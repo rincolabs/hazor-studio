@@ -1,0 +1,142 @@
+{
+  "airbrush": false,
+  "airbrushRate": 20,
+  "angle": 0,
+  "application": 0,
+  "autoBrush": {
+    "density": 1,
+    "hFade": -1,
+    "profile": 0,
+    "randomness": 0,
+    "softnessCurve": {
+      "points": []
+    },
+    "spikes": 2,
+    "vFade": -1
+  },
+  "autoSpacingCoeff": 1,
+  "blendMode": 9,
+  "color": "#000000",
+  "colorDynamics": {
+    "bgColor": "#ffffffff",
+    "brightness": 0,
+    "enabled": false,
+    "fgColor": "#ff000000",
+    "hue": 0,
+    "purity": 0,
+    "saturation": 0
+  },
+  "dualBrushConfig": {
+    "count": 1,
+    "enabled": false,
+    "hardness": 0.800000011920929,
+    "scatter": 0,
+    "size": 20,
+    "spacing": 1,
+    "tipType": 0
+  },
+  "flipX": false,
+  "flipY": false,
+  "flow": 0.30000001192092896,
+  "flowOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "group": "Default Brushes/Smudge / Blend",
+  "hardness": 0.4000000059604645,
+  "mode": 0,
+  "name": "Bristle Blender",
+  "opacity": 0.6000000238418579,
+  "opacityOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "paintMode": 0,
+  "ratioOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "rotationOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 5
+      }
+    ]
+  },
+  "roundness": 0.5,
+  "scatterAxisX": true,
+  "scatterAxisY": true,
+  "scatterOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "size": 74,
+  "sizeOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "smoothingMode": 0,
+  "smoothingRadius": 10,
+  "spacing": 0.07000000029802322,
+  "textureConfig": {
+    "autoInvertForEraser": false,
+    "brightness": -0.23999999463558197,
+    "contrast": 1.1699999570846558,
+    "cutoffMax": 1,
+    "cutoffMin": 0,
+    "cutoffPolicy": 0,
+    "depth": 0.6000000238418579,
+    "enabled": true,
+    "horizontalOffset": 0,
+    "invert": false,
+    "neutralPoint": 0.5,
+    "randomHorizontalOffset": true,
+    "randomVerticalOffset": true,
+    "scale": 0.6600000262260437,
+    "softTexturing": false,
+    "textureId": "canvas_weave",
+    "texturing": 0,
+    "texturingMode": 0,
+    "verticalOffset": 0
+  },
+  "tipBrightness": 0,
+  "tipContrast": 0,
+  "tipId": "oil_flat_brush",
+  "tipImagePath": ":/brushes/tips/flat-bristle.png",
+  "tipMidpoint": 0.5,
+  "tipSource": 1,
+  "type": 0,
+  "useAutoSpacing": false,
+  "wetEdges": false
+}

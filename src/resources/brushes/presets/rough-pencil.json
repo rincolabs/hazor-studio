@@ -1,0 +1,191 @@
+{
+  "airbrush": false,
+  "airbrushRate": 20,
+  "angle": 0,
+  "application": 0,
+  "autoBrush": {
+    "density": 1,
+    "hFade": -1,
+    "profile": 0,
+    "randomness": 0,
+    "softnessCurve": {
+      "points": []
+    },
+    "spikes": 2,
+    "vFade": -1
+  },
+  "autoSpacingCoeff": 1,
+  "blendMode": 0,
+  "color": "#000000",
+  "colorDynamics": {
+    "bgColor": "#ffffffff",
+    "brightness": 0,
+    "enabled": false,
+    "fgColor": "#ff000000",
+    "hue": 0,
+    "purity": 0,
+    "saturation": 0
+  },
+  "dualBrushConfig": {
+    "count": 1,
+    "enabled": false,
+    "hardness": 0.800000011920929,
+    "scatter": 0,
+    "size": 20,
+    "spacing": 1,
+    "tipType": 0
+  },
+  "flipX": false,
+  "flipY": false,
+  "flow": 0.7799999713897705,
+  "flowOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.1899999976158142,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.5,
+              0.26537216828478966
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": false,
+        "type": 10
+      },
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.28879310344827586,
+              0.0970873786407767
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "group": "Default Brushes/Sketching",
+  "hardness": 0.6000000238418579,
+  "mode": 0,
+  "name": "Rough Pencil",
+  "opacity": 0.949999988079071,
+  "opacityOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.17000000178813934,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "paintMode": 0,
+  "ratioOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "rotationOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "roundness": 0.699999988079071,
+  "scatterAxisX": true,
+  "scatterAxisY": true,
+  "scatterOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 0.05000000074505806,
+    "minValue": 0,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": false,
+        "type": 0
+      }
+    ]
+  },
+  "size": 22,
+  "sizeOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0.38999998569488525,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": false,
+        "type": 0
+      }
+    ]
+  },
+  "smoothingMode": 0,
+  "smoothingRadius": 10,
+  "spacing": 0.05999999865889549,
+  "textureConfig": {
+    "autoInvertForEraser": false,
+    "brightness": -0.12999999523162842,
+    "contrast": 1.0399999618530273,
+    "cutoffMax": 0.6828358173370361,
+    "cutoffMin": 0,
+    "cutoffPolicy": 1,
+    "depth": 0.8500000238418579,
+    "enabled": true,
+    "horizontalOffset": 0,
+    "invert": false,
+    "neutralPoint": 0.4000000059604645,
+    "randomHorizontalOffset": true,
+    "randomVerticalOffset": true,
+    "scale": 0.1599999964237213,
+    "softTexturing": true,
+    "textureId": "paper_rough_grain",
+    "texturing": 0,
+    "texturingMode": 0,
+    "verticalOffset": 0
+  },
+  "tipBrightness": 0,
+  "tipContrast": 0,
+  "tipId": "rough_pencil",
+  "tipImagePath": ":/brushes/tips/rough-pencil.png",
+  "tipMidpoint": 0.5,
+  "tipSource": 1,
+  "type": 0,
+  "useAutoSpacing": false,
+  "wetEdges": false
+}

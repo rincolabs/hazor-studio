@@ -1,0 +1,159 @@
+{
+  "airbrush": false,
+  "airbrushRate": 20,
+  "angle": 0,
+  "application": 0,
+  "autoBrush": {
+    "density": 1,
+    "hFade": -1,
+    "profile": 0,
+    "randomness": 0,
+    "softnessCurve": {
+      "points": []
+    },
+    "spikes": 2,
+    "vFade": -1
+  },
+  "autoSpacingCoeff": 1,
+  "blendMode": 0,
+  "color": "#000000",
+  "colorDynamics": {
+    "bgColor": "#ffffffff",
+    "brightness": 0,
+    "enabled": false,
+    "fgColor": "#ff000000",
+    "hue": 0,
+    "purity": 0,
+    "saturation": 0
+  },
+  "dualBrushConfig": {
+    "count": 1,
+    "enabled": false,
+    "hardness": 0.800000011920929,
+    "scatter": 0,
+    "size": 20,
+    "spacing": 1,
+    "tipType": 0
+  },
+  "flipX": false,
+  "flipY": false,
+  "flow": 1,
+  "flowOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "group": "Default Brushes/Inking",
+  "hardness": 0.9599999785423279,
+  "mode": 0,
+  "name": "Comic Ink",
+  "opacity": 1,
+  "opacityOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.4000000059604645,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "paintMode": 1,
+  "ratioOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "rotationOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "roundness": 1,
+  "scatterAxisX": true,
+  "scatterAxisY": true,
+  "scatterOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "size": 24,
+  "sizeOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.07999999821186066,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.5,
+              0.25
+            ],
+            [
+              0.75,
+              0.5625
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "smoothingMode": 0,
+  "smoothingRadius": 10,
+  "spacing": 0.03999999910593033,
+  "textureConfig": {
+    "autoInvertForEraser": false,
+    "brightness": 0,
+    "contrast": 1,
+    "cutoffMax": 1,
+    "cutoffMin": 0,
+    "cutoffPolicy": 0,
+    "depth": 1,
+    "enabled": false,
+    "horizontalOffset": 0,
+    "invert": false,
+    "neutralPoint": 0.5,
+    "randomHorizontalOffset": false,
+    "randomVerticalOffset": false,
+    "scale": 1,
+    "softTexturing": false,
+    "textureId": "",
+    "texturing": 0,
+    "texturingMode": 0,
+    "verticalOffset": 0
+  },
+  "tipBrightness": 0,
+  "tipContrast": 0,
+  "tipId": "clean_ink",
+  "tipImagePath": ":/brushes/tips/ink-round.png",
+  "tipMidpoint": 0.5,
+  "tipSource": 1,
+  "type": 0,
+  "useAutoSpacing": false,
+  "wetEdges": false
+}

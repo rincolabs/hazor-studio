@@ -1,0 +1,9 @@
+/* XPM */
+static const char *combo_arrow_xpm[] = {
+"7 4 2 1",
+" 	c None",
+".	c #c2c2c2",
+".......",
+" ..... ",
+"  ...  ",
+"   .   "};

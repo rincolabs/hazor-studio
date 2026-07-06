@@ -1,0 +1,385 @@
+{
+  "version": 1,
+  "roots": [
+    {
+      "name": "Default Swatches",
+      "type": "folder",
+      "children": [
+        {
+          "name": "Default Colors",
+          "type": "collection",
+          "colors": [
+            { "color": "#000000" },
+            { "color": "#202020" },
+            { "color": "#404040" },
+            { "color": "#808080" },
+            { "color": "#B0B0B0" },
+            { "color": "#E0E0E0" },
+            { "color": "#FFFFFF" },
+            { "color": "#4C2A2A" },
+            { "color": "#7A1E1E" },
+            { "color": "#B31212" },
+            { "color": "#E53935" },
+            { "color": "#FF6B6B" },
+            { "color": "#FF9AA2" },
+            { "color": "#4A2A14" },
+            { "color": "#7A3F14" },
+            { "color": "#B35A1E" },
+            { "color": "#E67E22" },
+            { "color": "#FFAA4C" },
+            { "color": "#FFD08A" },
+            { "color": "#4A4312" },
+            { "color": "#7A6A11" },
+            { "color": "#B39B1A" },
+            { "color": "#E6C229" },
+            { "color": "#FFD84D" },
+            { "color": "#FFE88C" },
+            { "color": "#1E4B1E" },
+            { "color": "#2E7D32" },
+            { "color": "#43A047" },
+            { "color": "#66BB6A" },
+            { "color": "#9CCC65" },
+            { "color": "#C5E1A5" },
+            { "color": "#0F4C4C" },
+            { "color": "#00838F" },
+            { "color": "#00ACC1" },
+            { "color": "#26C6DA" },
+            { "color": "#4DD0E1" },
+            { "color": "#80DEEA" },
+            { "color": "#132A4A" },
+            { "color": "#1565C0" },
+            { "color": "#1E88E5" },
+            { "color": "#42A5F5" },
+            { "color": "#64B5F6" },
+            { "color": "#90CAF9" },
+            { "color": "#2B1A4A" },
+            { "color": "#5E35B1" },
+            { "color": "#7E57C2" },
+            { "color": "#9575CD" },
+            { "color": "#B39DDB" },
+            { "color": "#D1C4E9" },
+            { "color": "#4A1E3A" },
+            { "color": "#AD1457" },
+            { "color": "#D81B60" },
+            { "color": "#EC407A" },
+            { "color": "#F06292" },
+            { "color": "#F8BBD0" },
+            { "color": "#3E2723" },
+            { "color": "#5D4037" },
+            { "color": "#795548" },
+            { "color": "#8D6E63" },
+            { "color": "#A1887F" },
+            { "color": "#BCAAA4" }
+          ]
+        },
+        {
+          "name": "Essential Colors",
+          "type": "collection",
+          "colors": [
+            { "name": "Black", "color": "#000000" },
+            { "name": "Rich Black", "color": "#050505" },
+            { "name": "White", "color": "#FFFFFF" },
+            { "name": "Neutral Gray", "color": "#808080" },
+            { "name": "Pure Red", "color": "#FF0000" },
+            { "name": "Pure Green", "color": "#00FF00" },
+            { "name": "Pure Blue", "color": "#0000FF" },
+            { "name": "Cyan", "color": "#00FFFF" },
+            { "name": "Magenta", "color": "#FF00FF" },
+            { "name": "Yellow", "color": "#FFFF00" },
+            { "name": "Orange", "color": "#FF7A00" },
+            { "name": "Purple", "color": "#7A3FFF" }
+          ]
+        },
+        {
+          "name": "Grayscale",
+          "type": "collection",
+          "colors": [
+            { "name": "Gray 100", "color": "#000000" },
+            { "name": "Gray 95", "color": "#0D0D0D" },
+            { "name": "Gray 90", "color": "#1A1A1A" },
+            { "name": "Gray 80", "color": "#333333" },
+            { "name": "Gray 70", "color": "#4D4D4D" },
+            { "name": "Gray 60", "color": "#666666" },
+            { "name": "Gray 50", "color": "#808080" },
+            { "name": "Gray 40", "color": "#999999" },
+            { "name": "Gray 30", "color": "#B3B3B3" },
+            { "name": "Gray 20", "color": "#CCCCCC" },
+            { "name": "Gray 10", "color": "#E6E6E6" },
+            { "name": "Gray 5", "color": "#F2F2F2" },
+            { "name": "White", "color": "#FFFFFF" }
+          ]
+        },
+        {
+          "name": "Print Inspired CMYK",
+          "type": "collection",
+          "colors": [
+            { "name": "Process Cyan", "color": "#00AEEF" },
+            { "name": "Process Magenta", "color": "#EC008C" },
+            { "name": "Process Yellow", "color": "#FFF200" },
+            { "name": "Process Black", "color": "#231F20" },
+            { "name": "Rich Black", "color": "#111111" },
+            { "name": "Registration Inspired", "color": "#444444" }
+          ]
+        },
+        {
+          "name": "Web Safe Core",
+          "type": "collection",
+          "colors": [
+            { "name": "#000000", "color": "#000000" },
+            { "name": "#333333", "color": "#333333" },
+            { "name": "#666666", "color": "#666666" },
+            { "name": "#999999", "color": "#999999" },
+            { "name": "#CCCCCC", "color": "#CCCCCC" },
+            { "name": "#FFFFFF", "color": "#FFFFFF" },
+            { "name": "#FF0000", "color": "#FF0000" },
+            { "name": "#00FF00", "color": "#00FF00" },
+            { "name": "#0000FF", "color": "#0000FF" },
+            { "name": "#FFFF00", "color": "#FFFF00" },
+            { "name": "#00FFFF", "color": "#00FFFF" },
+            { "name": "#FF00FF", "color": "#FF00FF" }
+          ]
+        },
+        {
+          "name": "Skin Tones",
+          "type": "collection",
+          "colors": [
+            { "name": "Porcelain", "color": "#F8E4D8" },
+            { "name": "Ivory", "color": "#F2D4C0" },
+            { "name": "Light Beige", "color": "#E9C2A0" },
+            { "name": "Warm Beige", "color": "#D9A97F" },
+            { "name": "Tan", "color": "#C68642" },
+            { "name": "Golden Brown", "color": "#A97142" },
+            { "name": "Brown", "color": "#8D5A3B" },
+            { "name": "Dark Brown", "color": "#6F4A2F" },
+            { "name": "Deep Brown", "color": "#4E342E" },
+            { "name": "Espresso", "color": "#2E1B14" }
+          ]
+        },
+        {
+          "name": "Photography Landscape",
+          "type": "collection",
+          "colors": [
+            { "name": "Sky Blue", "color": "#87CEEB" },
+            { "name": "Deep Sky", "color": "#4A90E2" },
+            { "name": "Ocean Blue", "color": "#1565C0" },
+            { "name": "Forest Green", "color": "#2E7D32" },
+            { "name": "Grass Green", "color": "#43A047" },
+            { "name": "Olive", "color": "#827717" },
+            { "name": "Sand", "color": "#D7CCC8" },
+            { "name": "Stone", "color": "#9E9E9E" },
+            { "name": "Mountain", "color": "#5D6D7E" },
+            { "name": "Sunset Orange", "color": "#FF7043" }
+          ]
+        },
+        {
+          "name": "Concept Art",
+          "type": "collection",
+          "colors": [
+            { "name": "Warm Light", "color": "#FFD180" },
+            { "name": "Golden Highlight", "color": "#FFC107" },
+            { "name": "Orange Glow", "color": "#FF9800" },
+            { "name": "Red Accent", "color": "#E53935" },
+            { "name": "Cool Shadow", "color": "#5C6BC0" },
+            { "name": "Night Blue", "color": "#283593" },
+            { "name": "Deep Purple", "color": "#512DA8" },
+            { "name": "Teal Accent", "color": "#009688" },
+            { "name": "Atmospheric Cyan", "color": "#26C6DA" },
+            { "name": "Dark Neutral", "color": "#212121" }
+          ]
+        },
+        {
+          "name": "Material Design 3",
+          "type": "collection",
+          "colors": [
+            { "name": "Red", "color": "#F44336" },
+            { "name": "Pink", "color": "#E91E63" },
+            { "name": "Purple", "color": "#9C27B0" },
+            { "name": "Deep Purple", "color": "#673AB7" },
+            { "name": "Indigo", "color": "#3F51B5" },
+            { "name": "Blue", "color": "#2196F3" },
+            { "name": "Light Blue", "color": "#03A9F4" },
+            { "name": "Cyan", "color": "#00BCD4" },
+            { "name": "Teal", "color": "#009688" },
+            { "name": "Green", "color": "#4CAF50" },
+            { "name": "Amber", "color": "#FFC107" },
+            { "name": "Orange", "color": "#FF9800" }
+          ]
+        },
+        {
+          "name": "UI Semantic Colors",
+          "type": "collection",
+          "colors": [
+            { "name": "Primary", "color": "#1976D2" },
+            { "name": "Success", "color": "#2E7D32" },
+            { "name": "Warning", "color": "#ED6C02" },
+            { "name": "Danger", "color": "#D32F2F" },
+            { "name": "Info", "color": "#0288D1" },
+            { "name": "Surface Light", "color": "#F5F5F5" },
+            { "name": "Surface Dark", "color": "#424242" },
+            { "name": "Background Dark", "color": "#232323" }
+          ]
+        },
+        {
+          "name": "Pastels",
+          "type": "collection",
+          "colors": [
+            { "name": "Pastel Pink", "color": "#FFD1DC" },
+            { "name": "Pastel Rose", "color": "#F8BBD0" },
+            { "name": "Pastel Coral", "color": "#FFCCBC" },
+            { "name": "Pastel Peach", "color": "#FFE0B2" },
+            { "name": "Pastel Apricot", "color": "#FFD8A8" },
+            { "name": "Pastel Yellow", "color": "#FFF9C4" },
+            { "name": "Pastel Lemon", "color": "#FFF59D" },
+            { "name": "Pastel Lime", "color": "#E6EE9C" },
+            { "name": "Pastel Green", "color": "#C8E6C9" },
+            { "name": "Pastel Mint", "color": "#B2F2BB" },
+            { "name": "Pastel Aqua", "color": "#B2EBF2" },
+            { "name": "Pastel Cyan", "color": "#C5E1F5" },
+            { "name": "Pastel Sky", "color": "#BBDEFB" },
+            { "name": "Pastel Blue", "color": "#C5CAE9" },
+            { "name": "Pastel Lavender", "color": "#D1C4E9" },
+            { "name": "Pastel Violet", "color": "#E1BEE7" },
+            { "name": "Pastel Lilac", "color": "#EDE7F6" },
+            { "name": "Pastel Beige", "color": "#F5F5DC" },
+            { "name": "Pastel Cream", "color": "#FFF8E1" },
+            { "name": "Pastel Gray", "color": "#ECEFF1" }
+          ]
+        },
+        {
+          "name": "Earth Tones",
+          "type": "collection",
+          "colors": [
+            { "name": "Sand", "color": "#D7CCC8" },
+            { "name": "Desert Sand", "color": "#D2B48C" },
+            { "name": "Khaki", "color": "#C3B091" },
+            { "name": "Camel", "color": "#C19A6B" },
+            { "name": "Tan", "color": "#B08968" },
+            { "name": "Clay", "color": "#B5651D" },
+            { "name": "Terracotta", "color": "#C96A4A" },
+            { "name": "Rust", "color": "#A0522D" },
+            { "name": "Copper", "color": "#B87333" },
+            { "name": "Ochre", "color": "#CC7722" },
+            { "name": "Olive", "color": "#808000" },
+            { "name": "Moss", "color": "#6B8E23" },
+            { "name": "Sage", "color": "#9CAF88" },
+            { "name": "Forest", "color": "#2E7D32" },
+            { "name": "Pine", "color": "#355E3B" },
+            { "name": "Bark", "color": "#6D4C41" },
+            { "name": "Walnut", "color": "#5D4037" },
+            { "name": "Chocolate", "color": "#4E342E" },
+            { "name": "Dark Soil", "color": "#3E2723" },
+            { "name": "Stone", "color": "#8D8D8D" }
+          ]
+        },
+        {
+          "name": "Neon Colors",
+          "type": "collection",
+          "colors": [
+            { "name": "Neon Pink", "color": "#FF1493" },
+            { "name": "Hot Pink", "color": "#FF00AA" },
+            { "name": "Neon Magenta", "color": "#FF00FF" },
+            { "name": "Neon Purple", "color": "#C800FF" },
+            { "name": "Electric Blue", "color": "#00BFFF" },
+            { "name": "Neon Cyan", "color": "#00FFFF" },
+            { "name": "Neon Aqua", "color": "#00FFD5" },
+            { "name": "Laser Green", "color": "#39FF14" },
+            { "name": "Neon Lime", "color": "#CCFF00" },
+            { "name": "Neon Yellow", "color": "#FFFF33" },
+            { "name": "Neon Orange", "color": "#FF6700" },
+            { "name": "Neon Red", "color": "#FF3131" }
+          ]
+        },
+        {
+          "name": "Cinematic Grading",
+          "type": "collection",
+          "colors": [
+            { "name": "Teal Shadows", "color": "#0F6C7A" },
+            { "name": "Deep Teal", "color": "#005F73" },
+            { "name": "Ocean Teal", "color": "#00798C" },
+            { "name": "Cinematic Cyan", "color": "#1D9BF0" },
+            { "name": "Orange Highlights", "color": "#FF9E3D" },
+            { "name": "Warm Skin", "color": "#D89B6B" },
+            { "name": "Golden Hour", "color": "#F4B860" },
+            { "name": "Amber Glow", "color": "#FFB347" },
+            { "name": "Film Yellow", "color": "#E9C46A" },
+            { "name": "Muted Olive", "color": "#7D8F69" },
+            { "name": "Foliage Green", "color": "#5A7D4D" },
+            { "name": "Night Blue", "color": "#1B263B" },
+            { "name": "Moonlight", "color": "#415A77" },
+            { "name": "Steel Blue", "color": "#577590" },
+            { "name": "Dust Brown", "color": "#8D6E63" },
+            { "name": "Film Gray", "color": "#6C757D" },
+            { "name": "Highlight White", "color": "#F8F9FA" },
+            { "name": "Crushed Black", "color": "#111111" }
+          ]
+        },
+        {
+          "name": "Material Design",
+          "type": "collection",
+          "colors": [
+            { "name": "Red 500", "color": "#F44336" },
+            { "name": "Pink 500", "color": "#E91E63" },
+            { "name": "Purple 500", "color": "#9C27B0" },
+            { "name": "Deep Purple 500", "color": "#673AB7" },
+            { "name": "Indigo 500", "color": "#3F51B5" },
+            { "name": "Blue 500", "color": "#2196F3" },
+            { "name": "Cyan 500", "color": "#00BCD4" },
+            { "name": "Teal 500", "color": "#009688" },
+            { "name": "Green 500", "color": "#4CAF50" },
+            { "name": "Amber 500", "color": "#FFC107" },
+            { "name": "Orange 500", "color": "#FF9800" },
+            { "name": "Brown 500", "color": "#795548" }
+          ]
+        },
+        {
+          "name": "UI Colors",
+          "type": "collection",
+          "colors": [
+            { "name": "Primary", "color": "#1976D2" },
+            { "name": "Success", "color": "#2E7D32" },
+            { "name": "Warning", "color": "#ED6C02" },
+            { "name": "Danger", "color": "#D32F2F" },
+            { "name": "Info", "color": "#0288D1" },
+            { "name": "Surface", "color": "#424242" },
+            { "name": "Background", "color": "#232323" }
+          ]
+        },
+        {
+          "name": "Nature",
+          "type": "collection",
+          "colors": [
+            { "name": "Forest", "color": "#2E7D32" },
+            { "name": "Grass", "color": "#4CAF50" },
+            { "name": "Olive", "color": "#827717" },
+            { "name": "Sky", "color": "#42A5F5" },
+            { "name": "Ocean", "color": "#1565C0" },
+            { "name": "Sand", "color": "#D7CCC8" },
+            { "name": "Earth", "color": "#6D4C41" }
+          ]
+        },
+        {
+          "name": "Warm Colors",
+          "type": "collection",
+          "colors": [
+            { "name": "Warm Red", "color": "#E53935" },
+            { "name": "Coral", "color": "#FF7043" },
+            { "name": "Orange", "color": "#FB8C00" },
+            { "name": "Amber", "color": "#FFB300" },
+            { "name": "Gold", "color": "#FBC02D" }
+          ]
+        },
+        {
+          "name": "Cool Colors",
+          "type": "collection",
+          "colors": [
+            { "name": "Ice", "color": "#B3E5FC" },
+            { "name": "Sky", "color": "#4FC3F7" },
+            { "name": "Blue", "color": "#2196F3" },
+            { "name": "Indigo", "color": "#3949AB" },
+            { "name": "Purple", "color": "#7E57C2" }
+          ]
+        }
+      ]
+    }
+  ]
+}

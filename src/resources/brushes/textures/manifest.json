@@ -1,0 +1,222 @@
+[
+  {
+    "name": "paper-soft-grain",
+    "file": "paper-soft-grain.png",
+    "id": "paper_soft_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "paper-rough-grain",
+    "file": "paper-rough-grain.png",
+    "id": "paper_rough_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "fine-paper-grain",
+    "file": "fine-paper-grain.png",
+    "id": "fine_paper_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "wax-paper-grain",
+    "file": "wax-paper-grain.png",
+    "id": "wax_paper_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "canvas-weave",
+    "file": "canvas-weave.png",
+    "id": "canvas_weave",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "fine-canvas",
+    "file": "fine-canvas.png",
+    "id": "fine_canvas",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "canvas-soft-grain",
+    "file": "canvas-soft-grain.png",
+    "id": "canvas_soft_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "heavy-canvas-grain",
+    "file": "heavy-canvas-grain.png",
+    "id": "heavy_canvas_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "fine-fabric",
+    "file": "fine-fabric.png",
+    "id": "fine_fabric",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "charcoal-noise",
+    "file": "charcoal-noise.png",
+    "id": "charcoal_noise",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "charcoal-dense-grain",
+    "file": "charcoal-dense-grain.png",
+    "id": "charcoal_dense_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "rough-stone",
+    "file": "rough-stone.png",
+    "id": "rough_stone",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "cracked-texture",
+    "file": "cracked-texture.png",
+    "id": "cracked_texture",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "watercolor-paper",
+    "file": "watercolor-paper.png",
+    "id": "watercolor_paper",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "rough-watercolor-paper",
+    "file": "rough-watercolor-paper.png",
+    "id": "rough_watercolor_paper",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "dry-brush-streaks",
+    "file": "dry-brush-streaks.png",
+    "id": "dry_brush_streaks",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "vertical-bristles",
+    "file": "vertical-bristles.png",
+    "id": "vertical_bristles",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "dense-fiber",
+    "file": "dense-fiber.png",
+    "id": "dense_fiber",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "hard-grain",
+    "file": "hard-grain.png",
+    "id": "hard_grain",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "fine-speckles",
+    "file": "fine-speckles.png",
+    "id": "fine_speckles",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "soft-noise",
+    "file": "soft-noise.png",
+    "id": "soft_noise",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  },
+  {
+    "name": "fine-noise",
+    "file": "fine-noise.png",
+    "id": "fine_noise",
+    "size": [
+      512,
+      512
+    ],
+    "type": "brush_texture"
+  }
+]

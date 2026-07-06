@@ -1,0 +1,168 @@
+{
+  "airbrush": false,
+  "airbrushRate": 20,
+  "angle": 0,
+  "application": 0,
+  "autoBrush": {
+    "density": 1,
+    "hFade": -1,
+    "profile": 0,
+    "randomness": 0,
+    "softnessCurve": {
+      "points": []
+    },
+    "spikes": 2,
+    "vFade": -1
+  },
+  "autoSpacingCoeff": 1,
+  "blendMode": 0,
+  "color": "#000000",
+  "colorDynamics": {
+    "bgColor": "#ffffffff",
+    "brightness": 0,
+    "enabled": false,
+    "fgColor": "#ff000000",
+    "hue": 0,
+    "purity": 0,
+    "saturation": 0
+  },
+  "dualBrushConfig": {
+    "count": 1,
+    "enabled": false,
+    "hardness": 0.800000011920929,
+    "scatter": 0,
+    "size": 20,
+    "spacing": 1,
+    "tipType": 0
+  },
+  "flipX": false,
+  "flipY": false,
+  "flow": 0.8500000238418579,
+  "flowOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.07000000029802322,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.21982758620689655,
+              0.13592233009708737
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "group": "Default Brushes/Sketching",
+  "hardness": 0.8999999761581421,
+  "mode": 0,
+  "name": "Mechanical Pencil",
+  "opacity": 1,
+  "opacityOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.5,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.2413793103448276,
+              0.18122977346278318
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "paintMode": 0,
+  "ratioOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "rotationOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "roundness": 1,
+  "scatterAxisX": true,
+  "scatterAxisY": true,
+  "scatterOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "size": 8,
+  "sizeOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "smoothingMode": 0,
+  "smoothingRadius": 10,
+  "spacing": 0.03999999910593033,
+  "textureConfig": {
+    "autoInvertForEraser": false,
+    "brightness": -0.12999999523162842,
+    "contrast": 1.0800000429153442,
+    "cutoffMax": 1,
+    "cutoffMin": 0,
+    "cutoffPolicy": 0,
+    "depth": 0.550000011920929,
+    "enabled": true,
+    "horizontalOffset": 0,
+    "invert": false,
+    "neutralPoint": 0.5,
+    "randomHorizontalOffset": true,
+    "randomVerticalOffset": true,
+    "scale": 0.10000000149011612,
+    "softTexturing": false,
+    "textureId": "fine_paper_grain",
+    "texturing": 0,
+    "texturingMode": 0,
+    "verticalOffset": 0
+  },
+  "tipBrightness": 0,
+  "tipContrast": 0,
+  "tipId": "mechanical_pencil",
+  "tipImagePath": ":/brushes/tips/small-hard-round.png",
+  "tipMidpoint": 0.5,
+  "tipSource": 1,
+  "type": 0,
+  "useAutoSpacing": false,
+  "wetEdges": false
+}

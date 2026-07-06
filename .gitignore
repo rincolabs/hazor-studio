@@ -1,0 +1,52 @@
+# Build directory
+build/
+build-qt68/
+cmake-build-*/
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled objects
+*.o
+*.obj
+*.exe
+*.out
+*.app
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+
+# Qt
+moc_*
+qrc_*
+
+# Qt Creator
+*.autosave
+*.qmlproject.user
+
+# OS
+.DS_Store
+Thumbs.db
+.opencode/
+.codex/
+.agents/
+Testing/Temporary/
+tmp/
+# Vendored third-party deps: track the skeleton folders (via .gitkeep), ignore
+# all downloaded contents. The directory re-include lets nested .gitkeep survive.
+/3rdparty/**
+!/3rdparty/**/
+!/3rdparty/**/.gitkeep
+
+# Shape SVGs are generated at build time (Material Design Icons): track the
+# folder (empty), ignore its contents.
+/src/resources/shapes/*
+!/src/resources/shapes/.gitkeep

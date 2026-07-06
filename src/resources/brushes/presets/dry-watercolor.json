@@ -1,0 +1,203 @@
+{
+  "airbrush": false,
+  "airbrushRate": 20,
+  "angle": 0,
+  "application": 0,
+  "autoBrush": {
+    "density": 1,
+    "hFade": -1,
+    "profile": 2,
+    "randomness": 0,
+    "softnessCurve": {
+      "points": []
+    },
+    "spikes": 7,
+    "vFade": -1
+  },
+  "autoSpacingCoeff": 0.12999999523162842,
+  "blendMode": 0,
+  "color": "#000000",
+  "colorDynamics": {
+    "bgColor": "#ffffffff",
+    "brightness": 0,
+    "enabled": false,
+    "fgColor": "#ff000000",
+    "hue": 0,
+    "purity": 0,
+    "saturation": 0
+  },
+  "dualBrushConfig": {
+    "count": 1,
+    "enabled": false,
+    "hardness": 0.800000011920929,
+    "scatter": 0,
+    "size": 20,
+    "spacing": 1,
+    "tipType": 0
+  },
+  "flipX": false,
+  "flipY": false,
+  "flow": 0.4000000059604645,
+  "flowOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.550000011920929,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.19137931034482797,
+              0.2702187215486056
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": false,
+        "type": 10
+      },
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.1675862068965512,
+              0.27666392467037565
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "group": "Default Brushes/Watercolor",
+  "hardness": 0.20000000298023224,
+  "mode": 0,
+  "name": "Dry Watercolor",
+  "opacity": 0.550000011920929,
+  "opacityOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.5099999904632568,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "paintMode": 0,
+  "ratioOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "rotationOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "roundness": 1,
+  "scatterAxisX": true,
+  "scatterAxisY": true,
+  "scatterOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "size": 88,
+  "sizeOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.550000011920929,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": false,
+        "type": 10
+      },
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.145344827586207,
+              0.23386777594182326
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "smoothingMode": 0,
+  "smoothingRadius": 10,
+  "spacing": 0.07999999821186066,
+  "textureConfig": {
+    "autoInvertForEraser": false,
+    "brightness": 0.14000000059604645,
+    "contrast": 1.350000023841858,
+    "cutoffMax": 0.641791045665741,
+    "cutoffMin": 0.11194030195474625,
+    "cutoffPolicy": 1,
+    "depth": 0.8500000238418579,
+    "enabled": true,
+    "horizontalOffset": 0,
+    "invert": false,
+    "neutralPoint": 0.5,
+    "randomHorizontalOffset": true,
+    "randomVerticalOffset": true,
+    "scale": 0.8999999761581421,
+    "softTexturing": false,
+    "textureId": "rough_watercolor_paper",
+    "texturing": 0,
+    "texturingMode": 0,
+    "verticalOffset": 0
+  },
+  "tipBrightness": -0.4399999976158142,
+  "tipContrast": -0.41999998688697815,
+  "tipId": "dry_watercolor",
+  "tipImagePath": ":/brushes/tips/dry-watercolor.png",
+  "tipMidpoint": 0.6700000166893005,
+  "tipSource": 1,
+  "type": 0,
+  "useAutoSpacing": true,
+  "wetEdges": true
+}

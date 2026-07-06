@@ -1,0 +1,860 @@
+name: Windows Build
+
+on:
+  # Manual build only. Never triggers on push / pull_request / schedule.
+  # Tests are disabled in the CMake configure step below.
+  workflow_dispatch:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Builds a self-contained Windows x64 package. Mirrors the Linux AppImage
+# workflow: ships Qt, OpenCV, ONNX Runtime, RealESRGAN and the bundled ONNX
+# models so the end user installs none of them.
+#
+# NOTE on layout — the 3rdparty/ tree is the canonical structure:
+#   The app resolves every distributed asset relative to the executable via
+#   AppPaths::thirdPartyDir() (no env vars). On Windows the binary and the
+#   3rdparty/ tree sit together in dist\windows, so <exe>/3rdparty resolves it.
+#   Final layout under dist\windows:
+#     Hazor.exe + Qt/OpenCV/ONNX Runtime + provider DLLs  (loaded from here)
+#     3rdparty\onnx\models\<task>\...                   (bundled models)
+#     3rdparty\realesrgan\realesrgan-ncnn-vulkan.exe    (RealESRGAN exe, flat)
+#     3rdparty\realesrgan\models\...                     (RealESRGAN models)
+#   The ONNX Runtime DLLs live next to the executable (the Windows loader has no
+#   RPATH), so — unlike Linux — there is no 3rdparty\onnx\runtime copy.
+# ─────────────────────────────────────────────────────────────────────────────
+
+env:
+  # CMake target name (real name of the built binary).
+  APP_TARGET: Hazor
+  # Product branding used for the artifact / package.
+  APP_ID: hazor-studio
+  PRODUCT_NAME: Hazor Studio
+  ARTIFACT_NAME: HazorStudio-Windows-x64
+
+  QT_VERSION: 6.8.3
+
+  # ── 3rdparty library versions / download targets ────────────────────────────
+  # Keep these in sync with the exact releases. Bump when new versions land.
+  ONNXRUNTIME_VERSION: 1.26.0
+  ONNXRUNTIME_PKG: onnxruntime-win-x64-gpu-1.26.0
+
+  OPENCV_VERSION: 4.5.4
+  OPENCV_ARCHIVE: opencv-4.5.4-vc14_vc15.exe
+  OPENCV_ROOT: ${{ github.workspace }}\opencv-prebuilt\opencv
+
+  REALESRGAN_VERSION: "20220424"
+  REALESRGAN_ARCHIVE: realesrgan-ncnn-vulkan-20220424-windows.zip
+
+  # ── Bundled ONNX models (platform-independent downloads) ─────────────────────
+  SAM_VERSION: "20230629"
+  SAM_ARCHIVE: mobile_sam_20230629.zip
+
+  # BiRefNet Lite matting model (onnx-community, fp16).
+  BIREFNET_LITE_VERSION: "20240101"
+  BIREFNET_LITE_FILE: model_fp16.onnx
+
+  MATERIAL_ICONS_VERSION: 3.0.1
+
+  # Bump to force-invalidate every manual cache below.
+  CACHE_VERSION: v1
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Enforce main branch
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -ne "main") {
+            throw "This workflow must run from the 'main' branch (got '$env:GITHUB_REF_NAME')."
+          }
+          Write-Host "Running from branch: $env:GITHUB_REF_NAME"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure environment paths
+        shell: pwsh
+        run: |
+          $appDir = $env:GITHUB_WORKSPACE
+          $thirdParty = Join-Path $appDir "3rdparty"
+          @(
+            "APP_DIR=$appDir",
+            "THIRD_PARTY_DIR=$thirdParty",
+            "ONNXRUNTIME_DIR=$thirdParty\onnx\runtime\$env:ONNXRUNTIME_PKG",
+            "ONNX_MODELS_DIR=$thirdParty\onnx\models",
+            "REALESRGAN_DIR=$thirdParty\realesrgan",
+            "REALESRGAN_MODELS_DIR=$thirdParty\realesrgan\models",
+            "BUILD_DIR=$appDir\build\windows",
+            "DIST_DIR=$appDir\dist\windows",
+            "DOWNLOAD_CACHE=$appDir\.cache\downloads"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ── Qt 6.8.3 ────────────────────────────────────────────────────────────
+      - name: Setup Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+          cache-key-prefix: windows-x64-qt-${{ env.QT_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Validate Qt tools
+        shell: pwsh
+        run: |
+          $qmake = (Get-Command qmake.exe -ErrorAction SilentlyContinue)
+          if (-not $qmake) {
+            throw "qmake.exe was not found after Qt setup. Check QT_VERSION=$env:QT_VERSION and install-qt-action arch."
+          }
+          $windeployqt = (Get-Command windeployqt.exe -ErrorAction SilentlyContinue)
+          if (-not $windeployqt) {
+            throw "windeployqt.exe was not found after Qt setup. Qt deployment cannot continue."
+          }
+          Write-Host "qmake: $($qmake.Source)"
+          Write-Host "windeployqt: $($windeployqt.Source)"
+          & $qmake.Source -query QT_VERSION
+
+      # ── MSVC toolchain + modern CMake/Ninja ──────────────────────────────────
+      # Activate the MSVC x64 developer environment (cl/link on PATH) and install a
+      # recent CMake + Ninja. The runner's default PATH can surface an old cmake
+      # (e.g. the one bundled with Strawberry Perl) that does not know the
+      # "Visual Studio 17 2022" generator, so we drive the build with Ninja instead.
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      # ── ONNX Runtime (download cached, extracted fresh) ──────────────────────
+      - name: Restore ONNX Runtime archive cache
+        id: cache_onnxruntime
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\onnxruntime
+          key: windows-x64-onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare ONNX Runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveDir = Join-Path $env:DOWNLOAD_CACHE "onnxruntime"
+          $archive = Join-Path $archiveDir "$env:ONNXRUNTIME_PKG.zip"
+          $runtimeRoot = Join-Path $env:THIRD_PARTY_DIR "onnx\runtime"
+          New-Item -ItemType Directory -Force -Path $archiveDir, $runtimeRoot | Out-Null
+
+          if (-not (Test-Path $archive)) {
+            Write-Host "Downloading ONNX Runtime $env:ONNXRUNTIME_VERSION..."
+            curl.exe -fL --retry 3 -o $archive `
+              "https://github.com/microsoft/onnxruntime/releases/download/v$env:ONNXRUNTIME_VERSION/$env:ONNXRUNTIME_PKG.zip"
+          } else {
+            Write-Host "Using cached ONNX Runtime archive."
+          }
+
+          if (Test-Path $env:ONNXRUNTIME_DIR) { Remove-Item -Recurse -Force $env:ONNXRUNTIME_DIR }
+          Expand-Archive -Path $archive -DestinationPath $runtimeRoot -Force
+
+          $dll = Join-Path $env:ONNXRUNTIME_DIR "lib\onnxruntime.dll"
+          if (-not (Test-Path $dll)) {
+            throw "onnxruntime.dll not found under $env:ONNXRUNTIME_DIR\lib"
+          }
+          Write-Host "ONNX Runtime ready at $env:ONNXRUNTIME_DIR"
+          Get-ChildItem (Join-Path $env:ONNXRUNTIME_DIR "lib")
+
+      - name: Save ONNX Runtime archive cache
+        if: ${{ steps.cache_onnxruntime.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\onnxruntime
+          key: windows-x64-onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-${{ env.CACHE_VERSION }}
+
+      # ── SAM Mobile segmentation model (bundled) ──────────────────────────────
+      - name: Restore SAM Mobile archive cache
+        id: cache_sam_mobile
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\sam-mobile
+          key: windows-x64-sam-mobile-${{ env.SAM_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare SAM Mobile model
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveDir = Join-Path $env:DOWNLOAD_CACHE "sam-mobile"
+          $archive = Join-Path $archiveDir $env:SAM_ARCHIVE
+          $samDir = Join-Path $env:ONNX_MODELS_DIR "segmenters\sam-mobile"
+          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+
+          if (-not (Test-Path $archive)) {
+            Write-Host "Downloading SAM Mobile model..."
+            curl.exe -fL --retry 3 -o $archive `
+              "https://huggingface.co/vietanhdev/segment-anything-onnx-models/resolve/main/$env:SAM_ARCHIVE"
+          } else {
+            Write-Host "Using cached SAM Mobile archive."
+          }
+
+          if (Test-Path $samDir) { Remove-Item -Recurse -Force $samDir }
+          New-Item -ItemType Directory -Force -Path $samDir | Out-Null
+          $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid())
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $tmp -Force
+
+          # Flatten: copy every .onnx into the model folder (archive may nest).
+          Get-ChildItem -Path $tmp -Recurse -Filter *.onnx | ForEach-Object {
+            Copy-Item -Force $_.FullName $samDir
+          }
+          # Preserve any license/notice files shipped in the archive.
+          Get-ChildItem -Path $tmp -Recurse -Include LICENSE*, NOTICE*, *.md, *.txt -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName $samDir }
+          Remove-Item -Recurse -Force $tmp
+
+          Write-Host "Files placed in ${samDir}:"
+          Get-ChildItem $samDir
+
+          # Resolve the REAL encoder/decoder filenames — never assume.
+          $encoder = (Get-ChildItem -Path $samDir -Filter *.onnx | Where-Object { $_.Name -match "encoder" } | Select-Object -First 1).Name
+          $decoder = (Get-ChildItem -Path $samDir -Filter *.onnx | Where-Object { $_.Name -match "decoder" } | Select-Object -First 1).Name
+          if (-not $encoder -or -not $decoder) {
+            throw "Could not identify encoder/decoder .onnx files in $samDir."
+          }
+          Write-Host "Encoder: $encoder"
+          Write-Host "Decoder: $decoder"
+
+          # model.json (English) — schema matches AiModelJson (schema_version 1,
+          # type=segment_anything, files.encoder/decoder, input.input_size).
+          $modelJson = @"
+          {
+            "schema_version": 1,
+            "id": "mobile-sam",
+            "type": "segment_anything",
+            "backend": "onnxruntime",
+            "task": "segmentation",
+            "family": "sam",
+            "variant": "mobile_sam",
+            "display_name": "Segment Anything Mobile",
+            "description": "Lightweight Segment Anything model used for object selection by point prompt or bounding box.",
+            "quality": "fast",
+            "default": true,
+            "files": {
+              "encoder": "$encoder",
+              "decoder": "$decoder"
+            },
+            "input": {
+              "input_size": 1024,
+              "max_width": 1024,
+              "max_height": 682,
+              "color_space": "rgb"
+            },
+            "capabilities": [
+              "point_prompt",
+              "box_prompt",
+              "object_selection",
+              "selection_mask"
+            ],
+            "license": {
+              "name": "Apache-2.0",
+              "file": "LICENSE",
+              "notice": "NOTICE.md"
+            },
+            "source": {
+              "name": "vietanhdev/segment-anything-onnx-models",
+              "url": "https://huggingface.co/vietanhdev/segment-anything-onnx-models"
+            }
+          }
+          "@
+          $modelJson | Out-File -FilePath (Join-Path $samDir "model.json") -Encoding utf8
+
+          # Guarantee a provenance/notice file even if the archive shipped none.
+          $noticePath = Join-Path $samDir "NOTICE.md"
+          if (-not (Test-Path $noticePath)) {
+            $today = (Get-Date -Format "yyyy-MM-dd")
+            @"
+          # Segment Anything Mobile (mobile_sam)
+
+          - Name: Segment Anything Mobile
+          - Version: $env:SAM_VERSION
+          - Source URL: https://huggingface.co/vietanhdev/segment-anything-onnx-models
+          - Archive: $env:SAM_ARCHIVE
+          - License: Apache-2.0
+          - Downloaded by the Windows build workflow on $today.
+          "@ | Out-File -FilePath $noticePath -Encoding utf8
+          }
+
+          Write-Host "Final SAM model folder:"
+          Get-ChildItem $samDir
+
+      - name: Save SAM Mobile archive cache
+        if: ${{ steps.cache_sam_mobile.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\sam-mobile
+          key: windows-x64-sam-mobile-${{ env.SAM_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Create ONNX model task folders
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Structure from the instructions. SAM ships populated above; the other
+          # task folders ship empty (no bundled model yet) but keep the layout.
+          @(
+            (Join-Path $env:ONNX_MODELS_DIR "background-removal"),
+            (Join-Path $env:ONNX_MODELS_DIR "inpainting"),
+            (Join-Path $env:ONNX_MODELS_DIR "matting"),
+            (Join-Path $env:ONNX_MODELS_DIR "segmenters\sam-mobile")
+          ) | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
+          Get-ChildItem -Path $env:ONNX_MODELS_DIR -Recurse -Directory | Select-Object FullName
+
+      # ── BiRefNet Lite matting model (bundled) ────────────────────────────────
+      - name: Restore BiRefNet Lite model cache
+        id: cache_birefnet_lite
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\birefnet-lite
+          key: windows-x64-birefnet-lite-${{ env.BIREFNET_LITE_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare BiRefNet Lite matting model
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveDir = Join-Path $env:DOWNLOAD_CACHE "birefnet-lite"
+          $cached = Join-Path $archiveDir $env:BIREFNET_LITE_FILE
+          $birefnetDir = Join-Path $env:ONNX_MODELS_DIR "matting\BiRefNet_lite-ONNX"
+          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+
+          if (-not (Test-Path $cached)) {
+            Write-Host "Downloading BiRefNet Lite model..."
+            curl.exe -fL --retry 3 -o $cached `
+              "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/$env:BIREFNET_LITE_FILE"
+          } else {
+            Write-Host "Using cached BiRefNet Lite model."
+          }
+
+          if (Test-Path $birefnetDir) { Remove-Item -Recurse -Force $birefnetDir }
+          New-Item -ItemType Directory -Force -Path $birefnetDir | Out-Null
+          Copy-Item -Force $cached (Join-Path $birefnetDir $env:BIREFNET_LITE_FILE)
+
+          # model.json (English) — schema matches AiModelJson (schema_version 1,
+          # type=birefnet, task=matting).
+          $modelJson = @"
+          {
+            "schema_version": 1,
+            "id": "birefnet-matting-lite",
+            "type": "birefnet",
+            "backend": "onnxruntime",
+            "task": "matting",
+            "family": "birefnet",
+            "variant": "lite",
+            "display_name": "BiRefNet Matting Lite",
+            "description": "Lightweight BiRefNet model for foreground refinement, complex edges and alpha matte, with lower memory usage and higher speed.",
+            "quality": "medium",
+            "default": true,
+            "files": {
+              "model": "$env:BIREFNET_LITE_FILE"
+            },
+            "input": {
+              "color_space": "rgb"
+            },
+            "capabilities": [
+              "alpha_matte",
+              "refine_mask",
+              "soft_edges",
+              "foreground_extraction"
+            ],
+            "license": {
+              "name": "MIT",
+              "file": "LICENSE",
+              "notice": "NOTICE.md"
+            },
+            "source": {
+              "name": "onnx-community/BiRefNet_lite-ONNX",
+              "url": "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX"
+            }
+          }
+          "@
+          $modelJson | Out-File -FilePath (Join-Path $birefnetDir "model.json") -Encoding utf8
+
+          # Provenance / notice file (the resolve download ships no license file).
+          $today = (Get-Date -Format "yyyy-MM-dd")
+          @"
+          # BiRefNet Matting Lite
+
+          - Name: BiRefNet Matting Lite
+          - Version: $env:BIREFNET_LITE_VERSION
+          - Source URL: https://huggingface.co/onnx-community/BiRefNet_lite-ONNX
+          - File: onnx/$env:BIREFNET_LITE_FILE
+          - License: MIT
+          - Downloaded by the Windows build workflow on $today.
+          "@ | Out-File -FilePath (Join-Path $birefnetDir "NOTICE.md") -Encoding utf8
+
+          Write-Host "Final BiRefNet Lite model folder:"
+          Get-ChildItem $birefnetDir
+
+      - name: Save BiRefNet Lite model cache
+        if: ${{ steps.cache_birefnet_lite.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\birefnet-lite
+          key: windows-x64-birefnet-lite-${{ env.BIREFNET_LITE_VERSION }}-${{ env.CACHE_VERSION }}
+
+      # ── RealESRGAN ncnn Vulkan ───────────────────────────────────────────────
+      - name: Restore RealESRGAN archive cache
+        id: cache_realesrgan
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\realesrgan
+          key: windows-x64-realesrgan-${{ env.REALESRGAN_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare RealESRGAN
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveDir = Join-Path $env:DOWNLOAD_CACHE "realesrgan"
+          $archive = Join-Path $archiveDir $env:REALESRGAN_ARCHIVE
+          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+
+          if (-not (Test-Path $archive)) {
+            Write-Host "Downloading RealESRGAN $env:REALESRGAN_VERSION..."
+            curl.exe -fL --retry 3 -o $archive `
+              "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/$env:REALESRGAN_ARCHIVE"
+          } else {
+            Write-Host "Using cached RealESRGAN archive."
+          }
+
+          if (Test-Path $env:REALESRGAN_DIR) { Remove-Item -Recurse -Force $env:REALESRGAN_DIR }
+          New-Item -ItemType Directory -Force -Path $env:REALESRGAN_DIR, $env:REALESRGAN_MODELS_DIR | Out-Null
+          $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid())
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $tmp -Force
+
+          # Binary -> 3rdparty/realesrgan (flattened, no nested zip structure).
+          $binSrc = Get-ChildItem -Path $tmp -Recurse -Filter "realesrgan-ncnn-vulkan.exe" | Select-Object -First 1
+          if (-not $binSrc) { throw "realesrgan-ncnn-vulkan.exe not found in archive." }
+          Copy-Item -Force $binSrc.FullName (Join-Path $env:REALESRGAN_DIR "realesrgan-ncnn-vulkan.exe")
+          # Vulkan layer DLLs sit next to the exe in the Windows archive.
+          Get-ChildItem -Path $binSrc.Directory.FullName -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName $env:REALESRGAN_DIR }
+
+          # Models -> models/ (all .param/.bin).
+          $modelsSrc = Get-ChildItem -Path $tmp -Recurse -Directory -Filter "models" | Select-Object -First 1
+          if ($modelsSrc) {
+            Get-ChildItem -Path $modelsSrc.FullName -File | ForEach-Object { Copy-Item -Force $_.FullName $env:REALESRGAN_MODELS_DIR }
+          } else {
+            Get-ChildItem -Path $tmp -Recurse -Include *.param, *.bin -File | ForEach-Object { Copy-Item -Force $_.FullName $env:REALESRGAN_MODELS_DIR }
+          }
+          # Preserve licenses / readme.
+          Get-ChildItem -Path $tmp -Recurse -Include LICENSE*, NOTICE*, README* -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item -Force $_.FullName $env:REALESRGAN_DIR }
+          Remove-Item -Recurse -Force $tmp
+
+          if (-not (Test-Path (Join-Path $env:REALESRGAN_DIR "realesrgan-ncnn-vulkan.exe"))) {
+            throw "RealESRGAN binary missing."
+          }
+          if (-not (Get-ChildItem -Path $env:REALESRGAN_MODELS_DIR -File -ErrorAction SilentlyContinue)) {
+            throw "RealESRGAN models directory is empty."
+          }
+          Write-Host "RealESRGAN binary:"
+          Get-ChildItem $env:REALESRGAN_DIR
+          Write-Host "RealESRGAN models:"
+          Get-ChildItem $env:REALESRGAN_MODELS_DIR
+
+      - name: Save RealESRGAN archive cache
+        if: ${{ steps.cache_realesrgan.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\realesrgan
+          key: windows-x64-realesrgan-${{ env.REALESRGAN_VERSION }}-${{ env.CACHE_VERSION }}
+
+      # ── Material Design Icons -> shape SVGs (compiled into the .qrc) ──────────
+      - name: Restore Material Design Icons archive cache
+        id: cache_material_icons
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\material-icons
+          key: windows-x64-material-icons-${{ env.MATERIAL_ICONS_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare Material Design Icons (shape SVGs)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveDir = Join-Path $env:DOWNLOAD_CACHE "material-icons"
+          $archive = Join-Path $archiveDir "material-design-icons-$env:MATERIAL_ICONS_VERSION.zip"
+          $dest = Join-Path $env:APP_DIR "src\resources\shapes\material"
+          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+
+          if (-not (Test-Path $archive)) {
+            Write-Host "Downloading Material Design Icons $env:MATERIAL_ICONS_VERSION..."
+            curl.exe -fL --retry 3 -o $archive `
+              "https://github.com/google/material-design-icons/releases/download/$env:MATERIAL_ICONS_VERSION/material-design-icons-$env:MATERIAL_ICONS_VERSION.zip"
+          } else {
+            Write-Host "Using cached Material Design Icons archive."
+          }
+
+          # Idempotent: wipe any previous extraction (avoid stale leftovers).
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid())
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $tmp -Force
+
+          $root = Get-ChildItem -Path $tmp -Directory -Filter "material-design-icons-*" | Select-Object -First 1
+          if (-not $root) { $root = Get-Item $tmp }
+
+          # For every <category>/svg/production, copy only the production SVGs into
+          # src/resources/shapes/material/<category>/.
+          $count = 0
+          Get-ChildItem -Path $root.FullName -Recurse -Directory |
+            Where-Object { $_.FullName -match "[\\/]svg[\\/]production$" } |
+            ForEach-Object {
+              $category = Split-Path (Split-Path (Split-Path $_.FullName -Parent) -Parent) -Leaf
+              $catDir = Join-Path $dest $category
+              New-Item -ItemType Directory -Force -Path $catDir | Out-Null
+              $svgs = Get-ChildItem -Path $_.FullName -Filter *.svg -File
+              $svgs | ForEach-Object { Copy-Item -Force $_.FullName $catDir }
+              $count += $svgs.Count
+              Write-Host "  ${category}: $($svgs.Count) svg"
+            }
+
+          # Open-source license / notice files at the material/ root.
+          # (-Include needs -Recurse or a wildcard path; match by name instead.)
+          Get-ChildItem -Path $root.FullName -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(LICENSE|NOTICE|README)' } |
+            ForEach-Object { Copy-Item -Force $_.FullName $dest }
+          Remove-Item -Recurse -Force $tmp
+
+          if ($count -eq 0) {
+            throw "No production SVG icons were copied from the Material Design Icons archive."
+          }
+          Write-Host "Copied $count production SVG icons across $((Get-ChildItem -Path $dest -Directory).Count) categories."
+
+      - name: Save Material Design Icons archive cache
+        if: ${{ steps.cache_material_icons.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}\material-icons
+          key: windows-x64-material-icons-${{ env.MATERIAL_ICONS_VERSION }}-${{ env.CACHE_VERSION }}
+
+      # ── OpenCV prebuilt ──────────────────────────────────────────────────────
+      - name: Restore OpenCV prebuilt package cache
+        id: cache_opencv_prebuilt
+        uses: actions/cache/restore@v4
+        with:
+          path: opencv-prebuilt
+          key: opencv-prebuilt-${{ runner.os }}-${{ env.OPENCV_VERSION }}-windows-${{ env.CACHE_VERSION }}
+
+      - name: Download OpenCV prebuilt
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:OPENCV_ROOT\build\OpenCVConfig.cmake") {
+            Write-Host "Using cached OpenCV prebuilt package."
+            return
+          }
+          New-Item -ItemType Directory -Force -Path "opencv-prebuilt" | Out-Null
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE $env:OPENCV_ARCHIVE
+          $downloadUrl = "https://github.com/opencv/opencv/releases/download/$env:OPENCV_VERSION/$env:OPENCV_ARCHIVE"
+          curl.exe -L $downloadUrl -o $archivePath
+          7z x $archivePath -oopencv-prebuilt -y
+          if (-not (Test-Path "$env:OPENCV_ROOT\build\OpenCVConfig.cmake")) {
+            throw "OpenCV prebuilt package did not extract to the expected layout."
+          }
+
+      - name: Save OpenCV prebuilt package cache
+        if: ${{ steps.cache_opencv_prebuilt.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: opencv-prebuilt
+          key: opencv-prebuilt-${{ runner.os }}-${{ env.OPENCV_VERSION }}-windows-${{ env.CACHE_VERSION }}
+
+      - name: Detect OpenCV prebuilt layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Point OpenCV_DIR at a vc-specific config (build\x64\vcNN\lib), NOT the
+          # top-level build\OpenCVConfig.cmake. The top-level config auto-detects the
+          # MSVC runtime and fails on newer toolchains (VS 18 / MSVC 19.5x) because
+          # the 4.5.4 pack only ships vc14/vc15 binaries. The vcNN-specific config
+          # skips that detection, and vc15 libs are ABI-compatible with vc16/17/18,
+          # so we pin to the highest vcNN the pack provides.
+          $vcConfigs = Get-ChildItem -Path "$env:OPENCV_ROOT" -Filter "OpenCVConfig.cmake" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.DirectoryName -match '\\x64\\vc\d+\\lib$' } |
+            Sort-Object { [int][regex]::Match($_.DirectoryName, 'vc(\d+)').Groups[1].Value } -Descending
+          $opencvConfig = $vcConfigs | Select-Object -First 1
+          if (-not $opencvConfig) {
+            # Older/other layouts: fall back to any OpenCVConfig.cmake.
+            $opencvConfig = Get-ChildItem -Path "$env:OPENCV_ROOT" -Filter "OpenCVConfig.cmake" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          }
+          if (-not $opencvConfig) {
+            throw "OpenCVConfig.cmake was not found under $env:OPENCV_ROOT."
+          }
+          $opencvDir = $opencvConfig.Directory.FullName
+          # bin sits next to lib in the same vcNN folder.
+          $opencvBin = Join-Path (Split-Path $opencvDir -Parent) "bin"
+          if (-not (Test-Path $opencvBin)) {
+            $opencvDll = Get-ChildItem -Path "$env:OPENCV_ROOT" -Filter "opencv*.dll" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $opencvDll) { throw "No OpenCV DLLs were found under $env:OPENCV_ROOT." }
+            $opencvBin = $opencvDll.Directory.FullName
+          }
+          "OPENCV_DIR=$opencvDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENCV_BIN_DIR=$opencvBin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "OpenCV_DIR: $opencvDir"
+          Write-Host "OpenCV_BIN_DIR: $opencvBin"
+
+      # ── zlib (brush import inflate) ──────────────────────────────────────────
+      # Unlike Linux (system zlib from apt), Windows has none that find_package can
+      # see — OpenCV/Qt bundle zlib statically without exposing it. Install it via
+      # the runner's preinstalled vcpkg (a ~10s build of a tiny lib). The
+      # static-md triplet links zlib straight into Hazor.exe (no DLL to
+      # ship) while keeping the dynamic CRT (/MD), matching the rest of the build.
+      - name: Install zlib (vcpkg)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg -or -not (Test-Path "$vcpkg\vcpkg.exe")) { $vcpkg = "C:\vcpkg" }
+          if (-not (Test-Path "$vcpkg\vcpkg.exe")) { throw "vcpkg not found on the runner." }
+
+          Write-Host "Using vcpkg at: $vcpkg"
+
+          & "$vcpkg\vcpkg.exe" --vcpkg-root "$vcpkg" install zlib:x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg failed to install zlib." }
+
+          $zlibRoot = Join-Path $vcpkg "installed\x64-windows-static-md"
+
+          "ZLIB_ROOT=$zlibRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZLIB_INCLUDE_DIR=$zlibRoot\include" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZLIB_LIBRARY=$zlibRoot\lib\zs.lib" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZLIB_LIBRARY_DEBUG=$zlibRoot\debug\lib\zsd.lib" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "ZLIB_ROOT: $zlibRoot"
+          Write-Host "ZLIB_LIBRARY: $zlibRoot\lib\zs.lib"
+
+      # ── Build (Release, no tests) ────────────────────────────────────────────
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          Write-Host "Configuring target: $env:APP_TARGET"
+          Write-Host "Using OpenCV_DIR: $env:OPENCV_DIR"
+          Write-Host "Using ONNXRUNTIME_ROOT: $env:ONNXRUNTIME_DIR"
+          Write-Host "Using ZLIB_ROOT: $env:ZLIB_ROOT"
+          Write-Host "Using ZLIB_INCLUDE_DIR: $env:ZLIB_INCLUDE_DIR"
+          Write-Host "Using ZLIB_LIBRARY: $env:ZLIB_LIBRARY"
+          Write-Host "Using ZLIB_LIBRARY_DEBUG: $env:ZLIB_LIBRARY_DEBUG"
+
+          cmake -S . -B build/windows `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTS=OFF `
+            -DOpenCV_DIR="$env:OPENCV_DIR" `
+            -DZLIB_USE_STATIC_LIBS=ON `
+            -DZLIB_INCLUDE_DIR:PATH="$env:ZLIB_INCLUDE_DIR" `
+            -DZLIB_LIBRARY:FILEPATH="$env:ZLIB_LIBRARY" `
+            -DZLIB_LIBRARY_RELEASE:FILEPATH="$env:ZLIB_LIBRARY" `
+            -DZLIB_LIBRARY_DEBUG:FILEPATH="$env:ZLIB_LIBRARY_DEBUG" `
+            -DENABLE_ONNXRUNTIME=ON `
+            -DONNXRUNTIME_ROOT="$env:ONNXRUNTIME_DIR" `
+            -DONNXRUNTIME_INCLUDE_DIR="$env:ONNXRUNTIME_DIR\include"
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build build/windows --target $env:APP_TARGET --parallel
+
+      - name: Deploy Qt and runtime dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = $env:DIST_DIR
+          # Ninja is single-config: the binary lands directly under the build dir.
+          $exePath = Join-Path $env:BUILD_DIR "$env:APP_TARGET.exe"
+          if (-not (Test-Path $exePath)) {
+            $exe = Get-ChildItem -Path $env:BUILD_DIR -Filter "$env:APP_TARGET.exe" -Recurse |
+              Select-Object -First 1
+            if (-not $exe) { throw "Built executable not found." }
+            $exePath = $exe.FullName
+          }
+          Write-Host "Executable: $exePath"
+
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dist
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item -Force $exePath $dist
+
+          # ── Qt deployment ──
+          $windeployqtCommand = Get-Command windeployqt.exe -ErrorAction SilentlyContinue
+          if (-not $windeployqtCommand) { throw "windeployqt.exe was not found." }
+          $windeployqt = $windeployqtCommand.Source
+          Write-Host "windeployqt: $windeployqt"
+          & $windeployqt --release --compiler-runtime --dir $dist (Join-Path $dist "$env:APP_TARGET.exe")
+
+          $qtBin = Split-Path $windeployqt -Parent
+          $qtRoot = Split-Path $qtBin -Parent
+          $qtPlugins = Join-Path $qtRoot "plugins"
+          foreach ($pluginDir in @("platforms", "imageformats", "iconengines", "styles")) {
+            $source = Join-Path $qtPlugins $pluginDir
+            if (Test-Path $source) {
+              Write-Host "Copying Qt plugin directory: $source"
+              Copy-Item -Recurse -Force $source (Join-Path $dist $pluginDir)
+            }
+          }
+
+          # ── OpenCV DLLs ──
+          if (-not (Test-Path "$env:OPENCV_BIN_DIR")) {
+            throw "OpenCV bin directory does not exist: $env:OPENCV_BIN_DIR"
+          }
+          $opencvDlls = Get-ChildItem -Path "$env:OPENCV_BIN_DIR" -Filter "opencv*.dll" -ErrorAction SilentlyContinue
+          if (-not $opencvDlls) { throw "No OpenCV DLLs found in detected bin directory: $env:OPENCV_BIN_DIR" }
+          $opencvDlls | ForEach-Object {
+            Write-Host "Copying OpenCV DLL: $($_.FullName)"
+            Copy-Item -Path $_.FullName -Destination $dist -Force
+          }
+
+          # zlib is linked statically into Hazor.exe (vcpkg static-md), so
+          # there is no zlib DLL to deploy.
+
+          # ── ONNX Runtime DLLs (loader-adjacent; Windows has no RPATH) ──
+          Get-ChildItem -Path (Join-Path $env:ONNXRUNTIME_DIR "lib") -Filter *.dll |
+            ForEach-Object {
+              Write-Host "Copying ONNX Runtime DLL: $($_.Name)"
+              Copy-Item -Path $_.FullName -Destination $dist -Force
+            }
+
+          # ── 3rdparty tree (bundled models, full ONNX Runtime, RealESRGAN) ──
+          # AppPaths::thirdPartyDir() resolves <exe>/3rdparty.
+          $tp = Join-Path $dist "3rdparty"
+          New-Item -ItemType Directory -Force -Path `
+            (Join-Path $tp "onnx\models"), (Join-Path $tp "realesrgan\models") | Out-Null
+          Copy-Item -Recurse -Force "$env:ONNX_MODELS_DIR\*" (Join-Path $tp "onnx\models")
+          # ONNX Runtime is deliberately NOT copied here: the Windows loader resolves
+          # onnxruntime.dll + the provider DLLs from the executable's own directory
+          # (copied above). A 3rdparty\onnx\runtime copy would only duplicate ~520 MB
+          # (incl. the 298 MB CUDA provider) plus ~760 MB of .pdb, with no runtime use.
+          Copy-Item -Force (Join-Path $env:REALESRGAN_DIR "realesrgan-ncnn-vulkan.exe") (Join-Path $tp "realesrgan")
+          # Ship the release OpenMP runtime only (skip the debug vcomp140d.dll).
+          Get-ChildItem -Path $env:REALESRGAN_DIR -Filter *.dll -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne "vcomp140d.dll" } |
+            ForEach-Object { Copy-Item -Force $_.FullName (Join-Path $tp "realesrgan") }
+          Copy-Item -Recurse -Force "$env:REALESRGAN_MODELS_DIR\*" (Join-Path $tp "realesrgan\models")
+
+          # ── App resources ──
+          if (Test-Path "src\resources") {
+            Copy-Item -Recurse -Force "src\resources" (Join-Path $dist "resources")
+          }
+          if (Test-Path "assets") {
+            Copy-Item -Recurse -Force "assets" (Join-Path $dist "assets")
+          }
+
+      - name: Assemble licenses bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $lic = Join-Path $env:DIST_DIR "licenses"
+          New-Item -ItemType Directory -Force -Path $lic | Out-Null
+          $today = (Get-Date -Format "yyyy-MM-dd")
+
+          function Write-Notice($file, $name, $version, $url, $license) {
+            @"
+          # $name
+
+          - Name: $name
+          - Version: $version
+          - Source URL: $url
+          - License: $license
+          - Downloaded/bundled by the Windows build workflow on $today.
+          "@ | Out-File -FilePath (Join-Path $lic $file) -Encoding utf8
+          }
+
+          Write-Notice "QT-NOTICE.md" "Qt" $env:QT_VERSION "https://www.qt.io" "LGPL-3.0 (Qt Open Source)"
+          Write-Notice "ONNXRUNTIME-NOTICE.md" "ONNX Runtime" $env:ONNXRUNTIME_VERSION "https://github.com/microsoft/onnxruntime" "MIT"
+          Write-Notice "REALESRGAN-NOTICE.md" "Real-ESRGAN ncnn Vulkan" $env:REALESRGAN_VERSION "https://github.com/xinntao/Real-ESRGAN" "BSD-3-Clause"
+          Write-Notice "MATERIAL-ICONS-NOTICE.md" "Material Design Icons" $env:MATERIAL_ICONS_VERSION "https://github.com/google/material-design-icons" "Apache-2.0"
+          Write-Notice "OPENCV-NOTICE.md" "OpenCV" $env:OPENCV_VERSION "https://opencv.org" "Apache-2.0"
+          Write-Notice "BIREFNET-LITE-NOTICE.md" "BiRefNet Matting Lite" $env:BIREFNET_LITE_VERSION "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX" "MIT"
+
+          # Real license/notice files where we have them.
+          foreach ($f in @("LICENSE", "LICENSE.txt", "NOTICE", "NOTICE.md")) {
+            $src = Join-Path $env:ONNXRUNTIME_DIR $f
+            if (Test-Path $src) { Copy-Item -Force $src (Join-Path $lic "ONNXRUNTIME-$f") }
+          }
+          $samNotice = Join-Path $env:ONNX_MODELS_DIR "segmenters\sam-mobile\NOTICE.md"
+          if (Test-Path $samNotice) { Copy-Item -Force $samNotice (Join-Path $lic "SAM-MOBILE-NOTICE.md") }
+          $birefnetNotice = Join-Path $env:ONNX_MODELS_DIR "matting\BiRefNet_lite-ONNX\NOTICE.md"
+          if (Test-Path $birefnetNotice) { Copy-Item -Force $birefnetNotice (Join-Path $lic "BIREFNET-LITE-NOTICE.md") }
+          $materialLicense = Join-Path $env:APP_DIR "src\resources\shapes\LICENSES\material-icons.txt"
+          if (Test-Path $materialLicense) { Copy-Item -Force $materialLicense (Join-Path $lic "MATERIAL-ICONS-LICENSE.txt") }
+
+          Write-Host "Licenses bundled:"
+          Get-ChildItem $lic
+
+      - name: Validate deployment layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = $env:DIST_DIR
+          $required = @(
+            "$env:APP_TARGET.exe",
+            "Qt6Core.dll",
+            "Qt6Gui.dll",
+            "Qt6Widgets.dll",
+            "platforms\qwindows.dll",
+            "onnxruntime.dll",
+            "3rdparty\onnx\models\segmenters\sam-mobile\model.json",
+            "3rdparty\onnx\models\matting\BiRefNet_lite-ONNX\model.json",
+            "3rdparty\realesrgan\realesrgan-ncnn-vulkan.exe"
+          )
+          foreach ($item in $required) {
+            $path = Join-Path $dist $item
+            if (-not (Test-Path $path)) { throw "Missing required deploy file: $item" }
+          }
+          $opencvDlls = Get-ChildItem -Path $dist -Filter "opencv*.dll" -ErrorAction SilentlyContinue
+          if (-not $opencvDlls) { throw "No OpenCV DLLs were copied to the deploy directory." }
+          Write-Host "Deployment layout validated."
+
+      - name: Create README
+        shell: pwsh
+        run: |
+          @"
+          $env:PRODUCT_NAME — Windows x64
+
+          How to run
+          ----------
+          Run $env:APP_TARGET.exe. Keep the whole folder together — the DLLs,
+          plugins and the 3rdparty\ tree next to the executable are required.
+
+          What is included
+          -----------------
+          This package is self-contained. You do NOT need to install Qt, OpenCV,
+          ONNX Runtime, RealESRGAN, or the bundled AI models — they ship next to
+          the executable and are loaded automatically.
+
+          GPU / acceleration
+          -------------------
+          CPU AI inference and upscaling work out of the box. GPU acceleration
+          (CUDA/TensorRT for ONNX Runtime, Vulkan for RealESRGAN) depends on your
+          system drivers and runtime being installed and compatible; without them
+          the app automatically falls back to CPU.
+
+          Licenses for bundled third-party components are in the 'licenses' folder.
+          "@ | Out-File -FilePath (Join-Path $env:DIST_DIR "README-windows.txt") -Encoding utf8
+
+      - name: Create ZIP package
+        shell: pwsh
+        run: |
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "$env:ARTIFACT_NAME.zip"
+          Remove-Item -Force -ErrorAction SilentlyContinue $zipPath
+          Compress-Archive -Path "$env:DIST_DIR\*" -DestinationPath $zipPath -CompressionLevel Optimal
+          Write-Host "Zip created: $zipPath"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,184 @@
+{
+  "airbrush": false,
+  "airbrushRate": 20,
+  "angle": 0,
+  "application": 0,
+  "autoBrush": {
+    "density": 1,
+    "hFade": -1,
+    "profile": 0,
+    "randomness": 0,
+    "softnessCurve": {
+      "points": []
+    },
+    "spikes": 2,
+    "vFade": -1
+  },
+  "autoSpacingCoeff": 0.9300000071525574,
+  "blendMode": 0,
+  "color": "#000000",
+  "colorDynamics": {
+    "bgColor": "#ffffffff",
+    "brightness": 0,
+    "enabled": false,
+    "fgColor": "#ff000000",
+    "hue": 0,
+    "purity": 0,
+    "saturation": 0
+  },
+  "dualBrushConfig": {
+    "count": 1,
+    "enabled": false,
+    "hardness": 0.800000011920929,
+    "scatter": 0,
+    "size": 20,
+    "spacing": 1,
+    "tipType": 0
+  },
+  "flipX": false,
+  "flipY": false,
+  "flow": 0.4000000059604645,
+  "flowOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.30000001192092896,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.19706896551724148,
+              0.30244473715745535
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": false,
+        "type": 0
+      }
+    ]
+  },
+  "group": "Default Brushes/Special Effects",
+  "hardness": 0.20000000298023224,
+  "mode": 0,
+  "name": "Dust",
+  "opacity": 0.6000000238418579,
+  "opacityOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.3400000035762787,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 0
+      }
+    ]
+  },
+  "paintMode": 0,
+  "ratioOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "rotationOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 1,
+    "minValue": 0.15000000596046448,
+    "sensors": [
+      {
+        "curve": {
+          "points": [
+            [
+              0,
+              0
+            ],
+            [
+              0.17586206896551704,
+              0.3609671815031264
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "enabled": true,
+        "type": 10
+      }
+    ]
+  },
+  "roundness": 1,
+  "scatterAxisX": true,
+  "scatterAxisY": true,
+  "scatterOption": {
+    "combine": 0,
+    "enabled": true,
+    "maxValue": 0.3499999940395355,
+    "minValue": 0,
+    "sensors": [
+      {
+        "curve": {
+          "points": []
+        },
+        "enabled": true,
+        "type": 10
+      }
+    ]
+  },
+  "size": 74,
+  "sizeOption": {
+    "combine": 0,
+    "enabled": false,
+    "maxValue": 1,
+    "minValue": 0,
+    "sensors": []
+  },
+  "smoothingMode": 0,
+  "smoothingRadius": 10,
+  "spacing": 0.2800000011920929,
+  "textureConfig": {
+    "autoInvertForEraser": false,
+    "brightness": -0.8500000238418579,
+    "contrast": 0.9399999976158142,
+    "cutoffMax": 1,
+    "cutoffMin": 0,
+    "cutoffPolicy": 0,
+    "depth": 0.6000000238418579,
+    "enabled": true,
+    "horizontalOffset": 0,
+    "invert": false,
+    "neutralPoint": 0.05999999865889549,
+    "randomHorizontalOffset": true,
+    "randomVerticalOffset": true,
+    "scale": 1,
+    "softTexturing": false,
+    "textureId": "fine_speckles",
+    "texturing": 0,
+    "texturingMode": 0,
+    "verticalOffset": 0
+  },
+  "tipBrightness": 0,
+  "tipContrast": 0,
+  "tipId": "dust",
+  "tipImagePath": ":/brushes/tips/dust.png",
+  "tipMidpoint": 0.5,
+  "tipSource": 1,
+  "type": 0,
+  "useAutoSpacing": true,
+  "wetEdges": false
+}

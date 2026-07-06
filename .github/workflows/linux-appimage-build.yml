@@ -1,0 +1,929 @@
+name: Linux AppImage Build
+
+on:
+  # Manual build only. Never triggers on push / pull_request / schedule.
+  # Tests are disabled in the CMake configure step below.
+  workflow_dispatch:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Builds a universal Linux AppImage (x86_64) on Ubuntu 22.04 for maximum glibc
+# compatibility with modern distros. Self-contained: ships Qt, OpenCV, ONNX
+# Runtime, RealESRGAN and the bundled ONNX models so the end user installs none
+# of them.
+#
+# NOTE on layout — the 3rdparty/ tree is the canonical structure:
+#   The app resolves every distributed asset relative to the executable via
+#   AppPaths::thirdPartyDir() (no env vars). In the AppImage the binary lives in
+#   usr/bin/ (only the executable) and the 3rdparty/ tree sits at the AppDir root,
+#   so usr/bin -> ../../3rdparty resolves it. Exact final layout:
+#     AppDir/3rdparty/onnx/models/<task>/...                         (bundled models)
+#     AppDir/3rdparty/onnx/runtime/onnxruntime-linux-x64-gpu-1.26.0/ (ONNX Runtime + providers)
+#     AppDir/3rdparty/realesrgan/realesrgan-ncnn-vulkan             (RealESRGAN exe, flat)
+#     AppDir/3rdparty/realesrgan/models/...                          (RealESRGAN models)
+#   Qt and OpenCV runtime libs are bundled the normal way into usr/lib (NOT
+#   duplicated under 3rdparty). User/custom models stay a runtime preference
+#   (AiRuntimeSettings model dir, outside the package) — only the bundled set ships.
+# ─────────────────────────────────────────────────────────────────────────────
+
+env:
+  # CMake target name (real name of the built binary).
+  APP_TARGET: Hazor
+  # Product branding used for the artifact / AppImage / .desktop.
+  APP_ID: hazor-studio
+  PRODUCT_NAME: Hazor Studio
+  ARTIFACT_NAME: HazorStudio-linux-x86_64
+
+  QT_VERSION: 6.8.3
+  QT_HOST: linux
+  QT_ARCH: linux_gcc_64
+
+  ONNXRUNTIME_VERSION: 1.26.0
+  ONNXRUNTIME_PKG: onnxruntime-linux-x64-gpu-1.26.0
+
+  OPENCV_VERSION: 4.5.4
+
+  REALESRGAN_VERSION: "20220424"
+  REALESRGAN_ARCHIVE: realesrgan-ncnn-vulkan-20220424-ubuntu.zip
+
+  SAM_VERSION: "20230629"
+  SAM_ARCHIVE: mobile_sam_20230629.zip
+
+  # BiRefNet Lite matting model (onnx-community, fp16).
+  BIREFNET_LITE_VERSION: "20240101"
+  BIREFNET_LITE_FILE: model_fp16.onnx
+
+  MATERIAL_ICONS_VERSION: 3.0.1
+
+  # Bump to force-invalidate every manual cache below.
+  CACHE_VERSION: v1
+  # Make linuxdeploy / appimagetool extract themselves instead of FUSE-mounting
+  # (FUSE is unreliable on hosted runners).
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+
+jobs:
+  build-linux-appimage:
+    name: Build Linux AppImage x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Enforce main branch
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "::error::This workflow must run from the 'main' branch (got '${GITHUB_REF_NAME}')."
+            exit 1
+          fi
+          echo "Running from branch: ${GITHUB_REF_NAME}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure environment paths
+        run: |
+          set -euo pipefail
+          APP_DIR="${GITHUB_WORKSPACE}"
+          THIRD_PARTY_DIR="${APP_DIR}/3rdparty"
+          {
+            echo "APP_DIR=${APP_DIR}"
+            echo "THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
+            echo "QT_DIR=${THIRD_PARTY_DIR}/Qt/${QT_VERSION}/gcc_64"
+            echo "ONNXRUNTIME_DIR=${THIRD_PARTY_DIR}/onnx/runtime/${ONNXRUNTIME_PKG}"
+            echo "ONNX_MODELS_DIR=${THIRD_PARTY_DIR}/onnx/models"
+            echo "REALESRGAN_DIR=${THIRD_PARTY_DIR}/realesrgan"
+            echo "REALESRGAN_MODELS_DIR=${THIRD_PARTY_DIR}/realesrgan/models"
+            echo "OPENCV_DIR=${THIRD_PARTY_DIR}/opencv"
+            echo "BUILD_DIR=${APP_DIR}/build/linux-release"
+            echo "DOWNLOAD_CACHE=${APP_DIR}/.cache/downloads"
+            echo "TOOLS_DIR=${APP_DIR}/tools/appimage"
+            echo "APPDIR=${APP_DIR}/package/AppDir"
+            echo "OUT_DIR=${APP_DIR}/package/out"
+          } >> "${GITHUB_ENV}"
+
+      - name: Cache apt packages (.deb)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/apt
+          key: linux-apt-${{ env.CACHE_VERSION }}-${{ hashFiles('.github/workflows/linux-appimage-build.yml') }}
+          restore-keys: |
+            linux-apt-${{ env.CACHE_VERSION }}-
+
+      - name: Install system dependencies (apt)
+        run: |
+          set -euo pipefail
+          APT_CACHE="${GITHUB_WORKSPACE}/.cache/apt"
+          mkdir -p "${APT_CACHE}"
+          # Seed apt's archive dir with previously cached .deb files (skip re-download).
+          sudo mkdir -p /var/cache/apt/archives
+          sudo cp -an "${APT_CACHE}/." /var/cache/apt/archives/ 2>/dev/null || true
+          # Keep downloaded .deb after install so the cache can persist them.
+          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+            | sudo tee /etc/apt/apt.conf.d/01keep-debs >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            ccache \
+            git \
+            curl \
+            wget \
+            unzip \
+            tar \
+            file \
+            patchelf \
+            desktop-file-utils \
+            imagemagick \
+            libfuse2 \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libvulkan1 \
+            vulkan-tools \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-cursor-dev \
+            libxcb-xinerama0 \
+            libxcb-xinerama0-dev \
+            libxcb-randr0 \
+            libxcb-randr0-dev \
+            libxcb-render-util0 \
+            libxcb-render-util0-dev \
+            libxcb-image0 \
+            libxcb-image0-dev \
+            libxcb-keysyms1 \
+            libxcb-keysyms1-dev \
+            libxcb-icccm4 \
+            libxcb-icccm4-dev \
+            libxcb-shape0 \
+            libxcb-shape0-dev \
+            libxcb-xfixes0 \
+            libxcb-xfixes0-dev \
+            libopencv-dev \
+            zlib1g-dev
+          # Persist downloaded .deb to the cacheable (user-owned) dir for next runs.
+          sudo cp -an /var/cache/apt/archives/*.deb "${APT_CACHE}/" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "${APT_CACHE}"
+          echo "apt .deb cached: $(ls -1 "${APT_CACHE}"/*.deb 2>/dev/null | wc -l) file(s)"
+          echo "OpenCV / zlib from apt:"
+          dpkg-query -W -f='${Package} ${Version}\n' 'libopencv-dev' 'zlib1g-dev' || true
+
+      # ── Qt 6.8.3 ────────────────────────────────────────────────────────────
+      # install-qt-action wraps aqtinstall and handles restore-from-cache /
+      # download-if-missing on its own (keyed by host/target/arch/version).
+      # dir=3rdparty places Qt at 3rdparty/Qt/6.8.3/gcc_64, matching scripts/build.sh.
+      - name: Setup Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: ${{ env.QT_HOST }}
+          target: desktop
+          arch: ${{ env.QT_ARCH }}
+          dir: ${{ github.workspace }}/3rdparty
+          cache: true
+          cache-key-prefix: linux-x86_64-qt-${{ env.QT_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Validate Qt
+        run: |
+          set -euo pipefail
+          # Prefer the install path the action reports (authoritative), falling back
+          # to the computed one. Every later step uses this QT_DIR.
+          if [[ -n "${QT_ROOT_DIR:-}" && -x "${QT_ROOT_DIR}/bin/qmake" ]]; then
+            QT_DIR="${QT_ROOT_DIR}"
+          fi
+          if [[ ! -x "${QT_DIR}/bin/qmake" ]]; then
+            echo "::error::qmake not found under '${QT_DIR}/bin' (QT_ROOT_DIR='${QT_ROOT_DIR:-unset}')."
+            exit 1
+          fi
+          QV="$("${QT_DIR}/bin/qmake" -query QT_VERSION)"
+          echo "Qt prefix: ${QT_DIR}"
+          echo "qmake QT_VERSION: ${QV}"
+          if [[ "${QV}" != "${QT_VERSION}" ]]; then
+            echo "::error::Qt version mismatch: expected ${QT_VERSION}, got ${QV}."
+            exit 1
+          fi
+          # Fail fast (before the ~30-min build) if this Qt lacks the plugin that
+          # bridges Qt file dialogs to the desktop's native ones via
+          # xdg-desktop-portal. Later steps bundle it into the AppImage; there is no
+          # point building at all if the source plugin is missing.
+          PORTAL_PLUGIN="${QT_DIR}/plugins/platformthemes/libqxdgdesktopportal.so"
+          if [[ ! -f "${PORTAL_PLUGIN}" ]]; then
+            echo "::error::xdgdesktopportal plugin not found at ${PORTAL_PLUGIN}. \
+          Native file dialogs cannot be bundled — check the Qt install/arch."
+            exit 1
+          fi
+          echo "xdgdesktopportal plugin present: ${PORTAL_PLUGIN}"
+          {
+            echo "QT_DIR=${QT_DIR}"
+            # Used by linuxdeploy-plugin-qt to locate the Qt installation.
+            echo "QMAKE=${QT_DIR}/bin/qmake"
+          } >> "${GITHUB_ENV}"
+
+      # ── ONNX Runtime 1.26.0 (download cached, extracted fresh) ───────────────
+      - name: Cache ONNX Runtime archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}/onnxruntime
+          key: linux-x86_64-onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare ONNX Runtime
+        run: |
+          set -euo pipefail
+          archive_dir="${DOWNLOAD_CACHE}/onnxruntime"
+          archive="${archive_dir}/${ONNXRUNTIME_PKG}.tgz"
+          mkdir -p "${archive_dir}" "${THIRD_PARTY_DIR}/onnx/runtime"
+
+          if [[ ! -f "${archive}" ]]; then
+            echo "Downloading ONNX Runtime ${ONNXRUNTIME_VERSION}..."
+            curl -fL --retry 3 -o "${archive}" \
+              "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${ONNXRUNTIME_PKG}.tgz"
+          else
+            echo "Using cached ONNX Runtime archive."
+          fi
+
+          rm -rf "${ONNXRUNTIME_DIR}"
+          tar -xzf "${archive}" -C "${THIRD_PARTY_DIR}/onnx/runtime"
+
+          if [[ ! -f "${ONNXRUNTIME_DIR}/lib/libonnxruntime.so" ]]; then
+            echo "::error::libonnxruntime.so not found under ${ONNXRUNTIME_DIR}/lib"
+            find "${THIRD_PARTY_DIR}/onnx/runtime" -maxdepth 2 -type d | sort
+            exit 1
+          fi
+          echo "ONNX Runtime ready at ${ONNXRUNTIME_DIR}"
+          ls -la "${ONNXRUNTIME_DIR}/lib"
+
+      # ── SAM Mobile segmentation model (bundled) ──────────────────────────────
+      - name: Cache SAM Mobile archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}/sam-mobile
+          key: linux-x86_64-sam-mobile-${{ env.SAM_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare SAM Mobile model
+        run: |
+          set -euo pipefail
+          archive_dir="${DOWNLOAD_CACHE}/sam-mobile"
+          archive="${archive_dir}/${SAM_ARCHIVE}"
+          sam_dir="${ONNX_MODELS_DIR}/segmenters/sam-mobile"
+          mkdir -p "${archive_dir}"
+
+          if [[ ! -f "${archive}" ]]; then
+            echo "Downloading SAM Mobile model..."
+            curl -fL --retry 3 -o "${archive}" \
+              "https://huggingface.co/vietanhdev/segment-anything-onnx-models/resolve/main/${SAM_ARCHIVE}"
+          else
+            echo "Using cached SAM Mobile archive."
+          fi
+
+          rm -rf "${sam_dir}"
+          mkdir -p "${sam_dir}"
+          tmp="$(mktemp -d)"
+          unzip -o "${archive}" -d "${tmp}" >/dev/null
+
+          echo "Extracted SAM archive contents:"
+          find "${tmp}" -type f | sort
+
+          # Flatten: copy every .onnx into the model folder (archive may nest).
+          find "${tmp}" -type f -name '*.onnx' -exec cp -f {} "${sam_dir}/" \;
+          # Preserve any license/notice files shipped in the archive.
+          find "${tmp}" -type f \( -iname 'LICENSE*' -o -iname 'NOTICE*' -o -iname '*.md' -o -iname '*.txt' \) \
+            -exec cp -f {} "${sam_dir}/" \; 2>/dev/null || true
+          rm -rf "${tmp}"
+
+          echo "Files placed in ${sam_dir}:"
+          ls -la "${sam_dir}"
+
+          # Resolve the REAL encoder/decoder filenames — never assume.
+          encoder="$(cd "${sam_dir}" && ls -1 *.onnx 2>/dev/null | grep -i 'encoder' | head -n1 || true)"
+          decoder="$(cd "${sam_dir}" && ls -1 *.onnx 2>/dev/null | grep -i 'decoder' | head -n1 || true)"
+          if [[ -z "${encoder}" || -z "${decoder}" ]]; then
+            echo "::error::Could not identify encoder/decoder .onnx files in ${sam_dir}."
+            echo "Available .onnx files:"
+            (cd "${sam_dir}" && ls -1 *.onnx 2>/dev/null) || echo "  (none)"
+            exit 1
+          fi
+          echo "Encoder: ${encoder}"
+          echo "Decoder: ${decoder}"
+
+          # model.json (English) — schema matches AiModelJson (schema_version 1,
+          # type=segment_anything, files.encoder/decoder, input.input_size).
+          cat > "${sam_dir}/model.json" <<JSON
+          {
+            "schema_version": 1,
+            "id": "mobile-sam",
+            "type": "segment_anything",
+            "backend": "onnxruntime",
+            "task": "segmentation",
+            "family": "sam",
+            "variant": "mobile_sam",
+            "display_name": "Segment Anything Mobile",
+            "description": "Lightweight Segment Anything model used for object selection by point prompt or bounding box.",
+            "quality": "fast",
+            "default": true,
+            "files": {
+              "encoder": "${encoder}",
+              "decoder": "${decoder}"
+            },
+            "input": {
+              "input_size": 1024,
+              "max_width": 1024,
+              "max_height": 682,
+              "color_space": "rgb"
+            },
+            "capabilities": [
+              "point_prompt",
+              "box_prompt",
+              "object_selection",
+              "selection_mask"
+            ],
+            "license": {
+              "name": "Apache-2.0",
+              "file": "LICENSE",
+              "notice": "NOTICE.md"
+            },
+            "source": {
+              "name": "vietanhdev/segment-anything-onnx-models",
+              "url": "https://huggingface.co/vietanhdev/segment-anything-onnx-models"
+            }
+          }
+          JSON
+
+          # Guarantee a provenance/notice file even if the archive shipped none.
+          if [[ ! -f "${sam_dir}/NOTICE.md" ]]; then
+            cat > "${sam_dir}/NOTICE.md" <<NOTICE
+          # Segment Anything Mobile (mobile_sam)
+
+          - Name: Segment Anything Mobile
+          - Version: ${SAM_VERSION}
+          - Source URL: https://huggingface.co/vietanhdev/segment-anything-onnx-models
+          - Archive: ${SAM_ARCHIVE}
+          - License: Apache-2.0
+          - Downloaded by the Linux AppImage build workflow on $(date -u +%Y-%m-%d).
+          NOTICE
+          fi
+
+          echo "Final SAM model folder:"
+          ls -la "${sam_dir}"
+
+      - name: Create ONNX model task folders
+        run: |
+          set -euo pipefail
+          # Structure from the instructions. SAM ships populated above; the other
+          # task folders ship empty (no bundled model yet) but keep the layout.
+          mkdir -p \
+            "${ONNX_MODELS_DIR}/background-removal" \
+            "${ONNX_MODELS_DIR}/inpainting" \
+            "${ONNX_MODELS_DIR}/matting" \
+            "${ONNX_MODELS_DIR}/segmenters/sam-mobile"
+          find "${ONNX_MODELS_DIR}" -maxdepth 2 -type d | sort
+
+      # ── BiRefNet Lite matting model (bundled) ────────────────────────────────
+      - name: Cache BiRefNet Lite model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}/birefnet-lite
+          key: linux-x86_64-birefnet-lite-${{ env.BIREFNET_LITE_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare BiRefNet Lite matting model
+        run: |
+          set -euo pipefail
+          archive_dir="${DOWNLOAD_CACHE}/birefnet-lite"
+          cached="${archive_dir}/${BIREFNET_LITE_FILE}"
+          birefnet_dir="${ONNX_MODELS_DIR}/matting/BiRefNet_lite-ONNX"
+          mkdir -p "${archive_dir}"
+
+          if [[ ! -f "${cached}" ]]; then
+            echo "Downloading BiRefNet Lite model..."
+            curl -fL --retry 3 -o "${cached}" \
+              "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/${BIREFNET_LITE_FILE}"
+          else
+            echo "Using cached BiRefNet Lite model."
+          fi
+
+          rm -rf "${birefnet_dir}"
+          mkdir -p "${birefnet_dir}"
+          cp -f "${cached}" "${birefnet_dir}/${BIREFNET_LITE_FILE}"
+
+          # model.json (English) — schema matches AiModelJson (schema_version 1,
+          # type=birefnet, task=matting).
+          cat > "${birefnet_dir}/model.json" <<JSON
+          {
+            "schema_version": 1,
+            "id": "birefnet-matting-lite",
+            "type": "birefnet",
+            "backend": "onnxruntime",
+            "task": "matting",
+            "family": "birefnet",
+            "variant": "lite",
+            "display_name": "BiRefNet Matting Lite",
+            "description": "Lightweight BiRefNet model for foreground refinement, complex edges and alpha matte, with lower memory usage and higher speed.",
+            "quality": "medium",
+            "default": true,
+            "files": {
+              "model": "${BIREFNET_LITE_FILE}"
+            },
+            "input": {
+              "color_space": "rgb"
+            },
+            "capabilities": [
+              "alpha_matte",
+              "refine_mask",
+              "soft_edges",
+              "foreground_extraction"
+            ],
+            "license": {
+              "name": "MIT",
+              "file": "LICENSE",
+              "notice": "NOTICE.md"
+            },
+            "source": {
+              "name": "onnx-community/BiRefNet_lite-ONNX",
+              "url": "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX"
+            }
+          }
+          JSON
+
+          # Provenance / notice file (the resolve download ships no license file).
+          cat > "${birefnet_dir}/NOTICE.md" <<NOTICE
+          # BiRefNet Matting Lite
+
+          - Name: BiRefNet Matting Lite
+          - Version: ${BIREFNET_LITE_VERSION}
+          - Source URL: https://huggingface.co/onnx-community/BiRefNet_lite-ONNX
+          - File: onnx/${BIREFNET_LITE_FILE}
+          - License: MIT
+          - Downloaded by the Linux AppImage build workflow on $(date -u +%Y-%m-%d).
+          NOTICE
+
+          echo "Final BiRefNet Lite model folder:"
+          ls -la "${birefnet_dir}"
+
+      # ── RealESRGAN ncnn Vulkan ───────────────────────────────────────────────
+      - name: Cache RealESRGAN archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}/realesrgan
+          key: linux-x86_64-realesrgan-${{ env.REALESRGAN_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare RealESRGAN
+        run: |
+          set -euo pipefail
+          archive_dir="${DOWNLOAD_CACHE}/realesrgan"
+          archive="${archive_dir}/${REALESRGAN_ARCHIVE}"
+          mkdir -p "${archive_dir}"
+
+          if [[ ! -f "${archive}" ]]; then
+            echo "Downloading RealESRGAN ${REALESRGAN_VERSION}..."
+            curl -fL --retry 3 -o "${archive}" \
+              "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/${REALESRGAN_ARCHIVE}"
+          else
+            echo "Using cached RealESRGAN archive."
+          fi
+
+          rm -rf "${REALESRGAN_DIR}" "${REALESRGAN_MODELS_DIR}"
+          mkdir -p "${REALESRGAN_DIR}" "${REALESRGAN_MODELS_DIR}"
+          tmp="$(mktemp -d)"
+          unzip -o "${archive}" -d "${tmp}" >/dev/null
+
+          echo "Extracted RealESRGAN contents:"
+          find "${tmp}" -maxdepth 2 | sort
+
+          # Binary -> linux-x64 (flattened, no nested zip structure).
+          bin_src="$(find "${tmp}" -type f -name 'realesrgan-ncnn-vulkan' | head -n1 || true)"
+          if [[ -z "${bin_src}" ]]; then
+            echo "::error::realesrgan-ncnn-vulkan binary not found in archive."
+            exit 1
+          fi
+          cp -f "${bin_src}" "${REALESRGAN_DIR}/realesrgan-ncnn-vulkan"
+          chmod +x "${REALESRGAN_DIR}/realesrgan-ncnn-vulkan"
+
+          # Models -> models/ (all .param/.bin).
+          models_src="$(find "${tmp}" -type d -name 'models' | head -n1 || true)"
+          if [[ -n "${models_src}" ]]; then
+            find "${models_src}" -maxdepth 1 -type f -exec cp -f {} "${REALESRGAN_MODELS_DIR}/" \;
+          else
+            find "${tmp}" -type f \( -name '*.param' -o -name '*.bin' \) -exec cp -f {} "${REALESRGAN_MODELS_DIR}/" \;
+          fi
+          # Preserve licenses / readme.
+          find "${tmp}" -maxdepth 2 -type f \( -iname 'LICENSE*' -o -iname 'NOTICE*' -o -iname 'README*' \) \
+            -exec cp -f {} "${REALESRGAN_DIR}/" \; 2>/dev/null || true
+          rm -rf "${tmp}"
+
+          if [[ ! -x "${REALESRGAN_DIR}/realesrgan-ncnn-vulkan" ]]; then
+            echo "::error::RealESRGAN binary missing or not executable."
+            exit 1
+          fi
+          if [[ -z "$(ls -A "${REALESRGAN_MODELS_DIR}" 2>/dev/null)" ]]; then
+            echo "::error::RealESRGAN models directory is empty."
+            exit 1
+          fi
+          echo "RealESRGAN binary:"
+          ls -la "${REALESRGAN_DIR}"
+          echo "RealESRGAN models:"
+          ls -la "${REALESRGAN_MODELS_DIR}"
+
+      # ── Material Design Icons -> shape SVGs (compiled into the .qrc) ──────────
+      - name: Cache Material Design Icons archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOWNLOAD_CACHE }}/material-icons
+          key: linux-x86_64-material-icons-${{ env.MATERIAL_ICONS_VERSION }}-${{ env.CACHE_VERSION }}
+
+      - name: Prepare Material Design Icons (shape SVGs)
+        run: |
+          set -euo pipefail
+          archive_dir="${DOWNLOAD_CACHE}/material-icons"
+          archive="${archive_dir}/material-design-icons-${MATERIAL_ICONS_VERSION}.zip"
+          dest="${APP_DIR}/src/resources/shapes/material"
+          mkdir -p "${archive_dir}"
+
+          if [[ ! -f "${archive}" ]]; then
+            echo "Downloading Material Design Icons ${MATERIAL_ICONS_VERSION}..."
+            curl -fL --retry 3 -o "${archive}" \
+              "https://github.com/google/material-design-icons/releases/download/${MATERIAL_ICONS_VERSION}/material-design-icons-${MATERIAL_ICONS_VERSION}.zip"
+          else
+            echo "Using cached Material Design Icons archive."
+          fi
+
+          # Idempotent: wipe any previous extraction (avoid stale leftovers).
+          rm -rf "${dest}"
+          mkdir -p "${dest}"
+          tmp="$(mktemp -d)"
+          unzip -oq "${archive}" -d "${tmp}"
+
+          root="$(find "${tmp}" -maxdepth 1 -type d -name 'material-design-icons-*' | head -n1 || true)"
+          [[ -z "${root}" ]] && root="${tmp}"
+
+          # For every <category>/svg/production, copy only the production SVGs into
+          # src/resources/shapes/material/<category>/.
+          count=0
+          while IFS= read -r prod; do
+            category="$(basename "$(dirname "$(dirname "${prod}")")")"
+            mkdir -p "${dest}/${category}"
+            find "${prod}" -maxdepth 1 -type f -name '*.svg' -exec cp -f {} "${dest}/${category}/" \;
+            n="$(find "${prod}" -maxdepth 1 -type f -name '*.svg' | wc -l)"
+            count=$((count + n))
+            echo "  ${category}: ${n} svg"
+          done < <(find "${root}" -type d -path '*/svg/production')
+
+          # Open-source license / notice files at the material/ root.
+          find "${root}" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'NOTICE*' -o -iname 'README*' \) \
+            -exec cp -f {} "${dest}/" \; 2>/dev/null || true
+          rm -rf "${tmp}"
+
+          if [[ "${count}" -eq 0 ]]; then
+            echo "::error::No production SVG icons were copied from the Material Design Icons archive."
+            exit 1
+          fi
+          echo "Copied ${count} production SVG icons across $(find "${dest}" -mindepth 1 -maxdepth 1 -type d | wc -l) categories."
+
+      # ── OpenCV runtime staging (organization + licenses) ─────────────────────
+      # The actual .so files are bundled into usr/lib by linuxdeploy; this folder
+      # keeps a copy + the copyright for the licenses bundle.
+      - name: Stage OpenCV runtime
+        run: |
+          set -euo pipefail
+          mkdir -p "${OPENCV_DIR}/lib" "${OPENCV_DIR}/licenses"
+          # Copy the OpenCV shared libs installed by libopencv-dev. Locate them by
+          # file rather than by guessing the versioned apt package names.
+          found=0
+          while IFS= read -r so; do
+            cp -av "${so}" "${OPENCV_DIR}/lib/" 2>/dev/null && found=1 || true
+          done < <(find /usr/lib/x86_64-linux-gnu -maxdepth 1 -name 'libopencv_*.so*' 2>/dev/null)
+          [[ "${found}" -eq 1 ]] || echo "::warning::No OpenCV libs staged from /usr/lib (linuxdeploy will still bundle linked libs)."
+          if [[ -f /usr/share/doc/libopencv-dev/copyright ]]; then
+            cp -f /usr/share/doc/libopencv-dev/copyright "${OPENCV_DIR}/licenses/OPENCV-COPYRIGHT"
+          fi
+          echo "Staged OpenCV libs:"
+          ls -la "${OPENCV_DIR}/lib" || true
+
+      # ── AppImage packaging tools ─────────────────────────────────────────────
+      - name: Cache AppImage tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLS_DIR }}
+          key: linux-x86_64-appimage-tools-${{ env.CACHE_VERSION }}
+
+      - name: Download AppImage tools
+        run: |
+          set -euo pipefail
+          mkdir -p "${TOOLS_DIR}"
+          fetch() {
+            local out="$1" url="$2"
+            if [[ ! -f "${TOOLS_DIR}/${out}" ]]; then
+              echo "Downloading ${out}..."
+              curl -fL --retry 3 -o "${TOOLS_DIR}/${out}" "${url}"
+            else
+              echo "Using cached ${out}."
+            fi
+            chmod +x "${TOOLS_DIR}/${out}"
+          }
+          fetch linuxdeploy-x86_64.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          fetch linuxdeploy-plugin-qt-x86_64.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          fetch appimagetool-x86_64.AppImage \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+
+      # ── Build (Release, no tests) ────────────────────────────────────────────
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: linux-x86_64-ccache-${{ env.CACHE_VERSION }}-${{ github.sha }}
+          restore-keys: |
+            linux-x86_64-ccache-${{ env.CACHE_VERSION }}-
+
+      - name: Configure CMake
+        run: |
+          set -euo pipefail
+          # OpenCV is found automatically from the apt install (OpenCVConfig.cmake
+          # in /usr/lib/.../cmake/opencv4). The app resolves RealESRGAN and the
+          # bundled models relative to the binary (3rdparty/...), so no absolute
+          # asset paths are baked in.
+          cmake -S "${APP_DIR}" -B "${BUILD_DIR}" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF \
+            -DCMAKE_PREFIX_PATH="${QT_DIR}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DENABLE_ONNXRUNTIME=ON \
+            -DONNXRUNTIME_ROOT="${ONNXRUNTIME_DIR}" \
+            -DONNXRUNTIME_INCLUDE_DIR="${ONNXRUNTIME_DIR}/include" \
+            -DONNXRUNTIME_LIBRARY="${ONNXRUNTIME_DIR}/lib/libonnxruntime.so"
+
+      - name: Build Release
+        run: |
+          set -euo pipefail
+          cmake --build "${BUILD_DIR}" --target "${APP_TARGET}" --parallel "$(nproc)"
+          ccache --show-stats || true
+          # Locate the produced binary.
+          bin="${BUILD_DIR}/${APP_TARGET}"
+          if [[ ! -f "${bin}" ]]; then
+            bin="$(find "${BUILD_DIR}" -type f -name "${APP_TARGET}" -perm -u+x | head -n1 || true)"
+          fi
+          if [[ -z "${bin}" || ! -f "${bin}" ]]; then
+            echo "::error::Built binary '${APP_TARGET}' not found under ${BUILD_DIR}."
+            exit 1
+          fi
+          echo "Built binary: ${bin}"
+          echo "APP_BIN=${bin}" >> "${GITHUB_ENV}"
+
+      # ── AppDir + .desktop + icon + AppRun (via linuxdeploy) ───────────────────
+      - name: Prepare AppDir metadata
+        run: |
+          set -euo pipefail
+          rm -rf "${APPDIR}"
+          mkdir -p "${APPDIR}"
+          meta="${APP_DIR}/package/meta"
+          mkdir -p "${meta}"
+
+          # .desktop — relative Exec (no absolute path), Icon matches the png name.
+          cat > "${meta}/${APP_ID}.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=${PRODUCT_NAME}
+          Exec=${APP_TARGET}
+          Icon=${APP_ID}
+          Categories=Graphics;Photography;RasterGraphics;
+          Terminal=false
+          StartupNotify=true
+          DESKTOP
+
+          # Icon (real app icon from the source tree), named to match Icon=.
+          # linuxdeploy only accepts standard hicolor sizes, so normalize to
+          # 256x256 (the source app-icon.png is 103x103, which it rejects).
+          icon_src="${APP_DIR}/src/resources/icons/app-icon.png"
+          if [[ ! -f "${icon_src}" ]]; then
+            echo "::error::App icon not found at ${icon_src}."
+            exit 1
+          fi
+          convert "${icon_src}" -background none -resize 256x256 \
+            -gravity center -extent 256x256 "${meta}/${APP_ID}.png"
+          echo "Icon normalized: $(file -b "${meta}/${APP_ID}.png")"
+
+          if command -v desktop-file-validate >/dev/null 2>&1; then
+            desktop-file-validate "${meta}/${APP_ID}.desktop"
+            echo "desktop file validated."
+          fi
+          echo "DESKTOP_FILE=${meta}/${APP_ID}.desktop" >> "${GITHUB_ENV}"
+          echo "ICON_FILE=${meta}/${APP_ID}.png" >> "${GITHUB_ENV}"
+
+      - name: Run linuxdeploy + Qt plugin
+        run: |
+          set -euo pipefail
+          export PATH="${TOOLS_DIR}:${PATH}"
+          export QMAKE="${QT_DIR}/bin/qmake"
+          # Ensure the SVG image format + icon engine plugins are bundled (shape
+          # icons are SVG loaded through the Qt imageformats/iconengines plugins).
+          export EXTRA_QT_PLUGINS="svg"
+          export LD_LIBRARY_PATH="${QT_DIR}/lib:${ONNXRUNTIME_DIR}/lib:${LD_LIBRARY_PATH:-}"
+
+          # ── Native file dialogs via xdg-desktop-portal ──
+          # Pre-seed ONLY the xdgdesktopportal platform theme plugin into the AppDir
+          # BEFORE linuxdeploy runs, so its Qt plugin resolves the plugin's own
+          # dependency (libQt6DBus) and bundles it too. This plugin routes Qt's
+          # QFileDialog through the desktop's xdg-desktop-portal service, giving the
+          # user their REAL native open/save dialog (GNOME's, KDE's, …) via D-Bus —
+          # WITHOUT the GTK stack that the alternative qgtk3 plugin would drag in.
+          # We deliberately do NOT bundle libqgtk3.so (its libgtk-3/gdk/glib deps
+          # would bloat and destabilize the AppImage). The plugin's presence in the
+          # Qt install was already asserted in the "Validate Qt" step (fail-fast).
+          mkdir -p "${APPDIR}/usr/plugins/platformthemes"
+          cp -f "${QT_DIR}/plugins/platformthemes/libqxdgdesktopportal.so" \
+            "${APPDIR}/usr/plugins/platformthemes/"
+          echo "Pre-seeded xdgdesktopportal plugin for linuxdeploy to process."
+
+          "${TOOLS_DIR}/linuxdeploy-x86_64.AppImage" \
+            --appdir "${APPDIR}" \
+            --executable "${APP_BIN}" \
+            --desktop-file "${DESKTOP_FILE}" \
+            --icon-file "${ICON_FILE}" \
+            --plugin qt
+
+          echo "linuxdeploy populated AppDir."
+
+          # linuxdeploy's qt plugin may pull in libqgtk3.so as a sibling; drop it so
+          # the AppImage never loads GTK at runtime (we only want the portal route).
+          rm -f "${APPDIR}/usr/plugins/platformthemes/libqgtk3.so" 2>/dev/null || true
+
+          # linuxdeploy's AppRun sources apprun-hooks/*.sh before exec'ing the
+          # binary (same mechanism the qt plugin uses to export QT_PLUGIN_PATH).
+          # We force the platform theme to xdgdesktopportal so Qt uses the desktop's
+          # NATIVE file dialogs via the bundled portal plugin, regardless of what the
+          # host exports (GNOME=gtk3, KDE=kde). This does NOT re-theme the widgets:
+          # the Fusion style AND Fusion palette are pinned in code (src/main.cpp), so
+          # the app looks identical on every distro while native dialogs still come
+          # from the user's own desktop. No QT_STYLE_OVERRIDE is needed anymore.
+          mkdir -p "${APPDIR}/apprun-hooks"
+          cat > "${APPDIR}/apprun-hooks/qt-platformtheme.sh" <<'HOOK'
+          #!/bin/sh
+          export QT_QPA_PLATFORMTHEME=xdgdesktopportal
+          HOOK
+          echo "AppRun hook written:"
+          cat "${APPDIR}/apprun-hooks/qt-platformtheme.sh"
+
+          # Fail loudly if the native-dialog wiring did not survive bundling, so a
+          # regression surfaces here in CI instead of as a silent fallback to the
+          # (unwanted) Qt file dialog on the user's machine.
+          portal_out="${APPDIR}/usr/plugins/platformthemes/libqxdgdesktopportal.so"
+          if [[ ! -f "${portal_out}" ]]; then
+            echo "::error::xdgdesktopportal plugin missing from AppDir after linuxdeploy (${portal_out})."
+            exit 1
+          fi
+          if ! find "${APPDIR}/usr/lib" -maxdepth 1 -name 'libQt6DBus.so*' | grep -q .; then
+            echo "::error::libQt6DBus not bundled — the xdgdesktopportal plugin cannot load without it."
+            exit 1
+          fi
+          echo "Native-dialog wiring verified: portal plugin + libQt6DBus are present."
+
+      - name: Build 3rdparty tree in AppDir
+        run: |
+          set -euo pipefail
+          bindir="${APPDIR}/usr/bin"
+          libdir="${APPDIR}/usr/lib"
+          tp="${APPDIR}/3rdparty"
+          mkdir -p "${tp}/onnx/models" "${tp}/onnx/runtime" "${tp}/realesrgan/models"
+
+          # Bundled ONNX models -> 3rdparty/onnx/models (exact proposed structure;
+          # AppPaths::bundledModelsDir() resolves <bin>/../../3rdparty/onnx/models).
+          cp -a "${ONNX_MODELS_DIR}/." "${tp}/onnx/models/"
+
+          # Full ONNX Runtime distribution (incl. execution providers) ->
+          # 3rdparty/onnx/runtime/<pkg>. Lives ONLY here, not in usr/lib.
+          cp -a "${ONNXRUNTIME_DIR}" "${tp}/onnx/runtime/"
+
+          # RealESRGAN executable + models -> 3rdparty/realesrgan/ (flat, no OS folder).
+          cp -f "${REALESRGAN_DIR}/realesrgan-ncnn-vulkan" "${tp}/realesrgan/"
+          chmod +x "${tp}/realesrgan/realesrgan-ncnn-vulkan"
+          cp -a "${REALESRGAN_MODELS_DIR}/." "${tp}/realesrgan/models/"
+
+          # Point the binary's RUNPATH at the ONNX Runtime under 3rdparty (binary
+          # in usr/bin -> $ORIGIN/../../3rdparty/...) and drop linuxdeploy's
+          # duplicate libonnxruntime copy from usr/lib so the tree stays exact.
+          patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN/../../3rdparty/onnx/runtime/'"${ONNXRUNTIME_PKG}"'/lib' \
+            "${bindir}/${APP_TARGET}"
+          rm -f "${libdir}"/libonnxruntime*.so* 2>/dev/null || true
+
+          echo "AppDir 3rdparty tree:"
+          find "${tp}" -maxdepth 4 -type d | sort
+          echo "usr/bin contents (should be just the executable):"
+          ls -la "${bindir}"
+
+      - name: Assemble licenses bundle
+        run: |
+          set -euo pipefail
+          lic="${APPDIR}/usr/share/licenses/${APP_ID}"
+          mkdir -p "${lic}"
+          today="$(date -u +%Y-%m-%d)"
+
+          notice() {
+            # name version url license -> $lic/<file>
+            local file="$1" name="$2" version="$3" url="$4" license="$5"
+            cat > "${lic}/${file}" <<EOF
+          # ${name}
+
+          - Name: ${name}
+          - Version: ${version}
+          - Source URL: ${url}
+          - License: ${license}
+          - Downloaded/bundled by the Linux AppImage build workflow on ${today}.
+          EOF
+          }
+
+          notice QT-NOTICE.md "Qt" "${QT_VERSION}" "https://www.qt.io" "LGPL-3.0 (Qt Open Source)"
+          notice ONNXRUNTIME-NOTICE.md "ONNX Runtime" "${ONNXRUNTIME_VERSION}" "https://github.com/microsoft/onnxruntime" "MIT"
+          notice REALESRGAN-NOTICE.md "Real-ESRGAN ncnn Vulkan" "${REALESRGAN_VERSION}" "https://github.com/xinntao/Real-ESRGAN" "BSD-3-Clause"
+          notice MATERIAL-ICONS-NOTICE.md "Material Design Icons" "${MATERIAL_ICONS_VERSION}" "https://github.com/google/material-design-icons" "Apache-2.0"
+          notice OPENCV-NOTICE.md "OpenCV" "${OPENCV_VERSION}" "https://opencv.org" "Apache-2.0"
+          notice BIREFNET-LITE-NOTICE.md "BiRefNet Matting Lite" "${BIREFNET_LITE_VERSION}" "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX" "MIT"
+
+          # Real license/notice files where we have them.
+          [[ -f "${OPENCV_DIR}/licenses/OPENCV-COPYRIGHT" ]] && cp -f "${OPENCV_DIR}/licenses/OPENCV-COPYRIGHT" "${lic}/"
+          for f in LICENSE LICENSE.txt NOTICE NOTICE.md; do
+            [[ -f "${ONNXRUNTIME_DIR}/${f}" ]] && cp -f "${ONNXRUNTIME_DIR}/${f}" "${lic}/ONNXRUNTIME-${f}"
+          done
+          [[ -f "${ONNX_MODELS_DIR}/segmenters/sam-mobile/NOTICE.md" ]] && \
+            cp -f "${ONNX_MODELS_DIR}/segmenters/sam-mobile/NOTICE.md" "${lic}/SAM-MOBILE-NOTICE.md"
+          [[ -f "${ONNX_MODELS_DIR}/matting/BiRefNet_lite-ONNX/NOTICE.md" ]] && \
+            cp -f "${ONNX_MODELS_DIR}/matting/BiRefNet_lite-ONNX/NOTICE.md" "${lic}/BIREFNET-LITE-NOTICE.md"
+          if [[ -f "${APP_DIR}/src/resources/shapes/LICENSES/material-icons.txt" ]]; then
+            cp -f "${APP_DIR}/src/resources/shapes/LICENSES/material-icons.txt" "${lic}/MATERIAL-ICONS-LICENSE.txt"
+          fi
+          echo "Licenses bundled:"
+          ls -la "${lic}"
+
+      - name: Generate AppImage
+        run: |
+          set -euo pipefail
+          export PATH="${TOOLS_DIR}:${PATH}"
+          mkdir -p "${OUT_DIR}"
+          out="${OUT_DIR}/${ARTIFACT_NAME}.AppImage"
+          rm -f "${out}"
+          ARCH=x86_64 "${TOOLS_DIR}/appimagetool-x86_64.AppImage" "${APPDIR}" "${out}"
+          chmod +x "${out}"
+          echo "AppImage: ${out}"
+          ls -la "${OUT_DIR}"
+
+      # ── Diagnostics (informational only — never blocks the artifact) ─────────
+      - name: Diagnostics
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "Final package tree:"
+          find "${APPDIR}" -maxdepth 4 -type f | sort | head -300 || true
+          echo ""
+          echo "Binary dependencies (missing GPU/optional libs are tolerated):"
+          ldd "${APPDIR}/usr/bin/${APP_TARGET}" || true
+          echo ""
+          echo "Binary RPATH/RUNPATH:"
+          readelf -d "${APPDIR}/usr/bin/${APP_TARGET}" | grep -E "RPATH|RUNPATH" || true
+
+      # ── Zip artifact ─────────────────────────────────────────────────────────
+      - name: Create ZIP package
+        run: |
+          set -euo pipefail
+          cd "${OUT_DIR}"
+          cp -a "${APPDIR}/usr/share/licenses/${APP_ID}" "${OUT_DIR}/licenses"
+
+          cat > "${OUT_DIR}/README-linux.txt" <<README
+          ${PRODUCT_NAME} — Linux x86_64 (AppImage)
+
+          How to run
+          ----------
+          1. Make the AppImage executable (file managers may also offer this):
+               chmod +x ${ARTIFACT_NAME}.AppImage
+          2. Launch it:
+               ./${ARTIFACT_NAME}.AppImage
+
+          What is included
+          -----------------
+          This package is self-contained. You do NOT need to install Qt, OpenCV,
+          ONNX Runtime, RealESRGAN, or the bundled AI models — they ship inside the
+          AppImage and are loaded automatically.
+
+          GPU / acceleration
+          -------------------
+          CPU AI inference and upscaling work out of the box. GPU acceleration
+          (CUDA/TensorRT for ONNX Runtime, Vulkan for RealESRGAN) depends on your
+          system drivers and runtime being installed and compatible; without them
+          the app automatically falls back to CPU.
+
+          Licenses for bundled third-party components are in the 'licenses/' folder.
+          README
+
+          rm -f "${ARTIFACT_NAME}.zip"
+          zip -r "${ARTIFACT_NAME}.zip" \
+            "${ARTIFACT_NAME}.AppImage" \
+            "README-linux.txt" \
+            "licenses"
+          echo "Zip contents:"
+          unzip -l "${ARTIFACT_NAME}.zip"
+
+      - name: Upload Linux AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: package/out/${{ env.ARTIFACT_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 14

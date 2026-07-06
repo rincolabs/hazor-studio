@@ -1,0 +1,383 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "sam-vit-b",
+      "family": "sam1",
+      "role": "segmenter",
+      "task": "segmentation",
+      "type": "segment_anything",
+      "name": "SAM ViT-B",
+      "quality": "compatible",
+      "description": "Smaller, most compatible SAM model. Best for modest machines and weaker CPU/GPU. May miss detail on complex objects.",
+      "files": [
+        {
+          "type": "encoder",
+          "filename": "sam_vit_b_encoder.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "decoder",
+          "filename": "sam_vit_b_decoder.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "input_size": 1024,
+        "color_space": "rgb"
+      },
+      "capabilities": ["point_prompt", "box_prompt", "object_selection", "selection_mask"],
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/facebookresearch/segment-anything",
+      "source": {
+        "name": "facebookresearch/segment-anything",
+        "url": "https://github.com/facebookresearch/segment-anything"
+      },
+      "recommended": false,
+      "requires": {
+        "minRamMB": 4096,
+        "minVramMB": 0
+      }
+    },
+    {
+      "id": "sam-vit-l",
+      "family": "sam1",
+      "role": "segmenter",
+      "task": "segmentation",
+      "type": "segment_anything",
+      "name": "SAM ViT-L",
+      "quality": "recommended",
+      "description": "Recommended for balanced professional quality. Better precision than ViT-B, with higher RAM/VRAM use.",
+      "files": [
+        {
+          "type": "encoder",
+          "filename": "sam_vit_l_encoder.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "decoder",
+          "filename": "sam_vit_l_decoder.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "input_size": 1024,
+        "color_space": "rgb"
+      },
+      "capabilities": ["point_prompt", "box_prompt", "object_selection", "selection_mask"],
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/facebookresearch/segment-anything",
+      "source": {
+        "name": "facebookresearch/segment-anything",
+        "url": "https://github.com/facebookresearch/segment-anything"
+      },
+      "recommended": true,
+      "requires": {
+        "minRamMB": 8192,
+        "minVramMB": 4096
+      }
+    },
+    {
+      "id": "sam-vit-h",
+      "family": "sam1",
+      "role": "segmenter",
+      "task": "segmentation",
+      "type": "segment_anything",
+      "name": "SAM ViT-H",
+      "quality": "high",
+      "description": "Highest-quality SAM 1 model. For maximum precision, at the cost of more memory, longer processing and a much larger download.",
+      "files": [
+        {
+          "type": "encoder",
+          "filename": "sam_vit_h_encoder.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "decoder",
+          "filename": "sam_vit_h_decoder.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "input_size": 1024,
+        "color_space": "rgb"
+      },
+      "capabilities": ["point_prompt", "box_prompt", "object_selection", "selection_mask"],
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/facebookresearch/segment-anything",
+      "source": {
+        "name": "facebookresearch/segment-anything",
+        "url": "https://github.com/facebookresearch/segment-anything"
+      },
+      "recommended": false,
+      "requires": {
+        "minRamMB": 16384,
+        "minVramMB": 8192
+      }
+    },
+    {
+      "id": "birefnet-matting",
+      "family": "birefnet",
+      "role": "matting",
+      "task": "matting",
+      "type": "birefnet",
+      "name": "BiRefNet Matting",
+      "quality": "high",
+      "description": "High-quality foreground segmentation/refinement. Best for cleaner cut-outs and complex edges. Recommended for refining masks produced by SAM.",
+      "files": [
+        {
+          "type": "model",
+          "filename": "birefnet-matting.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "color_space": "rgb"
+      },
+      "capabilities": ["alpha_matte", "refine_mask", "soft_edges", "foreground_extraction"],
+      "license": "",
+      "homepage": "https://github.com/ZhengPeng7/BiRefNet",
+      "source": {
+        "name": "ZhengPeng7/BiRefNet",
+        "url": "https://github.com/ZhengPeng7/BiRefNet"
+      },
+      "recommended": true,
+      "requires": {
+        "minRamMB": 8192,
+        "minVramMB": 4096
+      }
+    },
+    {
+      "id": "modnet",
+      "family": "modnet",
+      "role": "matting",
+      "task": "matting",
+      "type": "modnet",
+      "name": "MODNet",
+      "quality": "portrait",
+      "description": "Alpha matting focused on people, hair and portraits. Useful when the selection involves soft edges and fine detail on human subjects. May not be ideal for every object type.",
+      "files": [
+        {
+          "type": "model",
+          "filename": "modnet.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "color_space": "rgb"
+      },
+      "capabilities": ["alpha_matte", "refine_mask", "soft_edges", "foreground_extraction"],
+      "license": "",
+      "homepage": "https://github.com/ZHKKKe/MODNet",
+      "source": {
+        "name": "ZHKKKe/MODNet",
+        "url": "https://github.com/ZHKKKe/MODNet"
+      },
+      "recommended": false,
+      "requires": {
+        "minRamMB": 4096,
+        "minVramMB": 2048
+      }
+    },
+    {
+      "id": "rmbg",
+      "family": "rmbg",
+      "role": "background-removal",
+      "task": "background_removal",
+      "type": "rmbg",
+      "name": "RMBG",
+      "quality": "balanced",
+      "description": "Specialised automatic background removal. Generates a foreground mask directly, with a more direct flow than SAM in some cases (no click or bounding box required).",
+      "files": [
+        {
+          "type": "model",
+          "filename": "rmbg.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "color_space": "rgb"
+      },
+      "capabilities": ["background_removal", "foreground_mask", "alpha_matte"],
+      "license": "",
+      "homepage": "https://huggingface.co/briaai/RMBG-1.4",
+      "source": {
+        "name": "briaai/RMBG-1.4",
+        "url": "https://huggingface.co/briaai/RMBG-1.4"
+      },
+      "recommended": false,
+      "requires": {
+        "minRamMB": 4096,
+        "minVramMB": 2048
+      }
+    },
+    {
+      "id": "lama-cleaner-small-onnx",
+      "family": "direct_inpaint",
+      "role": "inpainting",
+      "task": "inpainting",
+      "type": "inpainting",
+      "name": "LaMa Inpainting Small",
+      "quality": "compatible",
+      "description": "Local ONNX direct inpainting model for object removal and image repair.",
+      "files": [
+        {
+          "type": "model",
+          "filename": "model.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "config",
+          "filename": "config.json",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "color_space": "rgb",
+        "requiredMultiple": 64,
+        "inputNames": {
+          "image": "image",
+          "mask": "mask"
+        },
+        "outputNames": {
+          "image": "output"
+        }
+      },
+      "capabilities": ["remove_object", "inpainting", "inpaint"],
+      "license": "",
+      "homepage": "",
+      "source": {
+        "name": "",
+        "url": ""
+      },
+      "recommended": true,
+      "requires": {
+        "minRamMB": 2048,
+        "minVramMB": 0
+      }
+    },
+    {
+      "id": "sd15-inpainting-onnx",
+      "family": "stable_diffusion",
+      "role": "inpainting",
+      "task": "inpainting",
+      "type": "stable_diffusion",
+      "name": "Stable Diffusion 1.5 Inpainting ONNX",
+      "quality": "high",
+      "description": "Local ONNX Stable Diffusion inpainting model for object removal and prompt-guided image repair.",
+      "files": [
+        {
+          "type": "tokenizer_vocab",
+          "filename": "tokenizer/vocab.json",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "tokenizer_merges",
+          "filename": "tokenizer/merges.txt",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "tokenizer_config",
+          "filename": "tokenizer/tokenizer_config.json",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "text_encoder",
+          "filename": "text_encoder/model.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "unet",
+          "filename": "unet/model.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "vae_encoder",
+          "filename": "vae_encoder/model.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "vae_decoder",
+          "filename": "vae_decoder/model.onnx",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "scheduler_config",
+          "filename": "scheduler/scheduler_config.json",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        },
+        {
+          "type": "model_index",
+          "filename": "model_index.json",
+          "url": "",
+          "sha256": "",
+          "sizeBytes": 0
+        }
+      ],
+      "input": {
+        "baseResolution": 512,
+        "requiredMultiple": 8,
+        "latentChannels": 4,
+        "inpaintUnetChannels": 9,
+        "vaeScaleFactor": 8,
+        "latentScalingFactor": 0.18215,
+        "maxTokenLength": 77,
+        "predictionType": "epsilon",
+        "defaultScheduler": "ddim",
+        "supportsClassifierFreeGuidance": true,
+        "supportsPrompt": true,
+        "supportsNegativePrompt": true
+      },
+      "capabilities": ["text_to_image", "image_to_image", "inpainting", "remove_object"],
+      "license": "",
+      "homepage": "",
+      "source": {
+        "name": "",
+        "url": ""
+      },
+      "recommended": false,
+      "requires": {
+        "minRamMB": 8192,
+        "minVramMB": 4096
+      }
+    }
+  ]
+}
