@@ -10,8 +10,8 @@ ClassicTheme::ClassicTheme(QObject* parent)
     // single base color via tone() offsets (same model as Darker).
     // ============================================================
 
-    QColor baseColor = QColor("#242931");
-    QColor selectionColor = QColor("#27487b");
+    QColor baseColor = QColor("#444647");
+    QColor selectionColor = QColor("#36383a");
 
     // ============================================================
     // Helper
@@ -25,36 +25,51 @@ ClassicTheme::ClassicTheme(QObject* parent)
             std::clamp(c.blue() + delta, 0, 255));
     };
 
-    // ── Background ─────────────────────────────────────
-    colorBackgroundPrimary   = tone(baseColor, -22);
-    colorBackgroundSecondary = tone(baseColor, -15);
-    colorBackgroundTertiary  = tone(baseColor, -7);
+    // ============================================================
+    // Background
+    // ============================================================
 
-    // ── Surface ────────────────────────────────────────
-    colorSurface         = baseColor;
-    colorSurfaceDark     = tone(baseColor, -8);
-    colorSurfaceHover    = tone(baseColor, +8);
-    colorSurfacePressed  = tone(baseColor, +15);
+    colorBackgroundPrimary = tone(baseColor, -31);
+    colorBackgroundSecondary = tone(baseColor, -16);
+    colorBackgroundTertiary = tone(baseColor, -15);
+
+    // ============================================================
+    // Surface
+    // ============================================================
+
+    colorSurface = baseColor;
+    colorSurfaceDark = tone(baseColor, -18);
+    colorSurfaceHover = tone(baseColor, +4);
+    colorSurfacePressed = tone(baseColor, +14);
     colorSurfaceSelected = selectionColor;
-    colorSurfaceRow      = tone(baseColor, +4);
-    colorPanelBackground = tone(baseColor, -16);
+    colorSurfaceRow = tone(baseColor, -2);
+    colorPanelBackground = tone(baseColor, -13);
 
-    // ── Text ───────────────────────────────────────────
-    colorTextPrimary   = QColor("#abb5c2");
-    colorTextBright    = QColor("#ccd4df");
-    colorTextSecondary = QColor("#A7B0BC");
-    colorTextDisabled  = QColor("#6B7480");
-    colorTextInverted  = tone(baseColor, -22);
+    // ============================================================
+    // Text
+    // ============================================================
 
-    // ── Border ─────────────────────────────────────────
-    colorBorder      = tone(baseColor, +19);
-    colorBorderLight = tone(baseColor, +84);
-    colorBorderFocus = QColor("#4C8DFF");
+    colorTextPrimary = QColor("#E6E6E6");
+    colorTextBright = QColor("#FFFFFF");
+    colorTextSecondary = QColor("#C2C2C2");
+    colorTextDisabled = QColor("#8A8A8A");
+    colorTextInverted = QColor("#1F1F1F");
 
-    // ── Accent ─────────────────────────────────────────
-    colorAccent        = QColor("#4C8DFF");
-    colorAccentHover   = QColor("#6AA3FF");
-    colorAccentPressed = QColor("#3B78E7");
+    // ============================================================
+    // Border
+    // ============================================================
+
+    colorBorder = tone(baseColor, -23);
+    colorBorderLight = tone(baseColor, +23);
+    colorBorderFocus = QColor("#6CA0DC");
+
+    // ============================================================
+    // Accent
+    // ============================================================
+
+    colorAccent = QColor("#5C8FD8");
+    colorAccentHover = QColor("#76A7EA");
+    colorAccentPressed = QColor("#4B7CC2");
 
     colorTextSelection = QColor(
         colorAccent.red(),
@@ -62,129 +77,96 @@ ClassicTheme::ClassicTheme(QObject* parent)
         colorAccent.blue(),
         90);
 
-    // ── Splash ─────────────────────────────────────────
-    colorSplashBackground    = tone(baseColor, -22);
-    colorSplashBorder        = tone(baseColor, +8);
-    colorSplashProgressTrack = baseColor;
+    // ============================================================
+    // Splash
+    // ============================================================
 
-    colorSplashProgressStart = QColor("#4C8DFF");
-    colorSplashProgressEnd   = QColor("#35D6FF");
+    colorSplashBackground = tone(baseColor, -23);
+    colorSplashBorder = tone(baseColor, +8);
+    colorSplashProgressTrack = tone(baseColor, -8);
 
-    colorSplashText    = colorTextSecondary;
+    colorSplashProgressStart = QColor("#365d94");
+    colorSplashProgressEnd = QColor("#8BC3FF");
+
+    colorSplashText = colorTextSecondary;
     colorSplashVersion = colorTextDisabled;
 
-    // ── Status ─────────────────────────────────────────
-    colorDanger      = QColor("#FF5D73");
-    colorDangerHover = QColor("#FF7A8C");
+    // ============================================================
+    // Status
+    // ============================================================
 
-    colorWarning = QColor("#FFB547");
+    colorDanger = QColor("#D96C6C");
+    colorDangerHover = QColor("#E47C7C");
 
-    colorSuccess = QColor("#2ED47A");
+    colorWarning = QColor("#D7A65A");
 
-    colorHistogramBackdrop =  QColor("#979797");
-    // ------------------------------------------------------------------------------------------------------------------
-    //     // ── Background ─────────────────────────────────────
-    // colorBackgroundPrimary   = QColor("#1E1E1E");
-    // colorBackgroundSecondary = QColor("#252526");
-    // colorBackgroundTertiary  = QColor("#2D2D30");
+    colorSuccess = QColor("#6FBF73");
 
-    // // ── Surface ────────────────────────────────────────
-    // colorSurface         = QColor("#2B2B2B");
-    // colorSurfaceDark     = QColor("#1A1A1A");
-    // colorSurfaceHover    = QColor("#323232");
-    // colorSurfacePressed  = QColor("#3A3A3A");
-    // colorSurfaceSelected = QColor("#3C3F41");
-    // colorSurfaceRow      = QColor("#2F2F2F");
-    // colorPanelBackground = QColor("#232323");
+    // ============================================================
+    // Canvas
+    // ============================================================
 
-    // // ── Text ───────────────────────────────────────────
-    // colorTextPrimary   = QColor("#E5E5E5");
-    // colorTextBright    = QColor("#FFFFFF");
-    // colorTextSecondary = QColor("#B8B8B8");
-    // colorTextDisabled  = QColor("#7A7A7A");
-    // colorTextInverted  = QColor("#1E1E1E");
+    canvasBackground = tone(baseColor, -27);
 
-    // // ── Border ─────────────────────────────────────────
-    // colorBorder      = QColor("#3C3C3C");
-    // colorBorderFocus = QColor("#5C9DFF");
+    m_componentTheme = QtTheme{};
 
-    // // ── Accent ─────────────────────────────────────────
-    // colorAccent        = QColor("#4A90E2");
-    // colorAccentHover   = QColor("#63A4F4");
-    // colorAccentPressed = QColor("#3B7CCC");
-
-    // colorTextSelection = QColor(74, 144, 226, 90);
-
-    // // ── Splash ─────────────────────────────────────────
-    // colorSplashBackground    = QColor("#1E1E1E");
-    // colorSplashBorder        = QColor("#3A3A3A");
-    // colorSplashProgressTrack = QColor("#2B2B2B");
-
-    // colorSplashProgressStart = QColor("#4A90E2");
-    // colorSplashProgressEnd   = QColor("#6BCBFF");
-
-    // colorSplashText    = QColor("#B8B8B8");
-    // colorSplashVersion = QColor("#7A7A7A");
-
-    // // ── Status ─────────────────────────────────────────
-    // colorDanger      = QColor("#E06C75");
-    // colorDangerHover = QColor("#F07B84");
-
-    // colorWarning = QColor("#D19A66");
-
-    // colorSuccess = QColor("#98C379");
-
-    // ----------------------------------------------------------------------------------------------------------------------------------------------
-    //    // ── Background ─────────────────────────────────────
-    // colorBackgroundPrimary   = QColor("#232323");
-    // colorBackgroundSecondary = QColor("#323232");
-    // colorBackgroundTertiary  = QColor("#2d2d2d");
+    // // ── Background ─────────────────────────────────────
+    // colorBackgroundPrimary   = tone(baseColor, -22);
+    // colorBackgroundSecondary = tone(baseColor, -15);
+    // colorBackgroundTertiary  = tone(baseColor, -7);
 
     // // ── Surface ────────────────────────────────────────
-    // colorSurface         = QColor("#3C3C3C");
-    // colorSurfaceDark     = QColor("#2A2A2A");
-    // colorSurfaceHover    = QColor("#464646");
-    // colorSurfacePressed  = QColor("#505050");
-    // colorSurfaceSelected = QColor("#4059b3");
-    // colorSurfaceRow      = QColor("#404040");
-    // colorPanelBackground = QColor("#353535");
+    // colorSurface         = baseColor;
+    // colorSurfaceDark     = tone(baseColor, -8);
+    // colorSurfaceHover    = tone(baseColor, +8);
+    // colorSurfacePressed  = tone(baseColor, +15);
+    // colorSurfaceSelected = selectionColor;
+    // colorSurfaceRow      = tone(baseColor, +4);
+    // colorPanelBackground = tone(baseColor, -16);
 
     // // ── Text ───────────────────────────────────────────
-    // colorTextPrimary   = QColor("#E6E6E6");
-    // colorTextBright    = QColor("#FFFFFF");
-    // colorTextSecondary = QColor("#C2C2C2");
-    // colorTextDisabled  = QColor("#8A8A8A");
-    // colorTextInverted  = QColor("#1F1F1F");
+    // colorTextPrimary   = QColor("#abb5c2");
+    // colorTextBright    = QColor("#ccd4df");
+    // colorTextSecondary = QColor("#A7B0BC");
+    // colorTextDisabled  = QColor("#6B7480");
+    // colorTextInverted  = tone(baseColor, -22);
 
     // // ── Border ─────────────────────────────────────────
-    // colorBorder      = QColor("#4A4A4A");
-    // colorBorderFocus = QColor("#6CA0DC");
+    // colorBorder      = tone(baseColor, +19);
+    // colorBorderLight = tone(baseColor, +84);
+    // colorBorderFocus = QColor("#4C8DFF");
 
     // // ── Accent ─────────────────────────────────────────
-    // colorAccent        = QColor("#5C8FD8");
-    // colorAccentHover   = QColor("#76A7EA");
-    // colorAccentPressed = QColor("#4B7CC2");
+    // colorAccent        = QColor("#4C8DFF");
+    // colorAccentHover   = QColor("#6AA3FF");
+    // colorAccentPressed = QColor("#3B78E7");
 
-    // colorTextSelection = QColor(92, 143, 216, 90);
+    // colorTextSelection = QColor(
+    //     colorAccent.red(),
+    //     colorAccent.green(),
+    //     colorAccent.blue(),
+    //     90);
 
     // // ── Splash ─────────────────────────────────────────
-    // colorSplashBackground    = QColor("#2B2B2B");
-    // colorSplashBorder        = QColor("#4A4A4A");
-    // colorSplashProgressTrack = QColor("#3A3A3A");
+    // colorSplashBackground    = tone(baseColor, -22);
+    // colorSplashBorder        = tone(baseColor, +8);
+    // colorSplashProgressTrack = baseColor;
 
-    // colorSplashProgressStart = QColor("#5C8FD8");
-    // colorSplashProgressEnd   = QColor("#8BC3FF");
+    // colorSplashProgressStart = QColor("#4C8DFF");
+    // colorSplashProgressEnd   = QColor("#35D6FF");
 
-    // colorSplashText    = QColor("#C2C2C2");
-    // colorSplashVersion = QColor("#8A8A8A");
+    // colorSplashText    = colorTextSecondary;
+    // colorSplashVersion = colorTextDisabled;
 
     // // ── Status ─────────────────────────────────────────
-    // colorDanger      = QColor("#D96C6C");
-    // colorDangerHover = QColor("#E47C7C");
+    // colorDanger      = QColor("#FF5D73");
+    // colorDangerHover = QColor("#FF7A8C");
 
-    // colorWarning = QColor("#D7A65A");
+    // colorWarning = QColor("#FFB547");
 
-    // colorSuccess = QColor("#6FBF73"); 
+    // colorSuccess = QColor("#2ED47A");
+
+    // colorHistogramBackdrop =  QColor("#979797");
 
     populateComponentTheme();
 }

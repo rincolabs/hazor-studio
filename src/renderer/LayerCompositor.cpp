@@ -710,7 +710,8 @@ void LayerCompositor::renderNodes(
         // ── Draw ──
         if (node->layer->rasterStorage.isEnabled() && !usePreview && !hasEffects) {
             BLENDDBG() << "[BLENDBUG] draw layer=" << node->name << "path=RASTER-STORAGE"
-                     << "shaderBlend=" << (gpu->needsShaderBlend(static_cast<int>(node->blendMode)) && !hasMask);
+                     << "shaderBlend=" << gpu->needsShaderBlend(static_cast<int>(node->blendMode))
+                     << "hasMask=" << hasMask;
             if (node->layer->pendingGpuUpload || node->layer->textureOutdated) {
                 gpu->uploadDirtyRasterTiles(node->layer.get());
                 node->layer->pendingGpuUpload = false;
@@ -740,21 +741,30 @@ void LayerCompositor::renderNodes(
                 doc->size.width(), doc->size.height(),
                 vpPix, mvp);
 
-            const bool shaderBlend = gpu->needsShaderBlend(static_cast<int>(node->blendMode))
-                && !hasMask;
+            // A non-Normal blend must go through the blend shader even WITH a
+            // mask: the shader samples the mask per tile (uHasMask + the tile's
+            // own mask UVs) exactly like the flat FLAT-SHADERBLEND path. Routing
+            // the masked case to applyFixedBlend() below instead lost the blend
+            // mode entirely — applyFixedBlend only implements Normal — so a
+            // masked dab layer rendered SourceOver on the GPU while the CPU
+            // projection (DocumentCompositor) applied both mask and blend,
+            // diverging on every non-Normal mode.
+            const bool shaderBlend = gpu->needsShaderBlend(static_cast<int>(node->blendMode));
             if (shaderBlend) {
                 GLint vp[4] = {0, 0, doc->size.width(), doc->size.height()};
                 gl->glGetIntegerv(GL_VIEWPORT, vp);
                 for (const auto& tile : tiles) {
                     gpu->drawShaderBlend(tile.textureId,
-                                         0,
+                                         hasMask ? node->layer->maskTextureId : 0,
                                          tile.mvp,
                                          static_cast<int>(node->blendMode),
                                          node->opacity,
-                                         false,
+                                         hasMask,
                                          node->layer->maskDensity,
                                          vp[2],
-                                         vp[3]);
+                                         vp[3],
+                                         tile.maskUvScale,
+                                         tile.maskUvOffset);
                 }
             } else {
                 gpu->applyFixedBlend(static_cast<int>(node->blendMode));

@@ -2939,6 +2939,14 @@ void CanvasView::resizeParagraphTextBoxToTransform(LayerTreeNode* node, bool edi
 
     node->layer->textureOutdated = true;
     node->invalidateEffects();
+    // Bump the composition generation so the cached CPU projection rebuilds with
+    // the freshly re-rendered raster + fitted transform. Without this, when the
+    // resize gesture ends (liveEdit drops to false) ProjectionCache::update sees
+    // an unchanged generation, keeps its stale texture, and the rendered text
+    // lands at the pre-resize position while the transform outline is already
+    // correct — only a later move (which bumps the generation) fixes it. Mirrors
+    // rerenderTextLayer() and bakeTextLayerResolution() (the Point-text sibling).
+    if (m_doc) ++m_doc->compositionGeneration;
     makeCurrent();
     syncLayersToGpu();
     doneCurrent();

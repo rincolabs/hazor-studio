@@ -3,68 +3,12 @@
 DarkerTheme::DarkerTheme(QObject *parent)
     : ClassicTheme(parent)
 {
-    // colorBackgroundPrimary = QColor("#232323");
-    // colorBackgroundSecondary = QColor("#323232");
-    // colorBackgroundTertiary = QColor("#333333");
-
-    // // ── Surface ────────────────────────────────────────
-    // colorSurface = QColor("#424242");
-    // colorSurfaceDark = QColor("#303030");
-    // colorSurfaceHover = QColor("#464646");
-    // colorSurfacePressed = QColor("#505050");
-    // // colorSurfaceSelected = QColor("#4059b3");
-    // colorSurfaceSelected = QColor("#2e2e2e");
-    // colorSurfaceRow = QColor("#404040");
-    // colorPanelBackground = QColor("#353535");
-
-    // // ── Text ───────────────────────────────────────────
-    // colorTextPrimary = QColor("#E6E6E6");
-    // colorTextBright = QColor("#FFFFFF");
-    // colorTextSecondary = QColor("#C2C2C2");
-    // colorTextDisabled = QColor("#8A8A8A");
-    // colorTextInverted = QColor("#1F1F1F");
-
-    // // ── Border ─────────────────────────────────────────
-    // // colorBorder      = QColor("#4A4A4A");
-    // // colorBorder      = QColor("#242424");
-    // colorBorder = QColor("#2b2b2b");
-    // colorBorderFocus = QColor("#6CA0DC");
-
-    // // ── Accent ─────────────────────────────────────────
-    // colorAccent = QColor("#5C8FD8");
-    // colorAccentHover = QColor("#76A7EA");
-    // colorAccentPressed = QColor("#4B7CC2");
-
-    // colorTextSelection = QColor(92, 143, 216, 90);
-
-    // // ── Splash ─────────────────────────────────────────
-    // colorSplashBackground = QColor("#2B2B2B");
-    // colorSplashBorder = QColor("#4A4A4A");
-    // colorSplashProgressTrack = QColor("#3A3A3A");
-
-    // colorSplashProgressStart = QColor("#365d94");
-    // colorSplashProgressEnd = QColor("#8BC3FF");
-
-    // colorSplashText = QColor("#C2C2C2");
-    // colorSplashVersion = QColor("#8A8A8A");
-
-    // // ── Status ─────────────────────────────────────────
-    // colorDanger = QColor("#D96C6C");
-    // colorDangerHover = QColor("#E47C7C");
-
-    // colorWarning = QColor("#D7A65A");
-
-    // colorSuccess = QColor("#6FBF73");
-
-    // canvasBackground = QColor("#272727");
-
-    // ##################################################################################
-
     // ============================================================
     // Theme Base Colors
     // ============================================================
 
-    QColor baseColor = QColor("#444647");
+
+    QColor baseColor = QColor("#2c2e31");
     QColor selectionColor = QColor("#36383a");
 
     // ============================================================
