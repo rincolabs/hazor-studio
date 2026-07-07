@@ -1313,6 +1313,18 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
     initializeOpenGLFunctions();
     if (!doc) return;
 
+    // A full layer sync means the layer stack / pixels were replaced wholesale
+    // (project load, tab switch, undo/redo). The cached CPU projection and the
+    // captured render frame are keyed on (doc, compositionGeneration, size), and
+    // loading a project does NOT bump compositionGeneration — so an earlier
+    // projection built while the document was still empty (flatCount == 0, e.g.
+    // the first paintGL that runs before roots are populated) would otherwise be
+    // considered up-to-date and replayed transparent, hiding every freshly loaded
+    // layer until something bumps the generation (toggling a layer's visibility).
+    // Drop both caches here so the next frame recomposites from the real layers.
+    invalidateProjection();
+    m_renderCache.markInvalid();
+
     auto flat = doc->flatten();
     for (auto* node : flat) {
         if (!node->layer) continue;

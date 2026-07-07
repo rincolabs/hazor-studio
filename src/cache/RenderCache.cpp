@@ -21,7 +21,8 @@ void RenderCache::destroy()
         m_fbo = 0;
         m_texture = 0;
     }
-    m_cachedGeneration = 0;
+    m_cachedDoc = nullptr;
+    m_cachedGeneration = kInvalidGeneration;
     m_cachedVpW = m_cachedVpH = 0;
 }
 
@@ -35,6 +36,10 @@ bool RenderCache::isValid(const Document* doc, int viewportW, int viewportH,
     if (m_cachedPan != panOffset) return false;
     if (m_cachedCanvasHalfExtents != canvasHalfExtents) return false;
     if (!doc) return false;
+    // A cached frame belongs to one document. Two different documents can share
+    // the same viewport/zoom/pan and both sit at compositionGeneration 0 (freshly
+    // loaded), so without this the second would replay the first's frame.
+    if (m_cachedDoc != doc) return false;
     // Key on the display generation too: Assign Profile / Convert / soft proof /
     // monitor changes bump displayGeneration without touching the composition,
     // so the final pre-overlay frame must be re-rendered (the projection below
@@ -130,6 +135,7 @@ void RenderCache::markValid(const Document* doc, int vpW, int vpH,
     m_cachedZoom = zoom;
     m_cachedPan = panOffset;
     m_cachedCanvasHalfExtents = canvasHalfExtents;
-    m_cachedGeneration = doc ? doc->compositionGeneration : 0;
+    m_cachedDoc = doc;
+    m_cachedGeneration = doc ? doc->compositionGeneration : kInvalidGeneration;
     m_cachedDisplayGeneration = doc ? doc->displayGeneration : 0;
 }

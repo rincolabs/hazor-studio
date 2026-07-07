@@ -24,9 +24,14 @@ public:
     void markValid(const Document* doc, int vpW, int vpH,
                    float zoom, QPointF panOffset, QPointF canvasHalfExtents);
 
-    void markInvalid() { m_cachedGeneration = 0; }
+    // Force the next isValid() to fail. Uses a sentinel that can never equal a
+    // real Document::compositionGeneration (which starts at 0), so it invalidates
+    // even a freshly loaded document still at generation 0 — 0 would not.
+    void markInvalid() { m_cachedGeneration = kInvalidGeneration; }
 
 private:
+    static constexpr uint64_t kInvalidGeneration = ~0ull;
+
     unsigned int m_fbo = 0;
     unsigned int m_texture = 0;
     int m_cachedVpW = 0;
@@ -34,6 +39,7 @@ private:
     float m_cachedZoom = 1.0f;
     QPointF m_cachedPan;
     QPointF m_cachedCanvasHalfExtents;
-    uint64_t m_cachedGeneration = 0;
+    const Document* m_cachedDoc = nullptr;
+    uint64_t m_cachedGeneration = kInvalidGeneration;
     uint64_t m_cachedDisplayGeneration = 0;
 };
