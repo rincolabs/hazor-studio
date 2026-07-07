@@ -70,6 +70,7 @@ static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat);
 static bool applyMergeVisibleState(Document* doc);
 static bool applyFlattenImageState(Document* doc);
 static bool nodeIsDescendantOf(const LayerTreeNode* node, const LayerTreeNode* ancestor);
+static bool nodeEffectivelyVisible(const LayerTreeNode* node);
 static void convertDocumentContentToProfile(Document* doc,
                                             const ColorProfile& source,
                                             const ColorProfile& destination,
@@ -495,12 +496,22 @@ int ImageController::mergeDownTargetFlat(int srcFlat) const
     auto* src = flat[srcFlat];
     if (!src)
         return -1;
+    // Merge Down never crosses a container boundary: the target is the first
+    // SIBLING below src (same parent). Anything with a different parent — src's
+    // own clipped adjustments, the contents of a sibling group, layers outside
+    // src's group — is not a candidate. The first sibling decides the outcome:
+    // a pixel/shape/text Layer is the target; an Adjustment sibling is skipped
+    // (a stack adjustment still applies to the merged result, it is not
+    // consumed); a Group cannot receive a merge, so the action is unavailable.
     for (int i = srcFlat + 1; i < static_cast<int>(flat.size()); ++i) {
         auto* n = flat[i];
-        if (!n || n == src || nodeIsDescendantOf(n, src))
+        if (!n || n->parent != src->parent)
+            continue;
+        if (n->type == LayerTreeNode::Type::Adjustment)
             continue;
         if (n->type == LayerTreeNode::Type::Layer && n->layer)
             return i;
+        return -1;
     }
     return -1;
 }
@@ -4119,7 +4130,14 @@ static void applyMergedImageToNode(Document* doc, LayerTreeNode* node, QImage im
         layer->enableTiling(doc->tileSize());
     else
         layer->disableTiling();
-    node->transform = QTransform();
+    // The merged pixels are in DOCUMENT space. If the node still sits inside
+    // transformed ancestor groups (Merge Down of two siblings in a group), those
+    // transforms remain live and would re-transform the already-transformed
+    // pixels — cancel them so the accumulated transform is identity. At root
+    // level this reduces to the identity transform.
+    node->transform = node->parent
+        ? node->parent->accumulatedTransform().inverted()
+        : QTransform();
     // The merged pixels already bake every consumed layer's blend mode and
     // opacity (composited by DocumentCompositor). The result node must therefore
     // composite as Normal at full opacity, otherwise its own retained
@@ -4141,6 +4159,19 @@ static bool nodeIsDescendantOf(const LayerTreeNode* node, const LayerTreeNode* a
         if (p == ancestor)
             return true;
     return false;
+}
+
+// Effective visibility: the node AND every ancestor group must be visible —
+// exactly the condition under which the compositor renders it. Merge decisions
+// must use this, not the node's own flag: a visible-flagged layer inside a
+// hidden group contributes nothing to the composite, so consuming it would
+// silently destroy its pixels.
+static bool nodeEffectivelyVisible(const LayerTreeNode* node)
+{
+    for (const LayerTreeNode* p = node; p; p = p->parent)
+        if (!p->visible)
+            return false;
+    return node != nullptr;
 }
 
 // Drops every clipped (Single-Layer-Mode) adjustment child of a Layer node. Used
@@ -4210,6 +4241,22 @@ static void requireMergeComposite(const QImage& merged, const Document* doc)
             .arg(w).arg(h).toStdString());
 }
 
+// True when the layer would contribute at least one pixel to a composite:
+// painted dab tiles (rasterStorage), any cpuImage pixel with alpha, or a live
+// text/shape source (conservatively treated as content). Merge Down uses this
+// to decide whether a side's blend mode can survive the merge (see below).
+static bool layerHasVisibleContent(const Layer* layer)
+{
+    if (!layer)
+        return false;
+    if (layer->isTextLayer() || layer->isShapeLayer())
+        return true;
+    if (layer->rasterStorage.isEnabled()
+        && !layer->rasterStorage.contentBounds().isEmpty())
+        return true;
+    return !layer->cpuContentBounds().isEmpty();
+}
+
 static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat)
 {
     if (!doc || srcFlat == dstFlat)
@@ -4229,24 +4276,64 @@ static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat)
         qWarning() << "[MergeDown] aborted: src/dst is not a pixel/shape/text layer";
         return false;
     }
+    // Same-container only: with src and dst as siblings, every group traversed
+    // by the subset composite is a common ancestor, which is what makes the
+    // pass-through composite below (and the ancestor-transform cancellation in
+    // applyMergedImageToNode) correct.
+    if (srcNode->parent != dstNode->parent) {
+        qWarning() << "[MergeDown] aborted: src/dst are not siblings of the same container";
+        return false;
+    }
+    // A hidden endpoint contributes nothing to the composite, so merging would
+    // silently destroy its pixels (src) or overwrite them with content that
+    // ignores it (dst).
+    if (!nodeEffectivelyVisible(srcNode) || !nodeEffectivelyVisible(dstNode)) {
+        qWarning() << "[MergeDown] aborted: src/dst is hidden";
+        return false;
+    }
 
     // Visual source of truth: composite ONLY the two layers, in their real stack
     // order, with their own clipped adjustments baked in (computeEffectedImage)
     // and their masks/opacity/blend honoured. Normal-Mode adjustment siblings are
     // NOT consumed by Merge Down (they affect the whole stack, not just these two
-    // layers), so applyAdjustments stays false.
+    // layers), so applyAdjustments stays false. Ancestor groups are composited
+    // pass-through: their opacity/blend/effects stay live on the tree (the result
+    // remains their child), so baking them into the pixels would apply them twice.
     RenderContext ctx;
     ctx.document = doc;
     ctx.targetType = RenderTargetType::Flatten;
     ctx.outputSize = doc->size;
+    // Captured before the merge mutates the nodes — used to decide whether a
+    // blend mode can survive the merge (below).
+    const bool srcHasContent = layerHasVisibleContent(srcNode->layer.get());
+    const bool dstHasContent = layerHasVisibleContent(dstNode->layer.get());
+    const BlendMode srcBlend = srcNode->blendMode;
+    const BlendMode dstBlend = dstNode->blendMode;
+
     QImage merged = DocumentCompositor::compositeSubset(
-        doc, {srcNode, dstNode}, /*applyAdjustments=*/false, ctx);
+        doc, {srcNode, dstNode}, /*applyAdjustments=*/false, ctx,
+        /*ancestorGroupsPassThrough=*/true);
     requireMergeComposite(merged, doc);
 
     // dst keeps the merged pixels; its own clipped adjustments are already baked
     // into `merged`, so drop them to avoid a double application.
     removeClippedAdjustmentChildren(dstNode);
     applyMergedImageToNode(doc, dstNode, std::move(merged));
+
+    // A non-Normal blend mode reads the BACKDROP — and the pair was composited
+    // against a transparent one, where W3C compositing falls back to the plain
+    // source colour (i.e. the blend bakes as a no-op wherever the other layer
+    // has no pixels). When exactly ONE side contributed pixels, the pair image
+    // is therefore just that side's pixels with its blend NOT baked, and the
+    // appearance against the layers below is preserved exactly by carrying that
+    // side's blend mode onto the result instead of Normal. The everyday case:
+    // dabs painted with Multiply/Screen/etc. merged down onto an empty layer —
+    // resetting to Normal visibly "dropped" the blend mode. When BOTH sides
+    // have pixels the blend against dst's content is baked and the result stays
+    // Normal (matching the pair's rendered look; the interaction with layers
+    // below dst's transparent areas is not representable in a single layer).
+    if (srcHasContent != dstHasContent)
+        dstNode->blendMode = srcHasContent ? srcBlend : dstBlend;
 
     // src is consumed; its clipped adjustment children leave with the subtree.
     const int srcIdxNow = flatIndexOfNode(doc, srcNode);
@@ -4274,14 +4361,17 @@ static bool applyMergeVisibleState(Document* doc)
         return false;
 
     auto* activeNode = flat[doc->activeFlatIndex];
-    // The result must land on a real, visible Layer. If the active node is not a
-    // visible layer (e.g. an adjustment is selected), fall back to the top-most
-    // visible layer as the merge target.
+    // The result must land on a real, EFFECTIVELY visible Layer (its ancestors
+    // visible too — a visible-flagged layer inside a hidden group renders
+    // nothing and cannot hold the visible composite). If the active node does
+    // not qualify (e.g. an adjustment is selected, or it sits in a hidden
+    // group), fall back to the top-most effectively visible layer.
     if (!activeNode || activeNode->type != LayerTreeNode::Type::Layer
-        || !activeNode->layer || !activeNode->visible) {
+        || !activeNode->layer || !nodeEffectivelyVisible(activeNode)) {
         activeNode = nullptr;
         for (auto* n : flat) {
-            if (n && n->type == LayerTreeNode::Type::Layer && n->layer && n->visible) {
+            if (n && n->type == LayerTreeNode::Type::Layer && n->layer
+                && nodeEffectivelyVisible(n)) {
                 activeNode = n;
                 break;
             }
@@ -4295,7 +4385,7 @@ static bool applyMergeVisibleState(Document* doc)
     int visibleLayerCount = 0;
     int visibleAdjCount = 0;
     for (auto* n : flat) {
-        if (!n || !n->visible)
+        if (!n || !nodeEffectivelyVisible(n))
             continue;
         if (n->type == LayerTreeNode::Type::Layer && n->layer)
             ++visibleLayerCount;
@@ -4318,23 +4408,55 @@ static bool applyMergeVisibleState(Document* doc)
     QImage merged = compositeDocumentImage(doc, RenderTargetType::Flatten);
     requireMergeComposite(merged, doc);
 
-    // Consume every visible node EXCEPT the result layer: visible pixel layers
-    // AND visible adjustment layers (Normal-Mode at root, or clipped). Invisible
-    // layers are left untouched.
+    // Consume every EFFECTIVELY visible node EXCEPT the result layer: visible
+    // pixel layers AND visible adjustment layers (Normal-Mode at root, or
+    // clipped). Nodes that are hidden — by their own flag OR a hidden ancestor
+    // group — contributed nothing to `merged` and are left untouched; consuming
+    // them would destroy pixels that are not in the composite.
     std::vector<LayerTreeNode*> toRemove;
     for (auto* n : flat) {
         if (!n || n == activeNode)
             continue;
-        const bool visibleLayer = n->type == LayerTreeNode::Type::Layer
-            && n->layer && n->visible;
+        if (!nodeEffectivelyVisible(n))
+            continue;
+        const bool visibleLayer = n->type == LayerTreeNode::Type::Layer && n->layer;
         const bool visibleAdj = n->type == LayerTreeNode::Type::Adjustment
-            && n->visible && n->isAdjustmentLayer();
+            && n->isAdjustmentLayer();
         if (visibleLayer || visibleAdj)
             toRemove.push_back(n);
     }
     removeNodesByIdentity(doc, toRemove);
     // The result layer's own clipped adjustments are baked into `merged`.
     removeClippedAdjustmentChildren(activeNode);
+
+    // `merged` is the final document composite — every ancestor group's
+    // opacity/blend/effects/transform is already baked into the pixels. The
+    // result must therefore live at ROOT level: leaving it nested inside a
+    // surviving group (one that still holds hidden children) would re-apply the
+    // group's properties on top of the baked result. Hoist it above its
+    // outermost ancestor, then prune any ancestor group the merge left empty.
+    if (activeNode->parent) {
+        LayerTreeNode* outermost = activeNode;
+        while (outermost->parent)
+            outermost = outermost->parent;
+        LayerTreeNode* oldParent = activeNode->parent;
+        const int takeIdx = flatIndexOfNode(doc, activeNode);
+        auto taken = takeIdx >= 0 ? doc->takeNodeAt(takeIdx) : nullptr;
+        if (!taken) {
+            qWarning() << "[MergeVisible] aborted: could not detach result layer";
+            return false;
+        }
+        const int outerIdx = flatIndexOfNode(doc, outermost);
+        doc->insertNodeAt(outerIdx, std::move(taken));
+        for (LayerTreeNode* g = oldParent;
+             g && g->type == LayerTreeNode::Type::Group && g->children.empty();) {
+            LayerTreeNode* next = g->parent;
+            const int gi = flatIndexOfNode(doc, g);
+            if (gi >= 0)
+                doc->takeNodeAt(gi);
+            g = next;
+        }
+    }
 
     const int newActiveFlatIdx = flatIndexOfNode(doc, activeNode);
     if (newActiveFlatIdx < 0) {
@@ -4403,6 +4525,17 @@ void ImageController::mergeLayers(int srcFlat, int dstFlat)
     if ((srcNodeLk && srcNodeLk->isPixelEditingLocked())
         || (dstNodeLk && dstNodeLk->isPixelEditingLocked())) {
         emit operationBlocked(tr("One of the layers being merged is locked."));
+        return;
+    }
+    // Mirrors applyMergeLayersState's hard requirements, surfaced as friendly
+    // messages instead of a generic async failure.
+    if (!srcNodeLk || !dstNodeLk || srcNodeLk->parent != dstNodeLk->parent) {
+        emit operationBlocked(tr("Layers can only be merged with a layer "
+                                 "in the same group."));
+        return;
+    }
+    if (!nodeEffectivelyVisible(srcNodeLk) || !nodeEffectivelyVisible(dstNodeLk)) {
+        emit operationBlocked(tr("Hidden layers cannot be merged."));
         return;
     }
 

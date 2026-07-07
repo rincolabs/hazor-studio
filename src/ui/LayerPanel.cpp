@@ -449,8 +449,16 @@ LayerPanel::LayerPanel(QWidget* parent)
                 if (m_controller) m_controller->duplicateNode(idx);
             });
             menu.addAction(tr("Merge Down"), [this, idx]() {
-                if (m_controller && idx > 0)
-                    m_controller->mergeLayers(idx, idx - 1);
+                if (!m_controller)
+                    return;
+                // Flat order puts the stack TOP at index 0, so the layer below
+                // is at a HIGHER index — and not necessarily idx+1 (clipped
+                // adjustments occupy flat slots; groups must not be crossed).
+                // mergeDownTargetFlat resolves the real target; idx-1 pointed
+                // at the layer ABOVE and merged the wrong way.
+                const int dst = m_controller->mergeDownTargetFlat(idx);
+                if (dst >= 0)
+                    m_controller->mergeLayers(idx, dst);
             });
             menu.addSeparator();
             bool hasMask = m_controller && m_controller->hasLayerMask(idx);

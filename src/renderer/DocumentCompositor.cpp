@@ -485,14 +485,16 @@ void renderNodesFiltered(QImage& target,
                          const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
-                         bool applyAdjustments);
+                         bool applyAdjustments,
+                         bool groupsPassThrough);
 
 void renderNodes(QImage& target,
                  const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
                  const Document* doc, const QTransform& ndcToPixel)
 {
     renderNodesFiltered(target, nodes, doc, ndcToPixel,
-        [](const LayerTreeNode*) { return true; }, true);
+        [](const LayerTreeNode*) { return true; }, true,
+        /*groupsPassThrough=*/false);
 }
 
 bool subtreeHasIncludedLayer(const LayerTreeNode* node,
@@ -515,7 +517,8 @@ void renderNodesFiltered(QImage& target,
                          const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
-                         bool applyAdjustments)
+                         bool applyAdjustments,
+                         bool groupsPassThrough)
 {
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
@@ -534,14 +537,20 @@ void renderNodesFiltered(QImage& target,
         if (node->type == LayerTreeNode::Type::Group) {
             if (!subtreeHasIncludedLayer(node, includeLayer))
                 continue;
-            if (!node->needsIsolatedComposite()) {
+            if (groupsPassThrough || !node->needsIsolatedComposite()) {
                 // Fast path: an opacity-1, Normal-blend, effect-free, mask-free
                 // group composites identically whether its children are merged
                 // straight into the parent or isolated first, so skip the extra
                 // buffer. (A future PassThrough group would also take this path
                 // by design — see LayerTreeNode::needsIsolatedComposite.)
+                //
+                // groupsPassThrough forces this path for merge subsets whose
+                // result stays inside the group: its opacity/blend/effects
+                // remain live on the tree, so baking them here would apply
+                // them twice (see DocumentCompositor::compositeSubset).
                 renderNodesFiltered(target, node->children, doc, ndcToPixel,
-                                    includeLayer, applyAdjustments);
+                                    includeLayer, applyAdjustments,
+                                    groupsPassThrough);
             } else {
                 // Isolated group model — the group's mask/effects/opacity/blend
                 // apply once to the composed children, in this order:
@@ -549,7 +558,8 @@ void renderNodesFiltered(QImage& target,
                 QImage groupStage(doc->size, QImage::Format_ARGB32_Premultiplied);
                 groupStage.fill(Qt::transparent);
                 renderNodesFiltered(groupStage, node->children, doc, ndcToPixel,
-                                    includeLayer, applyAdjustments);
+                                    includeLayer, applyAdjustments,
+                                    groupsPassThrough);
                 applyGroupMask(groupStage, node);                 // no-op until group masks exist
                 applyGroupEffects(groupStage, node, doc->size);
                 compositeStage(target, groupStage, node->blendMode, node->opacity);
@@ -568,7 +578,8 @@ void renderNodesFiltered(QImage& target,
 
 QImage compositeFiltered(const Document* doc,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
-                         bool applyAdjustments)
+                         bool applyAdjustments,
+                         bool groupsPassThrough = false)
 {
     if (!doc || doc->flatCount() == 0 || doc->size.isEmpty())
         return QImage();
@@ -584,7 +595,7 @@ QImage compositeFiltered(const Document* doc,
     ndcToPixel.scale(cw * 0.5, -ch * 0.5);
 
     renderNodesFiltered(result, doc->roots, doc, ndcToPixel, includeLayer,
-                        applyAdjustments);
+                        applyAdjustments, groupsPassThrough);
 
     return result.convertToFormat(QImage::Format_RGBA8888);
 }
@@ -638,11 +649,12 @@ QImage DocumentCompositor::compositeSubset(
     const Document* doc,
     const std::set<const LayerTreeNode*>& includeLayers,
     bool applyAdjustments,
-    const RenderContext& /*ctx*/)
+    const RenderContext& /*ctx*/,
+    bool ancestorGroupsPassThrough)
 {
     if (!doc)
         return QImage();
     return compositeFiltered(doc, [&includeLayers](const LayerTreeNode* node) {
         return includeLayers.count(node) > 0;
-    }, applyAdjustments);
+    }, applyAdjustments, ancestorGroupsPassThrough);
 }

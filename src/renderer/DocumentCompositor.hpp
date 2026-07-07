@@ -24,8 +24,17 @@ public:
     // applied to the composited subset; pass false to consume only the included
     // layers and their own clipped adjustments (e.g. Merge Down). The visual
     // source of truth for layer-merge operations.
+    //
+    // ancestorGroupsPassThrough: when true, groups reached by the filtered walk
+    // composite their children directly — no isolation, so group opacity/blend/
+    // effects are NOT baked into the result pixels. Use it when the merge result
+    // stays nested inside those groups (Merge Down of two siblings): the group
+    // properties remain live on the tree and would otherwise apply twice. Only
+    // valid when every traversed group is a common ancestor of all included
+    // layers.
     static QImage compositeSubset(const Document* doc,
                                   const std::set<const LayerTreeNode*>& includeLayers,
                                   bool applyAdjustments,
-                                  const RenderContext& ctx);
+                                  const RenderContext& ctx,
+                                  bool ancestorGroupsPassThrough = false);
 };

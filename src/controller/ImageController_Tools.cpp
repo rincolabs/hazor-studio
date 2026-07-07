@@ -968,13 +968,24 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         int src = m_doc ? m_doc->activeFlatIndex : -1;
         // The layer below src is not necessarily src+1: src may own clipped
         // adjustment children that occupy the following flat slots. Resolve the
-        // next real layer below src's subtree.
+        // next real layer below src, in src's own container (mergeDownTargetFlat
+        // never crosses a group boundary).
         int dst = (src >= 0) ? mergeDownTargetFlat(src) : -1;
         if (m_doc && src >= 0 && dst >= 0) {
             auto* sn = m_doc->nodeAt(src);
             auto* dn = m_doc->nodeAt(dst);
+            auto effectivelyVisible = [](const LayerTreeNode* n) {
+                for (const LayerTreeNode* p = n; p; p = p->parent)
+                    if (!p->visible) return false;
+                return n != nullptr;
+            };
             if ((sn && sn->isPixelEditingLocked()) || (dn && dn->isPixelEditingLocked())) {
                 emit operationBlocked(tr("One of the layers being merged is locked."));
+                success = false;
+            } else if (!effectivelyVisible(sn) || !effectivelyVisible(dn)) {
+                // A hidden endpoint contributes nothing to the composite; the
+                // merge would silently destroy its pixels.
+                emit operationBlocked(tr("Hidden layers cannot be merged."));
                 success = false;
             } else {
                 success = mergeLayersAsync(src, dst);

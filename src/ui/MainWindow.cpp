@@ -4172,9 +4172,13 @@ void MainWindow::updateLayerMenuState()
         && !isAdjustment
         && !positionLocked;
 
-    bool hasActiveIdx = hasDoc && m_doc->flatCount() >= 2
+    // Merge Down needs a real target: the next Layer sibling below the active
+    // node in the SAME container (mergeDownTargetFlat never crosses a group
+    // boundary and skips adjustment slots) — a flat-index heuristic gets both
+    // of those wrong.
+    bool hasMergeDownTarget = hasDoc && m_ctrl
                        && m_doc->activeFlatIndex >= 0
-                       && m_doc->activeFlatIndex < m_doc->flatCount() - 1;
+                       && m_ctrl->mergeDownTargetFlat(m_doc->activeFlatIndex) >= 0;
     bool hasMask = hasLayer && m_ctrl->hasLayerMask(m_ctrl->activeLayerIndex());
 
     m_addLayerAction->setEnabled(hasDoc);
@@ -4187,7 +4191,7 @@ void MainWindow::updateLayerMenuState()
     Q_UNUSED(hasNode);
     m_fillLayerAction->setEnabled(canEditPixels);
     m_mergeVisibleAction->setEnabled(hasLayer && hasMultiple && !m_ctrl->anyFullyLockedVisibleLayer());
-    m_mergeDownAction->setEnabled(hasActiveIdx && !pixelsLocked);
+    m_mergeDownAction->setEnabled(hasMergeDownTarget && !pixelsLocked);
     m_mergeLayersAction->setEnabled(hasLayer && hasMultiple && !m_ctrl->anyFullyLockedVisibleLayer());
     m_flattenImageAction->setEnabled(hasDoc && m_ctrl && m_doc->flatCount() >= 1 && !m_ctrl->anyFullyLockedVisibleLayer());
     m_rasterizeLayerAction->setEnabled(hasLayer && !isAdjustment && !pixelsLocked);
