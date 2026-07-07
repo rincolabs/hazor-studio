@@ -5,7 +5,9 @@
 #include "RulerGuideSettingsPage.hpp"
 #include "AgentConfigWidget.hpp"
 #include "AiSettingsPage.hpp"
+#include "McpSettingsPage.hpp"
 #include "ShortcutManager.hpp"
+#include "MainWindow.hpp"
 #include "agent/AgentPresetManager.hpp"
 #include "agent/LLMClient.hpp"
 #include "theme/Theme.hpp"
@@ -70,6 +72,7 @@ void AppSettingsDialog::setupUi()
     m_sidebar->addItem(tr("AI Agent"));
     m_sidebar->addItem(tr("Interface"));
     m_sidebar->addItem(tr("AI / Machine Learning"));
+    m_sidebar->addItem(tr("MCP Server"));
 
     m_sidebar->setCurrentRow(PageKeyboardShortcuts);
 
@@ -121,6 +124,10 @@ void AppSettingsDialog::setupUi()
     // AI / Machine Learning page (ONNX runtime, providers, performance, models).
     m_aiPage = new AiSettingsPage(this);
     m_pages->addWidget(m_aiPage);
+
+    // MCP Server page (embedded local tool server for external AI agents).
+    m_mcpPage = new McpSettingsPage(this);
+    m_pages->addWidget(m_mcpPage);
 
     contentLay->addWidget(m_pages, 1);
 
@@ -186,6 +193,11 @@ void AppSettingsDialog::onAccept()
         m_rulerGuidePage->saveSettings();
     if (m_aiPage)
         m_aiPage->saveSettings();
+    if (m_mcpPage) {
+        m_mcpPage->saveSettings();
+        if (auto* mw = qobject_cast<MainWindow*>(parentWidget()))
+            mw->applyMcpSettings();
+    }
     ShortcutManager::instance()->saveSettings();
     accept();
 }

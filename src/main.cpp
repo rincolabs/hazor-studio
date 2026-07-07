@@ -8,6 +8,8 @@
 #include <QTimer>
 #include <QDebug>
 #include <QImageReader>
+#include <QFileOpenEvent>
+#include <QEvent>
 #include <memory>
 #include "ui/MainWindow.hpp"
 #include "ui/SplashScreen.hpp"
@@ -54,6 +56,61 @@ static bool isSupportedBrushImportFile(const QString& filePath)
     return QFileInfo(filePath).isFile() && !manager.adaptersForFile(filePath).isEmpty();
 }
 
+static bool isHazorProjectFile(const QString& filePath)
+{
+    return filePath.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+        && QFileInfo(filePath).isFile();
+}
+
+// On macOS the OS delivers "Open With" file paths through QFileOpenEvent rather
+// than argv. This filter buffers any paths that arrive before the MainWindow is
+// ready, then forwards them once it is set.
+class FileOpenEventFilter : public QObject {
+public:
+    using QObject::QObject;
+
+    void setWindow(MainWindow* window)
+    {
+        m_window = window;
+        flushPending();
+    }
+
+    QStringList takePending()
+    {
+        const QStringList pending = m_pending;
+        m_pending.clear();
+        return pending;
+    }
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override
+    {
+        if (event->type() == QEvent::FileOpen) {
+            const QString path = static_cast<QFileOpenEvent*>(event)->file();
+            if (isHazorProjectFile(path)) {
+                if (m_window)
+                    m_window->openProjectFiles({ path });
+                else
+                    m_pending << path;
+                return true;
+            }
+        }
+        return QObject::eventFilter(obj, event);
+    }
+
+private:
+    void flushPending()
+    {
+        if (m_window && !m_pending.isEmpty()) {
+            m_window->openProjectFiles(m_pending);
+            m_pending.clear();
+        }
+    }
+
+    MainWindow* m_window = nullptr;
+    QStringList m_pending;
+};
+
 int main(int argc, char* argv[])
 {
     CrashHandler::install();
@@ -86,12 +143,21 @@ int main(int argc, char* argv[])
     QApplication::setApplicationName(QStringLiteral("Hazor Studio"));
     QApplication::setApplicationVersion(QStringLiteral(HAZOR_VERSION_STRING));
 
+    // File paths handed to us by the OS (extension association / "Open With").
+    // *.hzs projects open as new tabs; supported brush files open the import
+    // dialog. On macOS these instead arrive via QFileOpenEvent, handled below.
     QStringList initialBrushImportFiles;
+    QStringList initialProjectFiles;
     const QStringList args = app.arguments();
     for (int i = 1; i < args.size(); ++i) {
-        if (isSupportedBrushImportFile(args[i]))
+        if (isHazorProjectFile(args[i]))
+            initialProjectFiles << args[i];
+        else if (isSupportedBrushImportFile(args[i]))
             initialBrushImportFiles << args[i];
     }
+
+    auto* fileOpenFilter = new FileOpenEventFilter(&app);
+    app.installEventFilter(fileOpenFilter);
 
     app.setWindowIcon(QIcon(":/icons/app-icon.png"));
     QImageReader::setAllocationLimit(0); // remove Qt's default 128 MB decoded-image cap
@@ -114,9 +180,27 @@ int main(int argc, char* argv[])
         splash.setProgress(35, "Creating main window...");
         window = std::make_unique<MainWindow>();
 
-        QObject::connect(&splash, &SplashScreen::finished, window.get(), [&window, initialBrushImportFiles]() {
+        fileOpenFilter->setWindow(window.get());
+        QObject::connect(&splash, &SplashScreen::finished, window.get(),
+                         [&window, initialBrushImportFiles, initialProjectFiles, fileOpenFilter]() {
             window->showMaximized();
-            QTimer::singleShot(0, window.get(), &MainWindow::createDefaultDocument);
+
+            // Merge any *.hzs paths that arrived via QFileOpenEvent (macOS) before
+            // the window existed with those parsed from argv (Windows/Linux).
+            QStringList projectFiles = initialProjectFiles;
+            projectFiles += fileOpenFilter->takePending();
+
+            QTimer::singleShot(0, window.get(), [&window, projectFiles]() {
+                int opened = 0;
+                if (!projectFiles.isEmpty())
+                    opened = window->openProjectFiles(projectFiles);
+                // Only fall back to a blank document when nothing was opened from
+                // a file association; otherwise the requested project would sit
+                // behind a spurious "Untitled" tab.
+                if (opened == 0)
+                    window->createDefaultDocument();
+            });
+
             if (!initialBrushImportFiles.isEmpty()) {
                 QTimer::singleShot(0, window.get(), [&window, initialBrushImportFiles]() {
                     window->openBrushImportDialog(initialBrushImportFiles);
@@ -126,10 +210,8 @@ int main(int argc, char* argv[])
 
         splash.setProgress(65, "Starting MCP server...");
         McpServer* mcp = new McpServer(window->toolExecutor(), window.get());
-        if (mcp->start(8080)) {
-        } else {
-            qWarning() << "Failed to start MCP server on port 8080";
-        }
+        window->setMcpServer(mcp);
+        window->applyMcpSettings();
 
         splash.setProgress(90, "Preparing canvas...");
 

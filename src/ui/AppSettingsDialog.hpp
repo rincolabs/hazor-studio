@@ -12,6 +12,7 @@ class ShortcutSettingsPage;
 class RulerGuideSettingsPage;
 class AgentConfigWidget;
 class AiSettingsPage;
+class McpSettingsPage;
 class AgentPresetManager;
 class LLMClient;
 
@@ -27,6 +28,7 @@ public:
         PageAIAgent = 3,
         PageInterface = 4,
         PageAIMachineLearning = 5,
+        PageMcpServer = 6,
         PageCount
     };
 
@@ -61,6 +63,7 @@ private:
     RulerGuideSettingsPage* m_rulerGuidePage = nullptr;
     AgentConfigWidget* m_agentConfigWidget = nullptr;
     AiSettingsPage* m_aiPage = nullptr;
+    McpSettingsPage* m_mcpPage = nullptr;
     AgentPresetManager* m_presetManager = nullptr;
     LLMClient* m_client = nullptr;
     int m_currentPage = -1;

@@ -5,6 +5,7 @@
 #include <QTcpSocket>
 #include <QJsonObject>
 #include "HttpParser.hpp"
+#include "McpSettings.hpp"
 
 class ToolExecutor;
 class ToolDefinition;
@@ -15,7 +16,7 @@ class McpServer : public QObject {
 public:
     explicit McpServer(ToolExecutor* executor, QObject* parent = nullptr);
 
-    bool start(quint16 port = 8080);
+    bool start(quint16 port = McpSettings::kDefaultPort);
     void stop();
     bool isListening() const;
     quint16 serverPort() const;

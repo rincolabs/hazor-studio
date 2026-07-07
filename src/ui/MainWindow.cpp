@@ -47,6 +47,8 @@
 #include "ui/dialogs/RemoveBgDialog.hpp"
 #include "ui/ShortcutManager.hpp"
 #include "ui/AppSettingsDialog.hpp"
+#include "mcp/McpServer.hpp"
+#include "mcp/McpSettings.hpp"
 #include "ui/AiAlertService.hpp"
 #include "ai/tool/AiObjectSelectionController.hpp"
 #include "ai/tool/AiRemoveObjectController.hpp"
@@ -3691,6 +3693,25 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     return true;
 }
 
+int MainWindow::openProjectFiles(const QStringList& files)
+{
+    int opened = 0;
+    for (const QString& path : files) {
+        if (!path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
+            continue;
+        if (!QFileInfo(path).isFile()) {
+            QMessageBox::warning(this, tr("Open Project"),
+                tr("File not found:\n%1").arg(path));
+            continue;
+        }
+        if (loadProjectAsNewTab(path))
+            ++opened;
+    }
+    if (opened > 0)
+        raise();
+    return opened;
+}
+
 void MainWindow::onExportFile()
 {
     if (!m_doc) return;
@@ -5837,6 +5858,31 @@ void MainWindow::onConfigureAgent()
             onAgentSelected(assistants.first());
         }
     }
+}
+
+void MainWindow::applyMcpSettings()
+{
+    if (!m_mcpServer)
+        return;
+
+    const bool wantEnabled = McpSettings::enabled();
+    const quint16 wantPort = McpSettings::port();
+
+    if (!wantEnabled) {
+        if (m_mcpServer->isListening())
+            m_mcpServer->stop();
+        return;
+    }
+
+    // Enabled: (re)bind only if not already listening on the desired port.
+    if (m_mcpServer->isListening()) {
+        if (m_mcpServer->serverPort() == wantPort)
+            return;
+        m_mcpServer->stop();
+    }
+
+    if (!m_mcpServer->start(wantPort))
+        qWarning() << "Failed to start MCP server on port" << wantPort;
 }
 
 void MainWindow::onSettings()

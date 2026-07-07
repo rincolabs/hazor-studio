@@ -48,6 +48,7 @@ class QDockWidget;
 class ImageController;
 class AgentController;
 class ToolExecutor;
+class McpServer;
 class AgentPanel;
 class AgentPresetManager;
 class BrushPresetManager;
@@ -64,8 +65,21 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     void createDefaultDocument();
     ToolExecutor* toolExecutor() const { return m_toolExecutor; }
+
+    // Embedded MCP server ownership. main.cpp constructs the server and hands it
+    // over; the settings page calls applyMcpSettings() to start/stop/rebind it
+    // to the port and enabled flag stored in QSettings.
+    void setMcpServer(McpServer* server) { m_mcpServer = server; }
+    McpServer* mcpServer() const { return m_mcpServer; }
+    void applyMcpSettings();
+
     bool isCustomShapeIconPreloadFinished() const { return m_customShapeIconPreloadFinished; }
     void openBrushImportDialog(const QStringList& files = {});
+
+    // Open one or more Hazor project files (*.hzs) as new tabs. Used when the OS
+    // launches the app with file arguments (extension association) or via a
+    // QFileOpenEvent (macOS "Open With"). Returns the number of files opened.
+    int openProjectFiles(const QStringList& files);
 
 signals:
     void customShapeIconPreloadFinished();
@@ -386,6 +400,7 @@ private:
     QDockWidget* m_brushSettingsDock = nullptr;
 
     ToolExecutor* m_toolExecutor = nullptr;
+    McpServer* m_mcpServer = nullptr;
     AgentController* m_agentController = nullptr;
     AgentPresetManager* m_presetManager = nullptr;
     ColorEngine* m_colorEngine = nullptr;

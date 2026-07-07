@@ -306,6 +306,7 @@ add_executable(Hazor WIN32
 
     src/mcp/McpServer.cpp
     src/mcp/McpServer.hpp
+    src/mcp/McpSettings.hpp
     src/mcp/HttpParser.cpp
     src/mcp/HttpParser.hpp
     src/mcp/McpTypes.hpp
@@ -497,6 +498,8 @@ add_executable(Hazor WIN32
     src/ui/ColorSettingsPage.hpp
     src/ui/GeneralSettingsPage.cpp
     src/ui/GeneralSettingsPage.hpp
+    src/ui/McpSettingsPage.cpp
+    src/ui/McpSettingsPage.hpp
     src/ui/RulerGuideSettingsPage.cpp
     src/ui/RulerGuideSettingsPage.hpp
     src/ui/MainWindow.cpp
