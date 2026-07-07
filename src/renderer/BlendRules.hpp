@@ -14,8 +14,14 @@
 //   - GPUViewport blendModeMap[]                    (BlendMode → shader id)
 //   - GPUViewport::needsShaderBlend / applyFixedBlend
 //
-// The shader-id numbering matches the `uBlendMode` cases in the blend
-// fragment shader (renderer/GPUViewport_Shaders.cpp).
+// The shader-id numbering matches the `bm_blend` mode ids in the shared GLSL
+// blend library (renderer/BlendShaderLib.hpp).
+//
+// This header maps each BlendMode to a backend primitive; the actual blend
+// FORMULAS live in exactly two mirrored files:
+//   - renderer/BlendMath.hpp       C++  (CPU compositor / projection / export)
+//   - renderer/BlendShaderLib.hpp  GLSL (live GPU preview)
+// Keep the three files consistent when adding a mode.
 // ─────────────────────────────────────────────────────────────────────────
 namespace blend {
 

@@ -1,4 +1,5 @@
 #include "GPUViewport.hpp"
+#include "BlendShaderLib.hpp"
 #include "ShaderCompat.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -184,8 +185,12 @@ void GPUViewport::initShaders()
                 gl_Position = uTransform * vec4(pos, 0.0, 1.0);
             }
         )");
-    const QByteArray blendFSrc = shader_compat::adaptSource(R"(
-            #version 330 core
+    // The blend-mode math itself (bm_*) comes from the shared GLSL library
+    // (renderer/BlendShaderLib.hpp), mirrored line-for-line by the CPU
+    // compositor's renderer/BlendMath.hpp — do not re-implement formulas here.
+    const QByteArray blendFSrcRaw = QByteArray("#version 330 core\n")
+        + blend_glsl::kLib
+        + R"(
             in vec2 vUV;
             out vec4 fragColor;
             uniform sampler2D uDstTexture;
@@ -258,45 +263,6 @@ void GPUViewport::initShaders()
                 return sampleAlphaWeighted(
                     tex, uv, uSrcPremultiplied > 0.5 ? 0.0 : 1.0);
             }
-            float lum(vec3 c) {
-                return 0.299*c.r + 0.587*c.g + 0.114*c.b;
-            }
-            vec3 clipColor(vec3 c) {
-                float l = lum(c);
-                float n = min(min(c.r,c.g),c.b);
-                float x = max(max(c.r,c.g),c.b);
-                if (n < 0.0)
-                    c = l + (c - l) * l / (l - n);
-                if (x > 1.0)
-                    c = l + (c - l) * (1.0 - l) / (x - l);
-                return c;
-            }
-            vec3 setLum(vec3 c, float l) {
-                float d = l - lum(c);
-                return clipColor(c + d);
-            }
-            float sat(vec3 c) { return max(max(c.r,c.g),c.b) - min(min(c.r,c.g),c.b); }
-            vec3 setSat(vec3 c, float s) {
-                float mn = min(min(c.r,c.g),c.b);
-                float mx = max(max(c.r,c.g),c.b);
-                if (mn == mx) return vec3(0.0);
-                vec3 r;
-                if (c.r <= mn) {
-                    if (c.g <= mn) {
-                        r.b = mn + (c.b - mn) * s / (mx - mn);
-                        r.r = r.g = mn;
-                    } else if (c.b <= mn) {
-                        r.r = mn + (c.r - mn) * s / (mx - mn);
-                        r.g = r.b = mn;
-                    }
-                } else if (c.g <= mn) {
-                    if (c.b <= mn) {
-                        r.r = mn + (c.r - mn) * s / (mx - mn);
-                        r.g = r.b = mn;
-                    }
-                }
-                return r;
-            }
             void main() {
                 vec2 st = gl_FragCoord.xy / uViewportSize;
                 vec4 dst = texture(uDstTexture, st);
@@ -318,56 +284,19 @@ void GPUViewport::initShaders()
                 vec3 srcColor = src.rgb;
                 src.a *= uOpacity * maskAlpha;
 
-                vec3 Cr;
                 float sa = src.a, da = dst.a;
-                if (uBlendMode == 0) { // Overlay
-                    Cr.r = (dstColor.r < 0.5) ? 2.0*srcColor.r*dstColor.r : 1.0 - 2.0*(1.0-srcColor.r)*(1.0-dstColor.r);
-                    Cr.g = (dstColor.g < 0.5) ? 2.0*srcColor.g*dstColor.g : 1.0 - 2.0*(1.0-srcColor.g)*(1.0-dstColor.g);
-                    Cr.b = (dstColor.b < 0.5) ? 2.0*srcColor.b*dstColor.b : 1.0 - 2.0*(1.0-srcColor.b)*(1.0-dstColor.b);
-                } else if (uBlendMode == 1) { // HardLight
-                    Cr.r = (srcColor.r < 0.5) ? 2.0*srcColor.r*dstColor.r : 1.0 - 2.0*(1.0-srcColor.r)*(1.0-dstColor.r);
-                    Cr.g = (srcColor.g < 0.5) ? 2.0*srcColor.g*dstColor.g : 1.0 - 2.0*(1.0-srcColor.g)*(1.0-dstColor.g);
-                    Cr.b = (srcColor.b < 0.5) ? 2.0*srcColor.b*dstColor.b : 1.0 - 2.0*(1.0-srcColor.b)*(1.0-dstColor.b);
-                } else if (uBlendMode == 2) { // SoftLight
-                    Cr.r = (srcColor.r < 0.5) ? dstColor.r - (1.0-2.0*srcColor.r)*dstColor.r*(1.0-dstColor.r) : dstColor.r + (2.0*srcColor.r-1.0)*( (dstColor.r<0.25 ? ((16.0*dstColor.r-12.0)*dstColor.r+4.0)*dstColor.r : sqrt(dstColor.r)) - dstColor.r);
-                    Cr.g = (srcColor.g < 0.5) ? dstColor.g - (1.0-2.0*srcColor.g)*dstColor.g*(1.0-dstColor.g) : dstColor.g + (2.0*srcColor.g-1.0)*( (dstColor.g<0.25 ? ((16.0*dstColor.g-12.0)*dstColor.g+4.0)*dstColor.g : sqrt(dstColor.g)) - dstColor.g);
-                    Cr.b = (srcColor.b < 0.5) ? dstColor.b - (1.0-2.0*srcColor.b)*dstColor.b*(1.0-dstColor.b) : dstColor.b + (2.0*srcColor.b-1.0)*( (dstColor.b<0.25 ? ((16.0*dstColor.b-12.0)*dstColor.b+4.0)*dstColor.b : sqrt(dstColor.b)) - dstColor.b);
-                } else if (uBlendMode == 3) { // ColorDodge
-                    Cr = dstColor / (1.0 - srcColor);
-                } else if (uBlendMode == 4) { // ColorBurn
-                    Cr = 1.0 - (1.0 - dstColor) / srcColor;
-                } else if (uBlendMode == 5) { // Difference
-                    Cr = abs(dstColor - srcColor);
-                } else if (uBlendMode == 6) { // Exclusion
-                    Cr = dstColor + srcColor - 2.0*dstColor*srcColor;
-                } else if (uBlendMode == 7) { // Hue
-                    Cr = setLum(setSat(srcColor, sat(dstColor)), lum(dstColor));
-                } else if (uBlendMode == 8) { // Saturation
-                    Cr = setLum(setSat(dstColor, sat(srcColor)), lum(dstColor));
-                } else if (uBlendMode == 9) { // Color
-                    Cr = setLum(srcColor, lum(dstColor));
-                } else if (uBlendMode == 11) { // Multiply
-                    Cr = srcColor * dstColor;
-                } else if (uBlendMode == 12) { // Screen
-                    Cr = srcColor + dstColor - srcColor * dstColor;
-                } else if (uBlendMode == 13) { // Darken
-                    Cr = min(srcColor, dstColor);
-                } else if (uBlendMode == 14) { // Lighten
-                    Cr = max(srcColor, dstColor);
-                } else { // Luminosity
-                Cr = setLum(dstColor, lum(srcColor));
+                vec3 Cr = clamp(bm_blend(uBlendMode, dstColor, srcColor), 0.0, 1.0);
+                // Blend modes are only meaningful where a backdrop exists. Over a
+                // transparent backdrop (da < 1) — e.g. the bottom layer of an
+                // isolated group, drawn against the freshly-cleared group FBO —
+                // fade the blended color back toward the source so darken-type modes
+                // (Multiply/Darken/ColorBurn/Overlay…) don't collapse to black.
+                // W3C compositing: Cs' = (1.0 - ab)*Cs + ab*B(Cb, Cs).
+                Cr = mix(srcColor, Cr, da);
+                fragColor = vec4(dstPremul * (1.0 - sa) + Cr * sa, da + sa * (1.0 - da));
             }
-            Cr = clamp(Cr, 0.0, 1.0);
-            // Blend modes are only meaningful where a backdrop exists. Over a
-            // transparent backdrop (da < 1) — e.g. the bottom layer of an
-            // isolated group, drawn against the freshly-cleared group FBO —
-            // fade the blended color back toward the source so darken-type modes
-            // (Multiply/Darken/ColorBurn/Overlay…) don't collapse to black.
-            // W3C compositing: Cs' = (1.0 - ab)*Cs + ab*B(Cb, Cs).
-            Cr = mix(srcColor, Cr, da);
-            fragColor = vec4(dstPremul * (1.0 - sa) + Cr * sa, da + sa * (1.0 - da));
-            }
-        )");
+        )";
+    const QByteArray blendFSrc = shader_compat::adaptSource(blendFSrcRaw.constData());
     shader_compat::bindQuadAttributes(m_blendProg);
     if (!m_blendProg->addShaderFromSourceCode(QOpenGLShader::Vertex, blendVSrc) ||
         !m_blendProg->addShaderFromSourceCode(QOpenGLShader::Fragment, blendFSrc) ||
@@ -554,8 +483,11 @@ void GPUViewport::initShaders()
                 gl_Position = uTransform * vec4(pos, 0.0, 1.0);
             }
         )");
-    const QByteArray adjustFSrc = shader_compat::adaptSource(R"(
-            #version 330 core
+    // Shares the bm_* blend/luma helpers with the blend shader via
+    // renderer/BlendShaderLib.hpp (CPU mirror: renderer/BlendMath.hpp).
+    const QByteArray adjustFSrcRaw = QByteArray("#version 330 core\n")
+        + blend_glsl::kLib
+        + R"(
             in vec2 vUV;
             out vec4 fragColor;
             uniform sampler2D uDstTexture;
@@ -586,29 +518,6 @@ void GPUViewport::initShaders()
             // degree frame as core/HueSaturationData.cpp (Reds stored around 0
             // with a negative outerStart for the 0/360 wrap).
             uniform vec4 uHsBandRange[6];
-            float cbLum(vec3 c) { return 0.299*c.r + 0.587*c.g + 0.114*c.b; }
-            vec3 cbClipColor(vec3 c) {
-                float l = cbLum(c);
-                float n = min(min(c.r, c.g), c.b);
-                float x = max(max(c.r, c.g), c.b);
-                if (n < 0.0)
-                    c = l + (c - l) * l / (l - n);
-                if (x > 1.0)
-                    c = l + (c - l) * (1.0 - l) / (x - l);
-                return c;
-            }
-            vec3 cbSetLum(vec3 c, float l) {
-                return cbClipColor(c + (l - cbLum(c)));
-            }
-            // Saturation helpers for the Solid Color blend branch (mirror the
-            // blend shader's sat()/setSat()).
-            float scSat(vec3 c) { return max(max(c.r,c.g),c.b) - min(min(c.r,c.g),c.b); }
-            vec3 scSetSat(vec3 c, float s) {
-                float mn = min(min(c.r,c.g),c.b);
-                float mx = max(max(c.r,c.g),c.b);
-                if (mn == mx) return vec3(0.0);
-                return (c - mn) * s / (mx - mn);
-            }
             // ── Hue/Saturation helpers (mirror core/HueSaturationData.cpp) ──
             float hsWrap360(float h) { h = mod(h, 360.0); if (h < 0.0) h += 360.0; return h; }
             float hsHueDist(float h, float c) {
@@ -705,7 +614,7 @@ void GPUViewport::initShaders()
                     float bb = texture(uCurveLut, vec2(straight.b * (255.0/256.0) + 0.5/256.0, 0.5)).b;
                     vec3 balanced = vec3(br, bg, bb);
                     if (uPreserveLuminosity > 0.5)
-                        balanced = cbSetLum(balanced, cbLum(straight));
+                        balanced = bm_setLum(balanced, bm_lum(straight));
                     adjusted = balanced * dst.a;
                 } else if (uAdjustmentType == 3) {
                     // Hue/Saturation — un-premultiply, run the shared HSL model,
@@ -714,7 +623,7 @@ void GPUViewport::initShaders()
                     straight = clamp(straight, 0.0, 1.0);
                     vec3 outc;
                     if (uColorize > 0.5) {
-                        float luma = cbLum(straight);
+                        float luma = bm_lum(straight);
                         float targetHue = hsWrap360(uHsHue[0]);
                         float cs = clamp(uHsSat[0], 0.0, 100.0) / 100.0;
                         float l = hsApplyLight(luma, uHsLight[0]);
@@ -760,48 +669,9 @@ void GPUViewport::initShaders()
                     vec3 srcColor = uSolidColor.rgb;
                     float da = dst.a;                         // backdrop alpha
                     vec3 dstColor = da > 0.0039 ? dst.rgb / da : dst.rgb;
-                    int bm = uSolidBlendMode;
-                    vec3 Cr;
-                    if (bm < 0) {                  // Normal
-                        Cr = srcColor;
-                    } else if (bm == 0) {          // Overlay
-                        Cr.r = (dstColor.r < 0.5) ? 2.0*srcColor.r*dstColor.r : 1.0 - 2.0*(1.0-srcColor.r)*(1.0-dstColor.r);
-                        Cr.g = (dstColor.g < 0.5) ? 2.0*srcColor.g*dstColor.g : 1.0 - 2.0*(1.0-srcColor.g)*(1.0-dstColor.g);
-                        Cr.b = (dstColor.b < 0.5) ? 2.0*srcColor.b*dstColor.b : 1.0 - 2.0*(1.0-srcColor.b)*(1.0-dstColor.b);
-                    } else if (bm == 1) {          // HardLight
-                        Cr.r = (srcColor.r < 0.5) ? 2.0*srcColor.r*dstColor.r : 1.0 - 2.0*(1.0-srcColor.r)*(1.0-dstColor.r);
-                        Cr.g = (srcColor.g < 0.5) ? 2.0*srcColor.g*dstColor.g : 1.0 - 2.0*(1.0-srcColor.g)*(1.0-dstColor.g);
-                        Cr.b = (srcColor.b < 0.5) ? 2.0*srcColor.b*dstColor.b : 1.0 - 2.0*(1.0-srcColor.b)*(1.0-dstColor.b);
-                    } else if (bm == 2) {          // SoftLight
-                        Cr.r = (srcColor.r < 0.5) ? dstColor.r - (1.0-2.0*srcColor.r)*dstColor.r*(1.0-dstColor.r) : dstColor.r + (2.0*srcColor.r-1.0)*( (dstColor.r<0.25 ? ((16.0*dstColor.r-12.0)*dstColor.r+4.0)*dstColor.r : sqrt(dstColor.r)) - dstColor.r);
-                        Cr.g = (srcColor.g < 0.5) ? dstColor.g - (1.0-2.0*srcColor.g)*dstColor.g*(1.0-dstColor.g) : dstColor.g + (2.0*srcColor.g-1.0)*( (dstColor.g<0.25 ? ((16.0*dstColor.g-12.0)*dstColor.g+4.0)*dstColor.g : sqrt(dstColor.g)) - dstColor.g);
-                        Cr.b = (srcColor.b < 0.5) ? dstColor.b - (1.0-2.0*srcColor.b)*dstColor.b*(1.0-dstColor.b) : dstColor.b + (2.0*srcColor.b-1.0)*( (dstColor.b<0.25 ? ((16.0*dstColor.b-12.0)*dstColor.b+4.0)*dstColor.b : sqrt(dstColor.b)) - dstColor.b);
-                    } else if (bm == 3) {          // ColorDodge
-                        Cr = dstColor / (1.0 - srcColor);
-                    } else if (bm == 4) {          // ColorBurn
-                        Cr = 1.0 - (1.0 - dstColor) / srcColor;
-                    } else if (bm == 5) {          // Difference
-                        Cr = abs(dstColor - srcColor);
-                    } else if (bm == 6) {          // Exclusion
-                        Cr = dstColor + srcColor - 2.0*dstColor*srcColor;
-                    } else if (bm == 7) {          // Hue
-                        Cr = cbSetLum(scSetSat(srcColor, scSat(dstColor)), cbLum(dstColor));
-                    } else if (bm == 8) {          // Saturation
-                        Cr = cbSetLum(scSetSat(dstColor, scSat(srcColor)), cbLum(dstColor));
-                    } else if (bm == 9) {          // Color
-                        Cr = cbSetLum(srcColor, cbLum(dstColor));
-                    } else if (bm == 10) {         // Luminosity
-                        Cr = cbSetLum(dstColor, cbLum(srcColor));
-                    } else if (bm == 11) {         // Multiply
-                        Cr = srcColor * dstColor;
-                    } else if (bm == 12) {         // Screen
-                        Cr = srcColor + dstColor - srcColor * dstColor;
-                    } else if (bm == 13) {         // Darken
-                        Cr = min(srcColor, dstColor);
-                    } else {                       // Lighten (14)
-                        Cr = max(srcColor, dstColor);
-                    }
-                    Cr = clamp(Cr, 0.0, 1.0);
+                    // bm_blend returns srcColor for -1 (Normal) / unmapped ids.
+                    vec3 Cr = clamp(bm_blend(uSolidBlendMode, dstColor, srcColor),
+                                    0.0, 1.0);
                     // W3C: blend modes only meaningful over an existing backdrop;
                     // fade back to the source where the backdrop is transparent.
                     Cr = mix(srcColor, Cr, da);
@@ -812,7 +682,8 @@ void GPUViewport::initShaders()
                     fragColor = vec4(mix(dst.rgb, adjusted, f), dst.a);
                 }
             }
-        )");
+        )";
+    const QByteArray adjustFSrc = shader_compat::adaptSource(adjustFSrcRaw.constData());
     shader_compat::bindQuadAttributes(m_adjustProg);
     if (!m_adjustProg->addShaderFromSourceCode(QOpenGLShader::Vertex, adjustVSrc) ||
         !m_adjustProg->addShaderFromSourceCode(QOpenGLShader::Fragment, adjustFSrc) ||

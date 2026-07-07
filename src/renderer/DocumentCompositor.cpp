@@ -1,5 +1,6 @@
 #include "DocumentCompositor.hpp"
 #include "RenderContext.hpp"
+#include "BlendMath.hpp"
 #include "BlendRules.hpp"
 #include "core/AdjustmentTypes.hpp"
 #include "core/Document.hpp"
@@ -31,59 +32,9 @@
 
 namespace {
 
-// ── Non-separable (HSL) blend helpers — mirror GPUViewport_Shaders.cpp ──
-using Vec3 = std::array<float, 3>;
-
-inline float lum(const Vec3& c) { return 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2]; }
-
-inline Vec3 clipColor(Vec3 c)
-{
-    const float l = lum(c);
-    const float n = std::min({c[0], c[1], c[2]});
-    const float x = std::max({c[0], c[1], c[2]});
-    if (n < 0.0f) {
-        const float d = l - n;
-        if (d != 0.0f) for (float& v : c) v = l + (v - l) * l / d;
-    }
-    if (x > 1.0f) {
-        const float d = x - l;
-        if (d != 0.0f) for (float& v : c) v = l + (v - l) * (1.0f - l) / d;
-    }
-    return c;
-}
-
-inline Vec3 setLum(Vec3 c, float l)
-{
-    const float d = l - lum(c);
-    for (float& v : c) v += d;
-    return clipColor(c);
-}
-
-inline float sat(const Vec3& c)
-{
-    return std::max({c[0], c[1], c[2]}) - std::min({c[0], c[1], c[2]});
-}
-
-inline Vec3 setSat(Vec3 c, float s)
-{
-    const float mn = std::min({c[0], c[1], c[2]});
-    const float mx = std::max({c[0], c[1], c[2]});
-    if (mn == mx) return {0.0f, 0.0f, 0.0f};
-    for (float& v : c)
-        v = (v == mx) ? s : (v == mn ? 0.0f : (v - mn) * s / (mx - mn));
-    return c;
-}
-
-inline Vec3 blendHsl(BlendMode mode, const Vec3& cb, const Vec3& cs)
-{
-    switch (mode) {
-    case BlendMode::Hue:        return setLum(setSat(cs, sat(cb)), lum(cb));
-    case BlendMode::Saturation: return setLum(setSat(cb, sat(cs)), lum(cb));
-    case BlendMode::Color:      return setLum(cs, lum(cb));
-    case BlendMode::Luminosity: return setLum(cb, lum(cs));
-    default:                    return cs;
-    }
-}
+// Non-separable (HSL) blend math comes from renderer/BlendMath.hpp — the
+// shared CPU/GPU specification (GLSL mirror: renderer/BlendShaderLib.hpp).
+using blendmath::Vec3;
 
 inline uchar toByte(float v)
 {
@@ -222,7 +173,7 @@ void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float
                       qBlue(dp) / 255.0f / ab};
             }
 
-            const Vec3 B = blendHsl(mode, cb, cs);
+            const Vec3 B = blendmath::blendHsl(mode, cb, cs);
             // W3C: blended source colour Cs' = (1-ab)*Cs + ab*B
             const Vec3 cp{(1.0f - ab) * cs[0] + ab * B[0],
                           (1.0f - ab) * cs[1] + ab * B[1],
@@ -356,9 +307,14 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
             const uchar* in  = layer->maskImage.constScanLine(y);
             for (int x = 0; x < mw; ++x) {
                 int val = in[x];
-                if (layer->maskDensity < 1.0f)
-                    val = static_cast<int>(255.0f * layer->maskDensity
-                                           + val * (1.0f - layer->maskDensity));
+                if (layer->maskDensity < 1.0f) {
+                    // mix(1, mask, density) — same ramp as the GPU shaders
+                    // (mix(1.0, maskAlpha, uMaskDensity)): density 1 applies the
+                    // mask as-is, density 0 turns it off.
+                    val = static_cast<int>(std::lround(
+                        255.0f * blendmath::maskDensityRamp(val / 255.0f,
+                                                            layer->maskDensity)));
+                }
                 out[x] = qRgba(255, 255, 255, val);
             }
         }
@@ -414,7 +370,7 @@ void modulateAlphaByAdjustmentMask(QImage& stage, const QImage& mask,
                 if (mx >= 0 && mx < mask.width())
                     m = maskRow[mx];
             }
-            const float f = 1.0f + (m / 255.0f - 1.0f) * density;
+            const float f = blendmath::maskDensityRamp(m / 255.0f, density);
             if (f >= 0.999f)
                 continue;
             const QRgb px = row[x];
@@ -596,15 +552,6 @@ void renderNodesFiltered(QImage& target,
                                     includeLayer, applyAdjustments);
                 applyGroupMask(groupStage, node);                 // no-op until group masks exist
                 applyGroupEffects(groupStage, node, doc->size);
-                auto coverage = [](const QImage& im) {
-                    int n = 0;
-                    for (int y = 0; y < im.height(); y += 8) {
-                        const QRgb* s = reinterpret_cast<const QRgb*>(im.constScanLine(y));
-                        for (int x = 0; x < im.width(); x += 8)
-                            if (qAlpha(s[x]) > 0) ++n;
-                    }
-                    return n;
-                };
                 compositeStage(target, groupStage, node->blendMode, node->opacity);
             }
             continue;
