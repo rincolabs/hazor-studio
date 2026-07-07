@@ -11,7 +11,7 @@ inline constexpr char kEnabledKey[] = "mcp/enabled";
 inline constexpr char kPortKey[] = "mcp/port";
 
 inline constexpr bool kDefaultEnabled = true;
-inline constexpr int kDefaultPort = 49517;
+inline constexpr int kDefaultPort = 8085;
 inline constexpr int kMinPort = 1024;
 inline constexpr int kMaxPort = 65535;
 
