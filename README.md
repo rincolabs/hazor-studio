@@ -53,16 +53,11 @@ The codebase is organized into six layers — UI (Qt Widgets) → Application
 (controller + command history) → Image Engine / Processing / AI Agent → Data
 Model → Rendering Pipeline.
 
-## Building
-
-Build instructions, dependencies, and CMake options are documented separately:
-
-➡️ **[docs/BUILD.md](docs/BUILD.md)**
-
 ## Documentation
 
 - **[docs/BUILD.md](docs/BUILD.md)** — building from source, dependencies, and CMake options
 - **[docs/MCP.md](docs/MCP.md)** — the local tool HTTP server (port 8080) for driving the editor from external agents like Claude Code
+- **[docs/RENDER-PIPELINE.md](docs/RENDER-PIPELINE.md)** — An exploded view of the render pipeline
 
 ## License
 
