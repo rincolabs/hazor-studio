@@ -6,6 +6,9 @@ shape, transform — with a chat agent that executes operations from natural
 language. You can paint and edit by hand, or simply ask the AI to do things like
 *"increase brightness and add a gaussian blur."*
 
+Visit the landing page:
+[https://rincolabs.org/projects/hazor-studio](https://rincolabs.org/projects/hazor-studio/).
+
 ## Sponsor
 
 Hazor Studio is developed independently through Rincolabs. If you want to support the project and help keep its development moving forward, you can sponsor my work through GitHub Sponsors: [github.com/sponsors/allanesquina](https://github.com/sponsors/allanesquina).
