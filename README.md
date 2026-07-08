@@ -9,6 +9,8 @@ language. You can paint and edit by hand, or simply ask the AI to do things like
 Visit the landing page:
 [https://rincolabs.org/projects/hazor-studio](https://rincolabs.org/projects/hazor-studio/).
 
+![Hazor Studio generative fill preview](https://rincolabs.org/assets/images/hazor-studio-generative-fill-preview.webp)
+
 ## Sponsor
 
 Hazor Studio is developed independently through Rincolabs. If you want to support the project and help keep its development moving forward, you can sponsor my work through GitHub Sponsors: [github.com/sponsors/allanesquina](https://github.com/sponsors/allanesquina).
