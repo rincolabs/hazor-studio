@@ -11,8 +11,8 @@ agent does.
 |-|-|
 | **Protocol** | HTTP/1.1, JSON request/response, `Connection: close` (one request per connection) |
 | **Host** | `127.0.0.1` (localhost only — never exposed to the network) |
-| **Port** | `49517` by default; configurable in **Settings → MCP Server** |
-| **Base URL** | `http://127.0.0.1:49517` |
+| **Port** | `8085` by default; configurable in **Settings → MCP Server** |
+| **Base URL** | `http://127.0.0.1:8085` |
 | **Lifecycle** | Started automatically at app launch (if enabled); stops when the app closes |
 
 The server binds to **localhost only** (`QHostAddress::LocalHost`, see
@@ -46,13 +46,13 @@ configured port, [`QTcpServer::listen`](../src/mcp/McpServer.cpp) fails
   or the other Hazor Studio instance) or pick a different port in
   **Settings → MCP Server**.
 
-To check what is holding the port (default `49517`):
+To check what is holding the port (default `8085`):
 
 ```bash
 # Linux / macOS
-lsof -i :49517         # or: ss -ltnp 'sport = :49517'
+lsof -i :8085         # or: ss -ltnp 'sport = :8085'
 # Windows
-netstat -ano | findstr :49517
+netstat -ano | findstr :8085
 ```
 
 A common cause is a **second Hazor Studio instance** already running — only the
@@ -68,7 +68,7 @@ ranges, and defaults. The catalog is grouped into categories: `Layer`,
 `Viewport`, and `AI`.
 
 ```bash
-curl http://127.0.0.1:49517/mcp/tools
+curl http://127.0.0.1:8085/mcp/tools
 ```
 
 Response:
@@ -100,7 +100,7 @@ Executes a single tool. The body is a JSON object with the tool `name` and a
 `params` object.
 
 ```bash
-curl -X POST http://127.0.0.1:49517/mcp/execute \
+curl -X POST http://127.0.0.1:8085/mcp/execute \
   -H "Content-Type: application/json" \
   -d '{
         "tool": "adjust_brightness",
@@ -172,7 +172,7 @@ Claude Code can call the endpoint in two ways.
 running editor:
 
 > "The Hazor Studio editor is running with a tool server on
-> `http://127.0.0.1:49517`. Fetch `GET /mcp/tools` to see what's available, then
+> `http://127.0.0.1:8085`. Fetch `GET /mcp/tools` to see what's available, then
 > `POST /mcp/execute` to raise the brightness and add a gaussian blur."
 
 **B) As a registered MCP server (via a bridge)** — Claude Code's `mcp`
@@ -186,7 +186,7 @@ claude mcp add hazor -- node /path/to/hazor-mcp-bridge.js
 ```
 
 The bridge translates each MCP tool call into an HTTP request to
-`http://127.0.0.1:49517` and returns the JSON `data`/`error` back to Claude Code.
+`http://127.0.0.1:8085` and returns the JSON `data`/`error` back to Claude Code.
 
 > The editor must be **running** for the server to answer — it is an in-process
 > HTTP server, not a standalone daemon.
@@ -195,7 +195,7 @@ The bridge translates each MCP tool call into an HTTP request to
 
 - The port and enabled flag are read from `QSettings` at launch
   ([`MainWindow::applyMcpSettings`](../src/ui/MainWindow.cpp)); defaults live in
-  [`McpSettings.hpp`](../src/mcp/McpSettings.hpp) (port `49517`, enabled).
+  [`McpSettings.hpp`](../src/mcp/McpSettings.hpp) (port `8085`, enabled).
 - Implementation lives in [`src/mcp/`](../src/mcp/) (`McpServer`, plus a
   lightweight `HttpParser` state machine over `QTcpServer`).
 - The tool catalog is shared with the in-app AI agent, defined in
