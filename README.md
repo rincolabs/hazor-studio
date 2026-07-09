@@ -41,7 +41,7 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **AI selection & matting** — ONNX-powered object selection (SAM) and
   background removal / matting (BiRefNet, ModNet, RMBG), with CPU/CUDA/TensorRT
   execution providers selectable at runtime.
-- **MCP server** — an HTTP tool endpoint (port 8080) so external agents and
+- **MCP server** — an HTTP tool endpoint (port 8085) so external agents and
   automation scripts can drive the editor (see [docs/MCP.md](docs/MCP.md)).
 - **Non-linear history** — jump to any point in the undo/redo timeline.
 - **Theming & shortcuts** — light/dark semantic theme system and 77 fully
