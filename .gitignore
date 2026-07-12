@@ -50,3 +50,4 @@ tmp/
 # folder (empty), ignore its contents.
 /src/resources/shapes/*
 !/src/resources/shapes/.gitkeep
+CLAUDE.md

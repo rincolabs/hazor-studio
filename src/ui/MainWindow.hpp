@@ -91,6 +91,7 @@ private slots:
     void onSaveFile();
     void onSaveAsFile();
     void onExportFile();
+    void onExportAnimation();
     void onImportImage();
     void onEditDocument();
     void onAddLayer();
@@ -433,6 +434,7 @@ private:
     QString m_aiLoadingMessage;
 
     QAction* m_importAction = nullptr;
+    QAction* m_exportAnimationAction = nullptr;
     QAction* m_importBrushesAction = nullptr;
     QAction* m_brushPressureAction = nullptr;
     QAction* m_addLayerAction = nullptr;

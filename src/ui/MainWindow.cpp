@@ -33,6 +33,7 @@
 #include "ui/TitleBar.hpp"
 #include "ui/NewDocumentDialog.hpp"
 #include "ui/ExportImageDialog.hpp"
+#include "ui/ExportAnimationDialog.hpp"
 #include "ui/AgentConfigWidget.hpp"
 #include "ui/AiUpscaleDialog.hpp"
 #include "ui/FillLayerDialog.hpp"
@@ -132,6 +133,7 @@
 #include <QEventLoop>
 #include <QFutureWatcher>
 #include <QtConcurrent>
+#include <QElapsedTimer>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -392,6 +394,12 @@ MainWindow::MainWindow(QWidget* parent)
     exportAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     ShortcutManager::instance()->registerAction("file.export_as", exportAction);
     connect(exportAction, &QAction::triggered, this, &MainWindow::onExportFile);
+
+    m_exportAnimationAction = fileMenu->addAction(tr("Export &Animation As..."));
+    ShortcutManager::instance()->registerAction("file.export_animation",
+                                                m_exportAnimationAction);
+    connect(m_exportAnimationAction, &QAction::triggered,
+            this, &MainWindow::onExportAnimation);
 
     fileMenu->addSeparator();
 
@@ -3810,6 +3818,80 @@ void MainWindow::onExportFile()
     }));
 }
 
+void MainWindow::onExportAnimation()
+{
+    if (!m_doc) return;
+
+    ExportAnimationDialog dlg(m_doc, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    anim::AnimationExportRequest request = dlg.request();
+
+    // Shared, thread-safe progress/cancel channel and an elapsed-time clock the
+    // poll timer reads to show ETA. The live document is snapshotted inside
+    // exportAnimationAsync before any compositing happens.
+    auto progress = std::make_shared<anim::ExportProgress>();
+    auto elapsed = std::make_shared<QElapsedTimer>();
+    elapsed->start();
+
+    QFuture<anim::AnimationExportResult> future =
+        anim::AnimationExportService::exportAnimationAsync(*m_doc, request, progress);
+
+    showProgress(tr("Export Animation"), tr("Preparing\xE2\x80\xA6"), true);
+    setProgress(0);
+
+    // Cancel button → flip the shared atomic. The shared progress dialog
+    // outlives this job, so remember the connection and drop it when finished.
+    auto cancelConn = std::make_shared<QMetaObject::Connection>();
+    if (m_progressDialog) {
+        *cancelConn = connect(m_progressDialog, &ProgressDialog::cancelRequested,
+                              this, [progress]() {
+            progress->cancelRequested.store(true);
+        });
+    }
+
+    auto* pollTimer = new QTimer(this);
+    connect(pollTimer, &QTimer::timeout, this, [this, progress, elapsed]() {
+        const qint64 total = progress->totalFrames.load();
+        const qint64 done = progress->completedFrames.load();
+        if (total <= 0) return;
+        int pct = static_cast<int>(done * 100 / total);
+        if (pct > 100) pct = 100;
+        setProgress(pct);
+        const double secs = elapsed->elapsed() / 1000.0;
+        QString msg = tr("Frame %1 of %2 (%3%)").arg(done).arg(total).arg(pct);
+        if (done > 0 && secs > 0.5) {
+            const double perFrame = secs / static_cast<double>(done);
+            const double remaining = perFrame * static_cast<double>(total - done);
+            msg += tr("  \xE2\x80\xA2  %1s elapsed, ~%2s left")
+                .arg(secs, 0, 'f', 0).arg(remaining, 0, 'f', 0);
+        }
+        setMessage(msg);
+    });
+    pollTimer->start(120);
+
+    auto* watcher = new QFutureWatcher<anim::AnimationExportResult>(this);
+    connect(watcher, &QFutureWatcher<anim::AnimationExportResult>::finished, this,
+            [this, watcher, pollTimer, cancelConn]() {
+        pollTimer->stop();
+        pollTimer->deleteLater();
+        if (*cancelConn)
+            disconnect(*cancelConn);
+        const anim::AnimationExportResult result = watcher->result();
+        watcher->deleteLater();
+        closeProgress();
+
+        if (result.cancelled)
+            return;
+        if (!result.ok) {
+            QMessageBox::warning(this, tr("Could Not Export Animation"),
+                result.errorMessage.isEmpty()
+                    ? tr("The animation export failed.") : result.errorMessage);
+        }
+    });
+    watcher->setFuture(future);
+}
+
 void MainWindow::onImportImage()
 {
     const QString path = QFileDialog::getOpenFileName(
@@ -4188,6 +4270,7 @@ void MainWindow::updateDistortControls()
 void MainWindow::updateLayerMenuState()
 {
     bool hasDoc = (m_doc != nullptr);
+    if (m_exportAnimationAction) m_exportAnimationAction->setEnabled(hasDoc);
     bool hasLayer = hasDoc && m_ctrl && m_ctrl->activeLayer() != nullptr;
     bool hasMultiple = hasDoc && m_doc->flatCount() >= 2;
     // Lock-derived gating mirrors the controller guards so the menu disables what
