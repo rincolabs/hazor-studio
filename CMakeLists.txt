@@ -585,6 +585,8 @@ add_executable(Hazor WIN32
     src/ui/SolidColorAdjustmentWidget.hpp
     src/ui/HistogramPanel.cpp
     src/ui/TimelinePanel.cpp
+    src/ui/TimelineView.cpp
+    src/ui/TimelineView.hpp
     src/ui/HistogramPanel.hpp
     src/ui/HistogramWidget.cpp
     src/ui/HistogramWidget.hpp

@@ -1,5 +1,7 @@
 #include "TimelinePanel.hpp"
 
+#include "TimelineView.hpp"
+#include "AppCheckBox.hpp"
 #include "animation/AnimationModel.hpp"
 #include "animation/AnimationCommands.hpp"
 #include "animation/AnimationTransform.hpp"
@@ -8,17 +10,14 @@
 #include "core/Document.hpp"
 #include "core/LayerTreeNode.hpp"
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
-#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSlider>
-#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -66,8 +65,8 @@ void TimelinePanel::buildUi()
     m_end->setRange(-1000000, 1000000);
     bar->addWidget(m_start);
     bar->addWidget(m_end);
-    m_loop = new QCheckBox(tr("Loop"), this);
-    m_autoKey = new QCheckBox(tr("Auto Key"), this);
+    m_loop = new AppCheckBox(tr("Loop"), this);
+    m_autoKey = new AppCheckBox(tr("Auto Key"), this);
     bar->addWidget(m_loop);
     bar->addWidget(m_autoKey);
     auto* interpolation = new QComboBox(this);
@@ -77,31 +76,28 @@ void TimelinePanel::buildUi()
     interpolation->setToolTip(tr("Interpolation for the selected keyframe"));
     bar->addWidget(interpolation);
     auto* applyInterpolation = button(tr("Apply"), tr("Apply interpolation"));
+    bar->addWidget(new QLabel(tr("Zoom"), this));
     auto* zoom = new QSlider(Qt::Horizontal, this);
-    zoom->setRange(24, 96);
-    zoom->setValue(34);
+    zoom->setRange(4, 48);
+    zoom->setValue(12);
     zoom->setFixedWidth(90);
     zoom->setToolTip(tr("Timeline horizontal zoom"));
     bar->addWidget(zoom);
     bar->addStretch(1);
 
     auto* addKey = button(tr("+ Key"), tr("Add a keyframe to the selected property"));
-    auto* keyLeft = button(QStringLiteral("Key ◀"), tr("Move selected key one frame left"));
-    auto* keyRight = button(QStringLiteral("Key ▶"), tr("Move selected key one frame right"));
+    auto* keyLeft = button(QStringLiteral("Key ◀"), tr("Move selected keys one frame left"));
+    auto* keyRight = button(QStringLiteral("Key ▶"), tr("Move selected keys one frame right"));
     auto* copyKey = button(tr("Copy"), tr("Copy selected keyframe or cel"));
     auto* pasteKey = button(tr("Paste"), tr("Paste keyframe or cel at current frame"));
     auto* newCel = button(tr("New Cel"), tr("Create a blank raster cel"));
     auto* duplicateCel = button(tr("Duplicate"), tr("Duplicate the active cel"));
     auto* emptyFrame = button(tr("Empty"), tr("Create an explicit empty frame"));
-    auto* removeCel = button(tr("Delete"), tr("Remove the raster key at this frame"));
+    auto* removeCel = button(tr("Delete"), tr("Remove the selected keyframes or the raster key"));
     root->addLayout(bar);
 
-    m_tracks = new QTreeWidget(this);
-    m_tracks->setAlternatingRowColors(true);
-    m_tracks->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_tracks->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
-    m_tracks->header()->setSectionsClickable(true);
-    root->addWidget(m_tracks, 1);
+    m_view = new TimelineView(this);
+    root->addWidget(m_view, 1);
 
     connect(previous, &QPushButton::clicked, this, [this] {
         if (m_controller) m_controller->playbackController()->previousFrame();
@@ -151,20 +147,15 @@ void TimelinePanel::buildUi()
         if (m_controller) m_controller->setAutoKey(on);
     });
     connect(zoom, &QSlider::valueChanged, this, [this](int width) {
-        for (int column = 1; column < m_tracks->columnCount(); ++column)
-            m_tracks->setColumnWidth(column, width);
+        m_view->setFrameWidth(width);
     });
     connect(applyInterpolation, &QPushButton::clicked, this,
             [this, interpolation] {
         if (!m_controller || !m_controller->document()) return;
-        auto* item = m_tracks->currentItem();
-        if (!item || item->data(0, Qt::UserRole).toInt() != 1) return;
-        const LayerId layerId = QUuid::fromString(
-            item->data(0, Qt::UserRole + 1).toString());
-        const auto property = static_cast<anim::Property>(
-            item->data(0, Qt::UserRole + 2).toInt());
+        const auto row = m_view->currentRow();
+        if (!row.valid || row.raster) return;
         auto command = std::make_unique<anim::ChangeKeyframeInterpolationCommand>(
-            m_controller->document(), layerId, property,
+            m_controller->document(), row.layer, row.prop,
             m_controller->currentFrame(),
             static_cast<anim::Interpolation>(interpolation->currentData().toInt()));
         command->execute();
@@ -176,19 +167,15 @@ void TimelinePanel::buildUi()
     });
     connect(addKey, &QPushButton::clicked, this, [this] {
         if (!m_controller || !m_controller->document()) return;
-        auto* item = m_tracks->currentItem();
-        if (!item || item->data(0, Qt::UserRole).toInt() != 1) return;
-        const LayerId layerId = QUuid::fromString(
-            item->data(0, Qt::UserRole + 1).toString());
-        const auto property = static_cast<anim::Property>(
-            item->data(0, Qt::UserRole + 2).toInt());
+        const auto row = m_view->currentRow();
+        if (!row.valid || row.raster) return;
         LayerTreeNode* node = nullptr;
         for (auto* candidate : m_controller->document()->flatten())
-            if (candidate && candidate->id == layerId) { node = candidate; break; }
+            if (candidate && candidate->id == row.layer) { node = candidate; break; }
         if (!node) return;
         anim::AnimationValue value;
         const auto transform = anim::decomposeTransform(node->transform());
-        switch (property) {
+        switch (row.prop) {
         case anim::Property::PositionX: value = anim::AnimationValue(float(transform.position.x())); break;
         case anim::Property::PositionY: value = anim::AnimationValue(float(transform.position.y())); break;
         case anim::Property::ScaleX: value = anim::AnimationValue(float(transform.scale.x())); break;
@@ -204,7 +191,7 @@ void TimelinePanel::buildUi()
             value = anim::AnimationValue::fromEnum(static_cast<int>(node->blendMode())); break;
         }
         auto command = std::make_unique<anim::SetKeyframeCommand>(
-            m_controller->document(), layerId, property,
+            m_controller->document(), row.layer, row.prop,
             m_controller->currentFrame(), value);
         command->execute();
         m_controller->history().push(std::move(command));
@@ -212,26 +199,13 @@ void TimelinePanel::buildUi()
     });
     auto moveSelectedKey = [this](int delta) {
         if (!m_controller || !m_controller->document()) return;
-        auto* item = m_tracks->currentItem();
-        if (!item) return;
-        const int target = std::clamp(
-            m_controller->currentFrame() + delta,
-            m_controller->document()->animation.startFrame(),
-            m_controller->document()->animation.endFrame());
-        if (item->data(0, Qt::UserRole).toInt() == 1) {
-            const LayerId layerId = QUuid::fromString(
-                item->data(0, Qt::UserRole + 1).toString());
-            const auto property = static_cast<anim::Property>(
-                item->data(0, Qt::UserRole + 2).toInt());
-            auto command = std::make_unique<anim::MoveKeyframeCommand>(
-                m_controller->document(), layerId, property,
-                m_controller->currentFrame(), target);
-            command->execute();
-            m_controller->history().push(std::move(command));
-            m_controller->setCurrentFrame(target);
-        } else if (item->data(0, Qt::UserRole).toInt() == 2) {
-            m_controller->moveRasterCelKeyframe(target);
+        if (m_view->hasKeyframeSelection()) {
+            m_view->moveSelection(delta);
+            return;
         }
+        const auto row = m_view->currentRow();
+        if (row.valid && row.raster)
+            m_controller->moveRasterCelKeyframe(m_controller->currentFrame() + delta);
         refresh();
     };
     connect(keyLeft, &QPushButton::clicked, this,
@@ -240,21 +214,16 @@ void TimelinePanel::buildUi()
             [moveSelectedKey] { moveSelectedKey(1); });
     connect(copyKey, &QPushButton::clicked, this, [this] {
         if (!m_controller || !m_controller->document()) return;
-        auto* item = m_tracks->currentItem();
-        if (!item) return;
-        const int kind = item->data(0, Qt::UserRole).toInt();
-        if (kind == 1) {
-            const LayerId layerId = QUuid::fromString(
-                item->data(0, Qt::UserRole + 1).toString());
-            const auto property = static_cast<anim::Property>(
-                item->data(0, Qt::UserRole + 2).toInt());
-            const auto* track = m_controller->document()->animation.track(layerId, property);
+        const auto row = m_view->currentRow();
+        if (!row.valid) return;
+        if (!row.raster) {
+            const auto* track = m_controller->document()->animation.track(row.layer, row.prop);
             const auto* key = track ? track->keyframeAt(m_controller->currentFrame()) : nullptr;
             if (!key) return;
             m_propertyClipboard = *key;
             m_copiedPropertyKey = true;
             m_copiedRasterKey = false;
-        } else if (kind == 2) {
+        } else {
             auto* node = m_controller->document()->activeNode();
             const auto* track = node
                 ? m_controller->document()->animation.rasterTrack(node->id) : nullptr;
@@ -272,28 +241,23 @@ void TimelinePanel::buildUi()
     });
     connect(pasteKey, &QPushButton::clicked, this, [this] {
         if (!m_controller || !m_controller->document()) return;
-        auto* item = m_tracks->currentItem();
-        if (!item) return;
-        const int kind = item->data(0, Qt::UserRole).toInt();
-        if (kind == 1 && m_copiedPropertyKey) {
-            const LayerId layerId = QUuid::fromString(
-                item->data(0, Qt::UserRole + 1).toString());
-            const auto property = static_cast<anim::Property>(
-                item->data(0, Qt::UserRole + 2).toInt());
-            if (anim::valueType(property) != m_propertyClipboard.value.type()) return;
+        const auto row = m_view->currentRow();
+        if (!row.valid) return;
+        if (!row.raster && m_copiedPropertyKey) {
+            if (anim::valueType(row.prop) != m_propertyClipboard.value.type()) return;
             m_controller->history().beginMacro(tr("Paste Keyframe"));
             auto set = std::make_unique<anim::SetKeyframeCommand>(
-                m_controller->document(), layerId, property,
+                m_controller->document(), row.layer, row.prop,
                 m_controller->currentFrame(), m_propertyClipboard.value);
             set->execute();
             m_controller->history().push(std::move(set));
             auto interp = std::make_unique<anim::ChangeKeyframeInterpolationCommand>(
-                m_controller->document(), layerId, property,
+                m_controller->document(), row.layer, row.prop,
                 m_controller->currentFrame(), m_propertyClipboard.interpolation);
             interp->execute();
             m_controller->history().push(std::move(interp));
             m_controller->history().endMacro();
-        } else if (kind == 2 && m_copiedRasterKey) {
+        } else if (row.raster && m_copiedRasterKey) {
             m_controller->pasteRasterCel(m_rasterClipboard);
         }
         refresh();
@@ -306,14 +270,15 @@ void TimelinePanel::buildUi()
     });
     connect(removeCel, &QPushButton::clicked, this, [this] {
         if (!m_controller) return;
-        auto* item = m_tracks->currentItem();
-        if (item && item->data(0, Qt::UserRole).toInt() == 1) {
-            const LayerId layerId = QUuid::fromString(
-                item->data(0, Qt::UserRole + 1).toString());
-            const auto property = static_cast<anim::Property>(
-                item->data(0, Qt::UserRole + 2).toInt());
+        if (m_view->hasKeyframeSelection()) {
+            m_view->deleteSelection();
+            refresh();
+            return;
+        }
+        const auto row = m_view->currentRow();
+        if (row.valid && !row.raster) {
             auto command = std::make_unique<anim::RemoveKeyframeCommand>(
-                m_controller->document(), layerId, property,
+                m_controller->document(), row.layer, row.prop,
                 m_controller->currentFrame());
             command->execute();
             m_controller->history().push(std::move(command));
@@ -321,17 +286,6 @@ void TimelinePanel::buildUi()
             m_controller->removeRasterCelKeyframe();
         }
         refresh();
-    });
-    connect(m_tracks->header(), &QHeaderView::sectionClicked, this, [this](int section) {
-        if (!m_controller || section <= 0) return;
-        m_controller->playbackController()->goToFrame(
-            m_controller->document()->animation.startFrame() + section - 1);
-    });
-    connect(m_tracks, &QTreeWidget::itemClicked, this,
-            [this](QTreeWidgetItem*, int column) {
-        if (!m_controller || column <= 0) return;
-        m_controller->playbackController()->goToFrame(
-            m_controller->document()->animation.startFrame() + column - 1);
     });
 }
 
@@ -341,6 +295,7 @@ void TimelinePanel::setController(ImageController* controller)
         disconnect(connection);
     m_connections.clear();
     m_controller = controller;
+    m_view->setController(controller);
     if (m_controller) {
         m_connections.push_back(connect(m_controller, &ImageController::currentFrameChanged,
             this, [this](int frame) {
@@ -371,58 +326,14 @@ void TimelinePanel::refresh()
                    b5(m_loop), b6(m_autoKey);
     Document* doc = m_controller ? m_controller->document() : nullptr;
     setEnabled(doc != nullptr);
-    m_tracks->clear();
     if (!doc) {
-        m_tracks->setColumnCount(1);
-        m_tracks->setHeaderLabels({tr("Layer / Property")});
+        m_view->rebuild();
         updatePlayButton();
         return;
     }
 
     const int start = doc->animation.startFrame();
     const int end = std::max(start, doc->animation.endFrame());
-    const int visibleEnd = std::min(end, start + 999); // bounded widget allocation
-    QStringList headers{tr("Layer / Property")};
-    for (int frame = start; frame <= visibleEnd; ++frame)
-        headers.push_back(QString::number(frame));
-    m_tracks->setColumnCount(headers.size());
-    m_tracks->setHeaderLabels(headers);
-    m_tracks->setColumnWidth(0, 190);
-    for (int c = 1; c < headers.size(); ++c)
-        m_tracks->setColumnWidth(c, 34);
-
-    for (LayerTreeNode* node : doc->flatten()) {
-        if (!node || node->type != LayerTreeNode::Type::Layer) continue;
-        auto* layerItem = new QTreeWidgetItem(m_tracks, {node->name});
-        for (anim::Property property : anim::allProperties()) {
-            const anim::AnimationTrack* track = doc->animation.track(node->id, property);
-            if (!track && node != doc->activeNode())
-                continue;
-                auto* item = new QTreeWidgetItem(layerItem,
-                    {QString(anim::propertyId(property))});
-                item->setData(0, Qt::UserRole, 1);
-                item->setData(0, Qt::UserRole + 1,
-                              node->id.toString(QUuid::WithoutBraces));
-                item->setData(0, Qt::UserRole + 2, static_cast<int>(property));
-                if (track) for (const auto& key : track->keyframes()) {
-                    if (key.frame >= start && key.frame <= visibleEnd)
-                        item->setText(key.frame - start + 1, QStringLiteral("◆"));
-                }
-        }
-        if (const auto* raster = doc->animation.rasterTrack(node->id)) {
-            auto* item = new QTreeWidgetItem(layerItem, {tr("Raster Cels")});
-            item->setData(0, Qt::UserRole, 2);
-            for (const auto& [frame, celId] : raster->keyframes()) {
-                if (frame >= start && frame <= visibleEnd)
-                    item->setText(frame - start + 1,
-                        celId ? QStringLiteral("■") : QStringLiteral("○"));
-            }
-        }
-        layerItem->setExpanded(node == doc->activeNode());
-    }
-    const int currentColumn = doc->currentFrame() - start + 1;
-    if (currentColumn > 0 && currentColumn < m_tracks->columnCount())
-        m_tracks->header()->setHighlightSections(true);
     m_frame->setRange(start, end);
     m_frame->setValue(doc->currentFrame());
     m_fps->setValue(doc->animation.fps());
@@ -430,5 +341,6 @@ void TimelinePanel::refresh()
     m_end->setValue(end);
     m_loop->setChecked(m_controller->playbackController()->loop());
     m_autoKey->setChecked(m_controller->autoKey());
+    m_view->rebuild();
     updatePlayButton();
 }

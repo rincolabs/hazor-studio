@@ -2520,6 +2520,10 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     doc->name = name;
     doc->size = size;
     doc->zoom = 1.0f;
+    // Default animation range for new documents. Loading a project overwrites the
+    // whole animation model afterwards, so a saved range is never clobbered.
+    doc->animation.setFrameRange(0, 100);
+    doc->animation.setPlaybackRange(0, 100);
 
     auto ctrl = std::make_unique<ImageController>();
     auto* ctrlPtr = ctrl.get();

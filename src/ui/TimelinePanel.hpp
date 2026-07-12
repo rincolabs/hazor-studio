@@ -8,11 +8,11 @@
 #include "animation/RasterCelModel.hpp"
 
 class ImageController;
-class QCheckBox;
+class TimelineView;
+class AppCheckBox;
 class QDoubleSpinBox;
 class QPushButton;
 class QSpinBox;
-class QTreeWidget;
 
 class TimelinePanel final : public QWidget {
     Q_OBJECT
@@ -34,9 +34,9 @@ private:
     QDoubleSpinBox* m_fps = nullptr;
     QSpinBox* m_start = nullptr;
     QSpinBox* m_end = nullptr;
-    QCheckBox* m_loop = nullptr;
-    QCheckBox* m_autoKey = nullptr;
-    QTreeWidget* m_tracks = nullptr;
+    AppCheckBox* m_loop = nullptr;
+    AppCheckBox* m_autoKey = nullptr;
+    TimelineView* m_view = nullptr;
     bool m_copiedPropertyKey = false;
     anim::Keyframe m_propertyClipboard;
     bool m_copiedRasterKey = false;
