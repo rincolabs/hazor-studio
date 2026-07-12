@@ -95,7 +95,7 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
         static QPixmap visiblePix(":/icons/layer-visible.png");
         static QPixmap hiddenPix(":/icons/layer-invisible.png");
         QRect eyeRect = this->eyeRect(option, index);
-        QPixmap pix = node->visible ? visiblePix : hiddenPix;
+        QPixmap pix = node->isVisible() ? visiblePix : hiddenPix;
         painter->save();
         painter->setOpacity(th->iconOpacity);
         painter->drawPixmap(eyeRect, pix);

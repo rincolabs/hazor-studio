@@ -35,7 +35,7 @@ private:
         if (!node || !node->layer) return;
         node->layer->shapeData = std::make_shared<ShapeData>(sd);
         node->layer->cpuImage = img;
-        node->transform = xf;
+        node->setBaseTransform(xf);
         node->layer->textureOutdated = true;
         node->layer->shapeCache.dirty = true;
         node->invalidateEffects();

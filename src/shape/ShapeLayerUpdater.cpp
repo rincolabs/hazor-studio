@@ -41,7 +41,7 @@ bool ShapeLayerUpdater::rebuildShapeRaster(Document& document, LayerTreeNode& no
 
     rendered = rendered.convertToFormat(QImage::Format_RGBA8888);
     node.layer->cpuImage = rendered;
-    node.transform = rasterTransformForShape(*node.layer->shapeData, rendered, document.size);
+    node.setBaseTransform(rasterTransformForShape(*node.layer->shapeData, rendered, document.size));
     node.layer->textureOutdated = true;
     node.layer->shapeCache.dirty = true;
     node.invalidateEffects();

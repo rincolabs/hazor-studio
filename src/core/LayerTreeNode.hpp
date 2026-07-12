@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDebug>
+#include <QHash>
 #include <QString>
 #include <QVariantMap>
 #include <QImage>
@@ -12,6 +13,7 @@
 #include <vector>
 #include "AdjustmentTypes.hpp"
 #include "Layer.hpp"
+#include "LayerId.hpp"
 #include "LayerEffect.hpp"
 #include "text/TextTypes.hpp"
 #include "ShapeTypes.hpp"
@@ -32,6 +34,13 @@ public:
     Type type = Type::Layer;
     QString name;
 
+    // Stable, persistent identity (see LayerId.hpp). Auto-generated on
+    // construction so every fresh node is unique; clone()/shallowClone()
+    // PRESERVE it (render/export/undo snapshots keep the same identity), while a
+    // real duplication calls assignNewIds() to get fresh ids for the whole
+    // duplicated subtree. Serialized as "nodeId" and restored on load.
+    LayerId id = QUuid::createUuid();
+
     // True while `name` is still a system-generated label (e.g. a freshly
     // created Text Layer). Manual renames clear this flag so automatic naming
     // (deriving the label from the text content on commit) never overwrites a
@@ -43,10 +52,63 @@ public:
     LayerTreeNode* parent = nullptr;
     std::vector<std::unique_ptr<LayerTreeNode>> children;
 
-    QTransform transform;
-    float opacity = 1.0f;
-    bool visible = true;
-    BlendMode blendMode = BlendMode::Normal;
+    // ── Animatable node state ───────────────────────────────────────────────
+    // The four properties the animation system can drive live in one struct so
+    // a whole frame's evaluation is a single copy (baseState -> evaluatedState).
+    //   - m_baseState:      the static values persisted in the document.
+    //   - m_evaluatedState: the final values used for the CURRENT frame.
+    // In a static document (no animation) they are always kept equal, so the
+    // renderers, hit-testing, bounds and export behave exactly as before.
+    //
+    // Access rules (enforced by making the fields private):
+    //   - Renderers / hit-testing / bounds / export read the EVALUATED getters:
+    //       transform(), opacity(), isVisible(), blendMode()
+    //   - Tools / UI / commands / serialization edit the BASE via setters:
+    //       setBaseTransform/Opacity/Visible/BlendMode
+    //   - Only the (future) AnimationEvaluator writes the evaluated state via
+    //       setEvaluated* / resetEvaluatedState().
+    struct LayerNodeState {
+        QTransform transform;
+        float opacity = 1.0f;
+        bool visible = true;
+        BlendMode blendMode = BlendMode::Normal;
+    };
+
+    // Evaluated getters — the values consumed for the current frame. Equal to
+    // the base values in a static document.
+    const QTransform& transform() const { return m_evaluatedState.transform; }
+    float opacity() const { return m_evaluatedState.opacity; }
+    bool isVisible() const { return m_evaluatedState.visible; }
+    BlendMode blendMode() const { return m_evaluatedState.blendMode; }
+
+    // Base getters — the persisted, animation-independent values.
+    const QTransform& baseTransform() const { return m_baseState.transform; }
+    float baseOpacity() const { return m_baseState.opacity; }
+    bool baseVisible() const { return m_baseState.visible; }
+    BlendMode baseBlendMode() const { return m_baseState.blendMode; }
+
+    // Base setters. While the node has no active animation track for the
+    // property, editing the base also updates the evaluated value so a static
+    // document behaves exactly as before. (Track-aware gating arrives with the
+    // AnimationEvaluator in a later stage; for now these always mirror.)
+    void setBaseTransform(const QTransform& v) { m_baseState.transform = v; m_evaluatedState.transform = v; }
+    void setBaseOpacity(float v) { m_baseState.opacity = v; m_evaluatedState.opacity = v; }
+    void setBaseVisible(bool v) { m_baseState.visible = v; m_evaluatedState.visible = v; }
+    void setBaseBlendMode(BlendMode v) { m_baseState.blendMode = v; m_evaluatedState.blendMode = v; }
+
+    // Restore the evaluated state to the base state. The AnimationEvaluator
+    // calls this before applying a frame's tracks.
+    void resetEvaluatedState() { m_evaluatedState = m_baseState; }
+
+    // Apply an animation result to the EVALUATED state without touching the
+    // base. Intended for the AnimationEvaluator only — tools and UI must go
+    // through the base setters. (Kept public until the evaluator exists and can
+    // befriend this type in a later stage.)
+    void setEvaluatedTransform(const QTransform& v) { m_evaluatedState.transform = v; }
+    void setEvaluatedOpacity(float v) { m_evaluatedState.opacity = v; }
+    void setEvaluatedVisible(bool v) { m_evaluatedState.visible = v; }
+    void setEvaluatedBlendMode(BlendMode v) { m_evaluatedState.blendMode = v; }
+
     GroupBlendMode groupBlendMode = GroupBlendMode::Isolated;
 
     bool collapsed = false;
@@ -69,7 +131,7 @@ public:
     bool hasVisibleAdjustmentChildren() const {
         if (type != Type::Layer) return false;
         for (const auto& c : children) {
-            if (c && c->visible && c->isAdjustmentLayer())
+            if (c && c->isVisible() && c->isAdjustmentLayer())
                 return true;
         }
         return false;
@@ -81,7 +143,7 @@ public:
     bool hasVisibleAdjustmentDirectChild() const {
         if (type != Type::Group) return false;
         for (const auto& c : children) {
-            if (c && c->visible && c->isAdjustmentLayer())
+            if (c && c->isVisible() && c->isAdjustmentLayer())
                 return true;
         }
         return false;
@@ -210,7 +272,7 @@ public:
             static_cast<int>(std::floor(baseBounds.top())) - padding.top());
         for (auto it = children.rbegin(); it != children.rend(); ++it) {
             const LayerTreeNode* adj = it->get();
-            if (!adj || !adj->visible || !adj->isAdjustmentLayer())
+            if (!adj || !adj->isVisible() || !adj->isAdjustmentLayer())
                 continue;
             QImage mask;
             QPoint maskTopLeft;
@@ -222,7 +284,7 @@ public:
                 maskTopLeft = adj->layer->maskOrigin - resultOrigin;
                 density = adj->layer->maskDensity;
             }
-            adjustments::apply(result, *adj->adjustment, adj->opacity,
+            adjustments::apply(result, *adj->adjustment, adj->opacity(),
                                mask, maskTopLeft, density);
         }
 
@@ -284,7 +346,7 @@ public:
                                       static_cast<int>(std::floor(baseBounds.top())));
         for (auto it = children.rbegin(); it != children.rend(); ++it) {
             const LayerTreeNode* adj = it->get();
-            if (!adj || !adj->visible || !adj->isAdjustmentLayer())
+            if (!adj || !adj->isVisible() || !adj->isAdjustmentLayer())
                 continue;
             QImage mask;
             QPoint maskTopLeft;
@@ -303,7 +365,7 @@ public:
                                      static_cast<int>(std::lround(offFull.y() * fy)));
                 density = adj->layer->maskDensity;
             }
-            adjustments::apply(result, *adj->adjustment, adj->opacity,
+            adjustments::apply(result, *adj->adjustment, adj->opacity(),
                                mask, maskTopLeft, density);
         }
         return clampToMax(result);
@@ -431,7 +493,7 @@ public:
         QTransform xf;
         const LayerTreeNode* n = this;
         while (n) {
-            xf = xf * n->transform;
+            xf = xf * n->transform();
             n = n->parent;
         }
         return xf;
@@ -481,8 +543,8 @@ public:
     // group. (A future PassThrough group would also take that fast path.)
     bool needsIsolatedComposite() const {
         if (type != Type::Group) return false;
-        return blendMode != BlendMode::Normal
-            || opacity < 0.999f
+        return blendMode() != BlendMode::Normal
+            || opacity() < 0.999f
             || !effects.empty()
             || hasGroupMask()
             // A Normal-Mode adjustment inside the group must only affect the
@@ -495,18 +557,40 @@ public:
     // path once group masks exist — no other compositor change is required.
     bool hasGroupMask() const { return false; }
 
+    // Assign a fresh LayerId to this node and every descendant. Used by the
+    // real "duplicate layer" operation so the copy has a distinct identity from
+    // the original (its animation tracks are then remapped to these new ids).
+    void assignNewIds() {
+        id = QUuid::createUuid();
+        for (auto& c : children)
+            if (c) c->assignNewIds();
+    }
+
+    // Same, but records the old->new id mapping so an external owner (e.g. the
+    // animation model on paste) can remap data keyed by the old ids.
+    void assignNewIds(QHash<LayerId, LayerId>& mapping) {
+        const LayerId old = id;
+        id = QUuid::createUuid();
+        mapping.insert(old, id);
+        for (auto& c : children)
+            if (c) c->assignNewIds(mapping);
+    }
+
     std::unique_ptr<LayerTreeNode> clone(bool preserveName = false) const {
         auto node = std::make_unique<LayerTreeNode>();
         node->type = type;
         node->name = preserveName ? name : name;
+        // Preserve identity: a clone (undo snapshot / render / export) is the
+        // SAME logical node. Real duplication re-ids afterwards.
+        node->id = id;
         node->nameIsAuto = nameIsAuto;
-        node->opacity = opacity;
-        node->visible = visible;
-        node->blendMode = blendMode;
+        // Copy the full animatable state (base + evaluated), not just the
+        // current frame's value — a clone must preserve both.
+        node->m_baseState = m_baseState;
+        node->m_evaluatedState = m_evaluatedState;
         node->groupBlendMode = groupBlendMode;
         node->lockFlags = lockFlags;
         node->collapsed = collapsed;
-        node->transform = transform;
         node->clipped = clipped;
         node->effects.clear();
         for (auto& e : effects)
@@ -571,14 +655,15 @@ public:
         auto node = std::make_unique<LayerTreeNode>();
         node->type = type;
         node->name = name;
+        node->id = id;  // snapshot keeps the live node's identity
         node->nameIsAuto = nameIsAuto;
-        node->opacity = opacity;
-        node->visible = visible;
-        node->blendMode = blendMode;
+        // Preserve the full animatable state (base + evaluated) in the snapshot
+        // so off-thread compositing sees the same frame the live tree does.
+        node->m_baseState = m_baseState;
+        node->m_evaluatedState = m_evaluatedState;
         node->groupBlendMode = groupBlendMode;
         node->lockFlags = lockFlags;
         node->collapsed = collapsed;
-        node->transform = transform;
         node->clipped = clipped;
         node->effects = effects;
         if (adjustment)
@@ -647,6 +732,10 @@ public:
     }
 
 private:
+    // Animatable state (see the accessor block near the top of the class).
+    LayerNodeState m_baseState;
+    LayerNodeState m_evaluatedState;
+
     QImage baseRenderImage() const {
         if (!layer)
             return QImage();

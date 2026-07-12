@@ -46,7 +46,7 @@ public:
 
     // documentSize-aware variant: for Shape layers it anchors the frame on the
     // pixel-exact natural base (the same transform a freshly-baked raster
-    // carries, i.e. node->transform once committed) instead of the geometry AABB.
+    // carries, i.e. node->transform() once committed) instead of the geometry AABB.
     // Use this where a stable numeric readback is needed (Transform panel /
     // options bar) — it removes the sub-pixel W/H/X/Y drift the geometry-AABB base
     // leaves after a shape commit. Falls back to the no-arg version for other

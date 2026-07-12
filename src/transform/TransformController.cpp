@@ -62,7 +62,7 @@ static QTransform parentAccumulatedTransform(const LayerTreeNode* node)
 {
     QTransform parentAccum;
     for (auto* p = node ? node->parent : nullptr; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
+        parentAccum = parentAccum * p->transform();
     return parentAccum;
 }
 
@@ -161,7 +161,7 @@ QPolygonF TransformController::cornersFromNode(const LayerTreeNode* node)
 // "natural base" transform the live display is measured against. The base is the
 // transform an un-transformed freshly-baked raster of this shape would carry;
 // `appliedDelta` then re-introduces any live (not-yet-baked) gesture sitting in
-// node->transform. Callers choose the base: the geometry AABB (rectFrame) for the
+// node->transform(). Callers choose the base: the geometry AABB (rectFrame) for the
 // canvas box, or the pixel-exact raster transform for a drift-free numeric readback.
 static QTransform shapeVisualFrame(const LayerTreeNode* node,
                                    const QTransform& naturalLocal)
@@ -253,7 +253,7 @@ QTransform TransformController::visualFrameForNode(const LayerTreeNode* node,
 
     // Pixel-exact natural base — identical to ImageController's
     // rasterTransformForShape (cpuImage size / document size, centred on the
-    // raster bounds), which is exactly what node->transform holds once the shape
+    // raster bounds), which is exactly what node->transform() holds once the shape
     // is committed. Using this base makes appliedDelta resolve to identity in the
     // settled state, so the readback equals the geometry box with no floor/ceil
     // pixel-snap residue.

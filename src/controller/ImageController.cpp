@@ -4,6 +4,7 @@
 #include "core/LayerTreeNode.hpp"
 #include "engine/ImageEngine.hpp"
 #include "Commands.hpp"
+#include "animation/AnimationCommands.hpp"
 #include "text/TextRenderer.hpp"
 #include "engine/ShapeRenderer.hpp"
 #include "shape/ShapeCommands.hpp"
@@ -80,6 +81,9 @@ ImageController::ImageController(QObject* parent)
     : QObject(parent)
     , m_upscaleService(std::make_unique<UpscaleService>())
 {
+    connect(&m_playbackController, &anim::PlaybackController::frameRequested,
+            this, &ImageController::setCurrentFrame);
+
     m_history.setChangeCallback([this]() {
         emit historyChanged();
     });
@@ -162,7 +166,7 @@ ImageController::ImageController(QObject* parent)
         }
 
         const QImage beforeImage = layer->cpuImage.copy();
-        const QTransform beforeTransform = node->transform;
+        const QTransform beforeTransform = node->transform();
         const QImage beforeMask = layer->maskImage.copy();
         const QPoint beforeMaskOrigin = layer->maskOrigin;
         const QImage afterMask = (options.preserveLayerMask && !beforeMask.isNull())
@@ -190,7 +194,7 @@ ImageController::ImageController(QObject* parent)
                           tr.x(), tr.y(), 1.0);
             return out;
         };
-        const QTransform afterTransform = scaledFromTopLeft(node->transform, options.scale);
+        const QTransform afterTransform = scaledFromTopLeft(node->transform(), options.scale);
 
         if (options.output == UpscaleOutputMode::NewLayer) {
             auto newNode = std::make_unique<LayerTreeNode>();
@@ -206,10 +210,10 @@ ImageController::ImageController(QObject* parent)
             newNode->layer->maskDensity = layer->maskDensity;
             newNode->layer->maskFeather = layer->maskFeather;
             newNode->layer->owner = newNode.get();
-            newNode->opacity = node->opacity;
-            newNode->visible = true;
-            newNode->blendMode = node->blendMode;
-            newNode->transform = afterTransform;
+            newNode->setBaseOpacity(node->opacity());
+            newNode->setBaseVisible(true);
+            newNode->setBaseBlendMode(node->blendMode());
+            newNode->setBaseTransform(afterTransform);
             newNode->layer->resetTransform = afterTransform;
             newNode->layer->hasResetTransform = true;
             if (m_doc && newNode->layer->cpuImage.width() * newNode->layer->cpuImage.height()
@@ -250,7 +254,7 @@ ImageController::ImageController(QObject* parent)
         } else {
             layer->disableTiling();
         }
-        node->transform = afterTransform;
+        node->setBaseTransform(afterTransform);
         node->thumbnailDirty = true;
         node->invalidateEffects();
         ++m_doc->compositionGeneration;
@@ -298,6 +302,8 @@ void ImageController::setDocument(Document* doc)
     m_pendingAsyncJobs.clear();
     m_doc = doc;
     m_history.clear();
+    m_propertyController.setContext(m_doc, &m_history);
+    m_playbackController.setDocument(m_doc);
     if (m_doc && !m_doc->size.isNull())
         m_doc->selection.resize(m_doc->size.width(), m_doc->size.height());
 }
@@ -626,7 +632,7 @@ static QPointF canvasToPixelScaleFor(const QSize& documentSize)
 static void stampResetTransform(LayerTreeNode* node)
 {
     if (!node || !node->layer) return;
-    node->layer->resetTransform = node->transform;
+    node->layer->resetTransform = node->transform();
     node->layer->hasResetTransform = true;
 }
 
@@ -1115,7 +1121,7 @@ void ImageController::newLayer()
     treeNode->layer->cpuImage = QImage(size, QImage::Format_RGBA8888);
     treeNode->layer->cpuImage.fill(Qt::transparent);
     treeNode->layer->owner = treeNode.get();
-    treeNode->layer->resetTransform = treeNode->transform;
+    treeNode->layer->resetTransform = treeNode->transform();
     treeNode->layer->hasResetTransform = true;
 
     int flatIndex = 0;
@@ -1500,7 +1506,7 @@ static void rebindAdjustmentSpace(Document* doc, LayerTreeNode* adj,
         l->cpuImage.fill(Qt::transparent);
     }
     l->maskRawImage = QImage();
-    adj->transform = QTransform();
+    adj->setBaseTransform(QTransform());
     l->maskThumbDirty = true;
     l->maskTextureOutdated = true;
     l->textureOutdated = true;
@@ -1786,6 +1792,243 @@ void ImageController::removeNode(int flatIndex)
     if (m_doc) ++m_doc->compositionGeneration;
 }
 
+void ImageController::setCurrentFrame(int frame)
+{
+    if (!m_doc)
+        return;
+    const int before = m_doc->currentFrame();
+    // Clamp + evaluate happen in the document; returns whether the composite
+    // changed. Pixels/masks/thumbnails/textures are intentionally not touched.
+    const bool composeChanged = m_doc->setCurrentFrame(frame);
+    const int after = m_doc->currentFrame();
+    if (after != before)
+        emit currentFrameChanged(after);
+    if (composeChanged)
+        emit imageChanged();  // existing flow: syncLayersToGpu + canvas update
+}
+
+bool ImageController::prepareRasterCelForEdit(LayerTreeNode* node)
+{
+    if (!m_doc)
+        return false;
+    if (!node)
+        node = m_doc->activeNode();
+    if (!node || !node->layer || node->type != LayerTreeNode::Type::Layer)
+        return false;
+
+    auto* track = m_doc->animation.rasterTrack(node->id);
+    if (!track || track->isEmpty())
+        return true; // ordinary static-layer edit
+
+    const int frame = m_doc->currentFrame();
+    anim::CelId celId;
+    if (track->hasKeyframe(frame))
+        celId = m_doc->animation.detachRasterCelForEdit(node->id, frame);
+    else if (const auto held = track->celAt(frame))
+        celId = *held;
+
+    if (celId.isNull()) {
+        anim::RasterCelContent content;
+        QSize size = node->layer->rasterBaseSize();
+        if (!size.isValid() || size.isEmpty())
+            size = m_doc->size.expandedTo(QSize(1, 1));
+        content.cpuImage = QImage(size, QImage::Format_RGBA8888);
+        content.cpuImage.fill(Qt::transparent);
+        content.bounds = QRect(QPoint(0, 0), size);
+        celId = m_doc->animation.celStorage().createCel(std::move(content));
+        track->setCel(frame, celId);
+    }
+
+    auto content = m_doc->animation.celStorage().contentHandle(celId);
+    if (!content)
+        return false;
+    node->layer->setEvaluatedRasterContent(celId, content);
+    node->compositeDirty = true;
+    ++m_doc->compositionGeneration;
+    return true;
+}
+
+bool ImageController::createRasterCel(bool duplicateCurrent)
+{
+    if (!m_doc)
+        return false;
+    auto* node = m_doc->activeNode();
+    if (!node || !node->layer || node->type != LayerTreeNode::Type::Layer
+        || node->layer->isTextLayer() || node->layer->isShapeLayer())
+        return false;
+
+    anim::AnimationModel before = m_doc->animation;
+    auto& track = m_doc->animation.ensureRasterTrack(node->id);
+    const int frame = m_doc->currentFrame();
+    std::optional<anim::CelId> celId;
+    if (duplicateCurrent)
+        celId = track.celAt(frame);
+
+    if (!celId) {
+        anim::RasterCelContent content;
+        if (duplicateCurrent) {
+            content.cpuImage = node->layer->compositeImage();
+        } else {
+            QSize size = node->layer->rasterBaseSize();
+            if (!size.isValid() || size.isEmpty())
+                size = m_doc->size.expandedTo(QSize(1, 1));
+            content.cpuImage = QImage(size, QImage::Format_RGBA8888);
+            content.cpuImage.fill(Qt::transparent);
+        }
+        content.bounds = QRect(QPoint(0, 0), content.cpuImage.size());
+        celId = m_doc->animation.celStorage().createCel(std::move(content));
+    }
+    track.setCel(frame, celId);
+    m_doc->animation.pruneUnusedCels();
+    m_doc->setCurrentFrame(frame);
+    anim::AnimationModel after = m_doc->animation;
+    m_history.push(std::make_unique<anim::AnimationModelStateCommand>(
+        m_doc, std::move(before), std::move(after),
+        duplicateCurrent ? tr("Duplicate Raster Cel") : tr("Create Raster Cel")));
+    emit imageChanged();
+    return true;
+}
+
+bool ImageController::createEmptyRasterFrame()
+{
+    if (!m_doc)
+        return false;
+    auto* node = m_doc->activeNode();
+    if (!node || !node->layer || node->type != LayerTreeNode::Type::Layer)
+        return false;
+    anim::AnimationModel before = m_doc->animation;
+    m_doc->animation.ensureRasterTrack(node->id).setCel(
+        m_doc->currentFrame(), std::nullopt);
+    m_doc->animation.pruneUnusedCels();
+    m_doc->setCurrentFrame(m_doc->currentFrame());
+    anim::AnimationModel after = m_doc->animation;
+    m_history.push(std::make_unique<anim::AnimationModelStateCommand>(
+        m_doc, std::move(before), std::move(after), tr("Create Empty Frame")));
+    emit imageChanged();
+    return true;
+}
+
+bool ImageController::removeRasterCelKeyframe()
+{
+    if (!m_doc)
+        return false;
+    auto* node = m_doc->activeNode();
+    auto* track = node ? m_doc->animation.rasterTrack(node->id) : nullptr;
+    if (!track || !track->hasKeyframe(m_doc->currentFrame()))
+        return false;
+    anim::AnimationModel before = m_doc->animation;
+    track->removeKeyframe(m_doc->currentFrame());
+    if (track->isEmpty())
+        m_doc->animation.removeRasterTrack(node->id);
+    else
+        m_doc->animation.pruneUnusedCels();
+    if (!m_doc->animation.hasRasterTrack(node->id))
+        node->layer->clearEvaluatedRasterContent();
+    m_doc->setCurrentFrame(m_doc->currentFrame());
+    anim::AnimationModel after = m_doc->animation;
+    m_history.push(std::make_unique<anim::AnimationModelStateCommand>(
+        m_doc, std::move(before), std::move(after), tr("Remove Raster Cel")));
+    emit imageChanged();
+    return true;
+}
+
+bool ImageController::moveRasterCelKeyframe(int targetFrame)
+{
+    if (!m_doc) return false;
+    auto* node = m_doc->activeNode();
+    auto* track = node ? m_doc->animation.rasterTrack(node->id) : nullptr;
+    const int from = m_doc->currentFrame();
+    targetFrame = std::clamp(targetFrame, m_doc->animation.startFrame(),
+                             m_doc->animation.endFrame());
+    if (!track || from == targetFrame || !track->hasKeyframe(from))
+        return false;
+    anim::AnimationModel before = m_doc->animation;
+    track->moveKeyframe(from, targetFrame);
+    m_doc->setCurrentFrame(targetFrame);
+    anim::AnimationModel after = m_doc->animation;
+    m_history.push(std::make_unique<anim::AnimationModelStateCommand>(
+        m_doc, std::move(before), std::move(after), tr("Move Raster Cel")));
+    emit currentFrameChanged(targetFrame);
+    emit imageChanged();
+    return true;
+}
+
+bool ImageController::pasteRasterCel(
+    const std::optional<anim::RasterCelContent>& content)
+{
+    if (!m_doc) return false;
+    auto* node = m_doc->activeNode();
+    if (!node || !node->layer || node->type != LayerTreeNode::Type::Layer)
+        return false;
+    anim::AnimationModel before = m_doc->animation;
+    auto& track = m_doc->animation.ensureRasterTrack(node->id);
+    if (content) {
+        anim::RasterCelContent detached;
+        detached.cpuImage = content->cpuImage.copy();
+        detached.bounds = content->bounds;
+        detached.metadata = content->metadata;
+        if (content->rasterStorage.isEnabled()) {
+            QRect bounds;
+            const QImage tiles = content->rasterStorage.toImage(&bounds);
+            detached.rasterStorage.replaceWithImage(
+                tiles, bounds.topLeft(), content->rasterStorage.tileSize());
+            detached.rasterStorage.setBaseSize(content->rasterStorage.baseSize());
+        }
+        const anim::CelId id = m_doc->animation.celStorage().createCel(
+            std::move(detached));
+        track.setCel(m_doc->currentFrame(), id);
+    } else {
+        track.setCel(m_doc->currentFrame(), std::nullopt);
+    }
+    m_doc->animation.pruneUnusedCels();
+    m_doc->setCurrentFrame(m_doc->currentFrame());
+    anim::AnimationModel after = m_doc->animation;
+    m_history.push(std::make_unique<anim::AnimationModelStateCommand>(
+        m_doc, std::move(before), std::move(after), tr("Paste Raster Cel")));
+    emit imageChanged();
+    return true;
+}
+
+// Copy animation tracks from a source subtree onto a structurally-identical
+// destination subtree (the duplicate), remapping to the destination's new ids.
+static void copyTracksParallel(Document* doc, const LayerTreeNode* src,
+                               const LayerTreeNode* dst)
+{
+    if (!doc || !src || !dst) return;
+    doc->animation.copyTracks(src->id, dst->id);
+    const size_t n = std::min(src->children.size(), dst->children.size());
+    for (size_t i = 0; i < n; ++i)
+        copyTracksParallel(doc, src->children[i].get(), dst->children[i].get());
+}
+
+// Snapshot a subtree's animation tracks (keyed by their current ids) for the
+// clipboard. Used only for a whole-layer/group copy, never a raster copy.
+static void captureSubtreeTracks(Document* doc, const LayerTreeNode* node,
+                                 std::vector<ClipboardTrack>& out,
+                                 std::vector<ClipboardRasterTrack>* rasterOut = nullptr,
+                                 anim::CelStorage* celOut = nullptr)
+{
+    if (!doc || !node) return;
+    if (const auto* layerTracks = doc->animation.tracksFor(node->id)) {
+        for (const auto& [prop, track] : *layerTracks)
+            out.push_back(ClipboardTrack{ node->id, prop, track });
+    }
+    if (rasterOut) {
+        if (const auto* track = doc->animation.rasterTrack(node->id)) {
+            rasterOut->push_back(ClipboardRasterTrack{node->id, *track});
+            if (celOut) {
+                for (const auto& [_, celId] : track->keyframes()) {
+                    if (!celId || celOut->contains(*celId)) continue;
+                    if (const auto* content = doc->animation.celStorage().content(*celId))
+                        celOut->insertCel(*celId, *content);
+                }
+            }
+        }
+    }
+    for (const auto& c : node->children)
+        captureSubtreeTracks(doc, c.get(), out, rasterOut, celOut);
+}
+
 void ImageController::duplicateNode(int flatIndex)
 {
     if (!m_doc || flatIndex < 0 || flatIndex >= m_doc->flatCount())
@@ -1797,14 +2040,14 @@ void ImageController::duplicateNode(int flatIndex)
     auto dup = std::make_unique<LayerTreeNode>();
     dup->type = srcNode->type;
     dup->name = srcNode->name + " (copy)";
-    dup->opacity = srcNode->opacity;
-    dup->visible = srcNode->visible;
-    dup->blendMode = srcNode->blendMode;
+    dup->setBaseOpacity(srcNode->opacity());
+    dup->setBaseVisible(srcNode->isVisible());
+    dup->setBaseBlendMode(srcNode->blendMode());
     dup->groupBlendMode = srcNode->groupBlendMode;
     dup->lockFlags = srcNode->lockFlags;
     dup->collapsed = srcNode->collapsed;
     dup->clipped = srcNode->clipped;
-    dup->transform = srcNode->transform;
+    dup->setBaseTransform(srcNode->transform());
     dup->effects = srcNode->effects;   // layer styles travel with the copy
     dup->invalidateEffects();
 
@@ -1814,7 +2057,7 @@ void ImageController::duplicateNode(int flatIndex)
         dup->layer->cpuImage = flushLayerToCpuImage(srcNode->layer.get());
         dup->layer->textureOutdated = true;
         dup->layer->owner = dup.get();
-        dup->layer->resetTransform = dup->transform;
+        dup->layer->resetTransform = dup->transform();
         dup->layer->hasResetTransform = true;
         if (srcNode->layer->textData)
             dup->layer->textData = std::make_shared<TextLayerData>(*srcNode->layer->textData);
@@ -1843,6 +2086,15 @@ void ImageController::duplicateNode(int flatIndex)
         childClone->parent = dup.get();
         dup->children.push_back(std::move(childClone));
     }
+
+    // Real duplication: the copy is a NEW node — give the whole duplicated
+    // subtree fresh, distinct ids (children came from clone(), which preserves
+    // ids, so without this they would collide with the originals).
+    dup->assignNewIds();
+    // Copy the source's animation tracks onto the duplicate's new ids so the
+    // copy animates independently of the original.
+    if (m_doc->animation.hasAnyTracks())
+        copyTracksParallel(m_doc, srcNode, dup.get());
 
     auto clone = dup->clone();
     m_doc->insertNodeAt(flatIndex, std::move(dup));
@@ -1935,17 +2187,49 @@ void ImageController::setNodeTransforms(
     size_t n = std::min({flatIndices.size(), newTransforms.size(), oldTransforms.size()});
     if (n == 0) { return; }
 
+    std::vector<int> staticIndices;
+    std::vector<QTransform> staticBefore;
+    std::vector<QTransform> staticAfter;
+    m_history.beginMacro(name.isEmpty() ? tr("Move") : name);
     for (size_t i = 0; i < n; ++i) {
         auto* node = m_doc->nodeAt(flatIndices[i]);
-        if (node)
-            node->transform = newTransforms[i];
+        if (!node)
+            continue;
+        if (!m_propertyController.editTransform(
+                node, newTransforms[i], m_doc->currentFrame())) {
+            node->setBaseTransform(newTransforms[i]);
+            staticIndices.push_back(flatIndices[i]);
+            staticBefore.push_back(oldTransforms[i]);
+            staticAfter.push_back(newTransforms[i]);
+        }
     }
-
-    m_history.push(std::make_unique<NodeTransformCommand>(
-        m_doc, flatIndices, oldTransforms, newTransforms,
-        name.isEmpty() ? tr("Move") : name));
+    if (!staticIndices.empty())
+        m_history.push(std::make_unique<NodeTransformCommand>(
+            m_doc, std::move(staticIndices), std::move(staticBefore),
+            std::move(staticAfter), name.isEmpty() ? tr("Move") : name));
+    m_history.endMacro();
     emit imageChanged();
     if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::previewNodeTransform(LayerTreeNode* node,
+                                           const QTransform& transform)
+{
+    if (!node || !m_doc)
+        return;
+    bool animated = autoKey();
+    for (anim::Property property : {
+             anim::Property::PositionX, anim::Property::PositionY,
+             anim::Property::ScaleX, anim::Property::ScaleY,
+             anim::Property::Rotation, anim::Property::SkewX,
+             anim::Property::SkewY, anim::Property::PivotX,
+             anim::Property::PivotY}) {
+        animated = animated || m_doc->animation.track(node->id, property) != nullptr;
+    }
+    if (animated)
+        node->setEvaluatedTransform(transform);
+    else
+        node->setBaseTransform(transform);
 }
 
 void ImageController::flipNodesAsUnit(const std::vector<int>& flatIndices, bool horizontal)
@@ -2010,8 +2294,8 @@ void ImageController::flipNodesAsUnit(const std::vector<int>& flatIndices, bool 
                                        : QTransform();
         const QTransform delta = P * W * P.inverted();
         idxs.push_back(idx);
-        before.push_back(n->transform);
-        after.push_back(n->transform * delta);
+        before.push_back(n->transform());
+        after.push_back(n->transform() * delta);
     }
     if (idxs.empty()) {
         emit operationBlocked(tr("This layer's position is locked."));
@@ -2141,18 +2425,24 @@ void ImageController::setNodeOpacity(int flatIndex, float opacity)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    float before = node->opacity;
+    // Animated property / auto-key: record a keyframe instead of editing base.
+    if (m_propertyController.editOpacity(node, opacity, m_doc->currentFrame())) {
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        return;
+    }
+    float before = node->opacity();
     float after = std::clamp(opacity, 0.0f, 1.0f);
     if (before == after) return;
-    node->opacity = after;
+    node->setBaseOpacity(after);
     // A nested adjustment (Single Layer Mode) bakes its opacity into the
     // parent layer's effected image — invalidate so the next frame re-bakes.
     if (node->type == LayerTreeNode::Type::Adjustment)
         node->invalidateEffects();
     m_history.push(std::make_unique<NodePropertyCommand>(
         m_doc, flatIndex, before, after,
-        node->visible, node->visible,
-        node->blendMode, node->blendMode,
+        node->isVisible(), node->isVisible(),
+        node->blendMode(), node->blendMode(),
         tr("Set Opacity")));
     emit layerChanged(flatIndex);
     emit imageChanged();
@@ -2164,14 +2454,14 @@ void ImageController::beginNodeOpacity(int flatIndex)
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
     m_opacityLayerIdx = flatIndex;
-    m_opacityBefore   = node->opacity;
+    m_opacityBefore   = node->opacity();
 }
 
 void ImageController::previewNodeOpacity(int flatIndex, float opacity)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    node->opacity = std::clamp(opacity, 0.0f, 1.0f);
+    node->setBaseOpacity(std::clamp(opacity, 0.0f, 1.0f));
     if (node->type == LayerTreeNode::Type::Adjustment)
         node->invalidateEffects();
     emit layerChanged(flatIndex);
@@ -2184,11 +2474,21 @@ void ImageController::commitNodeOpacity(int flatIndex, float opacity)
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
 
+    // Animated property / auto-key: the whole slider drag commits as one keyframe
+    // edit at the current frame (SetKeyframeCommand is a single undo entry).
+    if (m_propertyController.editOpacity(node, opacity, m_doc->currentFrame())) {
+        m_opacityBefore = -1.0f;
+        m_opacityLayerIdx = -1;
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        return;
+    }
+
     float before = (m_opacityLayerIdx == flatIndex && m_opacityBefore >= 0.0f)
-                   ? m_opacityBefore : node->opacity;
+                   ? m_opacityBefore : node->opacity();
     float after  = std::clamp(opacity, 0.0f, 1.0f);
 
-    node->opacity = after;
+    node->setBaseOpacity(after);
     m_opacityBefore   = -1.0f;
     m_opacityLayerIdx = -1;
     if (node->type == LayerTreeNode::Type::Adjustment)
@@ -2198,8 +2498,8 @@ void ImageController::commitNodeOpacity(int flatIndex, float opacity)
 
     m_history.push(std::make_unique<NodePropertyCommand>(
         m_doc, flatIndex, before, after,
-        node->visible, node->visible,
-        node->blendMode, node->blendMode,
+        node->isVisible(), node->isVisible(),
+        node->blendMode(), node->blendMode(),
         tr("Set Opacity")));
     emit layerChanged(flatIndex);
     emit imageChanged();
@@ -2210,17 +2510,22 @@ void ImageController::setNodeVisibility(int flatIndex, bool visible)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    bool before = node->visible;
+    if (m_propertyController.editVisibility(node, visible, m_doc->currentFrame())) {
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        return;
+    }
+    bool before = node->isVisible();
     if (before == visible) return;
-    node->visible = visible;
+    node->setBaseVisible(visible);
     // Toggling a nested adjustment (Single Layer Mode) changes the parent
     // layer's baked render.
     if (node->type == LayerTreeNode::Type::Adjustment)
         node->invalidateEffects();
     m_history.push(std::make_unique<NodePropertyCommand>(
-        m_doc, flatIndex, node->opacity, node->opacity,
+        m_doc, flatIndex, node->opacity(), node->opacity(),
         before, visible,
-        node->blendMode, node->blendMode,
+        node->blendMode(), node->blendMode(),
         tr("Set Visibility")));
     emit layerChanged(flatIndex);
     emit imageChanged();
@@ -2234,8 +2539,8 @@ void ImageController::toggleSoloVisibility(int flatIndex)
     if (flat.empty()) return;
 
     auto markVisible = [](LayerTreeNode* n, bool vis) {
-        if (!n || n->visible == vis) return;
-        n->visible = vis;
+        if (!n || n->isVisible() == vis) return;
+        n->setBaseVisible(vis);
         if (n->type == LayerTreeNode::Type::Adjustment)
             n->invalidateEffects();
     };
@@ -2255,7 +2560,7 @@ void ImageController::toggleSoloVisibility(int flatIndex)
         m_soloPrevVisibility.clear();
         m_soloPrevVisibility.reserve(flat.size());
         for (int i = 0; i < static_cast<int>(flat.size()); ++i)
-            m_soloPrevVisibility.push_back({i, flat[i]->visible});
+            m_soloPrevVisibility.push_back({i, flat[i]->isVisible()});
 
         // A node belongs to the target's branch if it is the target, a
         // descendant (target is one of its ancestors), or an ancestor of the
@@ -2289,12 +2594,17 @@ void ImageController::setNodeBlendMode(int flatIndex, BlendMode mode)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    BlendMode before = node->blendMode;
+    if (m_propertyController.editBlendMode(node, mode, m_doc->currentFrame())) {
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        return;
+    }
+    BlendMode before = node->blendMode();
     if (before == mode) return;
-    node->blendMode = mode;
+    node->setBaseBlendMode(mode);
     m_history.push(std::make_unique<NodePropertyCommand>(
-        m_doc, flatIndex, node->opacity, node->opacity,
-        node->visible, node->visible,
+        m_doc, flatIndex, node->opacity(), node->opacity(),
+        node->isVisible(), node->isVisible(),
         before, mode,
         tr("Set Blend Mode")));
     emit layerChanged(flatIndex);
@@ -2467,7 +2777,7 @@ void ImageController::reorderNode(int fromFlat, int toFlat)
     const QTransform movingWorldBefore = movingNodeBefore->accumulatedTransform();
     QTransform oldParentAccum;
     for (auto* p = movingNodeBefore->parent; p; p = p->parent)
-        oldParentAccum = oldParentAccum * p->transform;
+        oldParentAccum = oldParentAccum * p->transform();
     const bool hasResetBefore = movingNodeBefore->layer
         && movingNodeBefore->layer->hasResetTransform;
     const QTransform resetWorldBefore = hasResetBefore
@@ -2510,14 +2820,14 @@ void ImageController::reorderNode(int fromFlat, int toFlat)
         } else if (movedNode) {
             QTransform newParentAccum;
             for (auto* p = movedNode->parent; p; p = p->parent)
-                newParentAccum = newParentAccum * p->transform;
-            movedNode->transform = movingWorldBefore * newParentAccum.inverted();
+                newParentAccum = newParentAccum * p->transform();
+            movedNode->setBaseTransform(movingWorldBefore * newParentAccum.inverted());
             if (movedNode->layer) {
                 if (hasResetBefore) {
                     movedNode->layer->resetTransform = resetWorldBefore * newParentAccum.inverted();
                     movedNode->layer->hasResetTransform = true;
                 } else {
-                    movedNode->layer->resetTransform = movedNode->transform;
+                    movedNode->layer->resetTransform = movedNode->transform();
                     movedNode->layer->hasResetTransform = true;
                 }
             }
@@ -2549,8 +2859,15 @@ void ImageController::setLayerTransform(int flatIndex, const QTransform& transfo
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    QTransform oldXf = oldTransform ? *oldTransform : node->transform;
-    node->transform = transform;
+    // Animated transform / auto-key: keyframe the decomposed components at the
+    // current frame (one undo group) instead of editing the base transform.
+    if (m_propertyController.editTransform(node, transform, m_doc->currentFrame())) {
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        return;
+    }
+    QTransform oldXf = oldTransform ? *oldTransform : node->transform();
+    node->setBaseTransform(transform);
     if (node->layer) {
         // Transform-only change → transform-only command (same as the
         // multi-selection path, setNodeTransforms). The old FilterCommand here
@@ -2688,7 +3005,7 @@ void ImageController::expandLayer(Layer* layer, QPointF imagePos,
     adj.scale(sx, sy);
     adj.translate(dx, dy);
     if (layer->owner)
-        layer->owner->transform = adj * layer->owner->transform;
+        layer->owner->setBaseTransform(adj * layer->owner->transform());
 }
 
 void ImageController::syncLayerToGpu(Layer* layer)
@@ -3228,7 +3545,7 @@ void ImageController::pushLayerSnapshot(const QString& name, int flatIndex, QIma
     if (!layer) return;
     auto* node = m_doc->nodeAt(flatIndex);
     QImage after = layer->cpuImage.copy();
-    QTransform t = node ? node->transform : QTransform();
+    QTransform t = node ? node->transform() : QTransform();
     m_history.push(std::make_unique<FilterCommand>(
         m_doc, flatIndex, std::move(before), t,
         std::move(after), t, name));
@@ -3466,7 +3783,7 @@ bool ImageController::anyFullyLockedLayer(bool visibleOnly) const
     if (!m_doc) return false;
     for (auto* n : m_doc->flatten()) {
         if (!n) continue;
-        if (visibleOnly && !n->visible) continue;
+        if (visibleOnly && !n->isVisible()) continue;
         if (n->isFullyLocked()) return true;
     }
     return false;
@@ -3478,8 +3795,10 @@ void ImageController::fillActiveLayer(const QColor& color)
     if (!layer || !m_doc) return;
     if (!checkDestructiveOp(layer)) return;
 
-    layer->rasterStorage.clear();
-    layer->cpuImage.fill(color);
+    prepareRasterCelForEdit();
+    layer = activeLayer();
+    layer->renderRasterStorage().clear();
+    layer->writableRenderCpuImage().fill(color);
     markLayerDirty(layer);
     layer->textureOutdated = true;
     syncLayerToGpu(layer);
@@ -3908,7 +4227,7 @@ static bool applyResizeCanvasState(Document* doc, const CanvasResizeOptions& opt
 
     for (auto& root : doc->roots) {
         if (root)
-            root->transform = adjust * root->transform;
+            root->setBaseTransform(adjust * root->transform());
     }
 
     doc->size = newSize;
@@ -3942,7 +4261,7 @@ static bool applyResizeCanvasState(Document* doc, const CanvasResizeOptions& opt
             node->layer->owner = node.get();
             node->layer->textureOutdated = true;
             node->layer->pendingGpuUpload = true;
-            node->layer->resetTransform = node->transform;
+            node->layer->resetTransform = node->transform();
             node->layer->hasResetTransform = true;
 
             if (newSize.width() * newSize.height() >= doc->perfConfig.autoTileMinArea)
@@ -4041,7 +4360,7 @@ static bool applyCropDocumentState(Document* doc, const QRect& cropRect)
     for (int flatIndex : rootFlatIndices) {
         auto* node = doc->nodeAt(flatIndex);
         if (node)
-            node->transform = oldDocToNewDoc * node->transform;
+            node->setBaseTransform(oldDocToNewDoc * node->transform());
     }
 
     doc->size = QSize(cropW, cropH);
@@ -4083,19 +4402,21 @@ bool ImageController::cropDocumentAsync(const QRect& cropRect)
 static QImage flushLayerToCpuImage(Layer* layer)
 {
     if (!layer) return {};
-    if (!layer->rasterStorage.isEnabled())
-        return layer->cpuImage.copy();
+    const auto& storage = layer->renderRasterStorage();
+    const QImage& baseImage = layer->renderCpuImage();
+    if (!storage.isEnabled())
+        return baseImage.copy();
 
     QRect tileBounds;
-    QImage tileData = layer->rasterStorage.toImage(&tileBounds);
-    const QSize baseSize = layer->rasterStorage.baseSize();
+    QImage tileData = storage.toImage(&tileBounds);
+    const QSize baseSize = storage.baseSize();
 
     QImage full(baseSize, QImage::Format_RGBA8888);
     full.fill(Qt::transparent);
 
     QPainter p(&full);
-    if (!layer->cpuImage.isNull())
-        p.drawImage(0, 0, layer->cpuImage.convertToFormat(QImage::Format_RGBA8888));
+    if (!baseImage.isNull())
+        p.drawImage(0, 0, baseImage.convertToFormat(QImage::Format_RGBA8888));
     if (!tileData.isNull() && !tileBounds.isEmpty())
         p.drawImage(tileBounds.topLeft(), tileData);
     p.end();
@@ -4135,15 +4456,15 @@ static void applyMergedImageToNode(Document* doc, LayerTreeNode* node, QImage im
     // transforms remain live and would re-transform the already-transformed
     // pixels — cancel them so the accumulated transform is identity. At root
     // level this reduces to the identity transform.
-    node->transform = node->parent
+    node->setBaseTransform(node->parent
         ? node->parent->accumulatedTransform().inverted()
-        : QTransform();
+        : QTransform());
     // The merged pixels already bake every consumed layer's blend mode and
     // opacity (composited by DocumentCompositor). The result node must therefore
     // composite as Normal at full opacity, otherwise its own retained
     // blend/opacity would be applied a second time.
-    node->blendMode = BlendMode::Normal;
-    node->opacity = 1.0f;
+    node->setBaseBlendMode(BlendMode::Normal);
+    node->setBaseOpacity(1.0f);
     node->effects.clear();
     node->thumbnailDirty = true;
     node->sourceDirty = true;
@@ -4169,7 +4490,7 @@ static bool nodeIsDescendantOf(const LayerTreeNode* node, const LayerTreeNode* a
 static bool nodeEffectivelyVisible(const LayerTreeNode* node)
 {
     for (const LayerTreeNode* p = node; p; p = p->parent)
-        if (!p->visible)
+        if (!p->isVisible())
             return false;
     return node != nullptr;
 }
@@ -4307,8 +4628,8 @@ static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat)
     // blend mode can survive the merge (below).
     const bool srcHasContent = layerHasVisibleContent(srcNode->layer.get());
     const bool dstHasContent = layerHasVisibleContent(dstNode->layer.get());
-    const BlendMode srcBlend = srcNode->blendMode;
-    const BlendMode dstBlend = dstNode->blendMode;
+    const BlendMode srcBlend = srcNode->blendMode();
+    const BlendMode dstBlend = dstNode->blendMode();
 
     QImage merged = DocumentCompositor::compositeSubset(
         doc, {srcNode, dstNode}, /*applyAdjustments=*/false, ctx,
@@ -4333,7 +4654,7 @@ static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat)
     // Normal (matching the pair's rendered look; the interaction with layers
     // below dst's transparent areas is not representable in a single layer).
     if (srcHasContent != dstHasContent)
-        dstNode->blendMode = srcHasContent ? srcBlend : dstBlend;
+        dstNode->setBaseBlendMode(srcHasContent ? srcBlend : dstBlend);
 
     // src is consumed; its clipped adjustment children leave with the subtree.
     const int srcIdxNow = flatIndexOfNode(doc, srcNode);
@@ -4493,7 +4814,7 @@ static bool applyFlattenImageState(Document* doc)
     newNode->layer->owner = newNode.get();
     newNode->layer->textureOutdated = true;
     newNode->layer->pendingGpuUpload = true;
-    newNode->layer->resetTransform = newNode->transform;
+    newNode->layer->resetTransform = newNode->transform();
     newNode->layer->hasResetTransform = true;
     if (newNode->layer->cpuImage.width() * newNode->layer->cpuImage.height()
         >= doc->perfConfig.autoTileMinArea)
@@ -4591,7 +4912,7 @@ void ImageController::rasterizeNode(int flatIndex)
     }
 
     QImage beforeImg = layer->cpuImage.copy();
-    QTransform beforeXf = node->transform;
+    QTransform beforeXf = node->transform();
     auto beforeText = layer->textData;
     auto beforeShape = layer->shapeData;
 
@@ -4630,7 +4951,7 @@ void ImageController::rasterizeNode(int flatIndex)
         m_doc, flatIndex,
         std::move(beforeImg), beforeXf,
         std::move(beforeText), std::move(beforeShape),
-        layer->cpuImage.copy(), node->transform,
+        layer->cpuImage.copy(), node->transform(),
         tr("Rasterize Layer")));
 
     emit layerChanged(flatIndex);
@@ -4761,20 +5082,21 @@ void ImageController::applyLayerMask(int flatIndex)
         return;
     }
 
-    const bool flushedRaster = layer->rasterStorage.isEnabled();
+    const bool flushedRaster = layer->renderRasterStorage().isEnabled();
     if (flushedRaster) {
-        layer->cpuImage = flushLayerToCpuImage(layer);
-        layer->rasterStorage.clear();
+        layer->writableRenderCpuImage() = flushLayerToCpuImage(layer);
+        layer->renderRasterStorage().clear();
         layer->textureOutdated = true;
     }
 
-    QImage beforeImg = layer->cpuImage.copy();
-    QTransform beforeXf = node ? node->transform : QTransform();
+    QImage& pixels = layer->writableRenderCpuImage();
+    QImage beforeImg = pixels.copy();
+    QTransform beforeXf = node ? node->transform() : QTransform();
 
-    int w = layer->cpuImage.width();
-    int h = layer->cpuImage.height();
+    int w = pixels.width();
+    int h = pixels.height();
     for (int y = 0; y < h; ++y) {
-        uint32_t* imgRow = reinterpret_cast<uint32_t*>(layer->cpuImage.scanLine(y));
+        uint32_t* imgRow = reinterpret_cast<uint32_t*>(pixels.scanLine(y));
         for (int x = 0; x < w; ++x) {
             const int maskX = x - layer->maskOrigin.x();
             const int maskY = y - layer->maskOrigin.y();
@@ -4803,7 +5125,7 @@ void ImageController::applyLayerMask(int flatIndex)
     // Keep the dab-layer representation (see delete_selected): re-tile the
     // masked result so the content-bounds transform outline keeps working.
     if (flushedRaster)
-        layer->replaceRasterStorageWithImage(layer->cpuImage);
+        layer->replaceRasterStorageWithImage(pixels);
 
     markLayerDirty(layer);
     if (node)
@@ -4811,7 +5133,7 @@ void ImageController::applyLayerMask(int flatIndex)
 
     m_history.push(std::make_unique<FilterCommand>(
         m_doc, flatIndex, std::move(beforeImg), beforeXf,
-        layer->cpuImage.copy(), node ? node->transform : QTransform(),
+        pixels.copy(), node ? node->transform() : QTransform(),
         tr("Apply Layer Mask")));
 
     // The mask is gone (baked into pixels) — return the edit target to pixels.
@@ -4913,7 +5235,7 @@ void ImageController::moveNodeIntoGroup(int nodeFlatIndex, int groupFlatIndex)
 
     QTransform oldParentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        oldParentAccum = oldParentAccum * p->transform;
+        oldParentAccum = oldParentAccum * p->transform();
     const QTransform nodeWorldBefore = node->accumulatedTransform();
     const bool hasResetBefore = node->layer && node->layer->hasResetTransform;
     const QTransform resetWorldBefore = hasResetBefore
@@ -4928,16 +5250,16 @@ void ImageController::moveNodeIntoGroup(int nodeFlatIndex, int groupFlatIndex)
     if (owned->type == LayerTreeNode::Type::Adjustment) {
         // Adjustments are not spatial — inside a group they keep operating in
         // document space (Normal Mode scoped to the group's content).
-        owned->transform = QTransform();
+        owned->setBaseTransform(QTransform());
     } else {
         QTransform groupAccum = groupNode->accumulatedTransform();
-        owned->transform = nodeWorldBefore * groupAccum.inverted();
+        owned->setBaseTransform(nodeWorldBefore * groupAccum.inverted());
         if (owned->layer) {
             if (hasResetBefore) {
                 owned->layer->resetTransform = resetWorldBefore * groupAccum.inverted();
                 owned->layer->hasResetTransform = true;
             } else {
-                owned->layer->resetTransform = owned->transform;
+                owned->layer->resetTransform = owned->transform();
                 owned->layer->hasResetTransform = true;
             }
         }
@@ -5190,18 +5512,19 @@ void ImageController::applyFilterWithSelection(Layer* layer,
     if (!layer) return;
 
     // For rasterStorage layers, cpuImage is stale — composite tiles into full-size image first.
-    const bool flushedRaster = layer->rasterStorage.isEnabled();
+    const bool flushedRaster = layer->renderRasterStorage().isEnabled();
     if (flushedRaster) {
-        layer->cpuImage = flushLayerToCpuImage(layer);
-        layer->rasterStorage.clear();
+        layer->writableRenderCpuImage() = flushLayerToCpuImage(layer);
+        layer->renderRasterStorage().clear();
         layer->textureOutdated = true;
     }
 
     auto* node = m_doc->nodeAt(m_doc->activeFlatIndex);
-    QImage beforeImg = layer->cpuImage.copy();
-    QTransform beforeT = node ? node->transform : QTransform();
+    QImage& pixels = layer->writableRenderCpuImage();
+    QImage beforeImg = pixels.copy();
+    QTransform beforeT = node ? node->transform() : QTransform();
 
-    cv::Mat cvImg = ImageEngine::toCvMatFast(layer->cpuImage);
+    cv::Mat cvImg = ImageEngine::toCvMatFast(pixels);
     cv::Mat result = filter(cvImg);
 
     if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
@@ -5215,19 +5538,19 @@ void ImageController::applyFilterWithSelection(Layer* layer,
     }
 
     if (!cvImg.empty()) {
-        layer->cpuImage = ImageEngine::toQImageFast(cvImg);
+        pixels = ImageEngine::toQImageFast(cvImg);
         // Keep the dab-layer representation (see delete_selected): re-tile the
         // filtered result so the transform outline keeps tracking the
         // valid-pixel bounds instead of snapping to the layer base.
         if (flushedRaster)
-            layer->replaceRasterStorageWithImage(layer->cpuImage);
+            layer->replaceRasterStorageWithImage(pixels);
         markLayerDirty(layer);
         layer->textureOutdated = true;
         syncLayerToGpu(layer);
         emit imageChanged();
 
-        QImage afterImg = layer->cpuImage.copy();
-        QTransform afterT = node ? node->transform : QTransform();
+        QImage afterImg = pixels.copy();
+        QTransform afterT = node ? node->transform() : QTransform();
         m_history.push(std::make_unique<FilterCommand>(
             m_doc, m_doc->activeFlatIndex,
             std::move(beforeImg), beforeT,
@@ -5242,6 +5565,12 @@ void ImageController::markLayerDirty(Layer* layer, const QRect& rect)
     // Pixels changed: drop the cached alpha content bounds (covers in-place
     // cpuImage writes, where the QImage cacheKey doesn't change).
     layer->invalidateContentBounds();
+    if (m_doc && layer->hasEvaluatedRasterContent()
+        && !layer->evaluatedCelId().isNull()) {
+        if (auto* content = m_doc->animation.celStorage().content(
+                layer->evaluatedCelId()))
+            content->bounds = layer->contentImageBounds().toAlignedRect();
+    }
     // The composite changed whether or not the layer is tiled — bump the
     // generation so generation-keyed caches (the display projection,
     // RenderCache) rebuild. Tiled layers additionally flag their dirty tiles.
@@ -5296,7 +5625,7 @@ void ImageController::applyFilterTiled(Layer* layer, const std::string& toolName
 
     auto* node = m_doc ? m_doc->nodeAt(m_doc->activeFlatIndex) : nullptr;
     QImage beforeImg = layer->cpuImage.copy();
-    QTransform beforeT = node ? node->transform : QTransform();
+    QTransform beforeT = node ? node->transform() : QTransform();
 
     QVariantMap qParams;
     for (const auto& [k, v] : params) {
@@ -5326,7 +5655,7 @@ void ImageController::applyFilterTiled(Layer* layer, const std::string& toolName
         emit imageChanged();
 
         QImage afterImg = layer->cpuImage.copy();
-        QTransform afterT = node ? node->transform : QTransform();
+        QTransform afterT = node ? node->transform() : QTransform();
         m_history.push(std::make_unique<FilterCommand>(
             m_doc, m_doc->activeFlatIndex,
             std::move(beforeImg), beforeT,
@@ -5370,7 +5699,7 @@ void ImageController::onAsyncJobCompleted(uint64_t jobId)
     syncLayerToGpu(layer);
     emit imageChanged();
 
-    QTransform afterT = node->transform;
+    QTransform afterT = node->transform();
     m_history.push(std::make_unique<FilterCommand>(
         m_doc, job->targetFlatIndex,
         std::move(job->beforeImage), job->beforeTransform,
@@ -5504,20 +5833,20 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
         node->layer->name = node->name;
         node->layer->cpuImage = img;
         node->layer->owner = node.get();
-        node->visible = true;
-        node->opacity = 1.0f;
-        node->blendMode = BlendMode::Normal;
+        node->setBaseVisible(true);
+        node->setBaseOpacity(1.0f);
+        node->setBaseBlendMode(BlendMode::Normal);
         node->lockFlags = LockNone;
 
         const float halfW = static_cast<float>(img.width()) / static_cast<float>(docW);
         const float halfH = static_cast<float>(img.height()) / static_cast<float>(docH);
         const float cx = static_cast<float>(dropCanvasNdc.x()) + stepX * static_cast<float>(i);
         const float cy = static_cast<float>(dropCanvasNdc.y()) - stepY * static_cast<float>(i);
-        node->transform.setMatrix(
+        node->setBaseTransform(QTransform(
             halfW, 0.0, 0.0,
             0.0, halfH, 0.0,
-            cx, cy, 1.0);
-        node->layer->resetTransform = node->transform;
+            cx, cy, 1.0));
+        node->layer->resetTransform = node->baseTransform();
         node->layer->hasResetTransform = true;
 
         auto snapshot = node->clone(true);
@@ -5552,20 +5881,20 @@ bool ImageController::importImage(const QImage& img, const QString& name)
     node->layer->name = name;
     node->layer->cpuImage = converted;
     node->layer->owner = node.get();
-    node->visible = true;
-    node->opacity = 1.0f;
-    node->blendMode = BlendMode::Normal;
+    node->setBaseVisible(true);
+    node->setBaseOpacity(1.0f);
+    node->setBaseBlendMode(BlendMode::Normal);
     node->lockFlags = LockNone;
 
     const int docW = std::max(1, m_doc->size.width());
     const int docH = std::max(1, m_doc->size.height());
     const float halfW = static_cast<float>(converted.width()) / static_cast<float>(docW);
     const float halfH = static_cast<float>(converted.height()) / static_cast<float>(docH);
-    node->transform.setMatrix(
+    node->setBaseTransform(QTransform(
         halfW, 0.0, 0.0,
         0.0, halfH, 0.0,
-        0.0, 0.0, 1.0);
-    node->layer->resetTransform = node->transform;
+        0.0, 0.0, 1.0));
+    node->layer->resetTransform = node->baseTransform();
     node->layer->hasResetTransform = true;
 
     int insertAt = m_doc && m_doc->activeFlatIndex >= 0 ? 0 : 0;
@@ -5782,7 +6111,7 @@ void ImageController::onGenerativeFinished(const InpaintResult& result)
 
                 // Snapshot AFTER the flush so undo restores the real pixels.
                 QImage before = layer->cpuImage.copy();
-                const QTransform beforeT = n->transform;
+                const QTransform beforeT = n->transform();
 
                 // Map the document-space fill rect into the layer's pixel space
                 // via the same chain io/ImageIO uses (imgToNdc · accum · ndcToPixel).
@@ -5829,7 +6158,7 @@ void ImageController::onGenerativeFinished(const InpaintResult& result)
                         const float dx = 1.0f - 2.0f * offX / newW - float(lw) / newW;
                         const float dy = float(lh) / newH - 1.0f + 2.0f * offY / newH;
                         QTransform adj; adj.scale(sx, sy); adj.translate(dx, dy);
-                        n->transform = adj * n->transform;
+                        n->setBaseTransform(adj * n->transform());
 
                         if (layer->tiledSystem) {
                             layer->enableTiling(layer->tileManager.tileSize());
@@ -5882,7 +6211,7 @@ void ImageController::onGenerativeFinished(const InpaintResult& result)
                 }
 
                 // Keep the dab-layer representation (see delete_selected). The
-                // grown-layer branch already adjusted n->transform for the new
+                // grown-layer branch already adjusted n->transform() for the new
                 // cpuImage size, so re-tiling here (baseSize = cpuImage size)
                 // stays consistent with the transform.
                 if (flushedRaster)
@@ -5894,7 +6223,7 @@ void ImageController::onGenerativeFinished(const InpaintResult& result)
 
                 m_history.push(std::make_unique<FilterCommand>(
                     m_doc, m_genTargetIndex, std::move(before), beforeT,
-                    layer->cpuImage.copy(), n->transform,
+                    layer->cpuImage.copy(), n->transform(),
                     tr("Generative Fill")));
 
                 ++m_doc->compositionGeneration;
@@ -6030,7 +6359,7 @@ bool ImageController::applyAiRemoveResult(const AiRemoveApplyRequest& request)
     }
 
     QImage before = layer->cpuImage.copy();
-    const QTransform beforeT = node ? node->transform : QTransform();
+    const QTransform beforeT = node ? node->transform() : QTransform();
     const QPoint offset(qRound(layerToCanvas.dx()), qRound(layerToCanvas.dy()));
     const QRect fillR = request.documentRoi.translated(-offset);
     QImage after = layer->cpuImage.convertToFormat(QImage::Format_RGBA8888);
@@ -6049,7 +6378,7 @@ bool ImageController::applyAiRemoveResult(const AiRemoveApplyRequest& request)
 
     m_history.push(std::make_unique<FilterCommand>(
         m_doc, target, std::move(before), beforeT,
-        layer->cpuImage.copy(), node ? node->transform : QTransform(),
+        layer->cpuImage.copy(), node ? node->transform() : QTransform(),
         tr("AI Remove")));
     emit layerChanged(target);
     emit imageChanged();
@@ -6067,7 +6396,7 @@ void ImageController::copy()
         int dh = m_doc->size.height();
 
         auto* layer = m_doc->activeLayer();
-        if (layer && !layer->cpuImage.isNull()) {
+        if (layer && !layer->renderCpuImage().isNull()) {
             auto* node = m_doc->nodeAt(m_doc->activeFlatIndex);
             QTransform accumT = node ? node->accumulatedTransform() : QTransform();
             const bool rotatedOrSheared = accumT.m12() != 0.0 || accumT.m21() != 0.0;
@@ -6078,8 +6407,8 @@ void ImageController::copy()
             // sees. The native-resolution fast path only does that when each layer
             // pixel maps to one doc pixel; if the layer is scaled, cropping raw
             // pixels loses the scale and paste would shrink/enlarge the result.
-            const double lwForScale = static_cast<double>(layer->cpuImage.width());
-            const double lhForScale = static_cast<double>(layer->cpuImage.height());
+            const double lwForScale = static_cast<double>(layer->imageWidth());
+            const double lhForScale = static_cast<double>(layer->imageHeight());
             const double pxScaleX = lwForScale > 0 ? std::abs(dw * accumT.m11() / lwForScale) : 1.0;
             const double pxScaleY = lhForScale > 0 ? std::abs(dh * accumT.m22() / lhForScale) : 1.0;
             const bool unitScale = std::abs(pxScaleX - 1.0) < 1e-3 &&
@@ -6101,9 +6430,9 @@ void ImageController::copy()
                 // Dab (rasterStorage) layers keep painted pixels in tiles;
                 // cpuImage is the stale base — composite so the copy includes
                 // the dabs (same base size, so the mapping below is unchanged).
-                const QImage srcImage = layer->rasterStorage.isEnabled()
+                const QImage srcImage = layer->renderRasterStorage().isEnabled()
                     ? layer->compositeImage()
-                    : layer->cpuImage;
+                    : layer->renderCpuImage();
                 cv::Mat layerImg = ImageEngine::toCvMat(srcImage);
                 // Bake the layer mask so hidden regions are not copied.
                 applyLayerMaskToCvImage(layer, layerImg);
@@ -6116,8 +6445,8 @@ void ImageController::copy()
                 cropped = masked(layerBounds).clone();
 
                 // Convert layer-pixel top-left to document-pixel position
-                double lw = static_cast<double>(layer->cpuImage.width());
-                double lh = static_cast<double>(layer->cpuImage.height());
+                double lw = static_cast<double>(layer->imageWidth());
+                double lh = static_cast<double>(layer->imageHeight());
                 double a00 = dw * accumT.m11() / lw;
                 double a01 = -dw * accumT.m21() / lh;
                 double a02 = dw * 0.5 * (1.0 - accumT.m11() + accumT.m21() + accumT.m31());
@@ -6146,13 +6475,13 @@ void ImageController::copy()
             std::vector<bool> vis;
             for (int i = static_cast<int>(flat.size()) - 1; i >= 0; --i) {
                 auto* n = flat[i];
-                if (!n->layer || !n->visible) continue;
+                if (!n->layer || !n->isVisible()) continue;
                 auto* l = n->layer.get();
                 // Composite dab tiles over the stale cpuImage base (see the
                 // active-layer branch above).
-                const QImage srcLayerImage = l->rasterStorage.isEnabled()
+                const QImage srcLayerImage = l->renderRasterStorage().isEnabled()
                     ? l->compositeImage()
-                    : l->cpuImage;
+                    : l->renderCpuImage();
                 int lw = srcLayerImage.width();
                 int lh = srcLayerImage.height();
                 if (lw <= 0 || lh <= 0) continue;
@@ -6173,7 +6502,7 @@ void ImageController::copy()
                 cv::warpAffine(layerMat, canvas, xform, canvas.size(),
                                cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
                 mats.push_back(std::move(canvas));
-                ops.push_back(n->opacity);
+                ops.push_back(n->opacity());
                 vis.push_back(true);
             }
 
@@ -6214,6 +6543,10 @@ void ImageController::copy()
         ClipboardData data;
         data.type = (node->type == LayerTreeNode::Type::Group)
                     ? ClipboardType::Group : ClipboardType::Layer;
+        // Carry the copied subtree's animation tracks (keyed by their current
+        // ids; remapped to fresh ids on paste).
+        captureSubtreeTracks(m_doc, node, data.tracks,
+                             &data.rasterTracks, &data.celStorage);
         data.node = std::move(dup);
         data.sourceDocSize = m_doc->size;
         data.name = node->name + " (copy)";
@@ -6324,7 +6657,7 @@ void ImageController::paste()
             const QTransform bInv = between.inverted(&inv);
             const QTransform corr = inv
                 ? (between * crossDocScale * bInv) : crossDocScale;
-            root->transform = root->transform * corr;
+            root->setBaseTransform(root->transform() * corr);
             stampResetTransform(root);
         }
         for (auto& child : root->children)
@@ -6363,7 +6696,7 @@ void ImageController::paste()
         QTransform t;
         t.translate(tx, ty);
         t.scale(sx, sy);
-        newNode->transform = t;
+        newNode->setBaseTransform(t);
         newNode->layer->resetTransform = t;
         newNode->layer->hasResetTransform = true;
 
@@ -6383,12 +6716,32 @@ void ImageController::paste()
         if (!data.node) return;
         const bool isGroup = data.type == ClipboardType::Group;
         auto dup = data.node->clone(true);
+        // The pasted node is a NEW node: give the whole subtree fresh ids (the
+        // clone preserved the source ids, which would collide with the original)
+        // and install the carried animation tracks under those new ids.
+        QHash<LayerId, LayerId> idMap;
+        dup->assignNewIds(idMap);
+        for (const ClipboardTrack& ct : data.tracks) {
+            const LayerId newId = idMap.value(ct.layerId);
+            if (!newId.isNull())
+                m_doc->animation.ensureTrack(newId, ct.property) = ct.track;
+        }
+        for (const anim::CelId& celId : data.celStorage.ids()) {
+            if (m_doc->animation.celStorage().contains(celId)) continue;
+            if (const auto* content = data.celStorage.content(celId))
+                m_doc->animation.celStorage().insertCel(celId, *content);
+        }
+        for (const ClipboardRasterTrack& ct : data.rasterTracks) {
+            const LayerId newId = idMap.value(ct.layerId);
+            if (!newId.isNull())
+                m_doc->animation.ensureRasterTrack(newId) = ct.track;
+        }
         dup->name = data.name;
         // The paste offset rides the ROOT only, so a group moves as one block
         // (the children keep their relative positions). Cross-doc scale is NOT
         // applied here — it must run per leaf AFTER insertion (applyCrossDocFix),
         // once each leaf's parent accumulated transform reflects the destination.
-        dup->transform = dup->transform * ndcOffset;
+        dup->setBaseTransform(dup->transform() * ndcOffset);
         stampResetTransformRecursive(dup.get());
 
         int newIndex = m_doc->insertNodeAt(insertAt, std::move(dup));
@@ -6485,7 +6838,7 @@ void ImageController::createTextLayer(const QString& initialText,
     node->nameIsAuto = true;
     node->layer = layer;
     node->layer->owner = node.get();
-    node->transform = t;
+    node->setBaseTransform(t);
     node->layer->resetTransform = t;
     node->layer->hasResetTransform = true;
 
@@ -6530,7 +6883,7 @@ void ImageController::createShapeLayer(const ShapeData& data)
     node->layer->owner = node.get();
     if (!ShapeLayerUpdater::rebuildShapeRaster(*m_doc, *node))
         return;
-    QTransform t = node->transform;
+    QTransform t = node->transform();
     node->layer->resetTransform = t;
     node->layer->hasResetTransform = true;
 
@@ -6572,24 +6925,24 @@ void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
 
     ShapeData before = *node->layer->shapeData;
     QImage beforeImage = node->layer->cpuImage.copy();
-    QTransform beforeXf = node->transform;
+    QTransform beforeXf = node->transform();
     const QTransform beforeBaseXf = shapeLayerTransform(before, beforeImage, m_doc->size);
 
     *node->layer->shapeData = shape;
     if (!ShapeLayerUpdater::rebuildShapeRaster(*m_doc, *node)) {
         *node->layer->shapeData = before;
         node->layer->cpuImage = beforeImage;
-        node->transform = beforeXf;
+        node->setBaseTransform(beforeXf);
         return;
     }
 
     QImage rendered = node->layer->cpuImage.copy();
-    const QTransform afterBaseXf = node->transform;
+    const QTransform afterBaseXf = node->transform();
     bool invertible = false;
     const QTransform invBeforeBase = beforeBaseXf.inverted(&invertible);
     const QTransform userDelta = invertible ? (invBeforeBase * beforeXf) : QTransform();
     QTransform afterXf = invertible ? (afterBaseXf * userDelta) : beforeXf;
-    node->transform = afterXf;
+    node->setBaseTransform(afterXf);
     node->layer->textureOutdated = true;
     node->layer->shapeCache.dirty = true;
     node->invalidateEffects();
@@ -6618,11 +6971,11 @@ void ImageController::bakeShapeTransform(int flatIndex, const QTransform& before
     // Bake the visible layer transform into ShapeTransform.localToCanvas, keeping
     // VectorPath untouched and regenerating cpuImage as derived raster.
     if (!bakeShapeLayerResolutionInPlace(flatIndex)) {
-        setLayerTransform(flatIndex, node->transform, &beforeTransform);
+        setLayerTransform(flatIndex, node->transform(), &beforeTransform);
         return;
     }
 
-    const QTransform afterTransform = node->transform;
+    const QTransform afterTransform = node->transform();
     m_history.push(std::make_unique<ModifyShapeCommand>(
         m_doc, flatIndex,
         std::move(before), *node->layer->shapeData,
@@ -6670,10 +7023,10 @@ bool ImageController::bakeShapeLayerResolutionInPlace(int flatIndex)
     const QTransform newNaturalWorld = shapeLayerTransform(after, rendered, m_doc->size);
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
+        parentAccum = parentAccum * p->transform();
     bool parentInvOk = false;
     const QTransform parentInv = parentAccum.inverted(&parentInvOk);
-    node->transform = parentInvOk ? (newNaturalWorld * parentInv) : newNaturalWorld;
+    node->setBaseTransform(parentInvOk ? (newNaturalWorld * parentInv) : newNaturalWorld);
 
     node->layer->textureOutdated = true;
     node->layer->shapeCache.dirty = true;
@@ -6698,7 +7051,7 @@ void ImageController::updateTextLayer(int flatIndex, const TextLayerData& data)
     renderer.render(*node->layer->textData, node->layer->cpuImage);
     syncLayerToGpu(node->layer.get());
 
-    QTransform t = node->transform;
+    QTransform t = node->transform();
     m_history.push(std::make_unique<TextEditCommand>(
         m_doc, flatIndex, std::move(before), data, t, t, "edit_text"));
 
@@ -6760,7 +7113,7 @@ void ImageController::applyTextStyle(int flatIndex, const TextSpan& style, bool 
     renderer.render(data, node->layer->cpuImage);
     syncLayerToGpu(node->layer.get());
 
-    QTransform t = node->transform;
+    QTransform t = node->transform();
     m_history.push(std::make_unique<TextEditCommand>(
         m_doc, flatIndex, std::move(before), data, t, t, "apply_style"));
 
@@ -6788,7 +7141,7 @@ bool ImageController::commitTextEdit(int flatIndex, const TextLayerData& before,
 
     m_history.push(std::make_unique<TextEditCommand>(
         m_doc, flatIndex, before, after,
-        beforeTransform, node->transform, "edit_text"));
+        beforeTransform, node->transform(), "edit_text"));
 
     // While the layer still carries its system-generated label, keep it in sync
     // with the typed text (first non-empty line, elided). A manual rename clears

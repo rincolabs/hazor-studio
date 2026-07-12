@@ -48,7 +48,7 @@ void TileRenderer::initGL()
 
 void TileRenderer::enableLayerTiling(Layer* layer, int tileSize)
 {
-    if (!layer || layer->cpuImage.isNull()) return;
+    if (!layer || layer->renderCpuImage().isNull()) return;
     layer->enableTiling(tileSize);
 }
 
@@ -60,7 +60,7 @@ void TileRenderer::disableLayerTiling(Layer* layer)
 
 bool TileRenderer::shouldTile(const Layer* layer)
 {
-    if (!layer || layer->cpuImage.isNull()) return false;
+    if (!layer || layer->renderCpuImage().isNull()) return false;
     static constexpr int kMinArea = 256 * 256;
     return layer->imageWidth() * layer->imageHeight() >= kMinArea;
 }
@@ -80,7 +80,7 @@ void TileRenderer::uploadDirtyTiles(Layer* layer)
                    : nullptr;
     if (!gl) return;
 
-    const QImage& src = layer->cpuImage;
+    const QImage& src = layer->renderCpuImage();
     gl->glBindTexture(GL_TEXTURE_2D, layer->textureId);
 
     for (auto* tile : tiles) {
@@ -106,7 +106,7 @@ void TileRenderer::uploadDirtyTiles(Layer* layer)
 
 void TileRenderer::uploadDirtyRasterTiles(Layer* layer)
 {
-    if (!layer || !layer->rasterStorage.isEnabled())
+    if (!layer || !layer->renderRasterStorage().isEnabled())
         return;
 
     auto* gl = QOpenGLContext::currentContext()
@@ -117,7 +117,7 @@ void TileRenderer::uploadDirtyRasterTiles(Layer* layer)
     GLint prevUnpackAlignment = 4;
     gl->glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevUnpackAlignment);
 
-    layer->rasterStorage.forEachTile([&](core::RasterTile& tile) {
+    layer->renderRasterStorage().forEachTile([&](core::RasterTile& tile) {
         if (!tile.dirtyGpu && tile.textureId != 0)
             return;
         if (tile.cpuImage.isNull())
@@ -165,7 +165,7 @@ std::vector<TileDraw> TileRenderer::computeTilesForLayer(
     core::RenderScheduler::LOD lod)
 {
     std::vector<TileDraw> out;
-    if (!layer || !layer->tiledSystem || layer->cpuImage.isNull())
+    if (!layer || !layer->tiledSystem || layer->renderCpuImage().isNull())
         return out;
 
     int lW = layer->imageWidth();
@@ -178,7 +178,7 @@ std::vector<TileDraw> TileRenderer::computeTilesForLayer(
         : QTransform{};
 
     if (inv.isIdentity() && layer->owner
-        && !layer->owner->transform.isIdentity())
+        && !layer->owner->transform().isIdentity())
         return out; // singular — skip
 
     QPointF corners[4] = {
@@ -272,7 +272,7 @@ std::vector<TileDraw> TileRenderer::computeRasterTilesForLayer(
     const QMatrix4x4& layerMvp)
 {
     std::vector<TileDraw> out;
-    if (!layer || !layer->rasterStorage.isEnabled())
+    if (!layer || !layer->renderRasterStorage().isEnabled())
         return out;
 
     const QSize baseSize = layer->rasterBaseSize();
@@ -313,7 +313,7 @@ std::vector<TileDraw> TileRenderer::computeRasterTilesForLayer(
         QPoint(static_cast<int>(std::floor(minX)), static_cast<int>(std::floor(minY))),
         QPoint(static_cast<int>(std::ceil(maxX)), static_cast<int>(std::ceil(maxY))));
 
-    const auto tiles = layer->rasterStorage.tilesInRect(layerPixelRect);
+    const auto tiles = layer->renderRasterStorage().tilesInRect(layerPixelRect);
     out.reserve(tiles.size());
     for (const auto* tile : tiles) {
         if (!tile || tile->textureId == 0)
@@ -375,12 +375,12 @@ std::vector<TileDraw> TileRenderer::computeVisibleTiles(
     // ── Walk visible layers bottom → top ──
     auto flat = doc->flatten();
     for (auto* node : flat) {
-        if (!node->visible) continue;
+        if (!node->isVisible()) continue;
         if (node->type != LayerTreeNode::Type::Layer) continue;
         if (!node->layer || !node->layer->tiledSystem) continue;
 
         Layer* layer = node->layer.get();
-        if (layer->cpuImage.isNull()) continue;
+        if (layer->renderCpuImage().isNull()) continue;
 
         int lW = layer->imageWidth();
         int lH = layer->imageHeight();

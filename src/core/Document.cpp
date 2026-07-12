@@ -1,6 +1,22 @@
 #include "Document.hpp"
+#include "animation/AnimationEvaluator.hpp"
+#include <algorithm>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+
+bool Document::setCurrentFrame(int frame)
+{
+    // 1. clamp to the valid document frame range.
+    const int lo = animation.startFrame();
+    const int hi = std::max(lo, animation.endFrame());
+    m_currentFrame = std::clamp(frame, lo, hi);
+
+    // 2-4. run the evaluator: it writes evaluatedState for animated nodes and
+    // bumps compositionGeneration when anything actually changed. Static
+    // documents (no tracks) short-circuit inside evaluate(). The caller decides
+    // whether to repaint based on the return value.
+    return anim::AnimationEvaluator::evaluate(*this, m_currentFrame) > 0;
+}
 
 void Document::saveSelectionToChannel(const QString& name)
 {

@@ -16,6 +16,8 @@
 #include "core/Clipboard.hpp"
 #include "core/LayerEffect.hpp"
 #include "controller/CommandHistory.hpp"
+#include "animation/LayerPropertyController.hpp"
+#include "animation/PlaybackController.hpp"
 #include "text/TextTypes.hpp"
 #include "core/ShapeTypes.hpp"
 #include "tools/ToolCall.hpp"
@@ -83,6 +85,33 @@ public:
     Layer* activeLayer() const;
     int activeLayerIndex() const { return m_doc ? m_doc->activeFlatIndex : -1; }
     void deselectActive() { setActiveNode(-1); }
+
+    // ── Animation ─────────────────────────────────────────────
+    int currentFrame() const { return m_doc ? m_doc->currentFrame() : 0; }
+    // Auto-key: when on, editing an animatable property records a keyframe at the
+    // current frame instead of changing its static base value. The timeline
+    // toolbar toggles this (single source of truth for the whole app).
+    bool autoKey() const { return m_propertyController.autoKey(); }
+    void setAutoKey(bool on) { m_propertyController.setAutoKey(on); }
+    anim::PlaybackController* playbackController() { return &m_playbackController; }
+    const anim::PlaybackController* playbackController() const { return &m_playbackController; }
+    // Central entry point for frame navigation (scrubbing, playback, timeline).
+    // Delegates to Document::setCurrentFrame (clamp + evaluate) and drives the
+    // existing render flow: emits currentFrameChanged for the UI and imageChanged
+    // (GPU sync + repaint) only when the evaluated frame actually changed the
+    // composite. Frame navigation is view state — it is NOT an undo command.
+    void setCurrentFrame(int frame);
+    void previewNodeTransform(LayerTreeNode* node, const QTransform& transform);
+
+    // Ensure the active raster-animation exposure owns writable cel content.
+    // Static layers are unchanged. Shared duplicated cels detach on an explicit
+    // key before pixel tools write.
+    bool prepareRasterCelForEdit(LayerTreeNode* node = nullptr);
+    bool createRasterCel(bool duplicateCurrent = false);
+    bool createEmptyRasterFrame();
+    bool removeRasterCelKeyframe();
+    bool moveRasterCelKeyframe(int targetFrame);
+    bool pasteRasterCel(const std::optional<anim::RasterCelContent>& content);
 
     void newLayer();
     void newGroup();
@@ -347,6 +376,9 @@ signals:
     void activeLayerChanged(int flatIndex);
     void selectionChanged();
     void imageChanged();
+    // Emitted when the current animation frame changes (for the timeline UI /
+    // frame readouts). Carries the clamped frame actually in effect.
+    void currentFrameChanged(int frame);
     void toolExecuted(const QString& toolName, bool success);
     void clipboardChanged();
     void historyChanged();
@@ -404,6 +436,11 @@ private:
 
     Document* m_doc = nullptr;
     CommandHistory m_history;
+    // Central animatable-property editor (auto-key). Rebound in setDocument.
+    anim::LayerPropertyController m_propertyController;
+    // Timeline-independent, elapsed-time playback backend. It requests frames
+    // through setCurrentFrame(), never by touching evaluated layer state itself.
+    anim::PlaybackController m_playbackController;
     bool m_inBatch = false;
     int m_pasteCount = 0;
     bool m_editingMask = false;

@@ -14,6 +14,7 @@
 #include "DirtyRegion.hpp"
 #include "RenderScheduler.hpp"
 #include "RasterLayerStorage.hpp"
+#include "animation/RasterCelModel.hpp"
 
 struct TextLayerData;
 struct ShapeData;
@@ -121,23 +122,43 @@ public:
     bool tiledSystem = false;
     core::RasterLayerStorage rasterStorage;
 
-    int imageWidth()  const { return cpuImage.width(); }
-    int imageHeight() const { return cpuImage.height(); }
+    // Raster-animation render view. The base cpuImage/rasterStorage remain the
+    // static persisted content; evaluation selects a cel explicitly here.
+    bool hasEvaluatedRasterContent() const { return m_rasterAnimationActive; }
+    const anim::CelId& evaluatedCelId() const { return m_evaluatedCelId; }
+    const std::shared_ptr<anim::RasterCelContent>& evaluatedRasterContentHandle() const {
+        return m_evaluatedRasterContent;
+    }
+    void setEvaluatedRasterContent(
+        const anim::CelId& id,
+        std::shared_ptr<anim::RasterCelContent> content);
+    void setEvaluatedRasterEmpty();
+    void clearEvaluatedRasterContent();
 
-    bool usesRasterStorage() const { return rasterStorage.isEnabled(); }
+    const QImage& renderCpuImage() const;
+    QImage& writableRenderCpuImage();
+    const core::RasterLayerStorage& renderRasterStorage() const;
+    core::RasterLayerStorage& renderRasterStorage();
+
+    int imageWidth()  const { return renderCpuImage().width(); }
+    int imageHeight() const { return renderCpuImage().height(); }
+
+    bool usesRasterStorage() const { return renderRasterStorage().isEnabled(); }
 
     QSize rasterBaseSize() const {
-        if (rasterStorage.isEnabled() && rasterStorage.baseSize().isValid()
-            && !rasterStorage.baseSize().isEmpty()) {
-            return rasterStorage.baseSize();
+        const auto& storage = renderRasterStorage();
+        if (storage.isEnabled() && storage.baseSize().isValid()
+            && !storage.baseSize().isEmpty()) {
+            return storage.baseSize();
         }
-        return cpuImage.size();
+        return renderCpuImage().size();
     }
 
     QRect maskTargetBounds() const {
         QRect bounds(QPoint(0, 0), rasterBaseSize());
-        if (rasterStorage.isEnabled()) {
-            const QRect content = rasterStorage.contentBounds();
+        const auto& storage = renderRasterStorage();
+        if (storage.isEnabled()) {
+            const QRect content = storage.contentBounds();
             if (!content.isEmpty())
                 bounds = bounds.isEmpty() ? content : bounds.united(content);
         }
@@ -145,23 +166,25 @@ public:
     }
 
     QRectF renderImageBounds() const {
-        if (rasterStorage.isEnabled()) {
-            const QRect bounds = rasterStorage.logicalBounds();
+        const auto& storage = renderRasterStorage();
+        if (storage.isEnabled()) {
+            const QRect bounds = storage.logicalBounds();
             if (!bounds.isEmpty())
                 return QRectF(bounds);
         }
-        return QRectF(QPointF(0, 0), cpuImage.size());
+        return QRectF(QPointF(0, 0), renderCpuImage().size());
     }
 
     QRectF contentImageBounds() const {
-        if (rasterStorage.isEnabled()) {
-            QRect bounds = rasterStorage.contentBounds();
+        const auto& storage = renderRasterStorage();
+        if (storage.isEnabled()) {
+            QRect bounds = storage.contentBounds();
             if (bounds.isEmpty())
-                bounds = rasterStorage.logicalBounds();
+                bounds = storage.logicalBounds();
             if (!bounds.isEmpty())
                 return QRectF(bounds);
         }
-        return QRectF(QPointF(0, 0), cpuImage.size());
+        return QRectF(QPointF(0, 0), renderCpuImage().size());
     }
 
     // Alpha content bounds of cpuImage (flat raster layers): the tight rect of
@@ -175,13 +198,14 @@ public:
     void invalidateContentBounds() { cpuContentBoundsDirty = true; }
 
     QImage renderImage() const {
-        if (rasterStorage.isEnabled()) {
+        const auto& storage = renderRasterStorage();
+        if (storage.isEnabled()) {
             QRect bounds;
-            QImage image = rasterStorage.toImage(&bounds);
+            QImage image = storage.toImage(&bounds);
             if (!image.isNull())
                 return image;
         }
-        return cpuImage;
+        return renderCpuImage();
     }
 
     // Returns a full base-size image compositing rasterStorage tiles at their correct
@@ -198,7 +222,7 @@ public:
 
     void enableRasterStorage(int tileSize = 256) {
         if (!isTextLayer() && !isShapeLayer()) {
-            rasterStorage.enableFromImage(cpuImage, tileSize);
+            renderRasterStorage().enableFromImage(renderCpuImage(), tileSize);
             tiledSystem = false;
             tileManager.clear();
             dirtyRegion.clear();
@@ -210,8 +234,8 @@ public:
     void replaceRasterStorageWithImage(const QImage& image,
                                        const QPoint& origin = QPoint(0, 0),
                                        int tileSize = 256) {
-        rasterStorage.replaceWithImage(image, origin, tileSize);
-        cpuImage = image.convertToFormat(QImage::Format_RGBA8888);
+        renderRasterStorage().replaceWithImage(image, origin, tileSize);
+        writableRenderCpuImage() = image.convertToFormat(QImage::Format_RGBA8888);
         tiledSystem = false;
         tileManager.clear();
         dirtyRegion.clear();
@@ -246,6 +270,13 @@ public:
     mutable QRect cpuContentBoundsCache;
     mutable qint64 cpuContentBoundsKey = 0;
     mutable bool cpuContentBoundsDirty = true;
+
+private:
+    bool m_rasterAnimationActive = false;
+    anim::CelId m_evaluatedCelId;
+    std::shared_ptr<anim::RasterCelContent> m_evaluatedRasterContent;
+
+public:
 
     struct ShapeRenderCache {
         QImage image;

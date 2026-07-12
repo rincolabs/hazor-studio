@@ -295,7 +295,11 @@ public:
         , m_after(std::move(after))
         , m_afterTransform(afterTransform)
         , m_name(std::move(commandName))
-    {}
+    {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (node && node->layer && node->layer->hasEvaluatedRasterContent())
+            m_celId = node->layer->evaluatedCelId();
+    }
 
     void execute() override {
         apply(m_after, m_afterTransform);
@@ -312,21 +316,28 @@ private:
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (node && node->type == LayerTreeNode::Type::Layer && node->layer) {
             auto* l = node->layer.get();
-            node->layer->cpuImage = img;
-            node->transform = t;
+            QImage* pixels = &l->cpuImage;
+            core::RasterLayerStorage* storage = &l->rasterStorage;
+            if (!m_celId.isNull()) {
+                if (auto* content = m_doc->animation.celStorage().content(m_celId)) {
+                    pixels = &content->cpuImage;
+                    storage = &content->rasterStorage;
+                }
+            }
+            *pixels = img;
+            node->setBaseTransform(t);
             // The before/after snapshots are full flat images (every creator
             // flushes tiles into cpuImage first), so the pixel state is fully
             // defined by `img` in both representations. If the layer currently
             // uses rasterStorage (dab layer), rebuild the tiles from the applied
             // image instead of flattening: keeping the representation preserves
             // the content-bounds transform outline across undo/redo.
-            if (l->rasterStorage.isEnabled()) {
-                l->rasterStorage.replaceWithImage(
+            if (storage->isEnabled()) {
+                storage->replaceWithImage(
                     img, QPoint(0, 0),
-                    l->rasterStorage.tileSize() > 0 ? l->rasterStorage.tileSize()
-                                                    : 256);
+                    storage->tileSize() > 0 ? storage->tileSize() : 256);
             } else {
-                l->rasterStorage.clear();
+                storage->clear();
             }
             if (l->tiledSystem) {
                 l->enableTiling(l->tileManager.tileSize());
@@ -346,6 +357,7 @@ private:
     QImage m_after;
     QTransform m_afterTransform;
     QString m_name;
+    anim::CelId m_celId;
 };
 
 class RasterTileCommand : public Command {
@@ -357,7 +369,11 @@ public:
         , m_flatIndex(flatIndex)
         , m_changes(std::move(changes))
         , m_name(std::move(commandName))
-    {}
+    {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (node && node->layer && node->layer->hasEvaluatedRasterContent())
+            m_celId = node->layer->evaluatedCelId();
+    }
 
     void execute() override { apply(true); }
     void undo() override { apply(false); }
@@ -370,6 +386,14 @@ private:
             return;
 
         auto* layer = node->layer.get();
+        core::RasterLayerStorage* storage = &layer->rasterStorage;
+        QImage* baseImage = &layer->cpuImage;
+        if (!m_celId.isNull()) {
+            if (auto* content = m_doc->animation.celStorage().content(m_celId)) {
+                storage = &content->rasterStorage;
+                baseImage = &content->cpuImage;
+            }
+        }
         // The change list is a delta against the storage state at stroke time.
         // A later command may have flattened the layer (flush tiles → cpuImage,
         // rasterStorage.clear()) — e.g. a filter; its undo restores the flat
@@ -377,15 +401,14 @@ private:
         // re-enable tile rendering with ONLY the stroke's tiles, wiping the rest
         // of the layer. Re-seed the storage from the current (flushed) cpuImage
         // first so the delta lands on the full content again.
-        if (!layer->rasterStorage.isEnabled() || !layer->rasterStorage.hasTiles()) {
-            if (!layer->cpuImage.isNull()) {
-                const int tileSize = layer->rasterStorage.tileSize() > 0
-                    ? layer->rasterStorage.tileSize() : 256;
-                layer->rasterStorage.replaceWithImage(layer->cpuImage,
-                                                      QPoint(0, 0), tileSize);
+        if (!storage->isEnabled() || !storage->hasTiles()) {
+            if (!baseImage->isNull()) {
+                const int tileSize = storage->tileSize() > 0
+                    ? storage->tileSize() : 256;
+                storage->replaceWithImage(*baseImage, QPoint(0, 0), tileSize);
             }
         }
-        layer->rasterStorage.applyChanges(m_changes, useAfter);
+        storage->applyChanges(m_changes, useAfter);
         layer->pendingGpuUpload = true;
         layer->textureOutdated = true;
         layer->dirtyRegion.clear();
@@ -400,6 +423,7 @@ private:
     Document* m_doc;
     int m_flatIndex;
     std::vector<core::RasterTileChange> m_changes;
+    anim::CelId m_celId;
     QString m_name;
 };
 
@@ -480,7 +504,7 @@ private:
         for (size_t i = 0; i < count; ++i) {
             auto* node = m_doc->nodeAt(m_flatIndices[i]);
             if (node)
-                node->transform = transforms[i];
+                node->setBaseTransform(transforms[i]);
         }
         ++m_doc->compositionGeneration;
     }
@@ -768,7 +792,7 @@ private:
 
         auto textData = std::make_shared<TextLayerData>(data);
         node->layer->textData = textData;
-        node->transform = t;
+        node->setBaseTransform(t);
 
         TextRenderer renderer;
         renderer.render(*textData, node->layer->cpuImage);
@@ -819,7 +843,7 @@ private:
         if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
             return;
         node->layer->cpuImage = img;
-        node->transform = t;
+        node->setBaseTransform(t);
         node->layer->textData = textData;
         node->layer->shapeData = shapeData;
         node->layer->textureOutdated = true;
@@ -878,7 +902,7 @@ private:
         layer->dirtyRegion.clear();
         layer->textureOutdated = true;
         layer->pendingGpuUpload = true;
-        node->transform = t;
+        node->setBaseTransform(t);
         // Deep-copy so later edits don't mutate the stored undo state.
         layer->distortData = data
             ? std::make_shared<DistortData>(*data) : nullptr;
@@ -959,7 +983,7 @@ public:
         dstNode->layer->textData  = m_dstTextData;
         dstNode->layer->shapeCache = Layer::ShapeRenderCache{};
         LayerMaskSnapshot::restore(dstNode->layer.get(), m_dstMaskBefore);
-        dstNode->transform = m_dstBeforeXf;
+        dstNode->setBaseTransform(m_dstBeforeXf);
         dstNode->layer->textureOutdated = true;
         dstNode->thumbnailDirty = true;
         dstNode->sourceDirty    = true;
@@ -1068,7 +1092,7 @@ public:
         if (node && node->layer) {
             node->layer->rasterStorage.clear();
             node->layer->cpuImage = m_mergedImage;
-            node->transform = QTransform();
+            node->setBaseTransform(QTransform());
             LayerMaskSnapshot::clear(node->layer.get());
             node->layer->textureOutdated = true;
             node->thumbnailDirty = true;
@@ -1084,7 +1108,7 @@ public:
         if (node && node->layer) {
             node->layer->rasterStorage.clear();
             node->layer->cpuImage = m_activeBefore;
-            node->transform = m_activeBeforeXf;
+            node->setBaseTransform(m_activeBeforeXf);
             LayerMaskSnapshot::restore(node->layer.get(), m_activeMaskBefore);
             node->layer->textureOutdated = true;
             node->thumbnailDirty = true;
@@ -1375,9 +1399,9 @@ private:
     void apply(float op, bool vis, BlendMode bm) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (node) {
-            node->opacity = op;
-            node->visible = vis;
-            node->blendMode = bm;
+            node->setBaseOpacity(op);
+            node->setBaseVisible(vis);
+            node->setBaseBlendMode(bm);
             // A nested adjustment (Single Layer Mode) bakes opacity/visibility
             // into its parent layer's effected image — invalidate on undo/redo.
             if (node->type == LayerTreeNode::Type::Adjustment)

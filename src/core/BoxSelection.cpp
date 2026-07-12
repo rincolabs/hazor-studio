@@ -16,7 +16,7 @@ std::set<int> findLayersInRect(const Document* doc, const QRectF& canvasRect)
     auto flat = doc->flatten();
     for (int i = 0; i < static_cast<int>(flat.size()); ++i) {
         auto* node = flat[i];
-        if (!node->visible) continue;
+        if (!node->isVisible()) continue;
         if (node->type != LayerTreeNode::Type::Layer) continue;
         if (!node->layer) continue;
         if (node->isPositionLocked()) continue;

@@ -209,7 +209,7 @@ void SolidColorAdjustmentWidget::reloadFromNode()
     m_data = solidcolor::SolidColorData::fromParams(node->adjustment->params);
 
     m_bar->setPreviewChecked(true);
-    m_bar->setVisibilityChecked(node->visible);
+    m_bar->setVisibilityChecked(node->isVisible());
     const bool single = node->parent
         && node->parent->type == LayerTreeNode::Type::Layer;
     m_bar->setClipChecked(single);

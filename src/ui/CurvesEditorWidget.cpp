@@ -765,7 +765,7 @@ void CurvesEditorWidget::reloadFromNode()
         m_channelCombo->setCurrentIndex(0);
 
     m_bar->setPreviewChecked(true);
-    m_bar->setVisibilityChecked(node->visible);
+    m_bar->setVisibilityChecked(node->isVisible());
 
     const bool single = node->parent
         && node->parent->type == LayerTreeNode::Type::Layer;
@@ -1425,11 +1425,11 @@ QColor CurvesEditorWidget::sampleInputColor(const QPointF& docPos)
     // Composite with THIS adjustment hidden so the read is the curve's input.
     // Synchronous, throwaway image — does not touch the on-screen projection
     // (compositionGeneration is untouched), so there is no visual flicker.
-    const bool savedVisible = node->visible;
-    node->visible = false;
+    const bool savedVisible = node->isVisible();
+    node->setBaseVisible(false);
     node->invalidateEffects();
     QImage input = compositeImage(doc);
-    node->visible = savedVisible;
+    node->setBaseVisible(savedVisible);
     node->invalidateEffects();
 
     if (input.isNull()

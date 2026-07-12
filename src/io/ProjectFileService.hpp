@@ -24,6 +24,7 @@ struct ProjectLoadResult {
     std::vector<Guide> guides;
     ColorProfile colorProfile = ColorProfile::sRgb();
     ColorProfileSource profileSource = ColorProfileSource::GeneratedDefault;
+    anim::AnimationModel animation;
 };
 
 class ProjectFileService {

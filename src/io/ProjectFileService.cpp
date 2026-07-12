@@ -19,6 +19,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QSet>
+#include <QUuid>
+
+#include "animation/AnimationModel.hpp"
+#include "animation/AnimationTrack.hpp"
+#include "animation/AnimationTypes.hpp"
+#include "animation/AnimationValue.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -103,6 +110,274 @@ QTransform transformFromArray(const QJsonArray& a)
         a[0].toDouble(), a[1].toDouble(), a[2].toDouble(),
         a[3].toDouble(), a[4].toDouble(), a[5].toDouble(),
         a[6].toDouble(), a[7].toDouble(), a[8].toDouble());
+}
+
+// ── Animation section (Etapa 10) ────────────────────────────────────────────
+// Optional "animation" block. Only base values are persisted (the model is
+// independent of the current frame); documents without the block load as plain
+// static documents. Loading validates every track and ignores (with a warning)
+// anything malformed rather than failing the whole document.
+QString interpToString(anim::Interpolation i)
+{
+    switch (i) {
+    case anim::Interpolation::Hold:   return QStringLiteral("hold");
+    case anim::Interpolation::Bezier: return QStringLiteral("bezier");
+    case anim::Interpolation::Linear: break;
+    }
+    return QStringLiteral("linear");
+}
+
+anim::Interpolation interpFromString(const QString& s)
+{
+    if (s == QLatin1String("hold"))   return anim::Interpolation::Hold;
+    if (s == QLatin1String("bezier")) return anim::Interpolation::Bezier;
+    return anim::Interpolation::Linear;
+}
+
+QJsonValue keyValueToJson(const anim::AnimationValue& v, anim::ValueType t)
+{
+    switch (t) {
+    case anim::ValueType::Bool: return v.asBool();
+    case anim::ValueType::Enum: return v.asEnum();
+    case anim::ValueType::Float: break;
+    }
+    return static_cast<double>(v.asFloat());
+}
+
+anim::AnimationValue jsonToKeyValue(const QJsonValue& jv, anim::ValueType t)
+{
+    switch (t) {
+    case anim::ValueType::Bool: return anim::AnimationValue(jv.toBool());
+    case anim::ValueType::Enum: return anim::AnimationValue::fromEnum(jv.toInt());
+    case anim::ValueType::Float: break;
+    }
+    return anim::AnimationValue(static_cast<float>(jv.toDouble()));
+}
+
+QJsonObject animationToJson(const anim::AnimationModel& m,
+                            QMap<QString, QByteArray>& blobs)
+{
+    QJsonObject o;
+    o["version"] = 1;
+    o["fps"] = m.fps();
+    o["frameRange"] = QJsonArray{ m.startFrame(), m.endFrame() };
+    o["playbackRange"] = QJsonArray{ m.playbackStart(), m.playbackEnd() };
+
+    QJsonArray tracks;
+    for (const LayerId& id : m.animatedLayers()) {
+        const auto* layerTracks = m.tracksFor(id);
+        if (!layerTracks) continue;
+        for (const auto& [prop, track] : *layerTracks) {
+            const anim::ValueType vt = anim::valueType(prop);
+            QJsonObject to;
+            to["layerId"] = id.toString(QUuid::WithoutBraces);
+            to["property"] = QString(anim::propertyId(prop));
+            to["defaultInterp"] = interpToString(track.defaultInterpolation());
+            QJsonArray keys;
+            for (const anim::Keyframe& k : track.keyframes()) {
+                QJsonObject ko;
+                ko["frame"] = k.frame;
+                ko["value"] = keyValueToJson(k.value, vt);
+                ko["interp"] = interpToString(k.interpolation);
+                if (k.interpolation == anim::Interpolation::Bezier) {
+                    ko["inTanX"] = k.inTangentX;   ko["inTanY"] = k.inTangentY;
+                    ko["outTanX"] = k.outTangentX; ko["outTanY"] = k.outTangentY;
+                }
+                keys.push_back(ko);
+            }
+            to["keyframes"] = keys;
+            tracks.push_back(to);
+        }
+    }
+    o["tracks"] = tracks;
+
+    QJsonArray cels;
+    for (const anim::CelId& celId : m.celStorage().ids()) {
+        const auto* content = m.celStorage().content(celId);
+        if (!content) continue;
+        QJsonObject co;
+        const QString id = celId.toString(QUuid::WithoutBraces);
+        co["id"] = id;
+        co["bounds"] = QJsonArray{ content->bounds.x(), content->bounds.y(),
+                                    content->bounds.width(), content->bounds.height() };
+        co["metadata"] = QJsonObject::fromVariantMap(content->metadata);
+        if (!content->cpuImage.isNull()) {
+            const QString key = QStringLiteral("animation/cels/%1_base.png").arg(id);
+            blobs.insert(key, encodePng(content->cpuImage));
+            co["baseSource"] = key;
+        }
+        if (content->rasterStorage.isEnabled()) {
+            QRect tileBounds;
+            const QImage tiles = content->rasterStorage.toImage(&tileBounds);
+            co["tileSize"] = content->rasterStorage.tileSize();
+            co["baseWidth"] = content->rasterStorage.baseSize().width();
+            co["baseHeight"] = content->rasterStorage.baseSize().height();
+            co["tileOriginX"] = tileBounds.x();
+            co["tileOriginY"] = tileBounds.y();
+            if (!tiles.isNull()) {
+                const QString key = QStringLiteral("animation/cels/%1_tiles.png").arg(id);
+                blobs.insert(key, encodePng(tiles));
+                co["tilesSource"] = key;
+            }
+        }
+        cels.push_back(co);
+    }
+    o["cels"] = cels;
+
+    QJsonArray rasterTracks;
+    for (const LayerId& layerId : m.rasterAnimatedLayers()) {
+        const auto* track = m.rasterTrack(layerId);
+        if (!track || track->isEmpty()) continue;
+        QJsonObject to;
+        to["layerId"] = layerId.toString(QUuid::WithoutBraces);
+        QJsonArray keys;
+        for (const auto& [frame, celId] : track->keyframes()) {
+            QJsonObject ko;
+            ko["frame"] = frame;
+            if (celId)
+                ko["celId"] = celId->toString(QUuid::WithoutBraces);
+            else
+                ko["empty"] = true;
+            keys.push_back(ko);
+        }
+        to["keyframes"] = keys;
+        rasterTracks.push_back(to);
+    }
+    o["rasterTracks"] = rasterTracks;
+    return o;
+}
+
+void animationFromJson(const QJsonObject& o, anim::AnimationModel& m,
+                       const QSet<QUuid>& validIds,
+                       const QMap<QString, QByteArray>& blobs)
+{
+    if (o.isEmpty())
+        return;  // old document: no animation section, stays static
+
+    m.setFps(o.value("fps").toDouble(24.0));
+    const QJsonArray fr = o.value("frameRange").toArray();
+    if (fr.size() == 2) m.setFrameRange(fr[0].toInt(), fr[1].toInt());
+    const QJsonArray pr = o.value("playbackRange").toArray();
+    if (pr.size() == 2) m.setPlaybackRange(pr[0].toInt(), pr[1].toInt());
+
+    for (const QJsonValue& cv : o.value("cels").toArray()) {
+        if (!cv.isObject()) continue;
+        const QJsonObject co = cv.toObject();
+        const anim::CelId id = QUuid::fromString(co.value("id").toString());
+        if (id.isNull()) continue;
+        anim::RasterCelContent content;
+        const QJsonArray bounds = co.value("bounds").toArray();
+        if (bounds.size() == 4)
+            content.bounds = QRect(bounds[0].toInt(), bounds[1].toInt(),
+                                   bounds[2].toInt(), bounds[3].toInt());
+        content.metadata = co.value("metadata").toObject().toVariantMap();
+        const QString baseSource = co.value("baseSource").toString();
+        if (!baseSource.isEmpty() && blobs.contains(baseSource))
+            content.cpuImage = decodePng(blobs.value(baseSource))
+                .convertToFormat(QImage::Format_RGBA8888);
+        const QString tilesSource = co.value("tilesSource").toString();
+        if (!tilesSource.isEmpty() && blobs.contains(tilesSource)) {
+            const QImage tiles = decodePng(blobs.value(tilesSource))
+                .convertToFormat(QImage::Format_RGBA8888);
+            content.rasterStorage.replaceWithImage(
+                tiles,
+                QPoint(co.value("tileOriginX").toInt(), co.value("tileOriginY").toInt()),
+                co.value("tileSize").toInt(256));
+            const QSize baseSize(co.value("baseWidth").toInt(),
+                                 co.value("baseHeight").toInt());
+            if (baseSize.isValid() && !baseSize.isEmpty())
+                content.rasterStorage.setBaseSize(baseSize);
+        }
+        if (!m.celStorage().insertCel(id, std::move(content)))
+            qWarning() << "animation: skipping duplicate cel" << id;
+    }
+
+    for (const QJsonValue& tv : o.value("tracks").toArray()) {
+        if (!tv.isObject()) continue;
+        const QJsonObject to = tv.toObject();
+
+        const QUuid id = QUuid::fromString(to.value("layerId").toString());
+        if (id.isNull()) {
+            qWarning() << "animation: skipping track with invalid layerId";
+            continue;
+        }
+        if (!validIds.isEmpty() && !validIds.contains(id)) {
+            qWarning() << "animation: skipping track for unknown layer" << id.toString();
+            continue;
+        }
+        anim::Property prop;
+        if (!anim::propertyFromId(to.value("property").toString(), prop)) {
+            qWarning() << "animation: skipping unsupported property"
+                       << to.value("property").toString();
+            continue;
+        }
+
+        const anim::ValueType vt = anim::valueType(prop);
+        anim::AnimationTrack track(prop);
+        track.setDefaultInterpolation(interpFromString(to.value("defaultInterp").toString()));
+        for (const QJsonValue& kv : to.value("keyframes").toArray()) {
+            if (!kv.isObject()) continue;
+            const QJsonObject ko = kv.toObject();
+            if (!ko.contains("frame") || !ko.contains("value")) {
+                qWarning() << "animation: skipping malformed keyframe";
+                continue;
+            }
+            anim::Keyframe k(ko.value("frame").toInt(),
+                             jsonToKeyValue(ko.value("value"), vt),
+                             interpFromString(ko.value("interp").toString()));
+            if (ko.contains("inTanX")) {
+                k.inTangentX = static_cast<float>(ko.value("inTanX").toDouble());
+                k.inTangentY = static_cast<float>(ko.value("inTanY").toDouble());
+                k.outTangentX = static_cast<float>(ko.value("outTanX").toDouble());
+                k.outTangentY = static_cast<float>(ko.value("outTanY").toDouble());
+            }
+            track.setKeyframe(k);  // duplicate frames collapse (last wins)
+        }
+        if (!track.isEmpty())
+            m.ensureTrack(id, prop) = track;
+    }
+
+    for (const QJsonValue& tv : o.value("rasterTracks").toArray()) {
+        if (!tv.isObject()) continue;
+        const QJsonObject to = tv.toObject();
+        const LayerId layerId = QUuid::fromString(to.value("layerId").toString());
+        if (layerId.isNull() || (!validIds.isEmpty() && !validIds.contains(layerId))) {
+            qWarning() << "animation: skipping raster track for invalid layer";
+            continue;
+        }
+        anim::RasterCelTrack track;
+        for (const QJsonValue& kv : to.value("keyframes").toArray()) {
+            if (!kv.isObject()) continue;
+            const QJsonObject ko = kv.toObject();
+            if (!ko.contains("frame")) continue;
+            const int frame = ko.value("frame").toInt();
+            if (ko.value("empty").toBool(false)) {
+                track.setCel(frame, std::nullopt);
+                continue;
+            }
+            const anim::CelId celId = QUuid::fromString(ko.value("celId").toString());
+            if (celId.isNull() || !m.celStorage().contains(celId)) {
+                qWarning() << "animation: raster key references unknown cel";
+                continue;
+            }
+            track.setCel(frame, celId);
+        }
+        if (!track.isEmpty())
+            m.ensureRasterTrack(layerId) = std::move(track);
+    }
+    m.pruneUnusedCels();
+}
+
+// Collect the stable ids of every node in a loaded tree, for validating that
+// animation tracks reference layers that actually exist.
+void collectNodeIds(const std::vector<std::unique_ptr<LayerTreeNode>>& roots,
+                    QSet<QUuid>& out)
+{
+    for (const auto& n : roots) {
+        if (!n) continue;
+        out.insert(n->id);
+        collectNodeIds(n->children, out);
+    }
 }
 
 QJsonObject colorProfileToJson(const ColorProfile& profile, ColorProfileSource source)
@@ -554,19 +829,26 @@ QJsonObject nodeToJson(const LayerTreeNode& node,
                        QMap<QString, QByteArray>& blobs)
 {
     QJsonObject o;
+    // Ephemeral, per-save key used only to name this node's blobs inside the
+    // file (layers/<id>.png). NOT the node's identity.
     const QString id = QStringLiteral("layer_%1").arg(nextId++, 4, 10, QLatin1Char('0'));
     o["id"] = id;
+    // Stable persistent identity — survives reload and reorganization, and is
+    // what the animation model keys tracks by.
+    o["nodeId"] = node.id.toString(QUuid::WithoutBraces);
     o["name"] = node.name;
     o["type"] = nodeTypeToString(node.type);
-    o["visible"] = node.visible;
-    o["opacity"] = node.opacity;
-    o["blendMode"] = static_cast<int>(node.blendMode);
+    // Persist the BASE state — the static values, never the current frame's
+    // evaluated result (evaluatedState == baseState in a static document).
+    o["visible"] = node.baseVisible();
+    o["opacity"] = node.baseOpacity();
+    o["blendMode"] = static_cast<int>(node.baseBlendMode());
     o["groupBlendMode"] = static_cast<int>(node.groupBlendMode);
     o["lockFlags"] = node.lockFlags;
     o["collapsed"] = node.collapsed;
     o["clipped"] = node.clipped;
     o["nameIsAuto"] = node.nameIsAuto;
-    o["transform"] = transformToArray(node.transform);
+    o["transform"] = transformToArray(node.baseTransform());
     QJsonArray effects;
     for (const auto& effect : node.effects)
         effects.push_back(effectToJson(effect));
@@ -659,9 +941,14 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
     auto node = std::make_unique<LayerTreeNode>();
     node->name = o.value("name").toString("Layer");
     node->type = nodeTypeFromString(o.value("type").toString("layer"));
-    node->visible = o.value("visible").toBool(true);
-    node->opacity = static_cast<float>(o.value("opacity").toDouble(1.0));
-    node->blendMode = static_cast<BlendMode>(o.value("blendMode").toInt(0));
+    // Restore the stable identity. Documents saved before nodeId existed keep
+    // the fresh id generated in the constructor (persisted on the next save).
+    const QUuid nid = QUuid::fromString(o.value("nodeId").toString());
+    if (!nid.isNull())
+        node->id = nid;
+    node->setBaseVisible(o.value("visible").toBool(true));
+    node->setBaseOpacity(static_cast<float>(o.value("opacity").toDouble(1.0)));
+    node->setBaseBlendMode(static_cast<BlendMode>(o.value("blendMode").toInt(0)));
     // Default 0 == GroupBlendMode::Isolated so projects saved before group
     // blend modes existed load with the safe default.
     node->groupBlendMode =
@@ -670,7 +957,7 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
     node->collapsed = o.value("collapsed").toBool(false);
     node->clipped = o.value("clipped").toBool(false);
     node->nameIsAuto = o.value("nameIsAuto").toBool(false);
-    node->transform = transformFromArray(o.value("transform").toArray());
+    node->setBaseTransform(transformFromArray(o.value("transform").toArray()));
     for (const auto v : o.value("effects").toArray()) {
         if (v.isObject())
             node->effects.push_back(effectFromJson(v.toObject()));
@@ -758,7 +1045,7 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
         if (o.contains("resetTransform") && o.value("resetTransform").isArray())
             node->layer->resetTransform = transformFromArray(o.value("resetTransform").toArray());
         else
-            node->layer->resetTransform = node->transform;
+            node->layer->resetTransform = node->baseTransform();
         const QString maskSource = o.value("maskSource").toString();
         if (!maskSource.isEmpty()) {
             if (!blobs.contains(maskSource)) {
@@ -791,7 +1078,7 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
                 if (dj.value("quadTransform").isArray())
                     dd->quadTransform = transformFromArray(dj.value("quadTransform").toArray());
                 else
-                    dd->quadTransform = node->transform; // legacy: assume in-sync
+                    dd->quadTransform = node->baseTransform(); // legacy: assume in-sync
                 node->layer->distortData = dd;
             }
         }
@@ -859,6 +1146,12 @@ bool ProjectFileService::saveProject(const Document& doc, const QString& path, Q
         roots.push_back(nodeToJson(*n, nextId, blobs));
     }
     root["roots"] = roots;
+
+    // Optional animation section — omitted entirely for static documents so
+    // their files stay byte-identical to before.
+    if (doc.animation.hasAnyTracks()
+        || doc.animation.endFrame() > doc.animation.startFrame())
+        root["animation"] = animationToJson(doc.animation, blobs);
 
     const QByteArray manifestBytes = QJsonDocument(manifest).toJson(QJsonDocument::Compact);
     const QByteArray documentBytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
@@ -1011,6 +1304,15 @@ ProjectLoadResult ProjectFileService::loadProject(const QString& path)
             return result;
         }
         result.roots.push_back(std::move(node));
+    }
+
+    // Animation section (optional). Validate tracks against the ids that
+    // actually loaded so a stale/renamed reference is dropped, not fatal.
+    const QJsonObject animationObj = root.value("animation").toObject();
+    if (!animationObj.isEmpty()) {
+        QSet<QUuid> validIds;
+        collectNodeIds(result.roots, validIds);
+        animationFromJson(animationObj, result.animation, validIds, blobs);
     }
 
     result.ok = true;

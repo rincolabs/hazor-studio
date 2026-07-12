@@ -1488,7 +1488,7 @@ void CanvasView::setEditingMask(bool editing)
             QPoint newOrigin = layer->maskOrigin;
             if (layer->isShapeLayer()) {
                 // keep targetSize as oldMaskSize
-            } else if (layer->rasterStorage.isEnabled()) {
+            } else if (layer->renderRasterStorage().isEnabled()) {
                 const QRect targetBounds = layer->maskTargetBounds();
                 targetSize = targetBounds.size();
                 newOrigin  = targetBounds.topLeft();
@@ -1795,7 +1795,7 @@ bool CanvasView::canPaintActiveRasterLayer() const
     auto* layer = m_doc->activeLayer();
     if (!node || !layer || node->type != LayerTreeNode::Type::Layer)
         return false;
-    if (!node->visible)
+    if (!node->isVisible())
         return false;
     if (node->isPixelEditingLocked())
         return false;
@@ -2680,7 +2680,7 @@ void CanvasView::applyTextCharStyle(const std::function<void(TextSpan&)>& fn)
         && node->layer->textData.get() == td && m_controller;
 
     TextLayerData before = *td;
-    QTransform beforeTransform = node ? node->transform : QTransform();
+    QTransform beforeTransform = node ? node->transform() : QTransform();
 
     if (td->spans.empty())
         td->spans.push_back({0, static_cast<int>(td->text.size())});
@@ -2716,7 +2716,7 @@ void CanvasView::applyTextParagraphStyle(const std::function<void(ParagraphStyle
         && node->layer->textData.get() == td && m_controller;
 
     TextLayerData before = *td;
-    QTransform beforeTransform = node ? node->transform : QTransform();
+    QTransform beforeTransform = node ? node->transform() : QTransform();
 
     for (auto& ps : td->paragraphs)
         fn(ps);
@@ -2898,8 +2898,8 @@ void CanvasView::fitTextLayerTransformToImage(LayerTreeNode* node)
 
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
-    node->transform = naturalWorld * parentAccum.inverted();
+        parentAccum = parentAccum * p->transform();
+    node->setBaseTransform(naturalWorld * parentAccum.inverted());
 }
 
 void CanvasView::resizeParagraphTextBoxToTransform(LayerTreeNode* node, bool editing)
@@ -2915,7 +2915,7 @@ void CanvasView::resizeParagraphTextBoxToTransform(LayerTreeNode* node, bool edi
     // Lengths are measured in VISUAL (document-pixel) space — NDC lengths are
     // anisotropic for non-square documents and would resize the box of a
     // rotated paragraph by the aspect ratio.
-    const QTransform xf = node->transform;
+    const QTransform xf = node->transform();
     const double docW = static_cast<double>(std::max(1, m_doc->size.width()));
     const double docH = static_cast<double>(std::max(1, m_doc->size.height()));
     const float imageW = static_cast<float>(
@@ -4091,9 +4091,9 @@ void CanvasView::keyPressEvent(QKeyEvent* e)
                 auto* node = m_doc->nodeAt(idx);
                 if (!node) continue;
                 validIndices.push_back(idx);
-                beforeXfs.push_back(node->transform);
+                beforeXfs.push_back(node->transform());
                 translateNodeByDocumentDelta(node, QPointF(dx, dy));
-                afterXfs.push_back(node->transform);
+                afterXfs.push_back(node->transform());
             }
             if (!validIndices.empty())
                 m_controller->setNodeTransforms(validIndices, afterXfs, beforeXfs);
@@ -4288,8 +4288,8 @@ static bool hasBlendedStackAdjustment(
     const std::vector<std::unique_ptr<LayerTreeNode>>& nodes)
 {
     for (const auto& n : nodes) {
-        if (!n->visible) continue;
-        if (n->isAdjustmentLayer() && n->blendMode != BlendMode::Normal)
+        if (!n->isVisible()) continue;
+        if (n->isAdjustmentLayer() && n->blendMode() != BlendMode::Normal)
             return true;
         if (n->type == LayerTreeNode::Type::Group
             && hasBlendedStackAdjustment(n->children))
@@ -4533,7 +4533,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
             if (hitNode && hitNode->layer && hitNode->layer->textData) {
                 m_textLayerIndex = hitIndex;
                 m_textBeforeSnapshot = *hitNode->layer->textData;
-                m_textBeforeTransform = hitNode->transform;
+                m_textBeforeTransform = hitNode->transform();
                 m_controller->setActiveNode(hitIndex);
                 m_textToolState = TextToolState::Editing;
                 m_textEditor.beginEdit(hitNode->layer->textData.get());
@@ -4630,10 +4630,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 // the group's fresh visual frame (local-AABB × accumulated), which
                 // carries the group's current rotation/scale — same model as a
                 // single layer's frame, so resize-after-rotate behaves identically.
-                m_groupTransformStart = activeNode->transform;
+                m_groupTransformStart = activeNode->transform();
                 m_groupParentAccum = QTransform();
                 for (auto* p = activeNode->parent; p; p = p->parent)
-                    m_groupParentAccum = m_groupParentAccum * p->transform;
+                    m_groupParentAccum = m_groupParentAccum * p->transform();
 
                 // The group transforms as a single node — the per-leaf multi-resize
                 // loops must never fire for it.
@@ -4687,7 +4687,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 m_transformState.activeHandle = HandlePosition::None;
                 m_transformState.flatIndex = m_doc->activeFlatIndex;
                 m_transformState.startMouseScreen = screenPos;
-                m_transformState.startTransform = activeNode->transform;
+                m_transformState.startTransform = activeNode->transform();
                 if (!m_freeTransformActive
                     && activeNode->layer && activeNode->layer->textData) {
                     // The release commit compares against this snapshot for
@@ -4696,7 +4696,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                     // begin-of-session snapshot must survive across gestures.
                     m_textLayerIndex = m_doc->activeFlatIndex;
                     m_textBeforeSnapshot = *activeNode->layer->textData;
-                    m_textBeforeTransform = activeNode->transform;
+                    m_textBeforeTransform = activeNode->transform();
                 }
                 // Start frame is the node's WORLD (accumulated) frame so resize/
                 // rotate work in world space for nested layers too (root: identical
@@ -4733,14 +4733,14 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                     m_transformState.activeHandle = handle;
                     m_transformState.flatIndex = m_doc->activeFlatIndex;
                     m_transformState.startMouseScreen = screenPos;
-                    m_transformState.startTransform = activeNode->transform;
+                    m_transformState.startTransform = activeNode->transform();
                     // Per-gesture snapshot — but never overwrite the session
                     // snapshot while a free-transform session is open.
                     if (!m_freeTransformActive
                         && activeNode->layer && activeNode->layer->textData) {
                         m_textLayerIndex = m_doc->activeFlatIndex;
                         m_textBeforeSnapshot = *activeNode->layer->textData;
-                        m_textBeforeTransform = activeNode->transform;
+                        m_textBeforeTransform = activeNode->transform();
                     }
 
                     // World (accumulated) start frame, narrowed to the rendered
@@ -4827,8 +4827,8 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 m_transformState.mode = InteractionMode::Moving;
                 m_transformState.flatIndex = m_doc->activeFlatIndex;
                 m_transformState.startMouseScreen = e->position();
-                m_transformState.startTransform = activeNode->transform;
-                TransformController::decomposeVisual(activeNode->transform,
+                m_transformState.startTransform = activeNode->transform();
+                TransformController::decomposeVisual(activeNode->transform(),
                     m_canvasHalfExtents, size(),
                     m_transformState.startHw, m_transformState.startHh,
                     m_transformState.center, m_transformState.rotation);
@@ -4919,7 +4919,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 auto* node = m_doc->nodeAt(idx);
                 if (!node) continue;
                 m_multiMoveIndices.push_back(idx);
-                m_multiMoveStartTransforms.push_back(node->transform);
+                m_multiMoveStartTransforms.push_back(node->transform());
             }
         }
 
@@ -4932,7 +4932,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                                                  : InteractionMode::Moving;
             m_transformState.flatIndex = m_doc->activeFlatIndex;
             m_transformState.startMouseScreen = e->position();
-            m_transformState.startTransform = active->transform;
+            m_transformState.startTransform = active->transform();
             if (m_doc->selectedFlatIndices.size() > 1 && multiOutlineMatchesSelection()) {
                 QPointF metric(std::max(1e-6, m_canvasHalfExtents.x() * std::max(1, size().width())),
                                std::max(1e-6, m_canvasHalfExtents.y() * std::max(1, size().height())));
@@ -4944,9 +4944,9 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 && active->layer && active->layer->textData) {
                 m_textLayerIndex = m_doc->activeFlatIndex;
                 m_textBeforeSnapshot = *active->layer->textData;
-                m_textBeforeTransform = active->transform;
+                m_textBeforeTransform = active->transform();
             }
-            TransformController::decomposeVisual(active->transform,
+            TransformController::decomposeVisual(active->transform(),
                 m_canvasHalfExtents, size(),
                 m_transformState.startHw, m_transformState.startHh,
                 m_transformState.center, m_transformState.rotation);
@@ -5058,7 +5058,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
             auto* node = m_doc->activeNode();
             auto* layer = m_doc->activeLayer();
             if (m_editingMask && node && layer
-                && node->type == LayerTreeNode::Type::Layer && node->visible
+                && node->type == LayerTreeNode::Type::Layer && node->isVisible()
                 && !layer->maskImage.isNull() && m_controller) {
                 const QPointF imgPos = screenToImage(e->position(), layer);
                 const QPoint layerPos(static_cast<int>(std::floor(imgPos.x())),
@@ -5074,7 +5074,7 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         auto* node = m_doc->activeNode();
         auto* layer = m_doc->activeLayer();
         // Central gate: blocks Text/Shape and pixel-locked (Lock Image / Lock All).
-        if (node && layer && node->type == LayerTreeNode::Type::Layer && node->visible
+        if (node && layer && node->type == LayerTreeNode::Type::Layer && node->isVisible()
             && m_controller && m_controller->checkDestructiveOp(layer)) {
             fillBucket(e->position());
         }
@@ -5388,8 +5388,9 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
                 auto* node = m_doc->nodeAt(m_multiResizeIndices[i]);
                 if (!node || node->isPositionLocked()) continue;
                 const QTransform& parentAccum = m_multiResizeStartParentAccums[i];
-                node->transform = m_multiResizeStartTransforms[i] * parentAccum
-                                  * deltaM * parentAccum.inverted();
+                m_controller->previewNodeTransform(node,
+                    m_multiResizeStartTransforms[i] * parentAccum
+                    * deltaM * parentAccum.inverted());
             }
 
             // Keep the displayed multi-bbox in sync with the dragged frame.
@@ -5408,14 +5409,16 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         } else if (movingGroup) {
             // Single group: children follow via accumulatedTransform(); the
             // display bbox is recomputed fresh per frame in paintGL.
-            movingNode->transform = m_groupTransformStart * m_groupParentAccum
-                                    * deltaM * m_groupParentAccum.inverted();
+            m_controller->previewNodeTransform(movingNode,
+                m_groupTransformStart * m_groupParentAccum
+                * deltaM * m_groupParentAccum.inverted());
         } else {
             QTransform parentAccum;
             for (auto* p = movingNode->parent; p; p = p->parent)
-                parentAccum = parentAccum * p->transform;
-            movingNode->transform = m_transformState.startTransform * parentAccum
-                                    * deltaM * parentAccum.inverted();
+                parentAccum = parentAccum * p->transform();
+            m_controller->previewNodeTransform(movingNode,
+                m_transformState.startTransform * parentAccum
+                * deltaM * parentAccum.inverted());
         }
         if (m_freeTransformActive)
             m_freeTransformDirty = true;
@@ -5432,7 +5435,7 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         if (m_freeTransformActive && m_transformState.mode == InteractionMode::Rotating && m_transformOverlay) {
             float hw = 1.0f, hh = 1.0f, rot = 0.0f;
             QPointF center;
-            TransformController::decomposeVisual(movingNode->transform,
+            TransformController::decomposeVisual(movingNode->transform(),
                 m_canvasHalfExtents, size(), hw, hh, center, rot);
             float deg = static_cast<float>(rot * 180.0 / M_PI);
             while (deg > 180.0f) deg -= 360.0f;
@@ -6027,7 +6030,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
                 if (newNode && newNode->layer && newNode->layer->textData) {
                     m_textLayerIndex = newIdx;
                     m_textBeforeSnapshot = *newNode->layer->textData;
-                    m_textBeforeTransform = newNode->transform;
+                    m_textBeforeTransform = newNode->transform();
                     m_textToolState = TextToolState::Editing;
                     m_textEditor.beginEdit(newNode->layer->textData.get());
                     m_textEditor.setCursorPos(0);
@@ -6128,7 +6131,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
                 if (!mn) continue;
                 indices.push_back(idx);
                 beforeXfs.push_back(m_multiMoveStartTransforms[i]);
-                afterXfs.push_back(mn->transform);
+                afterXfs.push_back(mn->transform());
             }
             if (!indices.empty()) {
                 m_controller->setNodeTransforms(indices, afterXfs, beforeXfs);
@@ -6149,7 +6152,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
             bool anyBaked = false;
             // Indices baked through their own command (TextEditCommand /
             // ModifyShapeCommand). They must NOT also go into the shared
-            // NodeTransformCommand: the bake already mutated node->transform and
+            // NodeTransformCommand: the bake already mutated node->transform() and
             // its dedicated command restores it, so duplicating it would
             // double-apply on undo/redo.
             std::vector<bool> bakedListed(m_multiResizeIndices.size(), false);
@@ -6184,7 +6187,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
                     if (!mn) continue;
                     ntfIndices.push_back(idx);
                     ntfBefore.push_back(m_multiResizeStartTransforms[i]);
-                    ntfAfter.push_back(mn->transform);
+                    ntfAfter.push_back(mn->transform());
                 }
                 if (!ntfIndices.empty())
                     composite->add(std::make_unique<NodeTransformCommand>(
@@ -6202,7 +6205,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
                     if (!mn) continue;
                     indices.push_back(idx);
                     beforeXfs.push_back(m_multiResizeStartTransforms[i]);
-                    afterXfs.push_back(mn->transform);
+                    afterXfs.push_back(mn->transform());
                 }
                 if (!indices.empty()) {
                     m_controller->setNodeTransforms(indices, afterXfs, beforeXfs);
@@ -6228,11 +6231,11 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
                             m_transformState.startTransform);
                     } else {
                         m_controller->setLayerTransform(m_doc->activeFlatIndex,
-                            node->transform, &m_transformState.startTransform);
+                            node->transform(), &m_transformState.startTransform);
                     }
                 } else if (node->type == LayerTreeNode::Type::Group) {
                     const QTransform groupBefore = m_transformState.startTransform;
-                    const QTransform groupAfter = node->transform;
+                    const QTransform groupAfter = node->transform();
 
                     // TODO - review
                     auto composite = std::make_unique<CompositeCommand>(tr("Transform Group"));
@@ -6271,11 +6274,11 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
                     if (!m_controller->commitTextEdit(m_doc->activeFlatIndex,
                             m_textBeforeSnapshot, m_textBeforeTransform)) {
                         m_controller->setLayerTransform(m_doc->activeFlatIndex,
-                            node->transform, &m_transformState.startTransform);
+                            node->transform(), &m_transformState.startTransform);
                     }
                 } else {
                     m_controller->setLayerTransform(m_doc->activeFlatIndex,
-                        node->transform, &m_transformState.startTransform);
+                        node->transform(), &m_transformState.startTransform);
                 }
             }
         }
@@ -6432,7 +6435,7 @@ void CanvasView::mouseDoubleClickEvent(QMouseEvent* e)
                 setTool(Tool::Text);
             m_textLayerIndex = hitIndex;
             m_textBeforeSnapshot = *node->layer->textData;
-            m_textBeforeTransform = node->transform;
+            m_textBeforeTransform = node->transform();
             m_controller->setActiveNode(hitIndex);
             m_textToolState = TextToolState::Editing;
             m_textEditor.beginEdit(node->layer->textData.get());
@@ -6782,7 +6785,7 @@ QPointF CanvasView::screenToImage(QPointF screenPos, Layer* layer)
 
     const QSize imgSize = shapeSpriteActive
         ? layer->shapeCache.image.size()
-        : (layer->rasterStorage.isEnabled()
+        : (layer->renderRasterStorage().isEnabled()
             ? layer->rasterBaseSize()
             : layer->cpuImage.size());
     float imgX = (static_cast<float>(lx) + 1.0f) * 0.5f * imgSize.width();
@@ -6799,8 +6802,8 @@ QPointF CanvasView::screenToImage(QPointF screenPos, Layer* layer)
     }
 
     if (m_editingMask) {
-        const bool isTiled = layer->rasterStorage.isEnabled();
-        const QRect lb = isTiled ? layer->rasterStorage.logicalBounds() : QRect();
+        const bool isTiled = layer->renderRasterStorage().isEnabled();
+        const QRect lb = isTiled ? layer->renderRasterStorage().logicalBounds() : QRect();
         const QRectF maskBounds(QPointF(layer->maskOrigin), QSizeF(layer->maskImage.size()));
     }
 
@@ -6811,7 +6814,7 @@ void CanvasView::expandLayer(QPointF imagePos)
 {
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
-    if (!m_editingMask && layer->rasterStorage.isEnabled()) return;
+    if (!m_editingMask && layer->renderRasterStorage().isEnabled()) return;
     if (m_editingMask) return;
 
     auto* node = m_doc->activeNode();
@@ -6855,7 +6858,7 @@ void CanvasView::expandLayer(QPointF imagePos)
         }
 
         if (node && !adj.isIdentity())
-            node->transform = adj * node->transform;
+            node->setBaseTransform(adj * node->transform());
 
         // Grow the mask to match the new cpuImage size, preserving existing content.
         if (!layer->maskImage.isNull() && layer->maskImage.size() != layer->cpuImage.size()) {
@@ -6911,7 +6914,7 @@ bool CanvasView::expandLayerToRect(LayerTreeNode* node, Layer* layer,
         }
 
         if (node && !adj.isIdentity())
-            node->transform = adj * node->transform;
+            node->setBaseTransform(adj * node->transform());
 
         // Grow the mask to match, preserving existing content at the same offset.
         if (!layer->maskImage.isNull()
@@ -6943,7 +6946,7 @@ void CanvasView::growMaskToTiledLayer(Layer* layer)
     // logicalBounds() is an allocation envelope and may include tile padding; use
     // base image bounds united with real content bounds instead.
     if (!layer || layer->maskImage.isNull()) return;
-    if (!layer->rasterStorage.isEnabled()) return;
+    if (!layer->renderRasterStorage().isEnabled()) return;
 
     const QRect target = layer->maskTargetBounds();
     if (target.isEmpty()) return;
@@ -6993,6 +6996,8 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         update();
         return;
     }
+    if (m_controller)
+        m_controller->prepareRasterCelForEdit();
     auto* layer = m_doc->activeLayer();
     if (!layer || !canPaintActiveRasterLayer()) {
         m_brushDrawing = false;
@@ -7003,7 +7008,7 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         layer->distortData.reset();
 
     layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
-    m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
+    m_brushUsingRasterTiles = layer->renderRasterStorage().isEnabled();
     if (!m_brushUsingRasterTiles)
         return;
 
@@ -7026,7 +7031,7 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         return;
     }
 
-    layer->rasterStorage.beginChangeTracking();
+    layer->renderRasterStorage().beginChangeTracking();
 
     BrushInputState state = input;
     state.imagePos = screenToImage(screenPos, layer);
@@ -7097,6 +7102,8 @@ void CanvasView::continueCloneStampStroke(const BrushInputState& input,
 void CanvasView::beginBrushStroke(const BrushInputState& input,
                                   QPointF screenPos)
 {
+    if (m_controller && !m_editingMask)
+        m_controller->prepareRasterCelForEdit();
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
@@ -7122,9 +7129,9 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
         layer->distortData.reset();
     if (!m_editingMask && !layer->isTextLayer() && !layer->isShapeLayer()) {
         layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
-        m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
+        m_brushUsingRasterTiles = layer->renderRasterStorage().isEnabled();
         if (m_brushUsingRasterTiles)
-            layer->rasterStorage.beginChangeTracking();
+            layer->renderRasterStorage().beginChangeTracking();
     }
 
     if (m_editingMask) {
@@ -7137,10 +7144,10 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     if (m_editingMask && !layer->maskImage.isNull()) {
         m_brushBeforeImage = layer->maskImage.copy();
         m_brushBeforeOrigin = layer->maskOrigin;
-        if (!layer->rasterStorage.isEnabled()) {
+        if (!layer->renderRasterStorage().isEnabled()) {
             auto* node = m_doc->activeNode();
             m_maskStrokeBeforeCpu = layer->cpuImage.copy();
-            m_maskStrokeBeforeTransform = node ? node->transform : QTransform();
+            m_maskStrokeBeforeTransform = node ? node->transform() : QTransform();
         }
     }
 
@@ -7336,7 +7343,7 @@ void CanvasView::endBrushStroke()
                 layer->owner->invalidateEffects();
                 layer->owner->thumbnailDirty = true;
             }
-        } else if (m_brushUsingRasterTiles && layer->rasterStorage.isEnabled()) {
+        } else if (m_brushUsingRasterTiles && layer->renderRasterStorage().isEnabled()) {
             layer->pendingGpuUpload = true;
             layer->textureOutdated = true;
             if (layer->owner) {
@@ -7358,7 +7365,7 @@ void CanvasView::endBrushStroke()
         // layer-image growth by itself; keep an existing mask tied to
         // rasterBaseSize(), not to the tile envelope.
         if (!m_editingMask && m_brushUsingRasterTiles
-                && layer->rasterStorage.isEnabled() && !layer->maskImage.isNull()) {
+                && layer->renderRasterStorage().isEnabled() && !layer->maskImage.isNull()) {
             growMaskToTiledLayer(layer);
         }
 
@@ -7387,7 +7394,7 @@ void CanvasView::endBrushStroke()
                 composite->add(std::make_unique<FilterCommand>(
                     m_doc, m_doc->activeFlatIndex,
                     m_maskStrokeBeforeCpu, m_maskStrokeBeforeTransform,
-                    layer->cpuImage.copy(), node ? node->transform : QTransform(),
+                    layer->cpuImage.copy(), node ? node->transform() : QTransform(),
                     "brush_stroke_layer"));
                 composite->add(std::make_unique<MaskEditCommand>(
                     m_doc, m_doc->activeFlatIndex,
@@ -7400,8 +7407,8 @@ void CanvasView::endBrushStroke()
                     m_doc->activeFlatIndex, m_brushBeforeImage,
                     m_brushBeforeOrigin, layer->maskOrigin);
             }
-        } else if (m_brushUsingRasterTiles && layer->rasterStorage.isEnabled()) {
-            auto changes = layer->rasterStorage.endChangeTracking();
+        } else if (m_brushUsingRasterTiles && layer->renderRasterStorage().isEnabled()) {
+            auto changes = layer->renderRasterStorage().endChangeTracking();
             m_controller->pushRasterTileSnapshot("brush_stroke",
                 m_doc->activeFlatIndex, std::move(changes));
         } else {
@@ -7565,9 +7572,9 @@ void CanvasView::fillBucket(QPointF screenPos)
     if (!node || !layer) return;
     if (!m_controller) return;
 
-    if (layer->rasterStorage.isEnabled()) {
+    if (layer->renderRasterStorage().isEnabled()) {
         layer->cpuImage = layer->compositeImage();
-        layer->rasterStorage.clear();
+        layer->renderRasterStorage().clear();
         layer->textureOutdated = true;
     }
 
@@ -7583,9 +7590,9 @@ void CanvasView::fillBucket(QPointF screenPos)
     const bool hasSelection = m_doc->selection.active() && !m_doc->selection.isEmpty();
 
     // Snapshot BEFORE any expansion so undo restores the original pixels AND the
-    // original transform (the expansion adjusts node->transform).
+    // original transform (the expansion adjusts node->transform()).
     QImage before = layer->cpuImage.copy();
-    QTransform beforeT = node->transform;
+    QTransform beforeT = node->transform();
 
     // A flood fill (no selection) can create content in transparent areas outside
     // the layer's current bounds: grow the layer's internal canvas to span the
@@ -7667,7 +7674,7 @@ void CanvasView::fillBucket(QPointF screenPos)
     m_controller->history().push(std::make_unique<FilterCommand>(
         m_doc, m_doc->activeFlatIndex,
         std::move(before), beforeT,
-        layer->cpuImage.copy(), node->transform,
+        layer->cpuImage.copy(), node->transform(),
         tr("Fill Bucket")));
     emit m_controller->imageChanged();
     update();
@@ -7940,7 +7947,7 @@ QPointF CanvasView::documentToLayerImage(QPointF docPos, Layer* layer) const
     if (!m_doc || !layer || m_doc->size.width() <= 0 || m_doc->size.height() <= 0)
         return {};
 
-    const QSize imgSize = layer->rasterStorage.isEnabled()
+    const QSize imgSize = layer->renderRasterStorage().isEnabled()
         ? layer->rasterBaseSize()
         : layer->cpuImage.size();
     if (imgSize.width() <= 0 || imgSize.height() <= 0)
@@ -7964,7 +7971,7 @@ QPointF CanvasView::layerImageToDocument(QPointF imagePos, Layer* layer) const
     if (!m_doc || !layer || m_doc->size.width() <= 0 || m_doc->size.height() <= 0)
         return {};
 
-    const QSize imgSize = layer->rasterStorage.isEnabled()
+    const QSize imgSize = layer->renderRasterStorage().isEnabled()
         ? layer->rasterBaseSize()
         : layer->cpuImage.size();
     if (imgSize.width() <= 0 || imgSize.height() <= 0)
@@ -8261,12 +8268,12 @@ bool CanvasView::bakeGroupVectorChildrenToComposite(
             && n->layer->textData->flowMode == TextFlowMode::Point) {
             textIdx.push_back(i);
             tdBefore.push_back(*n->layer->textData);
-            txfBefore.push_back(n->transform);
+            txfBefore.push_back(n->transform());
         } else if (n->layer->shapeData) {
             shapeIdx.push_back(i);
             shapeBefore.push_back(*n->layer->shapeData);
             shapeImgBefore.push_back(n->layer->cpuImage.copy());
-            shapeXfBefore.push_back(n->transform);
+            shapeXfBefore.push_back(n->transform());
         }
     }
 
@@ -8287,7 +8294,7 @@ bool CanvasView::bakeGroupVectorChildrenToComposite(
         if (!tn || !tn->layer || !tn->layer->textData) continue;
         composite.add(std::make_unique<TextEditCommand>(
             m_doc, textIdx[i], tdBefore[i], *tn->layer->textData,
-            txfBefore[i], tn->transform, cmdName));
+            txfBefore[i], tn->transform(), cmdName));
     }
     for (size_t i = 0; i < shapeIdx.size(); ++i) {
         if (!shapeBaked[i]) continue;
@@ -8296,7 +8303,7 @@ bool CanvasView::bakeGroupVectorChildrenToComposite(
         composite.add(std::make_unique<ModifyShapeCommand>(
             m_doc, shapeIdx[i], shapeBefore[i], *sn->layer->shapeData,
             shapeImgBefore[i], sn->layer->cpuImage,
-            shapeXfBefore[i], sn->transform, cmdName));
+            shapeXfBefore[i], sn->transform(), cmdName));
     }
 
     // The bake mutated each child's content in place (text fontSize re-rendered,
@@ -8332,7 +8339,7 @@ bool CanvasView::bakeVectorNodeToComposite(
         bakeTextLayerResolution(node);
         composite.add(std::make_unique<TextEditCommand>(
             m_doc, flatIndex, tdBefore, *node->layer->textData,
-            beforeTransform, node->transform, cmdName));
+            beforeTransform, node->transform(), cmdName));
         emit m_controller->layerChanged(flatIndex);
         return true;
     }
@@ -8345,7 +8352,7 @@ bool CanvasView::bakeVectorNodeToComposite(
             composite.add(std::make_unique<ModifyShapeCommand>(
                 m_doc, flatIndex, shapeBefore, *node->layer->shapeData,
                 imgBefore, node->layer->cpuImage,
-                beforeTransform, node->transform, cmdName));
+                beforeTransform, node->transform(), cmdName));
             emit m_controller->layerChanged(flatIndex);
             return true;
         }
@@ -8398,7 +8405,7 @@ int CanvasView::pickLayerAtScreenPos(QPointF screenPos, bool tightToContent)
     // Index 0 = topmost (inserted at roots.begin()), iterate forward
     for (int i = 0; i < static_cast<int>(flat.size()); ++i) {
         auto* node = flat[i];
-        if (!node->visible) continue;
+        if (!node->isVisible()) continue;
         if (node->type != LayerTreeNode::Type::Layer) continue;
         if (!node->layer) continue;
         if (node->isPositionLocked()) continue;
@@ -8684,9 +8691,9 @@ QRect CanvasView::cachedLayerVisiblePixelBounds(const Layer* layer) const
         return cached->second;
 
     if (layer->usesRasterStorage()) {
-        QRect result = layer->rasterStorage.contentBounds();
+        QRect result = layer->renderRasterStorage().contentBounds();
         if (result.isEmpty())
-            result = layer->rasterStorage.logicalBounds();
+            result = layer->renderRasterStorage().logicalBounds();
         m_snapVisiblePixelBoundsCache.emplace(layer, result);
         if (snapDebugEnabled()) {
             qInfo().noquote()
@@ -8827,7 +8834,7 @@ QRectF CanvasView::nodeDocumentBounds(const LayerTreeNode* node) const
     };
 
     std::function<void(const LayerTreeNode*)> visit = [&](const LayerTreeNode* n) {
-        if (!n || !n->visible)
+        if (!n || !n->isVisible())
             return;
         if (n->type == LayerTreeNode::Type::Layer && n->layer) {
             const QPolygonF corners = layerCanvasSnapCorners(n);
@@ -8902,7 +8909,7 @@ QTransform CanvasView::transformWithDocumentDelta(const LayerTreeNode* node,
 
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
+        parentAccum = parentAccum * p->transform();
     const QTransform invParent = parentAccum.inverted();
     const qreal localDx = invParent.m11() * canvasDx + invParent.m21() * canvasDy;
     const qreal localDy = invParent.m12() * canvasDx + invParent.m22() * canvasDy;
@@ -8970,7 +8977,7 @@ void CanvasView::prepareSnapMoveBounds()
         if (m_doc && m_doc->activeFlatIndex >= 0) {
             if (auto* node = m_doc->activeNode()) {
                 m_snapMoveIndices.push_back(m_doc->activeFlatIndex);
-                m_snapMoveStartTransforms.push_back(node->transform);
+                m_snapMoveStartTransforms.push_back(node->transform());
             }
         }
     } else {
@@ -9084,9 +9091,9 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
         auto* node = m_doc->nodeAt(idx);
         if (!node)
             return;
-        const QTransform before = node->transform;
+        const QTransform before = node->transform();
         const QTransform after = transformWithDocumentDelta(node, startTransform, adjustedDeltaDoc);
-        node->transform = after;
+        m_controller->previewNodeTransform(node, after);
         if (snapDebugEnabled()) {
             qInfo().noquote()
                 << "[Snap][apply-node]"
@@ -9144,16 +9151,16 @@ void CanvasView::translateNodeByDocumentDelta(LayerTreeNode* node, QPointF delta
 
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
+        parentAccum = parentAccum * p->transform();
     const QTransform invParent = parentAccum.inverted();
     const qreal localDx = invParent.m11() * canvasDx + invParent.m21() * canvasDy;
     const qreal localDy = invParent.m12() * canvasDx + invParent.m22() * canvasDy;
 
-    QTransform t = node->transform;
+    QTransform t = node->transform();
     t.setMatrix(t.m11(), t.m12(), t.m13(),
                 t.m21(), t.m22(), t.m23(),
                 t.m31() + localDx, t.m32() + localDy, t.m33());
-    node->transform = t;
+    m_controller->previewNodeTransform(node, t);
 }
 
 void CanvasView::applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers)
@@ -9249,9 +9256,9 @@ void CanvasView::clearSnapBoundsCache()
     m_snapVisiblePixelBoundsCache.clear();
 }
 
-static void alignLayerTransform(LayerTreeNode* node, const QPointF& canvasDelta)
+static QTransform alignedLayerTransform(LayerTreeNode* node, const QPointF& canvasDelta)
 {
-    if (!node) return;
+    if (!node) return {};
     // Convert the canvas-NDC delta into the PARENT's space — the node's local
     // translation lives in parent coordinates (same conversion as
     // transformWithDocumentDelta). The previous version unmapped through the
@@ -9260,17 +9267,17 @@ static void alignLayerTransform(LayerTreeNode* node, const QPointF& canvasDelta)
     // moved nested layers by the wrong amount/direction).
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
+        parentAccum = parentAccum * p->transform();
     const QTransform invParent = parentAccum.inverted();
     const qreal localDx = invParent.m11() * canvasDelta.x()
                           + invParent.m21() * canvasDelta.y();
     const qreal localDy = invParent.m12() * canvasDelta.x()
                           + invParent.m22() * canvasDelta.y();
-    QTransform t = node->transform;
+    QTransform t = node->transform();
     t.setMatrix(t.m11(), t.m12(), t.m13(),
                 t.m21(), t.m22(), t.m23(),
                 t.m31() + localDx, t.m32() + localDy, t.m33());
-    node->transform = t;
+    return t;
 }
 
 static void computeAlignDelta(const QPolygonF& corners, int alignmentType,
@@ -9437,9 +9444,10 @@ void CanvasView::doAlignLayer(int alignmentType)
                 if (dx == 0.0f && dy == 0.0f)
                     continue;
                 indices.push_back(partIndices[i]);
-                oldTransforms.push_back(node->transform);
-                alignLayerTransform(node, QPointF(dx, dy));
-                newTransforms.push_back(node->transform);
+                oldTransforms.push_back(node->transform());
+                const QTransform after = alignedLayerTransform(node, QPointF(dx, dy));
+                m_controller->previewNodeTransform(node, after);
+                newTransforms.push_back(after);
             }
             // Participants moved by differing amounts, so the cached group
             // outline no longer describes them — drop it and let the live path
@@ -9474,9 +9482,10 @@ void CanvasView::doAlignLayer(int alignmentType)
             for (size_t i = 0; i < partNodes.size(); ++i) {
                 auto* node = partNodes[i];
                 indices.push_back(partIndices[i]);
-                oldTransforms.push_back(node->transform);
-                alignLayerTransform(node, QPointF(dx, dy));
-                newTransforms.push_back(node->transform);
+                oldTransforms.push_back(node->transform());
+                const QTransform after = alignedLayerTransform(node, QPointF(dx, dy));
+                m_controller->previewNodeTransform(node, after);
+                newTransforms.push_back(after);
             }
             // The whole selection shifted by the same canvas offset, so keep the
             // cached group outline (and its rotation/size) following along.
@@ -9510,15 +9519,16 @@ void CanvasView::doAlignLayer(int alignmentType)
                       refMinX, refMaxX, refMinY, refMaxY, dx, dy);
     if (dx == 0.0f && dy == 0.0f) return;
 
-    QTransform oldTransform = node->transform;
-    alignLayerTransform(node, QPointF(dx, dy));
+    QTransform oldTransform = node->transform();
+    const QTransform aligned = alignedLayerTransform(node, QPointF(dx, dy));
+    m_controller->previewNodeTransform(node, aligned);
     if (node->type == LayerTreeNode::Type::Group) {
         // Groups have no Layer, so they commit through the node-transform path.
         m_controller->setNodeTransforms({m_doc->activeFlatIndex},
-                                        {node->transform}, {oldTransform});
+                                        {aligned}, {oldTransform});
     } else {
         m_controller->setLayerTransform(m_doc->activeFlatIndex,
-                                        node->transform, &oldTransform);
+                                        aligned, &oldTransform);
     }
     update();
 }
@@ -9576,7 +9586,7 @@ void CanvasView::resetDistort()
 
     // Snapshot for a single undo step.
     QImage beforeImage = layer->cpuImage.copy();
-    QTransform beforeTransform = node->transform;
+    QTransform beforeTransform = node->transform();
     auto beforeData = std::make_shared<DistortData>(dd);
 
     // Reset the quad to the original and re-warp at full quality.
@@ -9599,7 +9609,7 @@ void CanvasView::resetDistort()
     m_controller->history().push(std::make_unique<DistortCommand>(
         m_doc, flatIndex,
         std::move(beforeImage), beforeTransform, std::move(beforeData),
-        layer->cpuImage.copy(), node->transform, std::move(afterData),
+        layer->cpuImage.copy(), node->transform(), std::move(afterData),
         tr("Reset Distort")));
     if (m_distortActive)
         ++m_distortSessionSteps;
@@ -9779,8 +9789,8 @@ void CanvasView::renderDistortLayer(bool highQuality)
     if (warped.isNull()) return;
 
     dd.resultOrigin = origin;
-    if (layer->rasterStorage.isEnabled())
-        layer->rasterStorage.clear();
+    if (layer->renderRasterStorage().isEnabled())
+        layer->renderRasterStorage().clear();
     layer->cpuImage = warped;
     layer->tiledSystem = false;
     layer->tileManager.clear();
@@ -9793,9 +9803,9 @@ void CanvasView::renderDistortLayer(bool highQuality)
     // nested in a transformed group gets the group transform applied twice.
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
-    node->transform = placementTransform(footprint, origin, m_doc->size)
-                      * parentAccum.inverted();
+        parentAccum = parentAccum * p->transform();
+    node->setBaseTransform(placementTransform(footprint, origin, m_doc->size)
+                      * parentAccum.inverted());
     // Record the WORLD transform the quad is consistent with, so a later move/
     // scale/rotate of the layer (or of an ancestor group) can be reconciled
     // when distort is re-entered.
@@ -9854,7 +9864,7 @@ bool CanvasView::beginDistort(TransformMode mode)
     m_distortDirty = false;
     m_distortMode = mode;
     m_distortFlatIndex = m_doc->activeFlatIndex;
-    m_distortOriginalTransform = node->transform;
+    m_distortOriginalTransform = node->transform();
     m_distortDragCorner = -1;
     m_distortSessionSteps = 0;
 
@@ -9987,7 +9997,7 @@ void CanvasView::distortMousePress(QMouseEvent* e)
     auto* node = m_doc ? m_doc->nodeAt(m_distortFlatIndex) : nullptr;
     if (node && node->layer) {
         m_distortDragBeforeImage = node->layer->cpuImage.copy();
-        m_distortDragBeforeTransform = node->transform;
+        m_distortDragBeforeTransform = node->transform();
         m_distortDragBeforeData = node->layer->distortData
             ? std::make_shared<DistortData>(*node->layer->distortData) : nullptr;
     }
@@ -10058,7 +10068,7 @@ void CanvasView::distortMouseRelease(QMouseEvent* /*e*/)
                 m_doc, m_distortFlatIndex,
                 m_distortDragBeforeImage, m_distortDragBeforeTransform,
                 m_distortDragBeforeData,
-                node->layer->cpuImage.copy(), node->transform, afterData, name));
+                node->layer->cpuImage.copy(), node->transform(), afterData, name));
             ++m_distortSessionSteps;
             m_distortDirty = true;
             if (m_controller) {
@@ -10158,17 +10168,17 @@ bool CanvasView::beginFreeTransform()
     m_freeTransformActive = true;
     m_freeTransformDirty = false;
     m_freeTransformFlatIndex = m_doc->activeFlatIndex;
-    m_freeTransformOriginal = node->transform;
+    m_freeTransformOriginal = node->transform();
     // Session capture: gestures during the session record every node they
     // touch (first-seen transform); the active node anchors the list.
     m_freeTransformSessionIndices.clear();
     m_freeTransformSessionStartTransforms.clear();
     m_freeTransformSessionIndices.push_back(m_freeTransformFlatIndex);
-    m_freeTransformSessionStartTransforms.push_back(node->transform);
+    m_freeTransformSessionStartTransforms.push_back(node->transform());
     if (node->layer && node->layer->textData) {
         m_textLayerIndex = m_freeTransformFlatIndex;
         m_textBeforeSnapshot = *node->layer->textData;
-        m_textBeforeTransform = node->transform;
+        m_textBeforeTransform = node->transform();
     }
     m_transformState.mode = InteractionMode::Idle;
     m_moving = false;
@@ -10218,7 +10228,7 @@ void CanvasView::commitFreeTransform()
             composite->add(std::make_unique<NodeTransformCommand>(
                 m_doc, std::vector<int>{m_freeTransformFlatIndex},
                 std::vector<QTransform>{m_freeTransformOriginal},
-                std::vector<QTransform>{node->transform}, tr("Transform Group")));
+                std::vector<QTransform>{node->transform()}, tr("Transform Group")));
             if (bakeGroupVectorChildrenToComposite(
                     node, tr("Transform Group"), *composite)) {
                 m_controller->pushCommand(std::move(composite));
@@ -10233,11 +10243,11 @@ void CanvasView::commitFreeTransform()
             if (activeCommitted && idx == m_freeTransformFlatIndex)
                 continue;
             auto* n = m_doc->nodeAt(idx);
-            if (!n || n->transform == m_freeTransformSessionStartTransforms[i])
+            if (!n || n->transform() == m_freeTransformSessionStartTransforms[i])
                 continue;
             indices.push_back(idx);
             beforeXfs.push_back(m_freeTransformSessionStartTransforms[i]);
-            afterXfs.push_back(n->transform);
+            afterXfs.push_back(n->transform());
         }
         if (!indices.empty())
             m_controller->setNodeTransforms(indices, afterXfs, beforeXfs);
@@ -10267,7 +10277,8 @@ void CanvasView::cancelFreeTransform()
     // to the history, so this is a full cancel).
     for (size_t i = 0; i < m_freeTransformSessionIndices.size(); ++i) {
         if (auto* n = m_doc ? m_doc->nodeAt(m_freeTransformSessionIndices[i]) : nullptr)
-            n->transform = m_freeTransformSessionStartTransforms[i];
+            m_controller->previewNodeTransform(
+                n, m_freeTransformSessionStartTransforms[i]);
     }
 
     // Paragraph text mutates its box live during resize gestures — restore the
@@ -10366,10 +10377,10 @@ bool CanvasView::applyTransformFromPanel(const QTransform& newTransform)
     if (!node || !node->canTransform())
         return false;
     if (node->isPositionLocked()) return false;
-    if (newTransform == node->transform) return false;
+    if (newTransform == node->transform()) return false;
 
     if (m_freeTransformActive) {
-        node->transform = newTransform;
+        m_controller->previewNodeTransform(node, newTransform);
         m_freeTransformDirty = true;
         emit activeTransformChanged();
         update();
@@ -10383,18 +10394,18 @@ bool CanvasView::applyTransformFromPanel(const QTransform& newTransform)
     m_freeTransformActive = true;
     m_freeTransformDirty = true;
     m_freeTransformFlatIndex = m_doc->activeFlatIndex;
-    m_freeTransformOriginal = node->transform;
+    m_freeTransformOriginal = node->transform();
     m_freeTransformSessionIndices.clear();
     m_freeTransformSessionStartTransforms.clear();
     m_freeTransformSessionIndices.push_back(m_freeTransformFlatIndex);
-    m_freeTransformSessionStartTransforms.push_back(node->transform);
+    m_freeTransformSessionStartTransforms.push_back(node->transform());
     if (node->layer && node->layer->textData) {
         m_textLayerIndex = m_freeTransformFlatIndex;
         m_textBeforeSnapshot = *node->layer->textData;
-        m_textBeforeTransform = node->transform;
+        m_textBeforeTransform = node->transform();
     }
 
-    node->transform = newTransform;
+    m_controller->previewNodeTransform(node, newTransform);
     commitFreeTransform();
     return true;
 }
@@ -10425,7 +10436,7 @@ QTransform CanvasView::groupFrameTransform(const LayerTreeNode* group, bool* ok)
     float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
     bool any = false;
     std::function<void(const LayerTreeNode*)> visit = [&](const LayerTreeNode* n) {
-        if (!n || !n->visible) return;
+        if (!n || !n->isVisible()) return;
         if (n->type == LayerTreeNode::Type::Layer && n->layer) {
             const QPolygonF wc = TransformController::cornersFromNode(n);
             for (const QPointF& cp : wc) {
@@ -10532,10 +10543,10 @@ void CanvasView::captureMultiResizeStartTransforms()
         auto* mn = m_doc->nodeAt(idx);
         if (!mn) continue;
         m_multiResizeIndices.push_back(idx);
-        m_multiResizeStartTransforms.push_back(mn->transform);
+        m_multiResizeStartTransforms.push_back(mn->transform());
         QTransform parentAccum;
         for (auto* p = mn->parent; p; p = p->parent)
-            parentAccum = parentAccum * p->transform;
+            parentAccum = parentAccum * p->transform();
         m_multiResizeStartParentAccums.push_back(parentAccum);
     }
 }
@@ -10614,7 +10625,7 @@ QColor CanvasView::eyedropperSampleColor(QPointF screenPos)
     // Current Layer mode
     auto* node = m_doc->activeNode();
     auto* layer = m_doc->activeLayer();
-    if (!node || !layer || !node->visible) return {};
+    if (!node || !layer || !node->isVisible()) return {};
     if (node->type != LayerTreeNode::Type::Layer) return {};
 
     QPointF imgPos = screenToImage(screenPos, layer);

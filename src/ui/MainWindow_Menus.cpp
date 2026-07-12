@@ -57,9 +57,9 @@ void MainWindow::execToolDialog(ToolDialog* dlg, const QString& toolName,
             auto node = std::make_unique<LayerTreeNode>();
             node->type = LayerTreeNode::Type::Adjustment;
             node->name = dlg->windowTitle();
-            node->opacity = 1.0f;
-            node->visible = true;
-            node->blendMode = BlendMode::Normal;
+            node->setBaseOpacity(1.0f);
+            node->setBaseVisible(true);
+            node->setBaseBlendMode(BlendMode::Normal);
 
             QVariantMap numParams;
             for (auto it = params.begin(); it != params.end(); ++it)

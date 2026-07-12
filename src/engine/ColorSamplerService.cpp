@@ -92,7 +92,7 @@ QColor ColorSamplerService::sampleComposite(const Document* doc, QPointF docPos,
     // Draw bottom-first (size-1 → 0) so top layers overlay bottom layers
     for (int i = static_cast<int>(flat.size()) - 1; i >= 0; --i) {
         auto* node = flat[i];
-        if (!node->visible) continue;
+        if (!node->isVisible()) continue;
         if (node->type != LayerTreeNode::Type::Layer) continue;
         if (!node->layer || node->layer->cpuImage.isNull()) continue;
 
@@ -143,7 +143,7 @@ QColor ColorSamplerService::sampleComposite(const Document* doc, QPointF docPos,
 
         QTransform full = imgToNdc * xf * ndcToPixel;
         p.setTransform(full);
-        p.setOpacity(node->opacity);
+        p.setOpacity(node->opacity());
         p.drawImage(QPointF(0, 0), drawImg);
         p.restore();
     }

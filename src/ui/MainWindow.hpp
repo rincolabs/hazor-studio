@@ -39,6 +39,7 @@ class AlignBar;
 class SwatchesPanel;
 class ColorMixerPanel;
 class ColorPaletteBar;
+class TimelinePanel;
 class ZoomComboBox;
 class AppSettingsDialog;
 class ProgressDialog;
@@ -366,6 +367,7 @@ private:
     SwatchesPanel* m_swatchesPanel = nullptr;
     ColorMixerPanel* m_colorMixerPanel = nullptr;
     ColorPaletteBar* m_colorPaletteBar = nullptr;
+    TimelinePanel* m_timelinePanel = nullptr;
     QWidget* m_viewportStatusBar = nullptr;
     QLabel* m_statusIconLabel = nullptr;
     QLabel* m_statusMessageLabel = nullptr;
@@ -397,6 +399,7 @@ private:
     QDockWidget* m_colorDock = nullptr;
     QDockWidget* m_swatchesDock = nullptr;
     QDockWidget* m_historyDock = nullptr;
+    QDockWidget* m_timelineDock = nullptr;
     QDockWidget* m_brushSettingsDock = nullptr;
 
     ToolExecutor* m_toolExecutor = nullptr;

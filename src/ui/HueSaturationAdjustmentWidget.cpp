@@ -608,7 +608,7 @@ void HueSaturationAdjustmentWidget::reloadFromNode()
     syncPresetCombo();
 
     m_bar->setPreviewChecked(true);
-    m_bar->setVisibilityChecked(node->visible);
+    m_bar->setVisibilityChecked(node->isVisible());
     const bool single = node->parent
         && node->parent->type == LayerTreeNode::Type::Layer;
     m_bar->setClipChecked(single);
@@ -800,8 +800,8 @@ QImage HueSaturationAdjustmentWidget::captureInputComposite()
     // is untouched so there is no on-screen flicker.
     std::vector<LayerTreeNode*> hidden;
     auto hide = [&](LayerTreeNode* n) {
-        if (n && n->visible) {
-            n->visible = false;
+        if (n && n->isVisible()) {
+            n->setBaseVisible(false);
             hidden.push_back(n);
         }
     };
@@ -815,7 +815,7 @@ QImage HueSaturationAdjustmentWidget::captureInputComposite()
     node->invalidateEffects();
     QImage input = compositeImage(doc);
     for (auto* n : hidden)
-        n->visible = true;
+        n->setBaseVisible(true);
     node->invalidateEffects();
     return input;
 }

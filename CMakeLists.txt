@@ -111,6 +111,22 @@ add_executable(Hazor WIN32
     src/core/BoxSelection.cpp
     src/core/BoxSelection.hpp
     src/core/LayerEffect.cpp
+
+    # Animation model (Etapa 4): document-owned keyframe/track data.
+    src/animation/AnimationTrack.cpp
+    src/animation/AnimationModel.cpp
+    # Sparse raster cel tracks + shared/COW cel payload storage (Etapa 13).
+    src/animation/RasterCelModel.cpp
+    # Interpolation + transform decompose/compose (Etapa 5) and evaluator (Etapa 6).
+    src/animation/AnimationInterpolation.cpp
+    src/animation/AnimationTransform.cpp
+    src/animation/AnimationEvaluator.cpp
+    # Time-based playback backend (Etapa 11).
+    src/animation/PlaybackController.cpp
+    # Isolated CPU image-sequence export (Etapa 12).
+    src/animation/AnimationExportService.cpp
+    # Property-edit controller with auto-key (Etapa 8).
+    src/animation/LayerPropertyController.cpp
     src/core/LayerEffect.hpp
 
     src/gradient/GradientTypes.cpp
@@ -568,6 +584,7 @@ add_executable(Hazor WIN32
     src/ui/SolidColorAdjustmentWidget.cpp
     src/ui/SolidColorAdjustmentWidget.hpp
     src/ui/HistogramPanel.cpp
+    src/ui/TimelinePanel.cpp
     src/ui/HistogramPanel.hpp
     src/ui/HistogramWidget.cpp
     src/ui/HistogramWidget.hpp

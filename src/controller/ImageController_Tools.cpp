@@ -105,7 +105,7 @@ bool ImageController::executeToolChain(
     }
     QImage before = layer->cpuImage.copy();
     QTransform beforeT = m_doc->nodeAt(m_doc->activeFlatIndex)
-                         ? m_doc->nodeAt(m_doc->activeFlatIndex)->transform
+                         ? m_doc->nodeAt(m_doc->activeFlatIndex)->transform()
                          : QTransform();
 
     QImage result = processing::FilterProcessor::processBatch(layer->cpuImage, qChain);
@@ -119,7 +119,7 @@ bool ImageController::executeToolChain(
     emit imageChanged();
 
     QTransform afterT = m_doc->nodeAt(m_doc->activeFlatIndex)
-                        ? m_doc->nodeAt(m_doc->activeFlatIndex)->transform
+                        ? m_doc->nodeAt(m_doc->activeFlatIndex)->transform()
                         : QTransform();
     m_history.push(std::make_unique<FilterCommand>(
         m_doc, m_doc->activeFlatIndex,
@@ -165,8 +165,10 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
     auto shouldUseLayerProgress = [&](Layer* targetLayer) -> bool {
         if (!m_doc || !targetLayer)
             return false;
-        const qint64 area = static_cast<qint64>(targetLayer->cpuImage.width())
-                          * targetLayer->cpuImage.height();
+        if (targetLayer->hasEvaluatedRasterContent())
+            return false; // cel edits stay synchronous and isolated in their payload
+        const qint64 area = static_cast<qint64>(targetLayer->imageWidth())
+                          * targetLayer->imageHeight();
         return area >= m_doc->perfConfig.autoTileMinArea;
     };
 
@@ -180,6 +182,10 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         "threshold", "remove_background",
         "rotate", "flip_horizontal", "flip_vertical", "resize_layer", "crop"
     };
+    if (layer && kDestructiveTools.count(toolName) > 0) {
+        prepareRasterCelForEdit();
+        layer = activeLayer();
+    }
     if (toolName == "set_clone_source") {
         emit cloneSourceRequested(QPointF(get("x"), get("y")));
         emit toolExecuted(QString::fromStdString(toolName), true);
@@ -319,7 +325,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         auto* l = layerAtOrWarn(m_doc, idx);
         if (!l) return {};
         auto* n = m_doc->nodeAt(idx);
-        return {l->cpuImage.copy(), n ? n->transform : QTransform()};
+        return {l->renderCpuImage().copy(), n ? n->transform() : QTransform()};
     };
 
     auto makeFilterCommand = [&](const QString& name, int idx,
@@ -327,8 +333,8 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         auto* l = layerAtOrWarn(m_doc, idx);
         if (!l) return nullptr;
         auto* n = m_doc->nodeAt(idx);
-        QImage after = l->cpuImage.copy();
-        QTransform afterT = n ? n->transform : QTransform();
+        QImage after = l->renderCpuImage().copy();
+        QTransform afterT = n ? n->transform() : QTransform();
         return std::make_unique<FilterCommand>(
             m_doc, idx, std::move(before), beforeT,
             std::move(after), afterT, name);
@@ -395,17 +401,17 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         if (n && aj) {
             // Flush rasterStorage tiles into cpuImage so the async job
             // operates on the full positioned image, not a stale/empty cpuImage.
-            const bool flushedRaster = layer->rasterStorage.isEnabled();
+            const bool flushedRaster = layer->renderRasterStorage().isEnabled();
             if (flushedRaster) {
-                layer->cpuImage = layer->compositeImage();
-                layer->rasterStorage.clear();
+                layer->writableRenderCpuImage() = layer->compositeImage();
+                layer->renderRasterStorage().clear();
                 layer->textureOutdated = true;
             }
             auto job = std::make_shared<AsyncJob>();
             job->toolName = toolName;
             job->targetFlatIndex = m_doc->activeFlatIndex;
             job->beforeImage = layer->cpuImage.copy();
-            job->beforeTransform = n->transform;
+            job->beforeTransform = n->transform();
             job->sourceImage = layer->cpuImage.copy();
             job->weakLayer = layer;
             job->retileRasterStorage = flushedRaster;
@@ -597,11 +603,12 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
     else if (toolName == "fill_layer") {
         if (!layer) { success = false; }
         else {
-            if (layer->rasterStorage.isEnabled()) {
-                layer->cpuImage = layer->compositeImage();
-                layer->rasterStorage.clear();
+            if (layer->renderRasterStorage().isEnabled()) {
+                layer->writableRenderCpuImage() = layer->compositeImage();
+                layer->renderRasterStorage().clear();
                 layer->textureOutdated = true;
             }
+            QImage& pixels = layer->writableRenderCpuImage();
             auto before = captureBefore(m_doc->activeFlatIndex);
             QColor c = QColor(
                 getInt("red", 255),
@@ -610,7 +617,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 getInt("alpha", 255));
 
             if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
-                cv::Mat cvImg = ImageEngine::toCvMat(layer->cpuImage);
+                cv::Mat cvImg = ImageEngine::toCvMat(pixels);
                 cv::Mat filled(cvImg.size(), cvImg.type(),
                     cv::Scalar(c.blue(), c.green(), c.red(), c.alpha()));
                 cv::Mat layerMask = makeLayerMask(layer);
@@ -618,7 +625,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                     blendByMask(cvImg, filled, layerMask);  // feather-aware
                 else
                     cvImg = filled;
-                layer->cpuImage = ImageEngine::toQImage(cvImg);
+                pixels = ImageEngine::toQImage(cvImg);
                 markLayerDirty(layer);
                 layer->textureOutdated = true;
                 syncLayerToGpu(layer);
@@ -632,24 +639,25 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
     else if (toolName == "fill_bucket") {
         if (!layer) { success = false; }
         else {
-            if (layer->rasterStorage.isEnabled()) {
-                layer->cpuImage = layer->compositeImage();
-                layer->rasterStorage.clear();
+            if (layer->renderRasterStorage().isEnabled()) {
+                layer->writableRenderCpuImage() = layer->compositeImage();
+                layer->renderRasterStorage().clear();
                 layer->textureOutdated = true;
             }
+            QImage& pixels = layer->writableRenderCpuImage();
             auto before = captureBefore(m_doc->activeFlatIndex);
             QColor c = QColor(
                 getInt("red", 255),
                 getInt("green", 255),
                 getInt("blue", 255),
                 getInt("alpha", 255));
-            int x = getInt("x", layer->cpuImage.width() / 2);
-            int y = getInt("y", layer->cpuImage.height() / 2);
+            int x = getInt("x", pixels.width() / 2);
+            int y = getInt("y", pixels.height() / 2);
             float tol = static_cast<float>(get("tolerance", 0.0));
             tol = std::clamp(tol, 0.0f, 1.0f);
 
             if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
-                cv::Mat cvImg = ImageEngine::toCvMat(layer->cpuImage);
+                cv::Mat cvImg = ImageEngine::toCvMat(pixels);
                 cv::Mat filled(cvImg.size(), cvImg.type(),
                     ImageEngine::qColorToScalar(c));
                 cv::Mat layerMask = makeLayerMask(layer);
@@ -657,12 +665,12 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                     blendByMask(cvImg, filled, layerMask);  // feather-aware
                 else
                     cvImg = filled;
-                layer->cpuImage = ImageEngine::toQImage(cvImg);
+                pixels = ImageEngine::toQImage(cvImg);
             } else {
-                cv::Mat cvImg = ImageEngine::toCvMat(layer->cpuImage);
+                cv::Mat cvImg = ImageEngine::toCvMat(pixels);
                 cv::Mat result = ImageEngine::fillRegion(cvImg, x, y,
                     ImageEngine::qColorToScalar(c), tol);
-                layer->cpuImage = ImageEngine::toQImage(result);
+                pixels = ImageEngine::toQImage(result);
             }
 
             markLayerDirty(layer);
@@ -915,7 +923,11 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             float sx = static_cast<float>(w) / oldW;
             float sy = static_cast<float>(h) / oldH;
             auto* resizeNode = m_doc->nodeAt(m_doc->activeFlatIndex);
-            if (resizeNode) resizeNode->transform.scale(sx, sy);
+            if (resizeNode) {
+                QTransform rt = resizeNode->baseTransform();
+                rt.scale(sx, sy);
+                resizeNode->setBaseTransform(rt);
+            }
             if (layer->tiledSystem) {
                 layer->enableTiling(layer->tileManager.tileSize());
             }
@@ -976,7 +988,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             auto* dn = m_doc->nodeAt(dst);
             auto effectivelyVisible = [](const LayerTreeNode* n) {
                 for (const LayerTreeNode* p = n; p; p = p->parent)
-                    if (!p->visible) return false;
+                    if (!p->isVisible()) return false;
                 return n != nullptr;
             };
             if ((sn && sn->isPixelEditingLocked()) || (dn && dn->isPixelEditingLocked())) {
@@ -1413,7 +1425,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 std::vector<bool> vis;
                 for (int i = static_cast<int>(flat.size()) - 1; i >= 0; --i) {
                     auto* n = flat[i];
-                    if (!n->layer || !n->visible) continue;
+                    if (!n->layer || !n->isVisible()) continue;
                     auto* l = n->layer.get();
                     int lw = l->cpuImage.width();
                     int lh = l->cpuImage.height();
@@ -1433,7 +1445,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                     cv::warpAffine(layerMat, canvas, xform, canvas.size(),
                                    cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
                     mats.push_back(std::move(canvas));
-                    ops.push_back(n->opacity);
+                    ops.push_back(n->opacity());
                     vis.push_back(true);
                 }
 
@@ -1467,7 +1479,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 auto* floatSrcNode = m_doc->nodeAt(flatIdx);
                 if (cut && layer) {
                     QImage beforeImg = layer->cpuImage.copy();
-                    QTransform beforeT = floatSrcNode ? floatSrcNode->transform : QTransform();
+                    QTransform beforeT = floatSrcNode ? floatSrcNode->transform() : QTransform();
 
                     cv::Mat layerImg = ImageEngine::toCvMat(layer->cpuImage);
                     cv::Mat layerMask = makeLayerMask(layer);
@@ -1481,7 +1493,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                     comp->add(std::make_unique<FilterCommand>(
                         m_doc, flatIdx,
                         std::move(beforeImg), beforeT,
-                        layer->cpuImage.copy(), floatSrcNode ? floatSrcNode->transform : QTransform(),
+                        layer->cpuImage.copy(), floatSrcNode ? floatSrcNode->transform() : QTransform(),
                         "float_cut_original"));
                 }
 
@@ -1507,9 +1519,9 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                                 1.0f - 2.0f * centerY / fdh);
                     t.scale(static_cast<float>(imgW) / fdw,
                             static_cast<float>(imgH) / fdh);
-                    newNode->transform = t;
+                    newNode->setBaseTransform(t);
                 }
-                newNode->layer->resetTransform = newNode->transform;
+                newNode->layer->resetTransform = newNode->transform();
                 newNode->layer->hasResetTransform = true;
 
                 int insertIdx = std::max(0, flatIdx);
@@ -1577,10 +1589,11 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 syncLayerFromGpu(layer);
             }
 
-            QImage before = layer->cpuImage.copy();
-            QTransform beforeT = delNode ? delNode->transform : QTransform();
+            QImage& pixels = layer->writableRenderCpuImage();
+            QImage before = pixels.copy();
+            QTransform beforeT = delNode ? delNode->transform() : QTransform();
 
-            cv::Mat cvImg = ImageEngine::toCvMat(layer->cpuImage);
+            cv::Mat cvImg = ImageEngine::toCvMat(pixels);
             cv::Mat layerMask = makeLayerMask(layer);
             const int maskNonZero = layerMask.empty() ? -1 : cv::countNonZero(layerMask);
             const int maskTotal = layerMask.empty() ? 0 : layerMask.rows * layerMask.cols;
@@ -1590,7 +1603,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 qWarning() << "[DeleteSel] SYNC: mask EMPTY -> nothing cleared";
             }
 
-            layer->cpuImage = ImageEngine::toQImage(cvImg);
+            pixels = ImageEngine::toQImage(cvImg);
             // Keep the dab-layer representation: the flush above flattened the
             // tiles only so the masked clear could run on the composited pixels.
             // Re-tile from the result so the layer stays a rasterStorage layer —
@@ -1598,7 +1611,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             // bounds (visualFrameForNode only uses contentImageBounds for
             // rasterStorage layers) and snaps to the full layer base.
             if (flushedRaster)
-                layer->replaceRasterStorageWithImage(layer->cpuImage);
+                layer->replaceRasterStorageWithImage(pixels);
             markLayerDirty(layer);
             if (delNode) delNode->invalidateEffects();
             syncLayerToGpu(layer);
@@ -1607,7 +1620,7 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             m_history.push(std::make_unique<FilterCommand>(
                 m_doc, m_doc->activeFlatIndex,
                 std::move(before), beforeT,
-                layer->cpuImage.copy(), delNode ? delNode->transform : QTransform(),
+                pixels.copy(), delNode ? delNode->transform() : QTransform(),
                 "delete_selected"));
         }
     }

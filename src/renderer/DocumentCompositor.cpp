@@ -343,7 +343,7 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
 
     layerPainter.end();
 
-    compositeStage(target, stage, node->blendMode, node->opacity);
+    compositeStage(target, stage, node->blendMode(), node->opacity());
 }
 
 // Scales every (premultiplied) channel of `stage` by the adjustment factor
@@ -410,12 +410,12 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
         stage.fill(qPremultiply(qRgba(c.red(), c.green(), c.blue(), c.alpha())));
         // The mask reveals/hides the fill per pixel (mix(1, mask, density)).
         modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-        compositeStage(target, stage, node->blendMode, node->opacity);
+        compositeStage(target, stage, node->blendMode(), node->opacity());
         return;
     }
 
-    if (node->blendMode == BlendMode::Normal) {
-        adjustments::apply(target, *node->adjustment, node->opacity,
+    if (node->blendMode() == BlendMode::Normal) {
+        adjustments::apply(target, *node->adjustment, node->opacity(),
                            mask, maskTopLeft, density);
         return;
     }
@@ -425,7 +425,7 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
     QImage stage = target.copy();
     adjustments::apply(stage, *node->adjustment, 1.0f);
     modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-    compositeStage(target, stage, node->blendMode, node->opacity);
+    compositeStage(target, stage, node->blendMode(), node->opacity());
 }
 
 // Group-mask extension point. Masks currently live on Layer, not on
@@ -500,7 +500,7 @@ void renderNodes(QImage& target,
 bool subtreeHasIncludedLayer(const LayerTreeNode* node,
                              const std::function<bool(const LayerTreeNode*)>& includeLayer)
 {
-    if (!node || !node->visible)
+    if (!node || !node->isVisible())
         return false;
     if (node->type == LayerTreeNode::Type::Layer)
         return node->layer && includeLayer(node);
@@ -522,7 +522,7 @@ void renderNodesFiltered(QImage& target,
 {
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
-        if (!node->visible) continue;
+        if (!node->isVisible()) continue;
 
         // Normal-Mode adjustment: applies non-destructively to everything
         // already composited into `target` (the layers below it in this
@@ -562,7 +562,7 @@ void renderNodesFiltered(QImage& target,
                                     groupsPassThrough);
                 applyGroupMask(groupStage, node);                 // no-op until group masks exist
                 applyGroupEffects(groupStage, node, doc->size);
-                compositeStage(target, groupStage, node->blendMode, node->opacity);
+                compositeStage(target, groupStage, node->blendMode(), node->opacity());
             }
             continue;
         }

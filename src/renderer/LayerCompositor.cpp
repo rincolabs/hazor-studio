@@ -32,8 +32,8 @@ const bool gBlendDebug = qEnvironmentVariableIntValue("BLEND_DEBUG") != 0;
 static bool treeHasBlendMode(const std::vector<std::unique_ptr<LayerTreeNode>>& nodes)
 {
     for (const auto& n : nodes) {
-        if (!n->visible) continue;
-        if (n->blendMode != BlendMode::Normal) return true;
+        if (!n->isVisible()) continue;
+        if (n->blendMode() != BlendMode::Normal) return true;
         if (n->type == LayerTreeNode::Type::Group && treeHasBlendMode(n->children))
             return true;
     }
@@ -50,7 +50,7 @@ static bool treeHasBlendMode(const std::vector<std::unique_ptr<LayerTreeNode>>& 
 static bool treeHasStackAdjustment(const std::vector<std::unique_ptr<LayerTreeNode>>& nodes)
 {
     for (const auto& n : nodes) {
-        if (!n->visible) continue;
+        if (!n->isVisible()) continue;
         if (n->isAdjustmentLayer()) return true;
         if (n->type == LayerTreeNode::Type::Group && treeHasStackAdjustment(n->children))
             return true;
@@ -148,8 +148,8 @@ void LayerCompositor::composite(Document* doc,
     LayerTreeNode liveRoot;
     liveRoot.type = LayerTreeNode::Type::Group;
     liveRoot.name = QStringLiteral("<live-root>");
-    liveRoot.blendMode = BlendMode::Normal;
-    liveRoot.opacity = 1.0f;
+    liveRoot.setBaseBlendMode(BlendMode::Normal);
+    liveRoot.setBaseOpacity(1.0f);
     gpu->popGroupFbo(&liveRoot, canvasHalfExtents, viewMvp, editingMask);
     gpu->mainProgram()->bind();
     gpu->bindMainVao();
@@ -189,7 +189,7 @@ void LayerCompositor::renderNodes(
 
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
-        if (!node->visible) continue;
+        if (!node->isVisible()) continue;
 
         // ── Normal-Mode adjustment: full-canvas pass over the backdrop ──
         // Everything below this node in the current scope is already in the
@@ -348,11 +348,11 @@ void LayerCompositor::renderNodes(
             if (node->adjustment->type == QLatin1String("solidcolor")) {
                 solidColor = solidcolor::SolidColorData::fromParams(
                                  node->adjustment->params).color;
-                solidBlendMode = blend::shaderId(node->blendMode);
+                solidBlendMode = blend::shaderId(node->blendMode());
             }
 
             gpu->drawAdjustmentPass(adjustments::shaderId(node->adjustment->type),
-                                    node->opacity,
+                                    node->opacity(),
                                     hasMask ? lyr->maskTextureId : 0,
                                     hasMask,
                                     lyr ? lyr->maskDensity : 1.0f,
@@ -379,16 +379,16 @@ void LayerCompositor::renderNodes(
             // only by the CPU projection (DocumentCompositor), the visual
             // source of truth; the live GPU path mirrors blend + opacity so the
             // hand-off to the projection stays seamless.
-            const bool isolate = node->blendMode != BlendMode::Normal
-                              || node->opacity < 0.999f
+            const bool isolate = node->blendMode() != BlendMode::Normal
+                              || node->opacity() < 0.999f
                               // A Normal-Mode adjustment inside the group must
                               // only affect the group's own content (mirrors
                               // needsIsolatedComposite on the CPU path).
                               || node->hasVisibleAdjustmentDirectChild();
             BLENDDBG() << "[GroupCompose] name=" << node->name
                      << "isolate=" << isolate
-                     << "blendMode=" << static_cast<int>(node->blendMode)
-                     << "opacity=" << node->opacity
+                     << "blendMode=" << static_cast<int>(node->blendMode())
+                     << "opacity=" << node->opacity()
                      << "groupAccum=" << node->accumulatedTransform()
                      << "hasTargetAccum(parent)=" << hasTargetAccum
                      << "halfExtents=" << canvasHalfExtents
@@ -432,21 +432,26 @@ void LayerCompositor::renderNodes(
 
         if (!node->layer) continue;
         {
-            const bool wouldSkip = !node->layer->textureId
-                                && !node->layer->rasterStorage.isEnabled();
+            const bool emptyCel = node->layer->hasEvaluatedRasterContent()
+                && node->layer->evaluatedCelId().isNull();
+            const bool wouldSkip = emptyCel || (!node->layer->textureId
+                                && !node->layer->renderRasterStorage().isEnabled());
             BLENDDBG() << "[BLENDBUG] layer=" << node->name
                      << "inFbo=" << hasTargetAccum
-                     << "blendMode=" << static_cast<int>(node->blendMode)
-                     << "needsShaderBlend=" << gpu->needsShaderBlend(static_cast<int>(node->blendMode))
+                     << "blendMode=" << static_cast<int>(node->blendMode())
+                     << "needsShaderBlend=" << gpu->needsShaderBlend(static_cast<int>(node->blendMode()))
                      << "textureId=" << node->layer->textureId
-                     << "rasterStorage=" << node->layer->rasterStorage.isEnabled()
+                     << "rasterStorage=" << node->layer->renderRasterStorage().isEnabled()
                      << "tiledSystem=" << node->layer->tiledSystem
                      << "textureOutdated=" << node->layer->textureOutdated
-                     << "cpuImage=" << node->layer->cpuImage.size()
-                     << "cpuNull=" << node->layer->cpuImage.isNull()
+                     << "cpuImage=" << node->layer->renderCpuImage().size()
+                     << "cpuNull=" << node->layer->renderCpuImage().isNull()
                      << "=> " << (wouldSkip ? "SKIP (no texture, no rasterStorage)" : "draw");
         }
-        if (!node->layer->textureId && !node->layer->rasterStorage.isEnabled()) continue;
+        if ((node->layer->hasEvaluatedRasterContent()
+             && node->layer->evaluatedCelId().isNull())
+            || (!node->layer->textureId
+                && !node->layer->renderRasterStorage().isEnabled())) continue;
 
         // Ensure the GPU mask texture exists before it is sampled. A mask created
         // on an already-uploaded layer (textureId != 0) only lives on the CPU
@@ -664,7 +669,7 @@ void LayerCompositor::renderNodes(
                      << "docSize=" << doc->size
                      << "baseTextureSize=" << baseTextureSize
                      << "rasterBaseSize=" << node->layer->rasterBaseSize()
-                     << "cpuImage=" << node->layer->cpuImage.size()
+                     << "cpuImage=" << node->layer->renderCpuImage().size()
                      << "shapeCacheSize=" << node->layer->shapeCache.image.size()
                      << "maskSize=" << node->layer->maskImage.size()
                      << "maskOrigin=" << node->layer->maskOrigin
@@ -691,7 +696,7 @@ void LayerCompositor::renderNodes(
                      << "shapeSpriteActive=" << shapeSpriteActive
                      << "baseTextureSize=" << baseTextureSize
                      << "rasterBaseSize=" << node->layer->rasterBaseSize()
-                     << "cpuImage=" << node->layer->cpuImage.size()
+                     << "cpuImage=" << node->layer->renderCpuImage().size()
                      << "maskSize=" << node->layer->maskImage.size()
                      << "maskOrigin=" << node->layer->maskOrigin
                      << "maskTargetBounds=" << node->layer->maskTargetBounds()
@@ -708,9 +713,9 @@ void LayerCompositor::renderNodes(
         };
 
         // ── Draw ──
-        if (node->layer->rasterStorage.isEnabled() && !usePreview && !hasEffects) {
+        if (node->layer->renderRasterStorage().isEnabled() && !usePreview && !hasEffects) {
             BLENDDBG() << "[BLENDBUG] draw layer=" << node->name << "path=RASTER-STORAGE"
-                     << "shaderBlend=" << gpu->needsShaderBlend(static_cast<int>(node->blendMode))
+                     << "shaderBlend=" << gpu->needsShaderBlend(static_cast<int>(node->blendMode()))
                      << "hasMask=" << hasMask;
             if (node->layer->pendingGpuUpload || node->layer->textureOutdated) {
                 gpu->uploadDirtyRasterTiles(node->layer.get());
@@ -749,7 +754,7 @@ void LayerCompositor::renderNodes(
             // masked dab layer rendered SourceOver on the GPU while the CPU
             // projection (DocumentCompositor) applied both mask and blend,
             // diverging on every non-Normal mode.
-            const bool shaderBlend = gpu->needsShaderBlend(static_cast<int>(node->blendMode));
+            const bool shaderBlend = gpu->needsShaderBlend(static_cast<int>(node->blendMode()));
             if (shaderBlend) {
                 GLint vp[4] = {0, 0, doc->size.width(), doc->size.height()};
                 gl->glGetIntegerv(GL_VIEWPORT, vp);
@@ -757,8 +762,8 @@ void LayerCompositor::renderNodes(
                     gpu->drawShaderBlend(tile.textureId,
                                          hasMask ? node->layer->maskTextureId : 0,
                                          tile.mvp,
-                                         static_cast<int>(node->blendMode),
-                                         node->opacity,
+                                         static_cast<int>(node->blendMode()),
+                                         node->opacity(),
                                          hasMask,
                                          node->layer->maskDensity,
                                          vp[2],
@@ -767,11 +772,11 @@ void LayerCompositor::renderNodes(
                                          tile.maskUvOffset);
                 }
             } else {
-                gpu->applyFixedBlend(static_cast<int>(node->blendMode));
+                gpu->applyFixedBlend(static_cast<int>(node->blendMode()));
                 gpu->mainProgram()->bind();
                 gpu->bindMainVao();
                 for (const auto& tile : tiles) {
-                    gpu->setMainUniforms(tile.mvp, node->opacity, hasMask,
+                    gpu->setMainUniforms(tile.mvp, node->opacity(), hasMask,
                                          node->layer->maskDensity);
                     gpu->setMainTexture(GL_TEXTURE0, tile.textureId);
                     gpu->setUVUniforms(tile.uvScale, tile.uvOffset);
@@ -798,7 +803,7 @@ void LayerCompositor::renderNodes(
             continue;
         }
 
-        if (gpu->needsShaderBlend(static_cast<int>(node->blendMode))) {
+        if (gpu->needsShaderBlend(static_cast<int>(node->blendMode()))) {
             GLint vp[4] = {0, 0, doc->size.width(), doc->size.height()};
             gl->glGetIntegerv(GL_VIEWPORT, vp);
             BLENDDBG() << "[BLENDBUG] draw layer=" << node->name << "path=FLAT-SHADERBLEND"
@@ -814,8 +819,8 @@ void LayerCompositor::renderNodes(
             gpu->drawShaderBlend(texId,
                                  hasMask ? node->layer->maskTextureId : 0,
                                  mvp,
-                                 static_cast<int>(node->blendMode),
-                                 node->opacity,
+                                 static_cast<int>(node->blendMode()),
+                                 node->opacity(),
                                  hasMask,
                                  node->layer->maskDensity,
                                  vp[2],
@@ -837,7 +842,7 @@ void LayerCompositor::renderNodes(
             // Simple blend path (Normal, Multiply, Screen, Darken, Lighten)
             BLENDDBG() << "[BLENDBUG] draw layer=" << node->name << "path=FLAT-SIMPLE-FIXED"
                      << "texId=" << texId << "tiledSystem=" << node->layer->tiledSystem;
-            gpu->applyFixedBlend(static_cast<int>(node->blendMode));
+            gpu->applyFixedBlend(static_cast<int>(node->blendMode()));
 
             {
                 GLint rvp[4] = {0,0,0,0};
@@ -845,15 +850,15 @@ void LayerCompositor::renderNodes(
                 BLENDDBG() << "[simpleDraw] node=" << node->name
                          << "hasTargetAccum=" << hasTargetAccum
                          << "tiled=" << node->layer->tiledSystem
-                         << "rasterStorage=" << node->layer->rasterStorage.isEnabled()
-                         << "cpuImage=" << node->layer->cpuImage.size()
+                         << "rasterStorage=" << node->layer->renderRasterStorage().isEnabled()
+                         << "cpuImage=" << node->layer->renderCpuImage().size()
                          << "realVp=" << rvp[0] << rvp[1] << rvp[2] << rvp[3]
                          << "mvp.row0=" << mvp.row(0) << "mvp.row1=" << mvp.row(1);
             }
 
             gpu->mainProgram()->bind();
             gpu->bindMainVao();
-            gpu->setMainUniforms(mvp, node->opacity, hasMask,
+            gpu->setMainUniforms(mvp, node->opacity(), hasMask,
                                  node->layer->maskDensity);
             gpu->setMainTexture(GL_TEXTURE0, texId);
             gpu->setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
@@ -1071,7 +1076,7 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
     // the on-screen viewport (mirrors the hasTargetAccum branches in renderNodes).
     const QRectF vpPix(0, 0, doc->size.width(), doc->size.height());
 
-    if (layer->rasterStorage.isEnabled()) {
+    if (layer->renderRasterStorage().isEnabled()) {
         if (layer->pendingGpuUpload || layer->textureOutdated) {
             gpu->uploadDirtyRasterTiles(layer);
             layer->pendingGpuUpload = false;

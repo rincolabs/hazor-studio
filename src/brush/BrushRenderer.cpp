@@ -836,7 +836,7 @@ void BrushRenderer::drawDabToRasterTiles(Layer* layer,
                                          const BrushSettings& settings,
                                          const QImage* selectMaskImage)
 {
-    if (!layer || !layer->rasterStorage.isEnabled())
+    if (!layer || !layer->renderRasterStorage().isEnabled())
         return;
 
     const float radius = std::max(0.5f, params.effectiveSize);
@@ -896,18 +896,19 @@ void BrushRenderer::drawDabToRasterTiles(Layer* layer,
 
     const float washOpacity = std::clamp(settings.opacity, 0.0f, 1.0f);
     const QRect dabRect(left, top, side, side);
-    const QPoint first = layer->rasterStorage.tileCoordForPixel(dabRect.left(), dabRect.top());
-    const QPoint last = layer->rasterStorage.tileCoordForPixel(dabRect.right(), dabRect.bottom());
+    auto& storage = layer->renderRasterStorage();
+    const QPoint first = storage.tileCoordForPixel(dabRect.left(), dabRect.top());
+    const QPoint last = storage.tileCoordForPixel(dabRect.right(), dabRect.bottom());
 
     for (int ty = first.y(); ty <= last.y(); ++ty) {
         for (int tx = first.x(); tx <= last.x(); ++tx) {
             const QPoint coord(tx, ty);
-            const QRect tileRect = layer->rasterStorage.tileBounds(coord);
+            const QRect tileRect = storage.tileBounds(coord);
             if (!tileRect.intersects(dabRect))
                 continue;
 
-            layer->rasterStorage.recordBefore(coord);
-            auto* tile = layer->rasterStorage.ensureTile(coord);
+            storage.recordBefore(coord);
+            auto* tile = storage.ensureTile(coord);
             if (!tile)
                 continue;
 
@@ -942,7 +943,7 @@ void BrushRenderer::drawDabToRasterTiles(Layer* layer,
                 painter.end();
             }
 
-            layer->rasterStorage.markTileModified(coord);
+            storage.markTileModified(coord);
         }
     }
 
@@ -986,7 +987,7 @@ void BrushRenderer::drawCloneDabToRasterTiles(Layer* layer,
                                               const CloneStampContext& cloneContext,
                                               const QImage* selectMaskImage)
 {
-    if (!layer || !layer->rasterStorage.isEnabled() || !cloneContext.isValid())
+    if (!layer || !layer->renderRasterStorage().isEnabled() || !cloneContext.isValid())
         return;
 
     const QImage& source = cloneSourceRgba(cloneContext.sourceImage);
@@ -1104,18 +1105,19 @@ void BrushRenderer::drawCloneDabToRasterTiles(Layer* layer,
     }
 
     const QRect dabRect(left, top, side, side);
-    const QPoint first = layer->rasterStorage.tileCoordForPixel(dabRect.left(), dabRect.top());
-    const QPoint last = layer->rasterStorage.tileCoordForPixel(dabRect.right(), dabRect.bottom());
+    auto& storage = layer->renderRasterStorage();
+    const QPoint first = storage.tileCoordForPixel(dabRect.left(), dabRect.top());
+    const QPoint last = storage.tileCoordForPixel(dabRect.right(), dabRect.bottom());
 
     for (int ty = first.y(); ty <= last.y(); ++ty) {
         for (int tx = first.x(); tx <= last.x(); ++tx) {
             const QPoint coord(tx, ty);
-            const QRect tileRect = layer->rasterStorage.tileBounds(coord);
+            const QRect tileRect = storage.tileBounds(coord);
             if (!tileRect.intersects(dabRect))
                 continue;
 
-            layer->rasterStorage.recordBefore(coord);
-            auto* tile = layer->rasterStorage.ensureTile(coord);
+            storage.recordBefore(coord);
+            auto* tile = storage.ensureTile(coord);
             if (!tile)
                 continue;
 
@@ -1124,7 +1126,7 @@ void BrushRenderer::drawCloneDabToRasterTiles(Layer* layer,
             painter.drawImage(dabRect.topLeft() - tileRect.topLeft(), dab);
             painter.end();
 
-            layer->rasterStorage.markTileModified(coord);
+            storage.markTileModified(coord);
         }
     }
 
@@ -1147,7 +1149,7 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
                                                 const CloneStampContext& cloneContext,
                                                 const QImage* selectMaskImage)
 {
-    if (!layer || !layer->rasterStorage.isEnabled() || !cloneContext.isValid())
+    if (!layer || !layer->renderRasterStorage().isEnabled() || !cloneContext.isValid())
         return;
 
     const QImage& source = cloneSourceRgba(cloneContext.sourceImage);
@@ -1358,18 +1360,19 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
     }
 
     const QRect dabRect(left, top, side, side);
-    const QPoint first = layer->rasterStorage.tileCoordForPixel(dabRect.left(), dabRect.top());
-    const QPoint last = layer->rasterStorage.tileCoordForPixel(dabRect.right(), dabRect.bottom());
+    auto& storage = layer->renderRasterStorage();
+    const QPoint first = storage.tileCoordForPixel(dabRect.left(), dabRect.top());
+    const QPoint last = storage.tileCoordForPixel(dabRect.right(), dabRect.bottom());
 
     for (int ty = first.y(); ty <= last.y(); ++ty) {
         for (int tx = first.x(); tx <= last.x(); ++tx) {
             const QPoint coord(tx, ty);
-            const QRect tileRect = layer->rasterStorage.tileBounds(coord);
+            const QRect tileRect = storage.tileBounds(coord);
             if (!tileRect.intersects(dabRect))
                 continue;
 
-            layer->rasterStorage.recordBefore(coord);
-            auto* tile = layer->rasterStorage.ensureTile(coord);
+            storage.recordBefore(coord);
+            auto* tile = storage.ensureTile(coord);
             if (!tile)
                 continue;
 
@@ -1378,7 +1381,7 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
             painter.drawImage(dabRect.topLeft() - tileRect.topLeft(), dab);
             painter.end();
 
-            layer->rasterStorage.markTileModified(coord);
+            storage.markTileModified(coord);
         }
     }
 
@@ -1408,7 +1411,7 @@ void BrushRenderer::drawDab(Layer* layer, const BrushInputState& state,
                             int selectMaskW, int selectMaskH,
                             const QImage* selectMaskImage)
 {
-    if (layer && layer->rasterStorage.isEnabled()) {
+    if (layer && layer->renderRasterStorage().isEnabled()) {
         Q_UNUSED(selectMaskTex);
         Q_UNUSED(selectMaskW);
         Q_UNUSED(selectMaskH);
@@ -1468,7 +1471,7 @@ void BrushRenderer::drawDab(Layer* layer, const BrushInputState& state,
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
 
     extra->glBindFramebuffer(GL_FRAMEBUFFER, layer->fbo);
-    glViewport(0, 0, layer->cpuImage.width(), layer->cpuImage.height());
+    glViewport(0, 0, layer->imageWidth(), layer->imageHeight());
 
     m_program->bind();
     m_vao.bind();
@@ -1478,8 +1481,8 @@ void BrushRenderer::drawDab(Layer* layer, const BrushInputState& state,
         static_cast<float>(imagePos.y()));
     m_program->setUniformValue(m_uRadius, params.effectiveSize);
     m_program->setUniformValue(m_uTexSize,
-        static_cast<float>(layer->cpuImage.width()),
-        static_cast<float>(layer->cpuImage.height()));
+        static_cast<float>(layer->imageWidth()),
+        static_cast<float>(layer->imageHeight()));
     m_program->setUniformValue(m_uColor,
         params.effectiveColor.redF(),
         params.effectiveColor.greenF(),
@@ -1537,8 +1540,8 @@ void BrushRenderer::drawDab(Layer* layer, const BrushInputState& state,
         // Compute layer→doc affine matrix from accumulated transform
         double docW = static_cast<double>(selectMaskW);
         double docH = static_cast<double>(selectMaskH);
-        double lW = static_cast<double>(layer->cpuImage.width());
-        double lH = static_cast<double>(layer->cpuImage.height());
+        double lW = static_cast<double>(layer->imageWidth());
+        double lH = static_cast<double>(layer->imageHeight());
         if (lW > 0.0 && lH > 0.0) {
             QTransform accumT = layer->owner ? layer->owner->accumulatedTransform() : QTransform();
             float a00 = static_cast<float>(docW * accumT.m11() / lW);
@@ -1561,8 +1564,8 @@ void BrushRenderer::drawDab(Layer* layer, const BrushInputState& state,
     }
 
     if (needDestRead) {
-        int w = layer->cpuImage.width();
-        int h = layer->cpuImage.height();
+        int w = layer->imageWidth();
+        int h = layer->imageHeight();
 
         glActiveTexture(GL_TEXTURE3);
         if (w != m_copyTexW || h != m_copyTexH) {

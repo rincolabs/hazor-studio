@@ -903,7 +903,7 @@ void LayerPanel::onVisibilityToggled(int flatIndex)
     if (!m_controller) return;
     auto* node = m_controller->document()->nodeAt(flatIndex);
     if (!node) return;
-    m_controller->setNodeVisibility(flatIndex, !node->visible);
+    m_controller->setNodeVisibility(flatIndex, !node->isVisible());
 }
 
 void LayerPanel::onLockToggled(int flatIndex, int)
@@ -1376,10 +1376,10 @@ void LayerPanel::updateTopBarFromActiveLayer()
     if (!node) return;
 
     m_blendCombo->blockSignals(true);
-    m_blendCombo->setCurrentIndex(blendModeToComboIndex(node->blendMode));
+    m_blendCombo->setCurrentIndex(blendModeToComboIndex(node->blendMode()));
     m_blendCombo->blockSignals(false);
 
-    int opacityPct = static_cast<int>(node->opacity * 100.0f);
+    int opacityPct = static_cast<int>(node->opacity() * 100.0f);
     m_opacitySlider->blockSignals(true);
     m_opacitySlider->setValue(opacityPct);
     m_opacitySlider->blockSignals(false);

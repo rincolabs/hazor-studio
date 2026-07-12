@@ -2,21 +2,105 @@
 #include <QPainter>
 #include <algorithm>
 
+namespace {
+const QImage& emptyRasterImage()
+{
+    static const QImage image;
+    return image;
+}
+
+core::RasterLayerStorage& emptyRasterStorage()
+{
+    static core::RasterLayerStorage storage;
+    return storage;
+}
+}
+
+void Layer::setEvaluatedRasterContent(
+    const anim::CelId& id,
+    std::shared_ptr<anim::RasterCelContent> content)
+{
+    const bool changed = !m_rasterAnimationActive || m_evaluatedCelId != id
+        || m_evaluatedRasterContent != content;
+    m_rasterAnimationActive = true;
+    m_evaluatedCelId = id;
+    m_evaluatedRasterContent = std::move(content);
+    if (changed) {
+        textureOutdated = true;
+        pendingGpuUpload = true;
+        invalidateContentBounds();
+    }
+}
+
+void Layer::setEvaluatedRasterEmpty()
+{
+    setEvaluatedRasterContent({}, nullptr);
+}
+
+void Layer::clearEvaluatedRasterContent()
+{
+    if (!m_rasterAnimationActive)
+        return;
+    m_rasterAnimationActive = false;
+    m_evaluatedCelId = {};
+    m_evaluatedRasterContent.reset();
+    textureOutdated = true;
+    pendingGpuUpload = true;
+    invalidateContentBounds();
+}
+
+const QImage& Layer::renderCpuImage() const
+{
+    if (!m_rasterAnimationActive)
+        return cpuImage;
+    return m_evaluatedRasterContent
+        ? m_evaluatedRasterContent->cpuImage : emptyRasterImage();
+}
+
+QImage& Layer::writableRenderCpuImage()
+{
+    if (!m_rasterAnimationActive)
+        return cpuImage;
+    if (!m_evaluatedRasterContent) {
+        m_evaluatedRasterContent = std::make_shared<anim::RasterCelContent>();
+        m_evaluatedCelId = {};
+    }
+    return m_evaluatedRasterContent->cpuImage;
+}
+
+const core::RasterLayerStorage& Layer::renderRasterStorage() const
+{
+    if (!m_rasterAnimationActive)
+        return rasterStorage;
+    return m_evaluatedRasterContent
+        ? m_evaluatedRasterContent->rasterStorage : emptyRasterStorage();
+}
+
+core::RasterLayerStorage& Layer::renderRasterStorage()
+{
+    if (!m_rasterAnimationActive)
+        return rasterStorage;
+    return m_evaluatedRasterContent
+        ? m_evaluatedRasterContent->rasterStorage : emptyRasterStorage();
+}
+
 QImage Layer::compositeImage() const
 {
-    if (!rasterStorage.isEnabled())
-        return cpuImage.copy();
+    const auto& storage = renderRasterStorage();
+    const QImage& baseImage = renderCpuImage();
+    if (!storage.isEnabled())
+        return baseImage.copy();
 
     QRect tileBounds;
-    QImage tileData = rasterStorage.toImage(&tileBounds);
-    const QSize baseSize = rasterStorage.baseSize();
+    QImage tileData = storage.toImage(&tileBounds);
+    const QSize baseSize = storage.baseSize();
 
     QImage full(baseSize, QImage::Format_RGBA8888);
     full.fill(Qt::transparent);
 
     QPainter p(&full);
-    if (!cpuImage.isNull())
-        p.drawImage(0, 0, cpuImage.convertToFormat(QImage::Format_RGBA8888));
+    if (!baseImage.isNull())
+        p.drawImage(0, 0, baseImage.convertToFormat(QImage::Format_RGBA8888));
     if (!tileData.isNull() && !tileBounds.isEmpty())
         p.drawImage(tileBounds.topLeft(), tileData);
     p.end();
@@ -26,14 +110,16 @@ QImage Layer::compositeImage() const
 
 QImage Layer::compositeImageExpanded(QRect* outBounds) const
 {
-    if (!rasterStorage.isEnabled()) {
-        if (outBounds) *outBounds = QRect(QPoint(0, 0), cpuImage.size());
-        return cpuImage.copy();
+    const auto& storage = renderRasterStorage();
+    const QImage& baseImage = renderCpuImage();
+    if (!storage.isEnabled()) {
+        if (outBounds) *outBounds = QRect(QPoint(0, 0), baseImage.size());
+        return baseImage.copy();
     }
 
     QRect tileBounds;
-    QImage tileData = rasterStorage.toImage(&tileBounds);
-    const QRect baseRect(QPoint(0, 0), rasterStorage.baseSize());
+    QImage tileData = storage.toImage(&tileBounds);
+    const QRect baseRect(QPoint(0, 0), storage.baseSize());
 
     // Grow the buffer to span both the original base rect and any tiles painted
     // outside it. The union origin may be negative / past baseSize.
@@ -48,8 +134,8 @@ QImage Layer::compositeImageExpanded(QRect* outBounds) const
     QImage out(full.size(), QImage::Format_RGBA8888);
     out.fill(Qt::transparent);
     QPainter p(&out);
-    if (!cpuImage.isNull())
-        p.drawImage(-full.topLeft(), cpuImage.convertToFormat(QImage::Format_RGBA8888));
+    if (!baseImage.isNull())
+        p.drawImage(-full.topLeft(), baseImage.convertToFormat(QImage::Format_RGBA8888));
     if (!tileData.isNull() && !tileBounds.isEmpty())
         p.drawImage(tileBounds.topLeft() - full.topLeft(), tileData);
     p.end();
@@ -60,25 +146,26 @@ QImage Layer::compositeImageExpanded(QRect* outBounds) const
 
 QRect Layer::cpuContentBounds() const
 {
-    if (cpuImage.isNull())
+    const QImage& image = renderCpuImage();
+    if (image.isNull())
         return {};
-    const QRect fullRect(QPoint(0, 0), cpuImage.size());
-    if (!cpuImage.hasAlphaChannel())
+    const QRect fullRect(QPoint(0, 0), image.size());
+    if (!image.hasAlphaChannel())
         return fullRect; // opaque format — nothing to trim
 
-    const qint64 key = cpuImage.cacheKey();
+    const qint64 key = image.cacheKey();
     if (!cpuContentBoundsDirty && key == cpuContentBoundsKey)
         return cpuContentBoundsCache;
 
-    const int w = cpuImage.width();
-    const int h = cpuImage.height();
+    const int w = image.width();
+    const int h = image.height();
     int minX = w, minY = h, maxX = -1, maxY = -1;
 
-    const QImage::Format fmt = cpuImage.format();
+    const QImage::Format fmt = image.format();
     if (fmt == QImage::Format_RGBA8888
         || fmt == QImage::Format_RGBA8888_Premultiplied) {
         for (int y = 0; y < h; ++y) {
-            const uchar* row = cpuImage.constScanLine(y);
+            const uchar* row = image.constScanLine(y);
             int first = -1, last = -1;
             for (int x = 0; x < w; ++x) {
                 if (row[x * 4 + 3] == 0)
@@ -96,7 +183,7 @@ QRect Layer::cpuContentBounds() const
     } else if (fmt == QImage::Format_ARGB32
                || fmt == QImage::Format_ARGB32_Premultiplied) {
         for (int y = 0; y < h; ++y) {
-            const QRgb* row = reinterpret_cast<const QRgb*>(cpuImage.constScanLine(y));
+            const QRgb* row = reinterpret_cast<const QRgb*>(image.constScanLine(y));
             int first = -1, last = -1;
             for (int x = 0; x < w; ++x) {
                 if (qAlpha(row[x]) == 0)

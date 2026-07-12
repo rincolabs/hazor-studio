@@ -977,7 +977,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                   static_cast<float>(canvasHalfExtents.y()));
     }
 
-    if (needsShaderBlend(static_cast<int>(groupNode->blendMode))) {
+    if (needsShaderBlend(static_cast<int>(groupNode->blendMode()))) {
         // Two-pass blend: copy the current target (dst) into m_blendTex, then run
         // the blend shader sampling src = group FBO, dst = m_blendTex. All sizing
         // uses the restored target viewport (entry.vp) — not the canvas-sized FBO —
@@ -1027,8 +1027,8 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                          static_cast<float>(tw),
                                          static_cast<float>(th));
             m_blendProg->setUniformValue(m_blendU.blendMode,
-                                         blendModeMap(static_cast<int>(groupNode->blendMode)));
-            m_blendProg->setUniformValue(m_blendU.opacity, groupNode->opacity);
+                                         blendModeMap(static_cast<int>(groupNode->blendMode())));
+            m_blendProg->setUniformValue(m_blendU.opacity, groupNode->opacity());
             m_blendProg->setUniformValue(m_blendU.hasMask, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskDensity, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskUvScale, QVector2D(1.0f, 1.0f));
@@ -1061,7 +1061,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_mainProg->setUniformValue(m_mainU.transform, mvp);
             m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
             m_mainProg->setUniformValue(m_mainU.texture, 0);
-            m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
+            m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity());
             m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
             m_mainProg->setUniformValue(m_mainU.maskDensity, 0.0f);
             m_mainProg->setUniformValue(m_mainU.instanced, 0);
@@ -1076,13 +1076,13 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         }
     } else {
         // Normal blend: draw with applyBlendMode
-        applyFixedBlend(static_cast<int>(groupNode->blendMode));
+        applyFixedBlend(static_cast<int>(groupNode->blendMode()));
         m_mainProg->bind();
         m_vao.bind();
         m_mainProg->setUniformValue(m_mainU.transform, mvp);
         m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
         m_mainProg->setUniformValue(m_mainU.texture, 0);
-        m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
+        m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity());
         m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
         m_mainProg->setUniformValue(m_mainU.instanced, 0);
         setMainSourcePremultiplied(true);
@@ -1268,7 +1268,7 @@ void GPUViewport::syncLayerFromGpu(Layer* layer)
     if (!ctx) return;
     glBindTexture(GL_TEXTURE_2D, layer->textureId);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                  layer->cpuImage.bits());
+                  layer->writableRenderCpuImage().bits());
     // In-place readback keeps the QImage cacheKey — invalidate the cached alpha
     // content bounds explicitly so the transform outline re-measures.
     layer->invalidateContentBounds();
@@ -1285,7 +1285,7 @@ void GPUViewport::syncLayerMaskFromGpu(Layer* layer)
 
 void GPUViewport::uploadLayerTextureCpu(Layer* layer)
 {
-    if (!layer || layer->cpuImage.isNull()) return;
+    if (!layer || layer->renderCpuImage().isNull()) return;
     if (layer->fbo != 0) {
         glDeleteFramebuffers(1, &layer->fbo);
         layer->fbo = 0;
@@ -1294,7 +1294,7 @@ void GPUViewport::uploadLayerTextureCpu(Layer* layer)
         glDeleteTextures(1, &layer->textureId);
         layer->textureId = 0;
     }
-    const QImage rgba = layer->cpuImage.convertToFormat(QImage::Format_RGBA8888);
+    const QImage rgba = layer->renderCpuImage().convertToFormat(QImage::Format_RGBA8888);
     glGenTextures(1, &layer->textureId);
     glBindTexture(GL_TEXTURE_2D, layer->textureId);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1334,7 +1334,7 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
             // Adjustment layers have no drawable pixels — only the mask
             // (handled below) is synced; uploading the doc-sized transparent
             // cpuImage would just waste VRAM.
-        } else if (layer->rasterStorage.isEnabled()) {
+        } else if (layer->renderRasterStorage().isEnabled()) {
             // Don't upload stale cpuImage; tiles are uploaded by LayerCompositor.
             // Only invalidate every tile when the CPU pixels were replaced
             // wholesale (textureOutdated): incremental edits (brush dabs,
@@ -1343,7 +1343,7 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
             // re-upload of every tile on the next live frame — the main reason
             // dab-heavy layers were slow to paint on and move.
             if (layer->textureOutdated) {
-                layer->rasterStorage.markAllGpuDirty();
+                layer->renderRasterStorage().markAllGpuDirty();
                 layer->pendingGpuUpload = true;
                 layer->textureOutdated = false;
             }
@@ -1351,7 +1351,7 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
             const bool hasShapeSprite = layer->shapeSpriteRenderable();
             const QImage& uploadImage = hasShapeSprite
                 ? layer->shapeCache.image
-                : layer->cpuImage;
+                : layer->renderCpuImage();
             if (!uploadImage.isNull()) {
                 if (layer->textureId == 0) {
                     glGenTextures(1, &layer->textureId);
@@ -1725,7 +1725,21 @@ void GPUViewport::render(const RenderParams& p)
         if (!node || !node->layer) continue;
         auto* layer = node->layer.get();
         const bool isAdjustment = node->type == LayerTreeNode::Type::Adjustment;
-        const bool hasRaster = !layer->cpuImage.isNull();
+        if (!isAdjustment && layer->hasEvaluatedRasterContent()
+            && layer->evaluatedCelId().isNull()) {
+            if (layer->fbo != 0) {
+                glDeleteFramebuffers(1, &layer->fbo);
+                layer->fbo = 0;
+            }
+            if (layer->textureId != 0) {
+                glDeleteTextures(1, &layer->textureId);
+                layer->textureId = 0;
+            }
+            layer->textureOutdated = false;
+            continue;
+        }
+        const bool hasRaster = !layer->renderCpuImage().isNull()
+            || layer->renderRasterStorage().isEnabled();
         const bool hasShapeSprite = layer->isShapeLayer()
             && !layer->shapeCache.image.isNull();
         if (!hasRaster && !hasShapeSprite) continue;
@@ -1742,7 +1756,7 @@ void GPUViewport::render(const RenderParams& p)
             needsLayerSync = true;
             break;
         }
-        if (!isAdjustment && !layer->rasterStorage.isEnabled()
+        if (!isAdjustment && !layer->renderRasterStorage().isEnabled()
             && layer->textureId == 0) {
             needsLayerSync = true;
             break;

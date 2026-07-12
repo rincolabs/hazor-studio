@@ -19,6 +19,7 @@
 #include "ui/SwatchesPanel.hpp"
 #include "ui/ColorMixerPanel.hpp"
 #include "ui/ColorPaletteBar.hpp"
+#include "ui/TimelinePanel.hpp"
 #include "ui/ToolOptionsBar.hpp"
 #include "ui/AlignBar.hpp"
 #include "ui/IconUtils.hpp"
@@ -74,6 +75,7 @@
 #include "theme/ThemeManager.hpp"
 #include "core/LayerEffect.hpp"
 #include "io/ImageIO.hpp"
+#include "animation/AnimationExportService.hpp"
 #include "io/ProjectFileService.hpp"
 #include "color/ColorManagementService.hpp"
 #include "ui/color/AssignProfileDialog.hpp"
@@ -1177,6 +1179,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_colorMixerPanel = new ColorMixerPanel(m_colorEngine, this);
 
     m_layerPanel = new LayerPanel(this);
+    m_timelinePanel = new TimelinePanel(this);
 
     
 
@@ -1221,6 +1224,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_colorDock     = makePanelDock(tr("Color"),      QStringLiteral("ColorDock"),      m_colorMixerPanel);
     m_swatchesDock  = makePanelDock(tr("Swatches"),   QStringLiteral("SwatchesDock"),   m_swatchesPanel);
     m_historyDock   = makePanelDock(tr("History"),    QStringLiteral("HistoryDock"),    m_historyPanel);
+    m_timelineDock  = makePanelDock(tr("Timeline"),   QStringLiteral("TimelineDock"),   m_timelinePanel);
+    addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
+    m_timelineDock->setMinimumHeight(180);
 
     connect(m_propsPanel, &PropertiesPanel::maskDensityChanged, this, [this](float density) {
         if (m_ctrl) m_ctrl->setMaskDensity(m_ctrl->activeLayerIndex(), density);
@@ -1270,11 +1276,11 @@ MainWindow::MainWindow(QWidget* parent)
         auto* node = m_doc->activeNode();
         if (!node || !node->layer || node->isPositionLocked()) return;
         if (!node->layer->hasResetTransform) {
-            node->layer->resetTransform = node->transform;
+            node->layer->resetTransform = node->transform();
             node->layer->hasResetTransform = true;
             return;
         }
-        const QTransform before = node->transform;
+        const QTransform before = node->transform();
         const QTransform after = node->layer->resetTransform;
         if (before == after) return;
         m_ctrl->setLayerTransform(m_doc->activeFlatIndex, after, &before);
@@ -2972,6 +2978,7 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     m_layerPanel->setController(m_ctrl);
     m_propsPanel->setController(m_ctrl);
     m_histogramPanel->setController(m_ctrl);
+    m_timelinePanel->setController(m_ctrl);
     syncGenerativeFillPanelController();
 
     if (m_presetManager && !m_presetManager->presetNames(Assistant).isEmpty())
@@ -3090,6 +3097,7 @@ void MainWindow::onTabChanged(int index)
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
         m_histogramPanel->setController(m_ctrl);
+        m_timelinePanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
 
         if (m_canvas->currentTool() == CanvasView::Tool::AiRemove) {
@@ -3147,6 +3155,7 @@ void MainWindow::onTabChanged(int index)
         m_toolExecutor->setController(nullptr);
         m_layerPanel->setController(nullptr);
         m_histogramPanel->setController(nullptr);
+        m_timelinePanel->setController(nullptr);
         m_propsPanel->setController(nullptr);
         syncGenerativeFillPanelController();
         m_propsPanel->clear();
@@ -3202,6 +3211,7 @@ void MainWindow::onTabCloseRequested(int index)
         m_toolExecutor->setController(nullptr);
         m_layerPanel->setController(nullptr);
         m_histogramPanel->setController(nullptr);
+        m_timelinePanel->setController(nullptr);
         syncGenerativeFillPanelController();
         m_propsPanel->clear();
         if (m_zoomCombo) {
@@ -3222,6 +3232,7 @@ void MainWindow::onTabCloseRequested(int index)
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
         m_histogramPanel->setController(m_ctrl);
+        m_timelinePanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
         refreshPropertiesPanel();
         updateStatusFromDocument();
@@ -3395,7 +3406,7 @@ void MainWindow::onOpenFile()
             node->layer->owner = node.get();
             // Required: without this, "Reset Position" stores the post-first-move position
             // as the origin instead of resetting to the original on the first click.
-            node->layer->resetTransform = node->transform;
+            node->layer->resetTransform = node->transform();
             node->layer->hasResetTransform = true;
             m_doc->selection.resize(preview.width(), preview.height());
             m_doc->roots.push_back(std::move(node));
@@ -3664,6 +3675,10 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     tab.document->zoom = loaded.zoom;
     tab.document->panOffset = loaded.panOffset;
     tab.document->guideManager.setGuides(loaded.guides);
+    // Animation model: clone(true) above preserved each node's stable id, so the
+    // loaded tracks (keyed by id) line up with the document's nodes.
+    tab.document->animation = loaded.animation;
+    tab.document->setCurrentFrame(tab.document->animation.startFrame());
     tab.document->selection.resize(loaded.canvasSize.width(), loaded.canvasSize.height());
     tab.document->selection.clear();
     tab.document->selection.setActive(false);
@@ -3770,6 +3785,10 @@ void MainWindow::onExportFile()
     if (opts.resizeEnabled && opts.targetSize.isValid())
         eopts.resizeTo = opts.targetSize;
 
+    // Snapshot on the document's owner thread before dispatch. The worker must
+    // never composite the live document while the editor can mutate it.
+    auto exportSnapshot = anim::AnimationExportService::createRenderSnapshot(*m_doc);
+
     beginProgressDelayed(tr("Progress"), tr("Exporting Image"), false);
     auto* watcher = new QFutureWatcher<QPair<bool, QString>>(this);
     connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this, [this, watcher]() {
@@ -3780,9 +3799,9 @@ void MainWindow::onExportFile()
             QMessageBox::warning(this, tr("Could Not Export Image"),
                 result.second.isEmpty() ? tr("Failed to export image.") : result.second);
     });
-    watcher->setFuture(QtConcurrent::run([doc = m_doc, path, eopts]() {
+    watcher->setFuture(QtConcurrent::run([snapshot = std::move(exportSnapshot), path, eopts]() {
         QString errorMessage;
-        const bool ok = saveImage(doc, path, eopts, &errorMessage);
+        const bool ok = saveImage(snapshot.get(), path, eopts, &errorMessage);
         return QPair<bool, QString>(ok, errorMessage);
     }));
 }
@@ -4092,7 +4111,7 @@ bool MainWindow::syncShapeOptionsBar(LayerTreeNode* node)
         sides = sd.metadata.parameters.value(QStringLiteral("sides"), 6).toInt();
     else if (sd.metadata.presetId == QLatin1String("star"))
         sides = sd.metadata.parameters.value(QStringLiteral("points"), 6).toInt();
-    const float opacity = std::clamp(node->opacity, 0.0f, 1.0f);
+    const float opacity = std::clamp(node->opacity(), 0.0f, 1.0f);
 
     m_toolBar->setShapeType(type);
     m_toolBar->setShapeFillColor(sd.style.fillColor);
@@ -4766,6 +4785,16 @@ void MainWindow::resetDockLayout()
     m_layersDock->raise();
     m_histogramDock->hide();
 
+    // Timeline is an independent horizontal bottom dock. Since the
+    // ColorPaletteBar is the last widget in the central host, the bottom dock is
+    // laid out directly below it by QMainWindow.
+    if (m_timelineDock) {
+        addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
+        m_timelineDock->setFloating(false);
+        m_timelineDock->show();
+        resizeDocks({m_timelineDock}, {230}, Qt::Vertical);
+    }
+
     QTimer::singleShot(0, this, [this]() {
         updateDockTitleBar(m_histogramDock);
         updateDockTitleBar(m_propsDock);
@@ -4774,6 +4803,7 @@ void MainWindow::resetDockLayout()
         updateDockTitleBar(m_historyDock);
         updateDockTitleBar(m_layersDock);
         updateDockTitleBar(m_agentDock);
+        updateDockTitleBar(m_timelineDock);
 
         // tabifyDockWidget() creates new internal QTabBar instances that are
         // not re-polished automatically, so all stylesheet rules are ignored.
@@ -5139,12 +5169,12 @@ void MainWindow::refreshLayerPanel()
 namespace {
 // W/H/X/Y/rotation a layer's Transform panel should display, derived from the
 // node's VISUAL frame (the same oriented box the canvas draws via
-// TransformController::cornersFromNode) — never node->transform directly.
+// TransformController::cornersFromNode) — never node->transform() directly.
 //
 // This matters for Shape layers: committing a free transform bakes the rotation
-// into the shape geometry and rebuilds node->transform AXIS-ALIGNED around the
+// into the shape geometry and rebuilds node->transform() AXIS-ALIGNED around the
 // new rotated-AABB raster (see ImageController::bakeShapeLayerResolutionInPlace).
-// Reading node->transform there reports rotation 0 and the bounding-box size, so
+// Reading node->transform() there reports rotation 0 and the bounding-box size, so
 // the fields jumped on commit. visualFrameForNode reconstructs the oriented box
 // from the geometry, so the values are invariant across the bake and match what
 // the user saw mid-gesture.
@@ -5287,9 +5317,9 @@ void MainWindow::applyPropertiesTransformEdit(int field, double value)
     const double docH = std::max(1, m_doc->size.height());
 
     // Edit the node's VISUAL frame (the on-screen oriented box that the panel
-    // displayed via computeLayerTransformMetrics), not node->transform directly.
+    // displayed via computeLayerTransformMetrics), not node->transform() directly.
     // For Shape layers the commit-time bake stores rotation in the geometry and
-    // leaves node->transform axis-aligned, so editing node->transform would
+    // leaves node->transform() axis-aligned, so editing node->transform() would
     // disagree with the shown W/H/X/Y/rotation. The resulting new frame is
     // converted back to a local transform via the world-delta model below.
     const QTransform frame =
@@ -5382,14 +5412,14 @@ void MainWindow::applyPropertiesTransformEdit(int field, double value)
         return;
     }
 
-    // Convert the edited visual frame back into a local node->transform via the
+    // Convert the edited visual frame back into a local node->transform() via the
     // world-delta model (local' = local · P · M · P⁻¹, with M = frame⁻¹·newFrame
     // the canvas-NDC delta and P the parent's accumulated transform). This keeps
     // grouped/nested layers correct, and for a full-base ungrouped layer it
-    // reduces to node->transform = newFrame (there frame == node->transform).
+    // reduces to node->transform() = newFrame (there frame == node->transform()).
     QTransform parentAccum;
     for (auto* p = node->parent; p; p = p->parent)
-        parentAccum = parentAccum * p->transform;
+        parentAccum = parentAccum * p->transform();
 
     bool ok = false;
     const QTransform frameInv = frame.inverted(&ok);
@@ -5397,7 +5427,7 @@ void MainWindow::applyPropertiesTransformEdit(int field, double value)
     const QTransform worldDelta = frameInv * newFrame;
     const QTransform parentInv = parentAccum.inverted(&ok);
     if (!ok) return;
-    const QTransform newLocal = node->transform * parentAccum * worldDelta * parentInv;
+    const QTransform newLocal = node->transform() * parentAccum * worldDelta * parentInv;
 
     // Routed through the canvas so per-type baking (text font size, shape
     // re-render) and undo grouping match a manual transform.

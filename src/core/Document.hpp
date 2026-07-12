@@ -13,6 +13,7 @@
 #include "RenderScheduler.hpp"
 #include "PerformanceConfig.hpp"
 #include "GuideManager.hpp"
+#include "animation/AnimationModel.hpp"
 #include "color/ColorProfile.hpp"
 #include "color/SoftProofSettings.hpp"
 
@@ -36,6 +37,25 @@ public:
     SelectionMask selection;
     std::vector<AlphaChannel> channels;
     GuideManager guideManager;
+
+    // ── Animation ────────────────────────────────────────────
+    // The document owns its animation data (tracks, fps, ranges). It is inert
+    // for static documents (no tracks) and is consulted only by the animation
+    // evaluator — never by the renderers, which keep reading the evaluated
+    // getters on LayerTreeNode.
+    anim::AnimationModel animation;
+
+    // Current animation frame. ALWAYS change it through setCurrentFrame() so the
+    // evaluator runs and the composite is invalidated — never assign the backing
+    // field directly. Clamped to the model's [startFrame, endFrame] range.
+    int currentFrame() const { return m_currentFrame; }
+
+    // Central frame operation: clamp `frame` to the valid range, update the
+    // current frame, run the AnimationEvaluator (which writes evaluatedState and
+    // bumps compositionGeneration when anything changed), and report whether any
+    // node's evaluated state changed so the caller can repaint. A static
+    // document (no tracks) short-circuits and is essentially free.
+    bool setCurrentFrame(int frame);
 
     // ── Performance ──────────────────────────────────────────
     PerformanceConfig perfConfig;
@@ -363,4 +383,7 @@ private:
     ColorProfile m_colorProfile = ColorProfile::sRgb();
     ColorProfileSource m_profileSource = ColorProfileSource::GeneratedDefault;
     SoftProofSettings m_softProof;
+
+    // Backing store for currentFrame(); mutate only via setCurrentFrame().
+    int m_currentFrame = 0;
 };
