@@ -17,6 +17,7 @@ struct ProjectLoadResult {
     double resolutionDpi = 300.0;
     QString colorMode = QStringLiteral("RGB Color");
     int bitDepth = 8;
+    QString documentType = QStringLiteral("Photo");
     std::vector<std::unique_ptr<LayerTreeNode>> roots;
     int activeFlatIndex = 0;
     float zoom = 1.0f;

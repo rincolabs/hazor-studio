@@ -182,8 +182,9 @@ private slots:
     // Restore every panel to its default position: the right-side panels back
     // into the default two-group split (Histogram hidden until Window menu),
     // and the on-demand floating panels (Brush Settings, Brushes, Generative
-    // Fill) back to their hidden floating state. Wired to Window → Reset Panel
-    // Layout.
+    // Fill) back to their hidden floating state. The timeline follows the active
+    // workspace (shown for Animation, hidden for Photo). Wired to Window → Reset
+    // Panel Layout.
     void resetDockLayout();
 
     void onTextFontChanged(const QFont& font);
@@ -402,6 +403,29 @@ private:
     QDockWidget* m_historyDock = nullptr;
     QDockWidget* m_timelineDock = nullptr;
     QDockWidget* m_brushSettingsDock = nullptr;
+
+    // The two built-in workspaces. Photo is the standard editing layout;
+    // Animation is the SAME layout plus the timeline dock — the only structural
+    // difference between them, so Animation reuses Photo's arrangement instead
+    // of duplicating it. (Not a slot: declared here, outside the private slots
+    // section, since moc cannot parse an enum among slot declarations.)
+    enum class Workspace { Photo, Animation };
+
+    // Switch the active workspace: toggles the timeline dock (shown only for
+    // Animation) and keeps the Window → Workspaces checkmarks in sync. Every
+    // other dock keeps the user's current arrangement, so switching never
+    // discards manual customization. A no-op when `ws` is already active unless
+    // `force` is set (the menu forces; auto-selection does not).
+    void applyWorkspace(Workspace ws, bool force = false);
+
+    // Map a document's `documentType` ("Photo"/"Animation") to its workspace.
+    static Workspace workspaceForDocumentType(const QString& documentType);
+
+    // Active workspace + its Window → Workspaces menu actions (kept as an
+    // exclusive checkable pair so auto-selection can update the checkmarks).
+    Workspace m_currentWorkspace = Workspace::Photo;
+    QAction* m_photoWorkspaceAction = nullptr;
+    QAction* m_animationWorkspaceAction = nullptr;
 
     ToolExecutor* m_toolExecutor = nullptr;
     McpServer* m_mcpServer = nullptr;

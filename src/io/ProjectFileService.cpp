@@ -1121,6 +1121,7 @@ bool ProjectFileService::saveProject(const Document& doc, const QString& path, Q
     root["resolutionDpi"] = doc.resolutionDpi;
     root["colorMode"] = doc.colorMode;
     root["bitDepth"] = doc.bitDepth;
+    root["documentType"] = doc.documentType;
     root["activeFlatIndex"] = doc.activeFlatIndex;
     root["zoom"] = doc.zoom;
     QJsonObject pan;
@@ -1264,6 +1265,7 @@ ProjectLoadResult ProjectFileService::loadProject(const QString& path)
     result.resolutionDpi = root.value("resolutionDpi").toDouble(300.0);
     result.colorMode = root.value("colorMode").toString(QStringLiteral("RGB Color"));
     result.bitDepth = root.value("bitDepth").toInt(8);
+    result.documentType = root.value("documentType").toString(QStringLiteral("Photo"));
     result.canvasSize = QSize(w, h);
     result.activeFlatIndex = root.value("activeFlatIndex").toInt(0);
     result.zoom = static_cast<float>(root.value("zoom").toDouble(1.0));

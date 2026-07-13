@@ -15,6 +15,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSlider>
@@ -34,7 +36,14 @@ void TimelinePanel::buildUi()
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(6, 6, 6, 6);
     root->setSpacing(4);
-    auto* bar = new QHBoxLayout();
+    // The transport/keyframe toolbar packs many controls into a single row. It
+    // lives inside a horizontal QScrollArea so its (large) natural width never
+    // propagates to the dock's minimum width — otherwise showing the timeline
+    // would force the whole main window wider than the screen. When the dock is
+    // wide enough the toolbar shows normally; when narrow it scrolls.
+    auto* barContainer = new QWidget(this);
+    auto* bar = new QHBoxLayout(barContainer);
+    bar->setContentsMargins(0, 0, 0, 0);
     bar->setSpacing(4);
 
     auto button = [this, bar](const QString& text, const QString& tip) {
@@ -94,7 +103,23 @@ void TimelinePanel::buildUi()
     auto* duplicateCel = button(tr("Duplicate"), tr("Duplicate the active cel"));
     auto* emptyFrame = button(tr("Empty"), tr("Create an explicit empty frame"));
     auto* removeCel = button(tr("Delete"), tr("Remove the selected keyframes or the raster key"));
-    root->addLayout(bar);
+
+    auto* barScroll = new QScrollArea(this);
+    barScroll->setObjectName(QStringLiteral("TimelineToolbarScroll"));
+    barScroll->setWidget(barContainer);
+    barScroll->setWidgetResizable(true);          // stretch to the dock width
+    barScroll->setFrameShape(QFrame::NoFrame);
+    barScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    barScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    barScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Inherit the panel background so the toolbar looks unchanged when it fits.
+    barScroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
+    barScroll->viewport()->setAutoFillBackground(false);
+    barContainer->setAutoFillBackground(false);
+    // Reserve room for the horizontal scrollbar so it never overlaps the row.
+    const int barHeight = std::max(barContainer->sizeHint().height(), 28);
+    barScroll->setFixedHeight(barHeight + barScroll->horizontalScrollBar()->sizeHint().height());
+    root->addWidget(barScroll);
 
     m_view = new TimelineView(this);
     root->addWidget(m_view, 1);

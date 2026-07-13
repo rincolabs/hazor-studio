@@ -92,6 +92,7 @@
 #include "agent/AgentPresetManager.hpp"
 
 #include <QMenuBar>
+#include <QActionGroup>
 #include <QMenu>
 #include <QInputDialog>
 #include <QShortcut>
@@ -1007,6 +1008,24 @@ MainWindow::MainWindow(QWidget* parent)
     connect(windowGenFillAction, &QAction::triggered, this, &MainWindow::onGenerativeFill);
 
     auto* workspacesMenu = windowMenu->addMenu(tr("&Workspaces"));
+    // Photo / Animation are mutually exclusive views of the same layout. The
+    // Animation entry just adds the timeline; both stay user-customizable and
+    // share one right-panel arrangement (see applyWorkspace()).
+    auto* workspaceGroup = new QActionGroup(this);
+    workspaceGroup->setExclusive(true);
+    m_photoWorkspaceAction = workspacesMenu->addAction(tr("&Photo"));
+    m_photoWorkspaceAction->setCheckable(true);
+    m_photoWorkspaceAction->setChecked(m_currentWorkspace == Workspace::Photo);
+    workspaceGroup->addAction(m_photoWorkspaceAction);
+    connect(m_photoWorkspaceAction, &QAction::triggered, this,
+            [this] { applyWorkspace(Workspace::Photo, /*force=*/true); });
+    m_animationWorkspaceAction = workspacesMenu->addAction(tr("&Animation"));
+    m_animationWorkspaceAction->setCheckable(true);
+    m_animationWorkspaceAction->setChecked(m_currentWorkspace == Workspace::Animation);
+    workspaceGroup->addAction(m_animationWorkspaceAction);
+    connect(m_animationWorkspaceAction, &QAction::triggered, this,
+            [this] { applyWorkspace(Workspace::Animation, /*force=*/true); });
+    workspacesMenu->addSeparator();
     auto* resetLayoutAction = workspacesMenu->addAction(tr("&Reset Panel Layout"));
     connect(resetLayoutAction, &QAction::triggered, this, &MainWindow::resetDockLayout);
 
@@ -3318,6 +3337,7 @@ void MainWindow::onNewFile()
     QSize pixelSize(wPx, hPx);
     auto& tab = createTab(s.name, pixelSize);
     if (tab.document) {
+        tab.document->documentType = s.documentType;
         tab.document->resolutionDpi = ppi;
         tab.document->colorMode = documentColorModeFromSetting(s.colorMode);
         tab.document->bitDepth = documentBitDepthFromSetting(s.colorMode);
@@ -3351,6 +3371,8 @@ void MainWindow::onNewFile()
     updateLayerMenuState();
     m_canvas->update();
     updateDirtyUi();
+    // A new document defines its type, so auto-select the matching workspace.
+    applyWorkspace(workspaceForDocumentType(s.documentType));
 }
 
 void MainWindow::onOpenFile()
@@ -3682,6 +3704,7 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     tab.document->resolutionDpi = loaded.resolutionDpi;
     tab.document->colorMode = loaded.colorMode;
     tab.document->bitDepth = loaded.bitDepth;
+    tab.document->documentType = loaded.documentType;
     tab.document->setColorProfile(loaded.colorProfile);
     tab.document->setProfileSource(loaded.profileSource);
     tab.document->zoom = loaded.zoom;
@@ -3717,6 +3740,8 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     updateLayerMenuState();
     updateStatusFromDocument();
     updateDirtyUi();
+    // Opening a document auto-selects the workspace its type was saved with.
+    applyWorkspace(workspaceForDocumentType(tab.document->documentType));
     return true;
 }
 
@@ -4872,14 +4897,18 @@ void MainWindow::resetDockLayout()
     m_layersDock->raise();
     m_histogramDock->hide();
 
-    // Timeline is an independent horizontal bottom dock. Since the
-    // ColorPaletteBar is the last widget in the central host, the bottom dock is
-    // laid out directly below it by QMainWindow.
+    // Timeline is an independent horizontal bottom dock, present only in the
+    // Animation workspace. Since the ColorPaletteBar is the last widget in the
+    // central host, the bottom dock is laid out directly below it by QMainWindow.
     if (m_timelineDock) {
-        addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
-        m_timelineDock->setFloating(false);
-        m_timelineDock->show();
-        resizeDocks({m_timelineDock}, {230}, Qt::Vertical);
+        if (m_currentWorkspace == Workspace::Animation) {
+            addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
+            m_timelineDock->setFloating(false);
+            m_timelineDock->show();
+            resizeDocks({m_timelineDock}, {230}, Qt::Vertical);
+        } else {
+            m_timelineDock->hide();
+        }
     }
 
     QTimer::singleShot(0, this, [this]() {
@@ -4912,6 +4941,73 @@ void MainWindow::resetDockLayout()
         d->setFloating(true);
         d->hide();
     }
+}
+
+MainWindow::Workspace MainWindow::workspaceForDocumentType(const QString& documentType)
+{
+    return documentType.compare(QStringLiteral("Animation"), Qt::CaseInsensitive) == 0
+               ? Workspace::Animation
+               : Workspace::Photo;
+}
+
+void MainWindow::applyWorkspace(Workspace ws, bool force)
+{
+    // Redundant switches are ignored so opening a document (or the menu picking
+    // the workspace that is already active) never discards a layout the user
+    // customized. The menu passes force=true to always re-assert the timeline.
+    if (ws == m_currentWorkspace && !force)
+        return;
+    m_currentWorkspace = ws;
+
+    // Keep the Window → Workspaces checkmarks in sync whether the switch came
+    // from the menu or from auto-selection on document create/open.
+    if (m_photoWorkspaceAction)
+        m_photoWorkspaceAction->setChecked(ws == Workspace::Photo);
+    if (m_animationWorkspaceAction)
+        m_animationWorkspaceAction->setChecked(ws == Workspace::Animation);
+
+    // The two workspaces share the exact same panel structure; the only
+    // difference is the animation timeline. Photo hides it, Animation shows it
+    // docked along the bottom. Every other dock keeps the user's arrangement.
+    if (m_timelineDock) {
+        if (ws == Workspace::Animation) {
+            if (m_timelineDock->isFloating())
+                m_timelineDock->setFloating(false);
+            // Re-dock only when it has no docked position (closed / never placed)
+            // so an existing bottom placement and its height survive a Photo →
+            // Animation round-trip; otherwise just re-show it.
+            if (dockWidgetArea(m_timelineDock) == Qt::NoDockWidgetArea) {
+                addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
+                resizeDocks({m_timelineDock}, {230}, Qt::Vertical);
+            }
+            m_timelineDock->show();
+            QTimer::singleShot(0, this, [this] { updateDockTitleBar(m_timelineDock); });
+        } else {
+            m_timelineDock->hide();
+        }
+    }
+
+    // Revealing the timeline can enlarge the window; keep it inside the screen so
+    // the title-bar controls never scroll off-screen. Deferred so the dock layout
+    // has settled first. A no-op while maximized/fullscreen or already on-screen.
+    QTimer::singleShot(0, this, [this] {
+        if (isMaximized() || isFullScreen())
+            return;
+        QScreen* scr = screen();
+        if (!scr)
+            return;
+        const QRect avail = scr->availableGeometry();
+        QRect g = frameGeometry();
+        if (avail.contains(g))
+            return;
+        g.setWidth(std::min(g.width(), avail.width()));
+        g.setHeight(std::min(g.height(), avail.height()));
+        if (g.right() > avail.right())   g.moveRight(avail.right());
+        if (g.bottom() > avail.bottom()) g.moveBottom(avail.bottom());
+        if (g.left() < avail.left())     g.moveLeft(avail.left());
+        if (g.top() < avail.top())       g.moveTop(avail.top());
+        setGeometry(g);
+    });
 }
 
 void MainWindow::applyBrushPressureEnabled(bool on)

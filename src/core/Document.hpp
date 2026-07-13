@@ -27,6 +27,12 @@ public:
     QString colorMode = QStringLiteral("RGB Color");
     int bitDepth = 8;
 
+    // Which editing workspace this document targets: "Photo" or "Animation".
+    // Chosen in the New Document dialog and restored when a project is loaded;
+    // MainWindow uses it to auto-select the matching workspace layout on create/
+    // open. A pure editor hint — it never affects pixels or the render pipeline.
+    QString documentType = QStringLiteral("Photo");
+
     std::vector<std::unique_ptr<LayerTreeNode>> roots;
     int activeFlatIndex = 0;
     std::set<int> selectedFlatIndices;
