@@ -165,6 +165,8 @@
         <file>icons/format-align-right.png</file>
         <file>icons/prop-pixel-layer.png</file>
         <file>icons/constrain-proportions.png</file>
+        <file>icons/play-circle.png</file>
+        <file>icons/image.png</file>
         <file>icons/flip-horizontal.png</file>
         <file>icons/flip-vertical.png</file>
         <file>icons/prop-document.png</file>

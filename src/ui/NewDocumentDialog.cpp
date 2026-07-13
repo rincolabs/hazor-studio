@@ -2,20 +2,49 @@
 #include "color/ColorProfileRepository.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
+#include "ui/IconUtils.hpp"
 
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QFormLayout>
-#include <QGridLayout>
-#include <QGroupBox>
-#include <QFrame>
-#include <QLabel>
-#include <QLineEdit>
 #include <QComboBox>
 #include <QDoubleSpinBox>
-#include <QSpinBox>
+#include <QFormLayout>
+#include <QFrame>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QHash>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
+#include <QSplitter>
+#include <QTreeWidget>
+#include <QVBoxLayout>
+
+#include <cmath>
+
 #include "colorpicker/ColorPickerDialog.hpp"
+
+namespace {
+const char* kCustomPresetsKey = "newDocument/customPresets";
+
+// Map a width/height unit-combo label to the token stored in a CanvasPreset.
+QString unitToken(const QString& comboText)
+{
+    if (comboText.startsWith(QStringLiteral("Inch"), Qt::CaseInsensitive)
+        || comboText.startsWith(QStringLiteral("in"), Qt::CaseInsensitive))
+        return QStringLiteral("in");
+    if (comboText.startsWith(QStringLiteral("cm"), Qt::CaseInsensitive))
+        return QStringLiteral("cm");
+    if (comboText.startsWith(QStringLiteral("mm"), Qt::CaseInsensitive))
+        return QStringLiteral("mm");
+    return QStringLiteral("px");
+}
+} // namespace
 
 NewDocumentDialog::NewDocumentDialog(QWidget* parent)
     : QDialog(parent)
@@ -23,10 +52,22 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
     setUpdatesEnabled(false);
 
     setWindowTitle(tr("New | Edit"));
-    setMinimumWidth(600);
-    setMinimumHeight(480);
+    setMinimumSize(760, 520);
+    resize(820, 560);
 
     auto* t = ThemeManager::instance()->current();
+    if (t) {
+        QString qss = t->exportDialogStyleSheet();
+        qss += QStringLiteral(
+                   "QDoubleSpinBox { min-height: 20px; padding: %1px; }\n"
+                   "QSplitter { background: %2; }\n"
+                   "QTreeWidget#presetTree { background: %3; }\n")
+                   .arg(t->spaceSM)
+                   .arg(t->colorSurface.name())
+                   .arg(t->colorBackgroundTertiary.name());
+        setStyleSheet(qss);
+    }
+
     auto* mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(t->spaceLG);
     mainLayout->setContentsMargins(t->spaceXL, t->spaceLG, t->spaceXL, t->spaceLG);
@@ -36,14 +77,14 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
     title->setTextFormat(Qt::RichText);
     mainLayout->addWidget(title);
 
-    // ── Body ──
-    auto* bodyLayout = new QHBoxLayout;
-    bodyLayout->setSpacing(t->spaceXXL);
-
-    bodyLayout->addWidget(createFormSection(), 1);
-    bodyLayout->addWidget(createButtonSection());
-
-    mainLayout->addLayout(bodyLayout, 1);
+    // ── Body: presets | form ──
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->addWidget(createPresetPanel());
+    splitter->addWidget(createFormSection());
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 2);
+    splitter->setSizes({220, 500});
+    mainLayout->addWidget(splitter, 1);
 
     // ── Footer ──
     auto* footerLayout = new QHBoxLayout;
@@ -53,11 +94,24 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
     footerLayout->addWidget(m_imageSizeLabel);
     mainLayout->addLayout(footerLayout);
 
-    setupPresets();
+    // ── Buttons ──
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch();
+    m_cancelBtn = new QPushButton(tr("Cancel"), this);
+    m_cancelBtn->setObjectName("cancelBtn");
+    m_cancelBtn->setMinimumHeight(32);
+    btnRow->addWidget(m_cancelBtn);
+    m_okBtn = new QPushButton(tr("OK"), this);
+    m_okBtn->setObjectName("okBtn");
+    m_okBtn->setDefault(true);
+    m_okBtn->setMinimumHeight(32);
+    btnRow->addWidget(m_okBtn);
+    mainLayout->addLayout(btnRow);
+
+    loadCustomPresets();
+    populatePresetTree();
     updateImageSizeDisplay();
 
-    connect(m_sizePresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &NewDocumentDialog::onSizePresetChanged);
     connect(m_widthSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &NewDocumentDialog::onWidthChanged);
     connect(m_heightSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -74,30 +128,239 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
             this, &NewDocumentDialog::onBackgroundChanged);
     connect(m_bgColorBtn, &QPushButton::clicked,
             this, &NewDocumentDialog::pickBackgroundColor);
+    connect(m_okBtn, &QPushButton::clicked, this, &QDialog::accept);
+    connect(m_cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
 
     setUpdatesEnabled(true);
 }
 
-void NewDocumentDialog::setupPresets()
+// ── Preset sidebar ───────────────────────────────────────────────────────────
+
+QWidget* NewDocumentDialog::createPresetPanel()
 {
-    m_presets = {
-        {"Landscape, 8 x 10 in",   10.0,   8.0,  "in"},
-        {"Landscape, 16 x 20 in",  20.0,  16.0,  "in"},
-        {"Portrait, 10 x 8 in",     8.0,  10.0,  "in"},
-        {"Square, 12 x 12 in",     12.0,  12.0,  "in"},
-        {"Square, 8 x 8 in",        8.0,   8.0,  "in"},
-        {"A3",                     11.7,  16.5,  "in"},
-        {"A4",                      8.27, 11.69, "in"},
-        {"A5",                      5.83,  8.27, "in"},
-        {"1920 x 1080 px",       1920.0, 1080.0, "px"},
-        {"3840 x 2160 px",       3840.0, 2160.0, "px"},
-        {"1024 x 768 px",        1024.0,  768.0, "px"},
+    auto* t = ThemeManager::instance()->current();
+    auto* panel = new QWidget(this);
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(t->spaceSM);
+
+    auto* title = new QLabel(tr("Presets"), this);
+    title->setAlignment(Qt::AlignHCenter);
+    layout->addWidget(title);
+
+    m_searchEdit = new QLineEdit(this);
+    m_searchEdit->setPlaceholderText(tr("Search"));
+    m_searchEdit->setClearButtonEnabled(true);
+    connect(m_searchEdit, &QLineEdit::textChanged,
+            this, &NewDocumentDialog::onSearchChanged);
+    layout->addWidget(m_searchEdit);
+
+    m_presetTree = new QTreeWidget(this);
+    m_presetTree->setObjectName(QStringLiteral("presetTree"));
+    m_presetTree->setHeaderHidden(true);
+    m_presetTree->setColumnCount(1);
+    m_presetTree->setMinimumWidth(200);
+    m_presetTree->setIndentation(10);
+    m_presetTree->setIconSize(QSize(24, 24));
+    connect(m_presetTree, &QTreeWidget::itemSelectionChanged,
+            this, &NewDocumentDialog::onPresetSelectionChanged);
+    layout->addWidget(m_presetTree, 1);
+
+    auto* toolRow = new QHBoxLayout;
+    m_addPresetBtn = new QPushButton(QStringLiteral("+"), this);
+    m_addPresetBtn->setObjectName("savePresetBtn");
+    m_addPresetBtn->setFixedWidth(38);
+    m_addPresetBtn->setToolTip(tr("Save the current size as a custom preset"));
+    connect(m_addPresetBtn, &QPushButton::clicked, this, &NewDocumentDialog::onAddPreset);
+    toolRow->addWidget(m_addPresetBtn);
+    m_removePresetBtn = new QPushButton(QStringLiteral("−"), this);
+    m_removePresetBtn->setObjectName("deletePresetBtn");
+    m_removePresetBtn->setFixedWidth(38);
+    m_removePresetBtn->setToolTip(tr("Delete the selected custom preset"));
+    m_removePresetBtn->setEnabled(false);
+    connect(m_removePresetBtn, &QPushButton::clicked, this, &NewDocumentDialog::onRemovePreset);
+    toolRow->addWidget(m_removePresetBtn);
+    toolRow->addStretch();
+    layout->addLayout(toolRow);
+
+    return panel;
+}
+
+void NewDocumentDialog::populatePresetTree()
+{
+    m_presetTree->clear();
+    QHash<QString, QTreeWidgetItem*> groups;
+    auto ensureGroup = [&](const QString& group) -> QTreeWidgetItem* {
+        auto it = groups.constFind(group);
+        if (it != groups.constEnd())
+            return it.value();
+        auto* node = new QTreeWidgetItem(m_presetTree, {group});
+        node->setFlags(Qt::ItemIsEnabled);
+        groups.insert(group, node);
+        return node;
     };
 
-    m_sizePresetCombo->addItem(tr("Custom"));
-    for (const auto& p : m_presets)
-        m_sizePresetCombo->addItem(p.label);
+    // A media-type icon makes the unified list clear at a glance (a platform can
+    // list both a video size and an image thumbnail).
+    const QIcon videoIcon = makeIcon(QStringLiteral(":/icons/play-circle.png"));
+    const QIcon imageIcon = makeIcon(QStringLiteral(":/icons/image.png"));
+    auto decorate = [&](QTreeWidgetItem* leaf, const canvaspresets::CanvasPreset& p) {
+        leaf->setIcon(0, p.kind == canvaspresets::DocumentKind::Animation
+                             ? videoIcon : imageIcon);
+        leaf->setData(0, Qt::UserRole, canvaspresets::toVariantMap(p));
+    };
+
+    for (const canvaspresets::CanvasPreset& p : canvaspresets::builtinPresets()) {
+        auto* leaf = new QTreeWidgetItem(ensureGroup(p.group), {p.name});
+        decorate(leaf, p);
+    }
+    if (!m_customPresets.isEmpty()) {
+        QTreeWidgetItem* customGroup = ensureGroup(tr("Custom"));
+        for (const canvaspresets::CanvasPreset& p : m_customPresets) {
+            auto* leaf = new QTreeWidgetItem(customGroup, {p.name});
+            decorate(leaf, p);
+        }
+    }
+    m_presetTree->expandAll();
 }
+
+void NewDocumentDialog::onPresetSelectionChanged()
+{
+    auto* item = m_presetTree->currentItem();
+    if (!item) {
+        m_removePresetBtn->setEnabled(false);
+        return;
+    }
+    const QVariant data = item->data(0, Qt::UserRole);
+    if (!data.isValid()) {
+        m_removePresetBtn->setEnabled(false);
+        return;
+    }
+    const canvaspresets::CanvasPreset preset =
+        canvaspresets::fromVariantMap(data.toMap());
+    m_removePresetBtn->setEnabled(!preset.builtin);
+    if (!m_updating)
+        applyPreset(preset);
+}
+
+void NewDocumentDialog::applyPreset(const canvaspresets::CanvasPreset& preset)
+{
+    m_updating = true;
+
+    m_widthSpin->setValue(preset.width);
+    m_heightSpin->setValue(preset.height);
+
+    const int unitIdx = m_widthUnitCombo->findText(preset.unit, Qt::MatchContains);
+    if (unitIdx >= 0) {
+        m_widthUnitCombo->setCurrentIndex(unitIdx);
+        m_heightUnitCombo->setCurrentIndex(unitIdx);
+    }
+
+    m_resolutionSpin->setValue(preset.resolution);
+    m_resolutionUnitCombo->setCurrentIndex(0); // Pixels/Inch
+
+    const QString kindLabel = canvaspresets::documentKindLabel(preset.kind);
+    const int dtIdx = m_docTypeCombo->findText(kindLabel);
+    if (dtIdx >= 0)
+        m_docTypeCombo->setCurrentIndex(dtIdx);
+
+    m_updating = false;
+    updateImageSizeDisplay();
+}
+
+void NewDocumentDialog::onSearchChanged(const QString& text)
+{
+    const QString needle = text.trimmed();
+    for (int i = 0; i < m_presetTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* group = m_presetTree->topLevelItem(i);
+        int visibleChildren = 0;
+        for (int j = 0; j < group->childCount(); ++j) {
+            QTreeWidgetItem* leaf = group->child(j);
+            const bool match = needle.isEmpty()
+                || leaf->text(0).contains(needle, Qt::CaseInsensitive);
+            leaf->setHidden(!match);
+            if (match)
+                ++visibleChildren;
+        }
+        group->setHidden(group->childCount() > 0 && visibleChildren == 0);
+    }
+}
+
+void NewDocumentDialog::onAddPreset()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("Save Preset"),
+        tr("Preset name:"), QLineEdit::Normal, QString(), &ok);
+    if (!ok || name.trimmed().isEmpty())
+        return;
+
+    canvaspresets::CanvasPreset p;
+    p.name = name.trimmed();
+    p.group = tr("Custom");
+    p.builtin = false;
+    p.kind = canvaspresets::documentKindFromLabel(m_docTypeCombo->currentText());
+    p.width = m_widthSpin->value();
+    p.height = m_heightSpin->value();
+    p.unit = unitToken(m_widthUnitCombo->currentText());
+    p.resolution = m_resolutionSpin->value();
+
+    for (auto& existing : m_customPresets) {
+        if (existing.name == p.name) {
+            existing = p;
+            saveCustomPresets();
+            populatePresetTree();
+            return;
+        }
+    }
+    m_customPresets.push_back(p);
+    saveCustomPresets();
+    populatePresetTree();
+}
+
+void NewDocumentDialog::onRemovePreset()
+{
+    auto* item = m_presetTree->currentItem();
+    if (!item)
+        return;
+    const QVariant data = item->data(0, Qt::UserRole);
+    if (!data.isValid())
+        return;
+    const canvaspresets::CanvasPreset preset =
+        canvaspresets::fromVariantMap(data.toMap());
+    if (preset.builtin)
+        return;
+    for (int i = 0; i < m_customPresets.size(); ++i) {
+        if (m_customPresets[i].name == preset.name) {
+            m_customPresets.remove(i);
+            break;
+        }
+    }
+    saveCustomPresets();
+    populatePresetTree();
+}
+
+void NewDocumentDialog::loadCustomPresets()
+{
+    m_customPresets.clear();
+    QSettings s;
+    const QJsonDocument doc = QJsonDocument::fromJson(
+        s.value(kCustomPresetsKey).toString().toUtf8());
+    for (const QJsonValue& v : doc.array())
+        m_customPresets.push_back(
+            canvaspresets::fromVariantMap(v.toObject().toVariantMap()));
+}
+
+void NewDocumentDialog::saveCustomPresets()
+{
+    QJsonArray arr;
+    for (const canvaspresets::CanvasPreset& p : m_customPresets)
+        arr.append(QJsonObject::fromVariantMap(canvaspresets::toVariantMap(p)));
+    QSettings s;
+    s.setValue(kCustomPresetsKey,
+               QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+}
+
+// ── Form ─────────────────────────────────────────────────────────────────────
 
 QWidget* NewDocumentDialog::createFormSection()
 {
@@ -120,16 +383,10 @@ QWidget* NewDocumentDialog::createFormSection()
     m_nameEdit->setMinimumWidth(200);
     addField(tr("Name"), m_nameEdit);
 
-    // ── Document Type ──
+    // ── Document Type ── (Photo | Animation; later selects the workspace)
     m_docTypeCombo = new QComboBox(this);
-    m_docTypeCombo->addItems({tr("Photo"), tr("Illustration"), tr("Web"),
-                              tr("Mobile"), tr("Film & Video")});
+    m_docTypeCombo->addItems({tr("Photo"), tr("Animation")});
     addField(tr("Document Type"), m_docTypeCombo);
-
-    // ── Size Preset ──
-    m_sizePresetCombo = new QComboBox(this);
-    m_sizePresetCombo->setMinimumWidth(200);
-    addField(tr("Size"), m_sizePresetCombo);
 
     // ── Dimensions section ──
     auto* dimFrame = new QFrame(this);
@@ -251,47 +508,6 @@ QWidget* NewDocumentDialog::createFormSection()
     return container;
 }
 
-QWidget* NewDocumentDialog::createButtonSection()
-{
-    auto* t = ThemeManager::instance()->current();
-    auto* container = new QWidget(this);
-    auto* layout = new QVBoxLayout(container);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(t->spaceMD);
-
-    // Give it a minimum width for the buttons
-    container->setFixedWidth(160);
-
-    m_okBtn = new QPushButton(tr("OK"), this);
-    m_okBtn->setObjectName("okBtn");
-    m_okBtn->setDefault(true);
-    m_okBtn->setMinimumHeight(32);
-    layout->addWidget(m_okBtn);
-
-    m_cancelBtn = new QPushButton(tr("Cancel"), this);
-    m_cancelBtn->setObjectName("cancelBtn");
-    m_cancelBtn->setMinimumHeight(32);
-    layout->addWidget(m_cancelBtn);
-
-    layout->addSpacing(12);
-
-    m_savePresetBtn = new QPushButton(tr("Save Preset..."), this);
-    m_savePresetBtn->setObjectName("savePresetBtn");
-    layout->addWidget(m_savePresetBtn);
-
-    m_deletePresetBtn = new QPushButton(tr("Delete Preset..."), this);
-    m_deletePresetBtn->setObjectName("deletePresetBtn");
-    m_deletePresetBtn->setEnabled(false);
-    layout->addWidget(m_deletePresetBtn);
-
-    layout->addStretch();
-
-    connect(m_okBtn, &QPushButton::clicked, this, &QDialog::accept);
-    connect(m_cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
-
-    return container;
-}
-
 void NewDocumentDialog::setSettings(const DocumentSettings& s)
 {
     m_nameEdit->setText(s.name);
@@ -372,81 +588,41 @@ double NewDocumentDialog::valueToInches(double v, const QString& unit) const
     return v;
 }
 
-double NewDocumentDialog::inchesToValue(double inches, const QString& unit) const
-{
-    if (unit.startsWith("Inch") || unit.startsWith("in"))
-        return inches;
-    if (unit.startsWith("cm"))
-        return inches * 2.54;
-    if (unit.startsWith("mm"))
-        return inches * 25.4;
-    if (unit.startsWith("px"))
-        return inches * m_resolutionSpin->value();
-    return inches;
-}
-
 // ── Slots ──
-
-void NewDocumentDialog::onSizePresetChanged(int index)
-{
-    if (index == 0) return; // "Custom"
-    const auto& p = m_presets[index - 1];
-
-    m_widthSpin->blockSignals(true);
-    m_heightSpin->blockSignals(true);
-    m_widthUnitCombo->blockSignals(true);
-    m_heightUnitCombo->blockSignals(true);
-
-    m_widthSpin->setValue(p.w);
-    m_heightSpin->setValue(p.h);
-
-    int unitIdx = m_widthUnitCombo->findText(p.unit, Qt::MatchContains);
-    if (unitIdx >= 0) {
-        m_widthUnitCombo->setCurrentIndex(unitIdx);
-        m_heightUnitCombo->setCurrentIndex(unitIdx);
-    }
-
-    m_widthSpin->blockSignals(false);
-    m_heightSpin->blockSignals(false);
-    m_widthUnitCombo->blockSignals(false);
-    m_heightUnitCombo->blockSignals(false);
-
-    updateImageSizeDisplay();
-}
 
 void NewDocumentDialog::onWidthChanged(double)
 {
-    m_sizePresetCombo->blockSignals(true);
-    m_sizePresetCombo->setCurrentIndex(0); // "Custom"
-    m_sizePresetCombo->blockSignals(false);
+    if (m_updating) return;
     updateImageSizeDisplay();
 }
 
 void NewDocumentDialog::onHeightChanged(double)
 {
-    m_sizePresetCombo->blockSignals(true);
-    m_sizePresetCombo->setCurrentIndex(0); // "Custom"
-    m_sizePresetCombo->blockSignals(false);
+    if (m_updating) return;
     updateImageSizeDisplay();
 }
 
 void NewDocumentDialog::onWidthUnitChanged(int)
 {
+    if (m_updating) return;
     updateImageSizeDisplay();
 }
 
 void NewDocumentDialog::onHeightUnitChanged(int)
 {
+    if (m_updating) return;
     updateImageSizeDisplay();
 }
 
 void NewDocumentDialog::onResolutionChanged(int)
 {
+    if (m_updating) return;
     updateImageSizeDisplay();
 }
 
 void NewDocumentDialog::onResolutionUnitChanged(int)
 {
+    if (m_updating) return;
     updateImageSizeDisplay();
 }
 

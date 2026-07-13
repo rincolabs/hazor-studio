@@ -6,6 +6,7 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include "ui/AppCheckBox.hpp"
+#include "ui/CanvasPresets.hpp"
 #include "ui/IconUtils.hpp"
 
 #include <QColorDialog>
@@ -708,21 +709,16 @@ QVector<AnimExportPreset> ExportAnimationDialog::builtinPresets() const
     list << mk("General", tr("MP4 — Original Size"), F::Mp4, 0, 0, 20)
          << mk("General", tr("MP4 — High Quality"), F::Mp4, 0, 0, 16)
          << mk("General", tr("GIF — Original Size"), F::Gif, 0, 0)
-         << mk("General", tr("Image Sequence"), F::PngSequence, 0, 0)
-         << mk("Instagram", tr("Square Post — 1080 × 1080"), F::Mp4, 1080, 1080)
-         << mk("Instagram", tr("Portrait Post — 1080 × 1350"), F::Mp4, 1080, 1350)
-         << mk("Instagram", tr("Story / Reels — 1080 × 1920"), F::Mp4, 1080, 1920)
-         << mk("Instagram", tr("Landscape — 1080 × 566"), F::Mp4, 1080, 566)
-         << mk("TikTok", tr("Vertical Video — 1080 × 1920"), F::Mp4, 1080, 1920)
-         << mk("YouTube", tr("Full HD — 1920 × 1080"), F::Mp4, 1920, 1080)
-         << mk("YouTube", tr("Quad HD — 2560 × 1440"), F::Mp4, 2560, 1440)
-         << mk("YouTube", tr("4K — 3840 × 2160"), F::Mp4, 3840, 2160)
-         << mk("YouTube", tr("Shorts — 1080 × 1920"), F::Mp4, 1080, 1920)
-         << mk("X / Twitter", tr("Landscape — 1280 × 720"), F::Mp4, 1280, 720)
-         << mk("X / Twitter", tr("Square — 1080 × 1080"), F::Mp4, 1080, 1080)
-         << mk("Facebook", tr("Feed — 1080 × 1350"), F::Mp4, 1080, 1350)
-         << mk("Facebook", tr("Landscape — 1280 × 720"), F::Mp4, 1280, 720)
-         << mk("Facebook", tr("Stories / Reels — 1080 × 1920"), F::Mp4, 1080, 1920);
+         << mk("General", tr("Image Sequence"), F::PngSequence, 0, 0);
+
+    // The platform size presets are shared with the New Document dialog so the
+    // two dialogs stay in sync from a single catalogue.
+    for (const canvaspresets::CanvasPreset& cp : canvaspresets::builtinPresets()) {
+        if (cp.kind != canvaspresets::DocumentKind::Animation)
+            continue;
+        const QSize px = canvaspresets::presetPixelSize(cp);
+        list << mk(cp.group, cp.name, F::Mp4, px.width(), px.height());
+    }
     return list;
 }
 

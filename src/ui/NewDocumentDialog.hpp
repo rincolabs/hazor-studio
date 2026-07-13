@@ -3,9 +3,10 @@
 #include <QDialog>
 #include <QColor>
 #include <QString>
-#include <vector>
+#include <QVector>
 
 #include "color/ColorProfile.hpp"
+#include "ui/CanvasPresets.hpp"
 
 class QLineEdit;
 class QComboBox;
@@ -13,6 +14,7 @@ class QDoubleSpinBox;
 class QSpinBox;
 class QPushButton;
 class QLabel;
+class QTreeWidget;
 
 struct DocumentSettings {
     QString name = "My new document";
@@ -43,7 +45,6 @@ public:
     DocumentSettings settings() const;
 
 private slots:
-    void onSizePresetChanged(int index);
     void onWidthChanged(double v);
     void onHeightChanged(double v);
     void onWidthUnitChanged(int index);
@@ -54,16 +55,29 @@ private slots:
     void pickBackgroundColor();
     void updateImageSizeDisplay();
 
-private:
-    QWidget* createFormSection();
-    QWidget* createButtonSection();
-    void setupPresets();
-    double valueToInches(double v, const QString& unit) const;
-    double inchesToValue(double inches, const QString& unit) const;
+    void onPresetSelectionChanged();
+    void onSearchChanged(const QString& text);
+    void onAddPreset();
+    void onRemovePreset();
 
+private:
+    QWidget* createPresetPanel();
+    QWidget* createFormSection();
+    void populatePresetTree();
+    void applyPreset(const canvaspresets::CanvasPreset& preset);
+    void loadCustomPresets();
+    void saveCustomPresets();
+    double valueToInches(double v, const QString& unit) const;
+
+    // ── Preset sidebar ──
+    QLineEdit* m_searchEdit = nullptr;
+    QTreeWidget* m_presetTree = nullptr;
+    QPushButton* m_addPresetBtn = nullptr;
+    QPushButton* m_removePresetBtn = nullptr;
+
+    // ── Form ──
     QLineEdit* m_nameEdit = nullptr;
     QComboBox* m_docTypeCombo = nullptr;
-    QComboBox* m_sizePresetCombo = nullptr;
     QDoubleSpinBox* m_widthSpin = nullptr;
     QDoubleSpinBox* m_heightSpin = nullptr;
     QComboBox* m_widthUnitCombo = nullptr;
@@ -75,19 +89,11 @@ private:
     QComboBox* m_backgroundCombo = nullptr;
     QPushButton* m_bgColorBtn = nullptr;
     QLabel* m_imageSizeLabel = nullptr;
-    QLabel* m_imageSizeDetailLabel = nullptr;
     QColor m_bgColor = Qt::white;
 
     QPushButton* m_okBtn = nullptr;
     QPushButton* m_cancelBtn = nullptr;
-    QPushButton* m_savePresetBtn = nullptr;
-    QPushButton* m_deletePresetBtn = nullptr;
 
-    struct SizePreset {
-        QString label;
-        double w;
-        double h;
-        QString unit;
-    };
-    std::vector<SizePreset> m_presets;
+    QVector<canvaspresets::CanvasPreset> m_customPresets;
+    bool m_updating = false;
 };

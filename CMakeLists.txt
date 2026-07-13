@@ -559,6 +559,8 @@ add_executable(Hazor WIN32
     src/ui/gradient/GradientStopEditor.hpp
     src/ui/gradient/GradientEditorDialog.cpp
     src/ui/gradient/GradientEditorDialog.hpp
+    src/ui/CanvasPresets.cpp
+    src/ui/CanvasPresets.hpp
     src/ui/ExportImageDialog.cpp
     src/ui/ExportImageDialog.hpp
     src/ui/ExportAnimationDialog.cpp
