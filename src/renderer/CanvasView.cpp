@@ -59,6 +59,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <limits>
 
 static bool snapDebugEnabled()
@@ -3027,9 +3028,25 @@ void CanvasView::clampPanOffset()
     const QPointF clamped = core::ViewportCamera::clampPan(
         QPointF(specX, specY), QSizeF(vw, vh), QSizeF(cw, ch), m_overscrollEnabled);
 
-    // Convert the clamped top-left back to centre-NDC.
-    const double newPanX = (clamped.x() + cw * 0.5) * 2.0 / vw - 1.0;
-    const double newPanY = 1.0 - (clamped.y() + ch * 0.5) * 2.0 / vh;
+    // Pixel-grid alignment — the reason this is the LAST step before storing.
+    // The canvas top-left lands at (viewport - canvas)/2 device pixels when
+    // centred, i.e. on a HALF pixel whenever that difference is odd. A half-pixel
+    // offset makes the viewport sample the projection between two texels, so every
+    // pixel on screen becomes a blend of its neighbours and the whole image looks
+    // soft — even at 100% zoom, where nothing should be resampled at all. Snapping
+    // the top-left to whole device pixels is what GIMP gets for free by keeping its
+    // scroll offsets integral (gint offset_x/offset_y, app/display/gimpdisplayshell.h).
+    // Snapping here (rather than when building the MVP) keeps overlays, hit-testing
+    // and the scroll bars reading the exact same aligned value.
+    // Stable under repetition: clampPan() may pull a snapped value back by at most
+    // half a pixel, and rounding maps it straight back to the same snapped value.
+    const double dpr = std::max(1.0, static_cast<double>(devicePixelRatioF()));
+    const double snappedX = std::round(clamped.x() * dpr) / dpr;
+    const double snappedY = std::round(clamped.y() * dpr) / dpr;
+
+    // Convert the clamped + snapped top-left back to centre-NDC.
+    const double newPanX = (snappedX + cw * 0.5) * 2.0 / vw - 1.0;
+    const double newPanY = 1.0 - (snappedY + ch * 0.5) * 2.0 / vh;
 
     m_doc->panOffset = QPointF(newPanX, newPanY);
 }
@@ -3365,16 +3382,57 @@ void CanvasView::setZoom(float zoom)
     update();
 }
 
+// Zoom ladder — simple fractions and whole multiples, mirroring GIMP's preset
+// table (libgimpwidgets/gimpzoommodel.c). Stepping by a bare factor (the old
+// zoom * 1.25) never lands on an exact ratio: from 100% it walks 125%, 156.25%,
+// 195.3%… so the viewport is always resampling the projection by an arbitrary
+// fraction. On a ladder, the zoom levels people actually stop at (1:1, 1:2, 1:4,
+// 2:1, 4:1) are exact pixel replications/decimations, which is the single
+// cheapest sharpness win available for the display path.
+// Trimmed to the zoom range setZoom() clamps to (0.01 .. 100).
+static constexpr float kZoomPresets[] = {
+    1.0f / 90,  1.0f / 64,  1.0f / 45, 1.0f / 32,
+    1.0f / 23,  1.0f / 16,  1.0f / 11, 1.0f / 8,
+    2.0f / 11,  1.0f / 4,   1.0f / 3,  1.0f / 2,
+    2.0f / 3,
+    1.0f,
+    3.0f / 2,   2.0f,       3.0f,      4.0f,
+    11.0f / 2,  8.0f,       11.0f,     16.0f,
+    23.0f,      32.0f,      45.0f,     64.0f,
+    90.0f,
+};
+
+// Next/previous ladder entry. The relative epsilon keeps a zoom that is already
+// sitting on a preset (or a hair off it after a float round-trip) from being
+// treated as "between" that preset and the next one, which would make a step
+// silently do nothing.
+static float steppedZoom(float current, bool zoomIn)
+{
+    constexpr int   kCount = static_cast<int>(std::size(kZoomPresets));
+    constexpr float kEps   = 1e-3f;
+
+    if (zoomIn) {
+        for (int i = 0; i < kCount; ++i)
+            if (kZoomPresets[i] > current * (1.0f + kEps))
+                return kZoomPresets[i];
+        return kZoomPresets[kCount - 1];
+    }
+    for (int i = kCount - 1; i >= 0; --i)
+        if (kZoomPresets[i] < current * (1.0f - kEps))
+            return kZoomPresets[i];
+    return kZoomPresets[0];
+}
+
 void CanvasView::zoomIn()
 {
     if (!m_doc) return;
-    setZoom(m_doc->zoom * 1.25f);
+    setZoom(steppedZoom(m_doc->zoom, true));
 }
 
 void CanvasView::zoomOut()
 {
     if (!m_doc) return;
-    setZoom(m_doc->zoom / 1.25f);
+    setZoom(steppedZoom(m_doc->zoom, false));
 }
 
 void CanvasView::resizeEvent(QResizeEvent* e)
@@ -3454,11 +3512,13 @@ void CanvasView::wheelEvent(QWheelEvent* e)
 {
     if (!m_doc) return;
 
-    float factor = 1.1f;
+    // One ladder step per notch (same as the zoom buttons and GIMP's wheel
+    // binding), so wheel zooming also stops on exact ratios instead of drifting
+    // onto arbitrary 1.1^n factors that force a resample at every level.
     if (e->angleDelta().y() > 0)
-        setZoom(m_doc->zoom * factor);
+        zoomIn();
     else
-        setZoom(m_doc->zoom / factor);
+        zoomOut();
 
     // The selection drag overlays store screen points; a mid-gesture zoom
     // would otherwise leave the preview displaced from the real (doc-space)
@@ -4453,11 +4513,11 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         return;
 
     if (tool == Tool::Zoom) {
-        float factor = 1.5f;
-        float newZoom = (e->modifiers() & Qt::AltModifier)
-            ? m_doc->zoom / factor
-            : m_doc->zoom * factor;
-        setZoom(newZoom);
+        // Ladder step (Alt = out), matching the wheel and the zoom buttons.
+        if (e->modifiers() & Qt::AltModifier)
+            zoomOut();
+        else
+            zoomIn();
         return;
     }
 

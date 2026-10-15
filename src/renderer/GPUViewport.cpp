@@ -391,6 +391,10 @@ void GPUViewport::setMainUniforms(const QMatrix4x4& mvp, float opacity,
     m_mainProg->setUniformValue(m_mainU.maskTexture, 1);
     setMainSourcePremultiplied(false);
     setMainAlphaWeightedSampling(true);
+    // Off by default for every main-shader draw: only the doc→screen display of
+    // the projection opts in (drawProjection), so a layer drawn by the live
+    // compositor can never pick it up and drift from the CPU truth.
+    setMainSharpMagnification(false);
 
     float hm = hasMask ? 1.0f : 0.0f;
     if (m_uc.mainTransform != mvp) {
@@ -601,6 +605,15 @@ void GPUViewport::setMainAlphaWeightedSampling(bool enabled)
         return;
     m_mainProg->setUniformValue(m_mainU.alphaWeightedSampling, value);
     m_uc.mainAlphaWeightedSampling = value;
+}
+
+void GPUViewport::setMainSharpMagnification(bool enabled)
+{
+    const float value = enabled ? 1.0f : 0.0f;
+    if (qFuzzyCompare(1.0f + m_uc.mainSharpMagnify, 1.0f + value))
+        return;
+    m_mainProg->setUniformValue(m_mainU.sharpMagnify, value);
+    m_uc.mainSharpMagnify = value;
 }
 
 void GPUViewport::setMainTexture(GLenum unit, GLuint tex)
@@ -1644,9 +1657,14 @@ bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMv
     m_vao.bind();
     m_mainProg->setUniformValue(m_mainU.instanced, 0);
     setMainUniforms(mvp, 1.0f, false, 0.0f);
+    // doc→screen is a pure view mapping: the projection IS the CPU truth at
+    // document resolution, so sharpening the magnification ramp here changes
+    // only how those finished pixels are presented — never what they are.
+    setMainSharpMagnification(true);
     setMainTexture(GL_TEXTURE0, tex);
     setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    setMainSharpMagnification(false);
     return true;
 }
 

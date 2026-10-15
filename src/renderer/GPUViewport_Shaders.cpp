@@ -53,6 +53,7 @@ void GPUViewport::initShaders()
         uniform float uMaskDensity;
         uniform float uSourcePremultiplied;
         uniform float uAlphaWeightedSampling;
+        uniform float uSharpMagnify;
         uniform vec2 uUVScale;
         uniform vec2 uUVOffset;
         uniform vec2 uMaskUVScale;
@@ -95,9 +96,27 @@ void GPUViewport::initShaders()
         vec4 sampleAlphaWeighted(sampler2D tex, vec2 uv, float straightAlpha) {
             ivec2 ts = textureSize(tex, 0);
             vec2 p = uv * vec2(ts) - vec2(0.5);
-            vec2 footprint = max(fwidth(uv) * vec2(ts), vec2(1.0));
-            if (max(footprint.x, footprint.y) <= 1.25)
+            // Raw footprint = texels covered by one screen pixel. Kept separate
+            // from the clamped one below because magnification (raw < 1) is
+            // exactly the information the clamp throws away.
+            vec2 raw = fwidth(uv) * vec2(ts);
+            vec2 footprint = max(raw, vec2(1.0));
+            if (max(footprint.x, footprint.y) <= 1.25) {
+                // Magnification / near 1:1. Plain bilinear is what makes a
+                // zoomed-in canvas look soft: the ramp between two texels is
+                // always a full texel wide, so at 400% it smears each texel
+                // across four screen pixels. Narrowing the ramp to one screen
+                // pixel (raw) keeps texel interiors flat and confines the blend
+                // to the texel boundary — crisp like GIMP's magnified view, but
+                // still antialiased rather than hard nearest-neighbour.
+                // At 1:1 raw == 1 and the weights are untouched, so this cannot
+                // change an unscaled frame.
+                if (uSharpMagnify > 0.5) {
+                    vec2 ramp = max(min(raw, vec2(1.0)), vec2(1e-4));
+                    p = floor(p) + clamp((fract(p) - 0.5) / ramp + 0.5, 0.0, 1.0);
+                }
                 return unpremultiply(samplePremultipliedAt(tex, p, straightAlpha));
+            }
 
             vec2 stepPx = footprint / 4.0;
             vec2 first = p - footprint * 0.5 + stepPx * 0.5;
@@ -758,6 +777,7 @@ void GPUViewport::collectUniforms()
     m_mainU.maskDensity = m_mainProg->uniformLocation("uMaskDensity");
     m_mainU.sourcePremultiplied = m_mainProg->uniformLocation("uSourcePremultiplied");
     m_mainU.alphaWeightedSampling = m_mainProg->uniformLocation("uAlphaWeightedSampling");
+    m_mainU.sharpMagnify = m_mainProg->uniformLocation("uSharpMagnify");
     m_mainU.uvScale     = m_mainProg->uniformLocation("uUVScale");
     m_mainU.uvOffset    = m_mainProg->uniformLocation("uUVOffset");
     m_mainU.maskUvScale = m_mainProg->uniformLocation("uMaskUVScale");

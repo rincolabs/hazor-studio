@@ -5561,10 +5561,22 @@ bool ImageController::importImage(const QImage& img, const QString& name)
     const int docH = std::max(1, m_doc->size.height());
     const float halfW = static_cast<float>(converted.width()) / static_cast<float>(docW);
     const float halfH = static_cast<float>(converted.height()) / static_cast<float>(docH);
+
+    // Centre the layer on a WHOLE-pixel grid. A pure scale transform puts the
+    // image at ((docW - imgW)/2, (docH - imgH)/2) canvas pixels, which is a HALF
+    // pixel whenever that difference is odd — and a half-pixel offset forces both
+    // compositors to resample the whole layer bilinearly, baking the softness into
+    // the projection and into the export (not just the preview). The nudge is that
+    // missing half pixel expressed in the transform's NDC units: one canvas pixel
+    // is 2/docW in x, and pixel Y runs opposite to NDC Y, hence the minus.
+    const double offX = (docW - converted.width()) * 0.5;
+    const double offY = (docH - converted.height()) * 0.5;
+    const double nudgeX = std::round(offX) - offX;   // 0 or ±0.5 px
+    const double nudgeY = std::round(offY) - offY;
     node->transform.setMatrix(
         halfW, 0.0, 0.0,
         0.0, halfH, 0.0,
-        0.0, 0.0, 1.0);
+        2.0 * nudgeX / docW, -2.0 * nudgeY / docH, 1.0);
     node->layer->resetTransform = node->transform;
     node->layer->hasResetTransform = true;
 

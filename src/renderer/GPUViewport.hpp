@@ -300,6 +300,7 @@ private:
         float mainMaskDensity = -2.0f;
         float mainSourcePremultiplied = -2.0f;
         float mainAlphaWeightedSampling = -2.0f;
+        float mainSharpMagnify = -2.0f;
         QVector2D mainUvScale{-2.0f, -2.0f};
         QVector2D mainUvOffset{-2.0f, -2.0f};
         QVector2D mainMaskUvScale{-2.0f, -2.0f};
@@ -319,6 +320,7 @@ private:
         GLint transform = -1, texture = -1, opacity = -1;
         GLint maskTexture = -1, hasMask = -1, maskDensity = -1;
         GLint sourcePremultiplied = -1, alphaWeightedSampling = -1;
+        GLint sharpMagnify = -1;
         GLint uvScale = -1, uvOffset = -1;
         GLint maskUvScale = -1, maskUvOffset = -1;
         GLint instanced = -1;
@@ -383,6 +385,11 @@ private:
     bool ensureBlendTarget(int viewportW, int viewportH);
     void setMainSourcePremultiplied(bool premultiplied);
     void setMainAlphaWeightedSampling(bool enabled);
+    // Narrows the bilinear ramp to one screen pixel when magnifying. Only valid
+    // for the doc→screen display step (drawProjection): it is a pure view
+    // operation there, so it cannot diverge from the CPU compositor, which is
+    // the visual source of truth at document resolution.
+    void setMainSharpMagnification(bool enabled);
 
     // ── Display colour-management (final stage) ──
     // Rebuilds + uploads the 3D LUT when the display state changes; returns true
