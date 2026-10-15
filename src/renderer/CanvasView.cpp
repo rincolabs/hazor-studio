@@ -1211,9 +1211,13 @@ void CanvasView::onPreviewReady(const QImage& previewImage)
             cv::Mat maskFull = m_doc->selectionMaskForLayer(
                 lw, lh, m_previewSourceNode->accumulatedTransform());
             if (!maskFull.empty()) {
-                cv::Mat origSmall, maskSmall;
+                cv::Mat maskSmall;
                 cv::Mat origFull = ImageEngine::toCvMatFast(sourceImg);
-                cv::resize(origFull,  origSmall, cv::Size(pw, ph), 0, 0, cv::INTER_AREA);
+                // Layer pixels go through the premultiplied path so the
+                // unfiltered surround matches PreviewRenderer's downscale; the
+                // mask is single channel and stays a plain resize.
+                cv::Mat origSmall = ImageEngine::resizePremultiplied(
+                    origFull, cv::Size(pw, ph), cv::INTER_AREA);
                 cv::resize(maskFull,  maskSmall, cv::Size(pw, ph), 0, 0, cv::INTER_AREA);
                 cv::Mat previewCv = ImageEngine::toCvMatFast(previewImage);
                 previewCv.copyTo(origSmall, maskSmall);
@@ -9749,14 +9753,18 @@ static TransformQuad remapQuadByTransformDelta(const TransformQuad& quad,
     return out;
 }
 
-// Warp `src` (whose full rect maps onto `srcQuadDoc` in document px) into the
+// Warp `srcPm` (whose full rect maps onto `srcQuadDoc` in document px) into the
 // quad `dstQuadDoc`. Returns the rendered RGBA image and its document-px origin.
+// `srcPm` must be Format_RGBA8888_Premultiplied — resampling straight alpha
+// bleeds the colour of transparent pixels into every soft edge as a dark fringe
+// (the rule and the 8-bit trade-off are stated in engine/ImageEngine.hpp). The
+// caller keeps the premultiplied copy so a live drag converts it only once.
 // `highQuality` selects cubic (commit/idle) vs linear (live drag) interpolation.
 // `previewScale` (≤1.0) renders into a proportionally smaller buffer for live
 // drags — the GPU upsamples it to the same document footprint, so distorting a
 // huge layer stays cheap. `outFootprint` reports the full document-px footprint
 // the result covers (independent of the buffer's pixel size), used to place it.
-static QImage warpDistort(const QImage& src,
+static QImage warpDistort(const QImage& srcPm,
                           const TransformQuad& srcQuadDoc,
                           const TransformQuad& dstQuadDoc,
                           bool highQuality,
@@ -9764,7 +9772,7 @@ static QImage warpDistort(const QImage& src,
                           QPoint* outOrigin,
                           QSize* outFootprint)
 {
-    if (src.isNull() || !dstQuadDoc.isValid())
+    if (srcPm.isNull() || !dstQuadDoc.isValid())
         return QImage();
 
     QRect dstBounds = dstQuadDoc.toPolygon().boundingRect().toAlignedRect();
@@ -9786,8 +9794,8 @@ static QImage warpDistort(const QImage& src,
     const double sx = static_cast<double>(outW) / dstBounds.width();
     const double sy = static_cast<double>(outH) / dstBounds.height();
 
-    const QImage srcRgba = src.format() == QImage::Format_RGBA8888
-        ? src : src.convertToFormat(QImage::Format_RGBA8888);
+    const QImage srcRgba = srcPm.format() == QImage::Format_RGBA8888_Premultiplied
+        ? srcPm : srcPm.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
 
     // Source points: where srcQuadDoc lands in source-image pixels. srcQuadDoc
     // maps the image's full rect, so invert that rect→quad map and apply it to
@@ -9817,6 +9825,14 @@ static QImage warpDistort(const QImage& src,
                         cv::Size(outW, outH),
                         highQuality ? cv::INTER_CUBIC : cv::INTER_LINEAR,
                         cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+
+    // Back to straight alpha, the format cpuImage is in. Done through the
+    // shared helper rather than Qt's conversion because cubic has negative
+    // lobes: a channel can overshoot past alpha, and qUnpremultiply() assumes
+    // it never does — it masks instead of clamping, so colour 255 at alpha 100
+    // computes 651 and stores 651 & 0xff = 139, a dark speck on a white edge.
+    // unpremultiplyInPlace() clamps colour to alpha first.
+    ImageEngine::unpremultiplyInPlace(dstMat);
 
     QImage out(dstMat.data, dstMat.cols, dstMat.rows,
                static_cast<int>(dstMat.step), QImage::Format_RGBA8888);
@@ -9875,7 +9891,13 @@ void CanvasView::renderDistortLayer(bool highQuality)
             const QRect fp = dd.quad.toPolygon().boundingRect().toAlignedRect();
             previewScale = distortPreviewScale(fp);
         }
-        warped = warpDistort(dd.sourceImage, dd.sourceQuad, dd.quad,
+        if (m_distortPremulSource.isNull()
+            || m_distortPremulKey != dd.sourceImage.cacheKey()) {
+            m_distortPremulSource = dd.sourceImage.convertToFormat(
+                QImage::Format_RGBA8888_Premultiplied);
+            m_distortPremulKey = dd.sourceImage.cacheKey();
+        }
+        warped = warpDistort(m_distortPremulSource, dd.sourceQuad, dd.quad,
                              highQuality, previewScale, &origin, &footprint);
     }
     if (warped.isNull()) return;
@@ -10196,6 +10218,8 @@ void CanvasView::commitDistort()
     m_distortBeforeData = nullptr;
     m_distortDragBeforeImage = QImage();
     m_distortDragBeforeData = nullptr;
+    m_distortPremulSource = QImage();
+    m_distortPremulKey = 0;
     if (m_distortOverlay) m_distortOverlay->finish();
     if (m_doc) ++m_doc->compositionGeneration;
 
@@ -10221,6 +10245,8 @@ void CanvasView::cancelDistort()
     m_distortBeforeData = nullptr;
     m_distortDragBeforeImage = QImage();
     m_distortDragBeforeData = nullptr;
+    m_distortPremulSource = QImage();
+    m_distortPremulKey = 0;
     if (m_distortOverlay) m_distortOverlay->finish();
 
     if (m_controller && stepsToUndo > 0) {

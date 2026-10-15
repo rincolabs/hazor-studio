@@ -907,8 +907,12 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             auto before = captureBefore(m_doc->activeFlatIndex);
             int oldW = layer->cpuImage.width();
             int oldH = layer->cpuImage.height();
-            int w = getInt("width", oldW);
-            int h = getInt("height", oldH);
+            // Clamped: the tool surface is driven by the chat agent and the MCP
+            // server, so width/height arrive unvalidated. A zero would both
+            // collapse the transform scale below and leave resize() nothing to
+            // produce.
+            int w = std::max(1, getInt("width", oldW));
+            int h = std::max(1, getInt("height", oldH));
             cv::Mat cvImg = ImageEngine::toCvMat(layer->cpuImage);
             cv::Mat result = ImageEngine::resize(cvImg, w, h);
             layer->cpuImage = ImageEngine::toQImage(result);
@@ -1429,9 +1433,11 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                     cv::Mat xform = (cv::Mat_<double>(2,3) << a00, a01, a02, a10, a11, a12);
 
                     cv::Mat layerMat = ImageEngine::toCvMat(l->cpuImage);
-                    cv::Mat canvas(dh, dw, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-                    cv::warpAffine(layerMat, canvas, xform, canvas.size(),
-                                   cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                    // Premultiplied cubic, as in extractSelectedDocRegion.
+                    cv::Mat canvas = ImageEngine::warpAffinePremultiplied(
+                        layerMat, xform, cv::Size(dw, dh), cv::INTER_CUBIC,
+                        cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                    if (canvas.empty()) continue;
                     mats.push_back(std::move(canvas));
                     ops.push_back(n->opacity);
                     vis.push_back(true);

@@ -271,7 +271,45 @@ path deviates by ≤ 2.3/255 on average (exact at power-of-two ratios); the
 level-0 path matches the CPU to ≤ 1/255 (float32 vs float64 rounding) and is
 bit-identical at 1:1.
 
-### 4.3 Known technical limit
+### 4.3 Resampling outside the compositors
+
+§4.2 covers the two compositors. Everything *else* that resamples layer pixels —
+destructive edits, clipboard copies, the distort warp, filter previews — must
+still obey one rule: **mix pixels in premultiplied alpha**. With straight alpha
+the colour stored in a fully transparent pixel is arbitrary (usually black) yet
+still gets its share of the kernel weight, so every soft or antialiased edge
+picks up a dark fringe — the same defect the projection pyramid is premultiplied
+to avoid.
+
+The helpers live in
+[src/engine/ImageEngine.hpp](../src/engine/ImageEngine.hpp):
+`premultiplyInPlace` / `unpremultiplyInPlace`, plus
+`warpAffinePremultiplied` / `resizePremultiplied`. The round trip is 8-bit, to
+match Qt's `Format_RGBA8888_Premultiplied` and `ProjectionCache`'s upload; it
+costs precision in the colour of near-transparent pixels, which is where it is
+least visible. A float path belongs with the linear-light work, not here.
+
+Two things that are easy to get wrong:
+
+- **Masks must not go through it.** Single-channel data has no alpha to
+  premultiply by, so `SelectionMask`, `Document::docMaskToLayer`, `LayerEffect`
+  and the `warpMask*` helpers stay plain `cv::warpAffine`/`cv::resize`. The
+  helpers forward anything that is not 4-channel `CV_8U` untouched, but routing
+  a mask through them "for consistency" is a regression, not a cleanup.
+- **Cubic and Lanczos overshoot.** Their negative lobes can push a colour
+  channel above alpha, which breaks the premultiplied invariant. Unpremultiplied
+  naively that lands above white and rings as a bright halo — and Qt's
+  `qUnpremultiply()` masks rather than clamps, so it wraps to a speck.
+  `unpremultiplyInPlace` clamps colour to alpha first; use it instead of
+  converting through `QImage` after a cubic warp.
+
+Kernel choice follows direction, not taste: OpenCV's `INTER_AREA` degenerates to
+nearest-neighbour when an axis *grows*, so it is used only when both axes shrink
+(that is what the Image Size dialog's "Bicubic Automatic" now selects) and
+`INTER_CUBIC` otherwise. `cv::warpAffine` has no area mode at all, so the
+affine layer-pixel warps use cubic throughout.
+
+### 4.4 Known technical limit
 
 **Transformed** layers undergo *two* resamples in the CPU path (layer→canvas at
 document resolution, then canvas→screen when displaying the projection) versus
@@ -354,6 +392,7 @@ through the normal CPU path.
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
 | Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp` |
+| Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
 | Caches | `cache/RenderCache.*` |
 | Layer data | `core/Layer.*`, `core/LayerTreeNode.hpp` (`computeEffectedImage`, `computeStyledBaseImage`, `clone`/`shallowClone`), `core/RasterLayerStorage.*`, `core/TileManager.*` |
 | Adjustments | `core/AdjustmentTypes.*`, `core/CurvesData.*`, `core/ColorBalanceData.*`, `core/HueSaturationData.*`, `core/SolidColorData.hpp` |

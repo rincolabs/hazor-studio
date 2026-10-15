@@ -60,6 +60,39 @@ public:
     static cv::Mat flipVertical(const cv::Mat& input);
     static cv::Mat resize(const cv::Mat& input, int w, int h);
 
+    // ── Resampling layer pixels ──────────────────────────────────────────
+    //
+    // Any filter that mixes neighbouring pixels must run on *premultiplied*
+    // alpha. With straight alpha the colour stored in a fully transparent
+    // pixel is arbitrary (usually black) yet still gets its share of the
+    // weight, so every soft or antialiased edge picks up a dark fringe —
+    // the same defect the projection mip pyramid was built to avoid
+    // (docs/RENDER-PIPELINE.md §4.2).
+    //
+    // The round trip is done in 8 bits, matching Qt's
+    // Format_RGBA8888_Premultiplied and ProjectionCache's upload, so the
+    // whole 8-bit pipeline stays consistent. It costs precision in the
+    // colour of near-transparent pixels, which is where it is least
+    // visible; a float path belongs with the linear-light work (P6), not
+    // here.
+    //
+    // 4-channel CV_8U input is premultiplied; anything else (notably
+    // single-channel masks, which have no alpha to premultiply by) is
+    // forwarded to OpenCV untouched. Do NOT route mask warps through these
+    // "for consistency" — it would be a regression.
+    static void premultiplyInPlace(cv::Mat& bgra8);
+    static void unpremultiplyInPlace(cv::Mat& bgra8);
+
+    // `flags` takes the usual cv:: interpolation bits (plus WARP_INVERSE_MAP).
+    // `borderValue` is read in premultiplied space; the transparent default
+    // (0,0,0,0) means the same thing in both spaces.
+    static cv::Mat warpAffinePremultiplied(const cv::Mat& input, const cv::Mat& m,
+                                           cv::Size dsize, int flags,
+                                           int borderMode = cv::BORDER_CONSTANT,
+                                           const cv::Scalar& borderValue = cv::Scalar());
+    static cv::Mat resizePremultiplied(const cv::Mat& input, cv::Size dsize,
+                                       int interpolation);
+
     static cv::Mat grayscale(const cv::Mat& input);
     static cv::Mat invertColors(const cv::Mat& input);
     static cv::Mat autoContrast(const cv::Mat& input);

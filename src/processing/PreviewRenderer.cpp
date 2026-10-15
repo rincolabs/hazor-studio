@@ -61,8 +61,11 @@ void PreviewRenderer::generatePreview(const QImage& source,
             int dw = std::max(1, static_cast<int>(cvSrc.cols * scale));
             int dh = std::max(1, static_cast<int>(cvSrc.rows * scale));
 
-            cv::Mat downscaled;
-            cv::resize(cvSrc, downscaled, cv::Size(dw, dh), 0, 0, cv::INTER_AREA);
+            // Premultiplied (engine/ImageEngine.hpp): a straight-alpha
+            // downscale darkens soft edges, so the preview would show a fringe
+            // the committed full-resolution filter does not.
+            cv::Mat downscaled = ImageEngine::resizePremultiplied(
+                cvSrc, cv::Size(dw, dh), cv::INTER_AREA);
 
             if (m_cancelled) {
                 m_busy = false;
