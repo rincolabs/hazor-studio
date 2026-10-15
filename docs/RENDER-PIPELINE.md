@@ -170,9 +170,10 @@ compositeFiltered
          │    mask included) or renderImage() (shape base); dabs = rasterStorage.toImage()
          ├─ transform: buildImgToCanvas (img→NDC→canvas, same chain as io/ImageIO
          │    and the GPU MVP; shape sprite uses spriteTransform)
-         ├─ either axis downscales → resampleAffine: ONE pass, exact premultiplied
-         │    box evaluated at the inverse-mapped position (§4.2);
-         │    otherwise bilinear (SmoothPixmapTransform)
+         ├─ anything but a whole-pixel copy → resampleAffine: ONE pass evaluated at
+         │    the inverse-mapped position, premultiplied, per axis an exact box
+         │    (downscale) or a Keys cubic (upscale/rotate/sub-pixel offset) (§4.2);
+         │    whole-pixel copy and projective transforms → QPainter
          ├─ mask: DestinationIn with density ramp mix(1, m, density)
          └─ compositeStage(target, stage, blendMode, opacity):
               modes with QPainter equivalent → native;
@@ -206,7 +207,7 @@ Four files, one contract — three for blending, one for resampling:
 | [src/renderer/BlendRules.hpp](../src/renderer/BlendRules.hpp) | maps `BlendMode` → primitive for each backend: shader id (`shaderId`), QPainter mode (`painterMode`), what requires shader/manual compositing |
 | [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C), `blendHsl`, `maskDensityRamp = mix(1, m, density)` |
 | [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 15 modes |
-| [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernel in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `boxWeights`/`resampleAffine` in `DocumentCompositor.cpp` (§4.2) |
+| [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernels in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `boxWeights`/`cubicWeights`/`resampleAffine` in `DocumentCompositor.cpp` (§4.2) |
 
 **Maintenance rule:** when adding/changing a blend mode, update all three blend
 files together — `BlendMath.hpp` and `BlendShaderLib.hpp` are kept comparable
@@ -227,31 +228,59 @@ move together.
 
 ### 4.2 Sampling / antialiasing (equivalence)
 
-Both backends run **one kernel**: an *exact box filter* of `width` texels over
-premultiplied samples, where `width` is the screen-pixel footprint. The three
-regimes are the same formula, not three code paths:
+Both backends run the **same two kernels over premultiplied samples**, picked
+**per axis** by the screen-pixel footprint (source texels per output pixel along
+that axis), never by a user setting:
 
-| `width` | Behaviour |
-|---|---|
-| `< 1` | magnification with the box narrower than a texel — interiors stay flat, the blend is confined to the texel boundary (crisp, still antialiased) |
-| `== 1` | plain bilinear; **bit-exact copy** when the sample centres land on texel centres, so an unscaled, grid-aligned frame is never resampled |
-| `> 1` | minification: the exact area average over the footprint |
+| footprint | Kernel | Behaviour |
+|---|---|---|
+| `> 1` | exact box of `footprint` texels | minification: the area average (what `cv::INTER_AREA` computes). Degenerates *continuously* into plain bilinear as the footprint approaches 1, so there is no seam to put a threshold at |
+| `≤ 1` | Keys cubic, `A = -0.75` | magnification, rotation, or a merely sub-pixel offset. At an integral sample position the weights are exactly `(0,1,0,0)`, so a grid-aligned 1:1 frame is still a **bit-exact copy** |
+
+`A = -0.75` is not a taste call: it is exactly `cv::INTER_CUBIC`, which every
+destructive path already bakes (§4.3), so a non-destructive layer scale and the
+same scale applied for real land on the same pixels. Measured against
+`cv::resize(INTER_CUBIC)`: mean 0.02/255, max 1/255.
+
+The cubic's negative lobes can leave the premultiplied range (alpha above 1, or
+a colour channel above alpha), which unpremultiplies to brighter than white and
+rings as a halo — in Qt's 8-bit `qUnpremultiply` it wraps to a dark speck
+instead. Both sides therefore clamp colour to alpha before dividing
+(`sm_clampPremultiplied`; `toByte` + `min` on the CPU). Measured on a 2.5×
+upscale of random RGBA: 10 789 pixels would exceed alpha unclamped, worst excess
+48/255.
 
 | Situation | GPU | CPU |
 |---|---|---|
-| Layer → document (any scale) | `sm_sampleSurface` with `uSharpMagnify = 0`, so `width` is clamped to ≥ 1 | `resampleAffine` (one pass) when either axis minifies, QPainter Smooth (bilinear) when it magnifies |
-| Document → screen (the *view* step) | `uSharpMagnify = 1`: `width` may drop below 1 | n/a — this step has no CPU counterpart; the projection **is** the CPU truth at document resolution |
+| Layer → document (any transform) | `sm_sampleSurface` with `uSharpMagnify = 0`: box above footprint 1, cubic at or below it | `resampleAffine` (one pass, same two kernels); QPainter only for a whole-pixel copy (not a resample) and for a projective transform |
+| Document → screen (the *view* step) | `uSharpMagnify = 1`: the box stays, and its width may drop below 1 — never the cubic | n/a — this step has no CPU counterpart; the projection **is** the CPU truth at document resolution |
 | Masks | bilinear R8 texture, ramp `mix(1, m, density)`, outside UV = 1 | same via DestinationIn + `maskDensityRamp` |
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- **Only the view step sharpens magnification.** Scaling a layer up is a
-  *document* edit that the CPU bakes with a smooth filter, so the GPU must
-  magnify it the same way or the live preview diverges from the export. Scaling
-  the *view* up is just a way of looking at finished pixels, so it gets the
-  crisp sub-texel box. `uSharpMagnify` is therefore enabled at exactly two draw
-  sites — `drawProjection` and the top-level `popGroupFbo` — and
-  `setMainUniforms` defaults it off so no layer draw can pick it up.
+- **The view step is the only place that sharpens *below* footprint 1.** There
+  the box is narrower than a texel, so texel interiors stay flat and the blend
+  is confined to the texel boundary (crisp like GIMP's magnified view, still
+  antialiased rather than hard nearest). Scaling a layer up, by contrast, is a
+  *document* edit the CPU bakes with the cubic, so the GPU must use the cubic
+  too or the live preview diverges from the export. `uSharpMagnify` is enabled
+  at exactly two draw sites — `drawProjection` and the top-level `popGroupFbo` —
+  and `setMainUniforms` defaults it off so no layer draw can pick it up.
+- **The footprint is a gradient norm, not `fwidth()`.** `fwidth` sums
+  `|∂u/∂x| + |∂u/∂y|`, which is the *bounding box* of a rotated footprint and
+  reaches 1.41 texels for a 45° rotation at scale 1 — prefiltering a layer that
+  needs none. `sm_footprint` measures `length(vec2(dFdx(u), dFdy(u)))` per axis,
+  which equals the CPU's per-axis transform scale for any scale+rotation and is
+  bit-identical to `fwidth` whenever the draw is axis-aligned (so every view
+  step is unchanged). A genuine *shear* is the one case where the two measures
+  still differ; there the shader's is the physically correct one and the CPU
+  under-filters.
+- **The 0.1% slack at footprint 1 is load-bearing.** The kernel flips at
+  `footprint ≤ 1.001`, not `≤ 1`: a rotated layer at scale 1 lands exactly on 1,
+  and the shader derives the footprint from screen-space derivatives while the
+  CPU derives it from the transform — they agree only to within rounding, and
+  without the slack the two backends could pick different kernels for the same
+  draw. An axis minifying by less than 0.1% needs no prefilter anyway.
 - **Minification uses a pyramid where one exists.** A fixed tap budget spread
   over an ever-wider footprint undersamples (moiré at low zoom), so when the
   bound texture carries a premultiplied mip pyramid the sampler picks the level
@@ -265,12 +294,18 @@ Two consequences worth knowing:
   and L+1, which is *blurrier* than a direct area filter at the non-power-of-two
   scales "fit to window" actually lands on.
 
+A pyramid level always leaves a residual footprint above 1, so the pyramid and
+the cubic never meet.
+
 The pyramid is why the CPU and GPU minification are "the same kernel" rather
 than bit-identical: a cascade of box reductions is very slightly wider than one
 box of the combined width. Measured against the ideal single box, the pyramid
 path deviates by ≤ 2.3/255 on average (exact at power-of-two ratios); the
 level-0 path matches the CPU to ≤ 1/255 (float32 vs float64 rounding) and is
-bit-identical at 1:1.
+bit-identical at 1:1. The cubic half matches to the same ≤ 1/255, including
+anisotropic draws that take the box on one axis and the cubic on the other, and
+rotations at scale 1 (where only the quad-edge pixels differ, because the GPU
+rasterises the layer quad while the CPU tests the destination pixel centre).
 
 ### 4.3 Resampling outside the compositors
 
@@ -323,12 +358,21 @@ half-pixel offset); one pass lands at 0.25/255, i.e. the 8-bit quantisation
 floor. It is also ~15–18% faster, because dropping the QPainter pass more than
 pays for evaluating weights per sample.
 
-Two deliberate differences from the shader remain, both in `resampleAffine`:
-the CPU tap count is **not** capped (`SM_MAX_TAPS` is a GPU budget, and this is
-the path that writes the export, so a 20× downscale stays exact), and the box
-width comes from the per-axis **scale** rather than GLSL's `fwidth()` — `fwidth`
-sums `|∂u/∂x| + |∂u/∂y|` and so widens the box to 1.41 texels for a 45°
-rotation at scale 1, prefiltering a layer that needs none.
+One deliberate difference from the shader remains, in `resampleAffine`: the CPU
+tap count is **not** capped. `SM_MAX_TAPS` is a GPU budget, and this is the path
+that writes the export, so a 20× downscale stays exact instead of degrading to a
+narrower centred box. (The second divergence, `fwidth` vs the per-axis scale, is
+gone — the shader now measures the footprint the same way; see §4.2.)
+
+**The cubic costs taps.** It is 4×4 where bilinear is 2×2, and this path is
+scalar C++ against QPainter's SIMD bilinear, so a *transformed* layer is
+noticeably more expensive to bake than it was: measured on a 2000×2000 layer,
+a 2× magnification into a 4000×4000 document goes from ~57 ms (QPainter) to
+~1200 ms, and a 23° rotation from ~28 ms to ~376 ms. Minification is unchanged
+(it already used this path). Only transformed layers pay it, and only on the
+async projection thread plus one-off export/flatten/merge — but it is the reason
+the obvious next optimisation is a two-pass separable evaluation for the
+axis-aligned case (4+4 taps instead of 16, mathematically identical).
 
 **The remaining limit is structural.** A transformed layer is still resampled
 twice on the way to the screen — layer→canvas at document resolution, then
