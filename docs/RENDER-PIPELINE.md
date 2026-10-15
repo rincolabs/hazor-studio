@@ -170,7 +170,8 @@ compositeFiltered
          │    mask included) or renderImage() (shape base); dabs = rasterStorage.toImage()
          ├─ transform: buildImgToCanvas (img→NDC→canvas, same chain as io/ImageIO
          │    and the GPU MVP; shape sprite uses spriteTransform)
-         ├─ either axis downscales → resampleArea (exact premultiplied box, §4.2);
+         ├─ either axis downscales → resampleAffine: ONE pass, exact premultiplied
+         │    box evaluated at the inverse-mapped position (§4.2);
          │    otherwise bilinear (SmoothPixmapTransform)
          ├─ mask: DestinationIn with density ramp mix(1, m, density)
          └─ compositeStage(target, stage, blendMode, opacity):
@@ -205,13 +206,13 @@ Four files, one contract — three for blending, one for resampling:
 | [src/renderer/BlendRules.hpp](../src/renderer/BlendRules.hpp) | maps `BlendMode` → primitive for each backend: shader id (`shaderId`), QPainter mode (`painterMode`), what requires shader/manual compositing |
 | [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C), `blendHsl`, `maskDensityRamp = mix(1, m, density)` |
 | [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 15 modes |
-| [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernel in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `buildAxisTaps`/`resampleArea` in `DocumentCompositor.cpp` (§4.2) |
+| [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernel in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `boxWeights`/`resampleAffine` in `DocumentCompositor.cpp` (§4.2) |
 
 **Maintenance rule:** when adding/changing a blend mode, update all three blend
 files together — `BlendMath.hpp` and `BlendShaderLib.hpp` are kept comparable
 function by function. ColorDodge/ColorBurn follow the edge semantics of Qt's
 raster engine (which executes separable modes on the CPU), without NaN. The
-same rule holds for the sampler: `SamplingShaderLib.hpp` and `resampleArea`
+same rule holds for the sampler: `SamplingShaderLib.hpp` and `resampleAffine`
 move together.
 
 ### 4.1 Alpha and compositing
@@ -238,7 +239,7 @@ regimes are the same formula, not three code paths:
 
 | Situation | GPU | CPU |
 |---|---|---|
-| Layer → document (any scale) | `sm_sampleSurface` with `uSharpMagnify = 0`, so `width` is clamped to ≥ 1 | `resampleArea` when either axis minifies, QPainter Smooth (bilinear) when it magnifies |
+| Layer → document (any scale) | `sm_sampleSurface` with `uSharpMagnify = 0`, so `width` is clamped to ≥ 1 | `resampleAffine` (one pass) when either axis minifies, QPainter Smooth (bilinear) when it magnifies |
 | Document → screen (the *view* step) | `uSharpMagnify = 1`: `width` may drop below 1 | n/a — this step has no CPU counterpart; the projection **is** the CPU truth at document resolution |
 | Masks | bilinear R8 texture, ramp `mix(1, m, density)`, outside UV = 1 | same via DestinationIn + `maskDensityRamp` |
 
@@ -309,14 +310,32 @@ nearest-neighbour when an axis *grows*, so it is used only when both axes shrink
 `INTER_CUBIC` otherwise. `cv::warpAffine` has no area mode at all, so the
 affine layer-pixel warps use cubic throughout.
 
-### 4.4 Known technical limit
+### 4.4 One pass per step, and the one that is left
 
-**Transformed** layers undergo *two* resamples in the CPU path (layer→canvas at
-document resolution, then canvas→screen when displaying the projection) versus
-*one* in the GPU path (layer→screen). At zoom ≠ 100%, this causes slightly more
-softening in the projection. This is inherent to the document-resolution
-projection architecture (export **is** at that resolution) and is accepted as a
-limit.
+The layer→document step is **one** resample. It used to be two: the box
+prefiltered the source down to a rounded integer size and QPainter then placed
+that result, so the fractional destination offset cost a bilinear tent on top of
+pixels that were already correctly filtered. `resampleAffine` evaluates the box
+once at the inverse-mapped position instead. Measured against an ideal
+double-precision box, the old pair deviated by a mean of 5–41/255 depending on
+the offset (worst case: a complete miss on high-contrast pixels at 0.5× with a
+half-pixel offset); one pass lands at 0.25/255, i.e. the 8-bit quantisation
+floor. It is also ~15–18% faster, because dropping the QPainter pass more than
+pays for evaluating weights per sample.
+
+Two deliberate differences from the shader remain, both in `resampleAffine`:
+the CPU tap count is **not** capped (`SM_MAX_TAPS` is a GPU budget, and this is
+the path that writes the export, so a 20× downscale stays exact), and the box
+width comes from the per-axis **scale** rather than GLSL's `fwidth()` — `fwidth`
+sums `|∂u/∂x| + |∂u/∂y|` and so widens the box to 1.41 texels for a 45°
+rotation at scale 1, prefiltering a layer that needs none.
+
+**The remaining limit is structural.** A transformed layer is still resampled
+twice on the way to the screen — layer→canvas at document resolution, then
+canvas→screen when the projection is displayed — versus once on the GPU
+(layer→screen). At zoom ≠ 100% the projection is therefore slightly softer than
+the live path. That is inherent to having a document-resolution projection
+(export **is** at that resolution) and is accepted.
 
 ---
 

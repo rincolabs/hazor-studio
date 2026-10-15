@@ -4,11 +4,16 @@
 // Shared GLSL sampling library — the GPU half of the resampling
 // specification (docs/RENDER-PIPELINE.md §4.2).
 //
-// Mirror of resampleArea() / buildAxisTaps() in
+// Mirror of boxWeights() / resampleAffine() in
 // renderer/DocumentCompositor.cpp (the CPU half), so there is exactly ONE
 // definition of "how Hazor resamples" per backend. Injected into the main
 // shader and the blend shader, which used to carry two drifting copies of
 // the same sampler.
+//
+// The CPU mirror differs in two documented ways (docs/RENDER-PIPELINE.md
+// §4.4): it does not cap the tap count, because it writes the export rather
+// than a frame, and it takes the box width from the per-axis scale instead
+// of fwidth(), which would widen the box for a pure rotation.
 //
 // Everything is one kernel: an *exact* box filter of `width` texels,
 // evaluated on premultiplied samples. The box width is the screen-pixel
