@@ -8,6 +8,8 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 
+#include <algorithm>
+
 ProjectionCache::ProjectionCache() = default;
 ProjectionCache::~ProjectionCache() = default;
 
@@ -118,18 +120,40 @@ void ProjectionCache::uploadTexture()
     if (m_texture == 0)
         f->glGenTextures(1, &m_texture);
 
+    // Uploaded premultiplied so the mip pyramid below is correct: averaging
+    // straight-alpha texels folds the (meaningless) colour of fully
+    // transparent pixels into every level, which shows up as a dark halo
+    // around soft edges once the canvas is zoomed out. drawProjection pairs
+    // this with uSourcePremultiplied = 1.
+    const QImage premul = m_image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (premul.isNull())
+        return;
+
     f->glBindTexture(GL_TEXTURE_2D, m_texture);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    // Keep the same texture state used by the live per-layer compositor. The
-    // main shader handles straight-alpha edges explicitly, but these filters
-    // remain the fallback state for normal texture sampling.
-    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     f->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                    m_image.width(), m_image.height(),
-                    0, GL_RGBA, GL_UNSIGNED_BYTE, m_image.constBits());
+                    premul.width(), premul.height(),
+                    0, GL_RGBA, GL_UNSIGNED_BYTE, premul.constBits());
+    // The pyramid is what keeps minification an exact area filter instead of
+    // a fixed tap grid spread ever thinner as the zoom drops: the sampler
+    // picks the level whose residual footprint is in [1,2) and boxes that
+    // (renderer/SamplingShaderLib.hpp). GEGL/GIMP use the same idea
+    // (gimpprojection.c, memsize x 1.33) — the pyramid costs a third of the
+    // texture.
+    f->glGenerateMipmap(GL_TEXTURE_2D);
+    m_mipLevels = maxMipLevel(premul.size());
     f->glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+int ProjectionCache::maxMipLevel(const QSize& s)
+{
+    int level = 0;
+    for (int n = std::max(s.width(), s.height()); n > 1; n /= 2)
+        ++level;
+    return level;
 }
 
 bool ProjectionCache::exceedsMaxTextureSize(const QSize& s)
@@ -152,5 +176,6 @@ void ProjectionCache::releaseGL()
     if (f && m_texture)
         f->glDeleteTextures(1, &m_texture);
     m_texture = 0;
+    m_mipLevels = 0;
     invalidate();
 }

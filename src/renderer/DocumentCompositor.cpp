@@ -15,6 +15,7 @@
 #include <cmath>
 #include <functional>
 #include <set>
+#include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────
 // CPU compositor — single source of truth for the flattened document image.
@@ -41,100 +42,117 @@ inline uchar toByte(float v)
     return static_cast<uchar>(std::clamp(static_cast<int>(std::lround(v * 255.0f)), 0, 255));
 }
 
-struct PremulSample {
-    float r = 0.0f;
-    float g = 0.0f;
-    float b = 0.0f;
-    float a = 0.0f;
+// ── Resampling (CPU half of the sampling specification) ──────────────────
+//
+// GLSL mirror: sm_boxWeights / sm_sampleBox in renderer/SamplingShaderLib.hpp.
+// One exact box filter over premultiplied samples, so a layer that the GPU
+// live preview minifies and the CPU bakes into the document land on the same
+// pixels (docs/RENDER-PIPELINE.md §4.2).
+
+// Per-axis tap table: which input texels each output sample reads, and with
+// what weight. Weights depend only on the output index, so they are built once
+// per axis rather than per pixel.
+struct AxisTaps {
+    int                maxTaps = 0;
+    std::vector<int>   first;   // first input texel per output sample
+    std::vector<int>   count;   // taps per output sample
+    std::vector<float> weight;  // outN * maxTaps, row-major
 };
 
-PremulSample samplePremultipliedAt(const QImage& rgba, double x, double y)
+// The box width is the footprint in input texels, clamped to 1 — so this
+// degenerates to plain bilinear at `inN == outN` and never narrows below a
+// texel. Narrowing below one texel (the crisp zoom-in) belongs to the
+// document → screen *view* step only: scaling a layer up is a document edit
+// that must stay smooth, because this is the resample export sees.
+AxisTaps buildAxisTaps(int inN, int outN)
 {
-    const int w = rgba.width();
-    const int h = rgba.height();
-    if (w <= 0 || h <= 0)
-        return {};
+    AxisTaps t;
+    const double ratio = static_cast<double>(inN) / outN;
+    const double width = std::max(ratio, 1.0);
+    t.maxTaps = static_cast<int>(std::ceil(width)) + 2;
+    t.first.resize(outN);
+    t.count.resize(outN);
+    t.weight.assign(static_cast<size_t>(outN) * t.maxTaps, 0.0f);
 
-    const int ix0 = static_cast<int>(std::floor(x));
-    const int iy0 = static_cast<int>(std::floor(y));
-    const int ix1 = ix0 + 1;
-    const int iy1 = iy0 + 1;
-    const int x0 = std::clamp(ix0, 0, w - 1);
-    const int y0 = std::clamp(iy0, 0, h - 1);
-    const int x1 = std::clamp(ix1, 0, w - 1);
-    const int y1 = std::clamp(iy1, 0, h - 1);
-    const float tx = static_cast<float>(x - ix0);
-    const float ty = static_cast<float>(y - iy0);
-
-    auto texel = [&](int px, int py) {
-        const uchar* p = rgba.constScanLine(py) + px * 4;
-        const float a = p[3] / 255.0f;
-        return PremulSample{
-            (p[0] / 255.0f) * a,
-            (p[1] / 255.0f) * a,
-            (p[2] / 255.0f) * a,
-            a
-        };
-    };
-    auto mix = [](const PremulSample& a, const PremulSample& b, float t) {
-        return PremulSample{
-            a.r + (b.r - a.r) * t,
-            a.g + (b.g - a.g) * t,
-            a.b + (b.b - a.b) * t,
-            a.a + (b.a - a.a) * t
-        };
-    };
-
-    return mix(mix(texel(x0, y0), texel(x1, y0), tx),
-               mix(texel(x0, y1), texel(x1, y1), tx),
-               ty);
+    const double inv = 1.0 / width;
+    for (int o = 0; o < outN; ++o) {
+        // Output sample centre, in input texel-centre coordinates (texel i
+        // covers [i-0.5, i+0.5]); the weight of texel i is its overlap with
+        // the box over the box width — identical algebra to sm_boxWeights.
+        const double p  = (o + 0.5) * ratio - 0.5;
+        const double lo = p - width * 0.5;
+        const double hi = p + width * 0.5;
+        const int    f  = static_cast<int>(std::floor(lo + 0.5));
+        const int    n  = std::clamp(
+            static_cast<int>(std::floor(hi + 0.5)) - f + 1, 1, t.maxTaps);
+        t.first[o] = f;
+        t.count[o] = n;
+        float* w = t.weight.data() + static_cast<size_t>(o) * t.maxTaps;
+        for (int i = 0; i < n; ++i) {
+            const double c = f + i;
+            w[i] = static_cast<float>(
+                std::max(std::min(hi, c + 0.5) - std::max(lo, c - 0.5), 0.0) * inv);
+        }
+    }
+    return t;
 }
 
-QImage resampleLikeGpu(const QImage& source, int outW, int outH)
+// Exact premultiplied area resample. Out-of-range taps clamp to the edge
+// texel — the same clamp-to-edge extension the shader uses — so the weights
+// still sum to 1 along the borders.
+QImage resampleArea(const QImage& source, int outW, int outH)
 {
     if (source.isNull() || outW <= 0 || outH <= 0)
         return QImage();
 
     const QImage rgba = source.convertToFormat(QImage::Format_RGBA8888);
+    const int inW = rgba.width();
+    const int inH = rgba.height();
+    if (inW <= 0 || inH <= 0)
+        return QImage();
+
+    const AxisTaps tx = buildAxisTaps(inW, outW);
+    const AxisTaps ty = buildAxisTaps(inH, outH);
+
     QImage out(outW, outH, QImage::Format_RGBA8888);
-    const double footprintX = static_cast<double>(rgba.width()) / outW;
-    const double footprintY = static_cast<double>(rgba.height()) / outH;
-
     for (int y = 0; y < outH; ++y) {
-        uchar* row = out.scanLine(y);
-        const double centerY = (static_cast<double>(y) + 0.5) * footprintY - 0.5;
-        const double stepY = footprintY / 4.0;
-        const double firstY = centerY - footprintY * 0.5 + stepY * 0.5;
+        uchar*       row = out.scanLine(y);
+        const float* wy  = ty.weight.data() + static_cast<size_t>(y) * ty.maxTaps;
+        const int    ny  = ty.count[y];
         for (int x = 0; x < outW; ++x) {
-            const double centerX = (static_cast<double>(x) + 0.5) * footprintX - 0.5;
-            const double stepX = footprintX / 4.0;
-            const double firstX = centerX - footprintX * 0.5 + stepX * 0.5;
-
-            PremulSample sum;
-            for (int sy = 0; sy < 4; ++sy) {
-                for (int sx = 0; sx < 4; ++sx) {
-                    const PremulSample s = samplePremultipliedAt(
-                        rgba, firstX + sx * stepX, firstY + sy * stepY);
-                    sum.r += s.r;
-                    sum.g += s.g;
-                    sum.b += s.b;
-                    sum.a += s.a;
+            const float* wx = tx.weight.data() + static_cast<size_t>(x) * tx.maxTaps;
+            const int    nx = tx.count[x];
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+            for (int j = 0; j < ny; ++j) {
+                const int    sy  = std::clamp(ty.first[y] + j, 0, inH - 1);
+                const uchar* line = rgba.constScanLine(sy);
+                float rr = 0.0f, gg = 0.0f, bb = 0.0f, aa = 0.0f;
+                for (int i = 0; i < nx; ++i) {
+                    const int    sx = std::clamp(tx.first[x] + i, 0, inW - 1);
+                    const uchar* px = line + sx * 4;
+                    const float  av = px[3] * (1.0f / 255.0f);
+                    const float  wi = wx[i] * (1.0f / 255.0f);
+                    rr += wi * px[0] * av;
+                    gg += wi * px[1] * av;
+                    bb += wi * px[2] * av;
+                    aa += wx[i] * av;
                 }
+                const float wj = wy[j];
+                r += wj * rr;
+                g += wj * gg;
+                b += wj * bb;
+                a += wj * aa;
             }
-            sum.r *= 1.0f / 16.0f;
-            sum.g *= 1.0f / 16.0f;
-            sum.b *= 1.0f / 16.0f;
-            sum.a *= 1.0f / 16.0f;
 
             uchar* p = row + x * 4;
-            if (sum.a > 0.0f) {
-                p[0] = toByte(sum.r / sum.a);
-                p[1] = toByte(sum.g / sum.a);
-                p[2] = toByte(sum.b / sum.a);
+            if (a > 0.0f) {
+                p[0] = toByte(r / a);
+                p[1] = toByte(g / a);
+                p[2] = toByte(b / a);
             } else {
                 p[0] = p[1] = p[2] = 0;
             }
-            p[3] = toByte(sum.a);
+            p[3] = toByte(a);
         }
     }
     return out;
@@ -268,19 +286,21 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
     layerPainter.setOpacity(1.0);
     layerPainter.setTransform(imgToCanvas);
 
-    // Match the GPU preview reference: keep small downscales bilinear, and only
-    // switch to premultiplied/alpha-weighted area sampling once the source
-    // footprint exceeds the shader's 1.25 texel threshold.
+    // Any minification goes through the premultiplied area filter, mirroring
+    // the shader (renderer/SamplingShaderLib.hpp) — which now covers the whole
+    // range because the exact box degenerates to plain bilinear at footprint 1,
+    // so there is no longer a band (the old 0.8–1.0) left to subsampled
+    // bilinear. QPainter keeps the magnifying case.
     const double effScaleX = std::hypot(imgToCanvas.m11(), imgToCanvas.m12());
     const double effScaleY = std::hypot(imgToCanvas.m21(), imgToCanvas.m22());
     bool resampled = false;
-    if (effScaleX < 0.8 || effScaleY < 0.8) {
+    if (effScaleX < 1.0 || effScaleY < 1.0) {
         const int sw = std::clamp(
             static_cast<int>(std::lround(lw * std::min(effScaleX, 1.0))), 1, lw);
         const int sh = std::clamp(
             static_cast<int>(std::lround(lh * std::min(effScaleY, 1.0))), 1, lh);
         if (sw < lw || sh < lh) {
-            const QImage small = resampleLikeGpu(source, sw, sh);
+            const QImage small = resampleArea(source, sw, sh);
             if (!small.isNull()) {
                 const QTransform smallToCanvas =
                     QTransform::fromScale(static_cast<double>(lw) / sw,

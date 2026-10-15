@@ -391,10 +391,13 @@ void GPUViewport::setMainUniforms(const QMatrix4x4& mvp, float opacity,
     m_mainProg->setUniformValue(m_mainU.maskTexture, 1);
     setMainSourcePremultiplied(false);
     setMainAlphaWeightedSampling(true);
-    // Off by default for every main-shader draw: only the doc→screen display of
-    // the projection opts in (drawProjection), so a layer drawn by the live
-    // compositor can never pick it up and drift from the CPU truth.
+    // Off by default for every main-shader draw: only the doc→screen view steps
+    // opt in (drawProjection, top-level popGroupFbo), so a layer drawn by the
+    // live compositor can never pick them up and drift from the CPU truth.
     setMainSharpMagnification(false);
+    // Likewise: only the projection texture carries a mip pyramid, so every
+    // other draw must sample level 0.
+    setMainMipLevels(0);
 
     float hm = hasMask ? 1.0f : 0.0f;
     if (m_uc.mainTransform != mvp) {
@@ -616,6 +619,14 @@ void GPUViewport::setMainSharpMagnification(bool enabled)
     m_uc.mainSharpMagnify = value;
 }
 
+void GPUViewport::setMainMipLevels(int levels)
+{
+    if (m_uc.mainMipLevels == levels)
+        return;
+    m_mainProg->setUniformValue(m_mainU.mipLevels, levels);
+    m_uc.mainMipLevels = levels;
+}
+
 void GPUViewport::setMainTexture(GLenum unit, GLuint tex)
 {
     glActiveTexture(unit);
@@ -728,6 +739,11 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
     m_blendProg->setUniformValue(m_blendU.maskUvOffset, maskUvOffset);
     m_blendProg->setUniformValue(m_blendU.srcPremultiplied, 0.0f);
     m_blendProg->setUniformValue(m_blendU.dstPremultiplied, 1.0f);
+    // A layer draw, never the view step (see setMainSharpMagnification): the
+    // layer's own scaling is baked into the document by the CPU compositor with
+    // a smooth filter, so the GPU must magnify it the same way.
+    m_blendProg->setUniformValue(m_blendU.sharpMagnify, 0.0f);
+    m_blendProg->setUniformValue(m_blendU.mipLevels, 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, srcTexture);
@@ -989,6 +1005,16 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         mvp.scale(static_cast<float>(canvasHalfExtents.x()),
                   static_cast<float>(canvasHalfExtents.y()));
     }
+    // At the top level this draw is doc→screen — the same pure view mapping
+    // drawProjection performs — so it must magnify with the same sub-texel box,
+    // otherwise a live frame of an isolated document looks softer than the idle
+    // projection and the canvas "pops" when a stroke ends. A nested pop is a 1:1
+    // copy into another canvas-NDC FBO, where the footprint is 1 either way.
+    // No pyramid either way: the group FBO is re-rendered every interactive
+    // frame, so minification keeps to level 0 rather than paying a
+    // glGenerateMipmap per frame — the pyramid-less path in
+    // SamplingShaderLib.hpp.
+    const bool viewStep = !nested;
 
     if (needsShaderBlend(static_cast<int>(groupNode->blendMode))) {
         // Two-pass blend: copy the current target (dst) into m_blendTex, then run
@@ -1048,6 +1074,9 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_blendProg->setUniformValue(m_blendU.maskUvOffset, QVector2D(0.0f, 0.0f));
             m_blendProg->setUniformValue(m_blendU.srcPremultiplied, 1.0f);
             m_blendProg->setUniformValue(m_blendU.dstPremultiplied, 1.0f);
+            m_blendProg->setUniformValue(m_blendU.sharpMagnify,
+                                         viewStep ? 1.0f : 0.0f);
+            m_blendProg->setUniformValue(m_blendU.mipLevels, 0);
 
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, entry.tex);
@@ -1080,10 +1109,13 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_mainProg->setUniformValue(m_mainU.instanced, 0);
             setMainSourcePremultiplied(true);
             setMainAlphaWeightedSampling(true);
+            setMainSharpMagnification(viewStep);
+            setMainMipLevels(0);
             setUVUniforms(QVector2D(1.0f, -1.0f), QVector2D(0.0f, 1.0f));
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, entry.tex);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            setMainSharpMagnification(false);
             setMainSourcePremultiplied(false);
             setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
         }
@@ -1100,6 +1132,8 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         m_mainProg->setUniformValue(m_mainU.instanced, 0);
         setMainSourcePremultiplied(true);
         setMainAlphaWeightedSampling(true);
+        setMainSharpMagnification(viewStep);
+        setMainMipLevels(0);
         // The group FBO is an OpenGL render target (row 0 = bottom), but the
         // shared quad's UVs assume an uploaded image (row 0 = top). Flip V while
         // sampling so the composed group is not drawn upside-down (which, because
@@ -1110,6 +1144,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, entry.tex);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        setMainSharpMagnification(false);
         setMainSourcePremultiplied(false);
         setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
 
@@ -1642,15 +1677,6 @@ bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMv
     QMatrix4x4 mvp = viewMvp;
     mvp.scale(hx, hy);
 
-    // Keep the texture state aligned with the live per-layer compositor. The
-    // main shader applies alpha-weighted sampling for straight-alpha content, so
-    // idle projection frames and live layer frames handle transparent edges the
-    // same way.
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
     // Normal/source-over blend so transparent areas reveal the checkerboard.
     applyFixedBlend(static_cast<int>(BlendMode::Normal));
     m_mainProg->bind();
@@ -1658,12 +1684,21 @@ bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMv
     m_mainProg->setUniformValue(m_mainU.instanced, 0);
     setMainUniforms(mvp, 1.0f, false, 0.0f);
     // doc→screen is a pure view mapping: the projection IS the CPU truth at
-    // document resolution, so sharpening the magnification ramp here changes
-    // only how those finished pixels are presented — never what they are.
+    // document resolution, so how it is resampled here changes only the way
+    // those finished pixels are presented — never what they are. Hence both
+    // view-only sampling modes are enabled: a sub-texel box when magnifying,
+    // and the premultiplied mip pyramid ProjectionCache uploads when
+    // minifying (the "fit to window" case).
     setMainSharpMagnification(true);
+    setMainMipLevels(m_projection.mipLevels());
+    // The pyramid is premultiplied — generating it from straight alpha would
+    // average the meaningless colour of transparent texels into every level.
+    setMainSourcePremultiplied(true);
     setMainTexture(GL_TEXTURE0, tex);
     setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    setMainSourcePremultiplied(false);
+    setMainMipLevels(0);
     setMainSharpMagnification(false);
     return true;
 }

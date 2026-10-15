@@ -398,6 +398,7 @@ add_executable(Hazor WIN32
     src/renderer/BlendRules.hpp
     src/renderer/BlendMath.hpp
     src/renderer/BlendShaderLib.hpp
+    src/renderer/SamplingShaderLib.hpp
     src/renderer/ProjectionCache.hpp
     src/renderer/ProjectionCache.cpp
     src/renderer/AsyncProjectionBuilder.hpp

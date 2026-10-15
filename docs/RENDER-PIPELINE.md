@@ -11,12 +11,13 @@ dragging, transforms, mask editing) and must produce the same visual result,
 pixel by pixel, within the technical limits.
 
 ```
-                        ┌──────────────────────────────────┐
-                        │     Shared layer (contract)      │
-                        │  BlendRules.hpp   (mode → id)    │
-                        │  BlendMath.hpp    (C++ formulas) │
-                        │  BlendShaderLib.hpp (GLSL formulas)│
-                        └────────────┬─────────────────────┘
+                        ┌────────────────────────────────────────┐
+                        │        Shared layer (contract)         │
+                        │  BlendRules.hpp        (mode → id)     │
+                        │  BlendMath.hpp         (C++ formulas)  │
+                        │  BlendShaderLib.hpp    (GLSL formulas) │
+                        │  SamplingShaderLib.hpp (GLSL resample) │
+                        └────────────┬───────────────────────────┘
                        used by       │      used by
               ┌──────────────────────┴──────────────────────┐
               ▼                                             ▼
@@ -96,8 +97,8 @@ File: [src/renderer/GPUViewport_Shaders.cpp](../src/renderer/GPUViewport_Shaders
 
 | Program | Function |
 |---|---|
-| **main** | textured quad + mask; alpha-weighted sampling (§4.2); instanced for tiles |
-| **blend** | blend modes that fixed-function cannot express: target snapshot in `m_blendTex` (dst) + `bm_blend()` from the shared lib + W3C compositing |
+| **main** | textured quad + mask; premultiplied box resampling from the shared sampler lib (§4.2); instanced for tiles |
+| **blend** | blend modes that fixed-function cannot express: target snapshot in `m_blendTex` (dst) + `bm_blend()` from the shared lib + W3C compositing; samples the source through the same shared sampler as **main** |
 | **adjust** | stack adjustment (Normal-Mode) as a pass over the backdrop: grayscale, curves/color balance (256×1 LUT), hue/saturation (HSL model mirrored from CPU), solid color (blends with `bm_blend`) |
 | **solid** | solid color (decorations, overlays) |
 | **select / rubylith / gray** | marching ants, mask overlay, grayscale mask view |
@@ -169,7 +170,7 @@ compositeFiltered
          │    mask included) or renderImage() (shape base); dabs = rasterStorage.toImage()
          ├─ transform: buildImgToCanvas (img→NDC→canvas, same chain as io/ImageIO
          │    and the GPU MVP; shape sprite uses spriteTransform)
-         ├─ downscale < 0.8 → resampleLikeGpu (4×4 premultiplied area, §4.2);
+         ├─ either axis downscales → resampleArea (exact premultiplied box, §4.2);
          │    otherwise bilinear (SmoothPixmapTransform)
          ├─ mask: DestinationIn with density ramp mix(1, m, density)
          └─ compositeStage(target, stage, blendMode, opacity):
@@ -197,18 +198,21 @@ worker → operation → state applied back + undo.
 
 ## 4. Shared specification layer
 
-Three files, one contract:
+Four files, one contract — three for blending, one for resampling:
 
 | File | Role |
 |---|---|
 | [src/renderer/BlendRules.hpp](../src/renderer/BlendRules.hpp) | maps `BlendMode` → primitive for each backend: shader id (`shaderId`), QPainter mode (`painterMode`), what requires shader/manual compositing |
 | [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C), `blendHsl`, `maskDensityRamp = mix(1, m, density)` |
 | [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 15 modes |
+| [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernel in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `buildAxisTaps`/`resampleArea` in `DocumentCompositor.cpp` (§4.2) |
 
-**Maintenance rule:** when adding/changing a blend mode, update all three files
-together — `BlendMath.hpp` and `BlendShaderLib.hpp` are kept comparable function
-by function. ColorDodge/ColorBurn follow the edge semantics of Qt's raster
-engine (which executes separable modes on the CPU), without NaN.
+**Maintenance rule:** when adding/changing a blend mode, update all three blend
+files together — `BlendMath.hpp` and `BlendShaderLib.hpp` are kept comparable
+function by function. ColorDodge/ColorBurn follow the edge semantics of Qt's
+raster engine (which executes separable modes on the CPU), without NaN. The
+same rule holds for the sampler: `SamplingShaderLib.hpp` and `resampleArea`
+move together.
 
 ### 4.1 Alpha and compositing
 
@@ -222,13 +226,50 @@ engine (which executes separable modes on the CPU), without NaN.
 
 ### 4.2 Sampling / antialiasing (equivalence)
 
+Both backends run **one kernel**: an *exact box filter* of `width` texels over
+premultiplied samples, where `width` is the screen-pixel footprint. The three
+regimes are the same formula, not three code paths:
+
+| `width` | Behaviour |
+|---|---|
+| `< 1` | magnification with the box narrower than a texel — interiors stay flat, the blend is confined to the texel boundary (crisp, still antialiased) |
+| `== 1` | plain bilinear; **bit-exact copy** when the sample centres land on texel centres, so an unscaled, grid-aligned frame is never resampled |
+| `> 1` | minification: the exact area average over the footprint |
+
 | Situation | GPU | CPU |
 |---|---|---|
-| Magnification / footprint ≤ 1.25 texel | premultiplied bilinear (manual in shader) | premultiplied bilinear (QPainter Smooth) |
-| Minification (scale < 0.8) | 4×4 alpha-weighted area in shader (`sampleAlphaWeighted`) | `resampleLikeGpu` — the same 4×4 premultiplied average |
+| Layer → document (any scale) | `sm_sampleSurface` with `uSharpMagnify = 0`, so `width` is clamped to ≥ 1 | `resampleArea` when either axis minifies, QPainter Smooth (bilinear) when it magnifies |
+| Document → screen (the *view* step) | `uSharpMagnify = 1`: `width` may drop below 1 | n/a — this step has no CPU counterpart; the projection **is** the CPU truth at document resolution |
 | Masks | bilinear R8 texture, ramp `mix(1, m, density)`, outside UV = 1 | same via DestinationIn + `maskDensityRamp` |
 
-The thresholds are intentionally mirrored: 1/1.25 = 0.8.
+Two consequences worth knowing:
+
+- **Only the view step sharpens magnification.** Scaling a layer up is a
+  *document* edit that the CPU bakes with a smooth filter, so the GPU must
+  magnify it the same way or the live preview diverges from the export. Scaling
+  the *view* up is just a way of looking at finished pixels, so it gets the
+  crisp sub-texel box. `uSharpMagnify` is therefore enabled at exactly two draw
+  sites — `drawProjection` and the top-level `popGroupFbo` — and
+  `setMainUniforms` defaults it off so no layer draw can pick it up.
+- **Minification uses a pyramid where one exists.** A fixed tap budget spread
+  over an ever-wider footprint undersamples (moiré at low zoom), so when the
+  bound texture carries a premultiplied mip pyramid the sampler picks the level
+  whose residual footprint lands in `[1,2)` and boxes *that* — the GEGL/GIMP
+  pyramid idea (`gimpprojection.c`). Only the projection texture has one
+  (`ProjectionCache`, built with `glGenerateMipmap` over
+  `Format_RGBA8888_Premultiplied`); everywhere else `uMipLevels = 0` and level 0
+  is boxed directly, with the box width capped at `SM_MAX_WIDTH` so the weights
+  still sum to 1.
+  Deliberately **not** `GL_LINEAR_MIPMAP_LINEAR`: trilinear cross-fades level L
+  and L+1, which is *blurrier* than a direct area filter at the non-power-of-two
+  scales "fit to window" actually lands on.
+
+The pyramid is why the CPU and GPU minification are "the same kernel" rather
+than bit-identical: a cascade of box reductions is very slightly wider than one
+box of the combined width. Measured against the ideal single box, the pyramid
+path deviates by ≤ 2.3/255 on average (exact at power-of-two ratios); the
+level-0 path matches the CPU to ≤ 1/255 (float32 vs float64 rounding) and is
+bit-identical at 1:1.
 
 ### 4.3 Known technical limit
 
@@ -312,7 +353,7 @@ through the normal CPU path.
 | GPU compositor | `renderer/LayerCompositor.cpp`, `renderer/TileRenderer.cpp`, `renderer/MipmapCache.cpp` |
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
-| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/ShaderCompat.hpp` |
+| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp` |
 | Caches | `cache/RenderCache.*` |
 | Layer data | `core/Layer.*`, `core/LayerTreeNode.hpp` (`computeEffectedImage`, `computeStyledBaseImage`, `clone`/`shallowClone`), `core/RasterLayerStorage.*`, `core/TileManager.*` |
 | Adjustments | `core/AdjustmentTypes.*`, `core/CurvesData.*`, `core/ColorBalanceData.*`, `core/HueSaturationData.*`, `core/SolidColorData.hpp` |

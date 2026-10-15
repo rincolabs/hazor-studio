@@ -41,6 +41,9 @@ public:
 
     unsigned int texture() const { return m_texture; }
     QSize        size()    const { return m_size; }
+    // Highest level of the premultiplied mip pyramid on the texture (0 until
+    // one has been uploaded). Passed to the sampler as uMipLevels.
+    int          mipLevels() const { return m_mipLevels; }
     const QImage& image()  const { return m_image; }
 
     // Invoked (on the UI thread) when an async projection result becomes
@@ -63,6 +66,7 @@ public:
 private:
     void uploadTexture();
     void ensureBuilder();
+    static int maxMipLevel(const QSize& s);
     // Builds a thread-safe COW snapshot of `doc` for off-thread compositing.
     std::shared_ptr<Document> makeSnapshot(const Document* doc) const;
     // A single full-canvas texture can't represent documents larger than the
@@ -77,6 +81,7 @@ private:
     unsigned int  m_texture    = 0;
     uint64_t      m_generation = kInvalidGen;
     QSize         m_size;
+    int           m_mipLevels = 0;
     int           m_maxTextureSize = 0; // cached GL_MAX_TEXTURE_SIZE
 
     std::unique_ptr<AsyncProjectionBuilder> m_builder;
