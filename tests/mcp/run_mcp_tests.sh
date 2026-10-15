@@ -1,16 +1,20 @@
 #!/bin/bash
 # MCP Integration Test Runner
-# Usage: run_mcp_tests.sh [--app PATH]
-#   Assumes the app is already running on port 8080, or starts it with --app
+# Usage: run_mcp_tests.sh [--url URL] [--app PATH]
+#   Assumes the app is already running at MCP_URL (default: http://localhost:8085/mcp),
+#   or starts it with --app.
 
 APP_PATH=""
 APP_ARGS=""
+MCP_URL="${MCP_URL:-http://localhost:8085/mcp}"
+MCP_PROTOCOL_VERSION="${MCP_PROTOCOL_VERSION:-2026-07-28}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --app) APP_PATH="$2"; shift 2 ;;
         --app-args) APP_ARGS="$2"; shift 2 ;;
+        --url) MCP_URL="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -36,10 +40,17 @@ if [ -n "$APP_PATH" ]; then
     trap cleanup EXIT
 fi
 
+export MCP_URL MCP_PROTOCOL_VERSION
+
 # Wait for MCP server
 echo "Waiting for MCP server..."
 for i in $(seq 1 10); do
-    if curl -s http://localhost:8080/mcp/tools > /dev/null 2>&1; then
+    if curl -sS --max-time 2 -X POST "$MCP_URL" \
+        -H 'Content-Type: application/json' \
+        -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION" \
+        -H 'Mcp-Method: tools/list' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"$MCP_PROTOCOL_VERSION\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}" \
+        > /dev/null 2>&1; then
         echo "MCP server ready"
         break
     fi

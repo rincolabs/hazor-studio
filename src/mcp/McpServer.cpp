@@ -1,4 +1,5 @@
 #include "McpServer.hpp"
+#include "McpProtocol.hpp"
 #include "tools/ToolExecutor.hpp"
 #include "tools/ToolCatalog.hpp"
 #include "tools/ToolCall.hpp"
@@ -9,6 +10,40 @@
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QHostAddress>
+#include <optional>
+
+namespace {
+
+// A tool execution error (bad parameter, business-logic failure) is a normal
+// `tools/call` *result* with `isError: true`, not a JSON-RPC error — it is
+// feedback the calling model can act on and retry, per the MCP tools error
+// handling model.
+QJsonObject buildToolExecutionError(const QJsonValue& id, const QString& message)
+{
+    return McpProtocol::buildResult(id, QJsonObject{
+        {"content", QJsonArray{QJsonObject{
+            {"type", "text"},
+            {"text", message},
+        }}},
+        {"structuredContent", QJsonObject{
+            {"success", false},
+            {"message", message},
+        }},
+        {"isError", true},
+    });
+}
+
+// A response is either `{..., "result": {...}}` or `{..., "error": {"code": ...}}`;
+// map the latter's code to the HTTP status the transport spec requires.
+int statusCodeForResponse(const QJsonObject& response)
+{
+    if (!response.contains("error"))
+        return 200;
+    int code = response.value("error").toObject().value("code").toInt();
+    return McpProtocol::httpStatusFor(static_cast<McpProtocol::ErrorCode>(code));
+}
+
+} // namespace
 
 McpServer::McpServer(ToolExecutor* executor, QObject* parent)
     : QObject(parent)
@@ -84,8 +119,6 @@ void McpServer::onReadyRead()
         break;
     case HttpParser::State::Error:
         sendJsonResponse(socket, 400, {
-            {"success", false},
-            {"data", QJsonValue::Null},
             {"error", QString::fromStdString(state.parser.errorMessage())}
         });
         break;
@@ -104,19 +137,23 @@ void McpServer::onClientDisconnected()
 
 void McpServer::handleRequest(QTcpSocket* socket, const McpRequest& req)
 {
-    if (req.method == "POST" && req.path == "/mcp/execute") {
-        handleExecute(socket, req);
-    } else if (req.method == "GET" && req.path == "/mcp/tools") {
-        handleListTools(socket);
-    } else {
+    if (req.path != "/mcp") {
         sendJsonResponse(socket, 404, {
-            {"success", false},
-            {"data", QJsonValue::Null},
-            {"error", QString("Route not found: %1 %2")
+            {"error", QString("Not found: %1 %2")
                           .arg(QString::fromStdString(req.method),
                                QString::fromStdString(req.path))}
         });
+        return;
     }
+
+    if (req.method != "POST") {
+        sendJsonResponse(socket, 405, {
+            {"error", "Only POST is supported on the MCP endpoint"}
+        });
+        return;
+    }
+
+    handleMcpEndpoint(socket, req);
 }
 
 void McpServer::sendJsonResponse(QTcpSocket* socket, int statusCode,
@@ -132,151 +169,221 @@ void McpServer::sendJsonResponse(QTcpSocket* socket, int statusCode,
     socket->disconnectFromHost();
 }
 
-void McpServer::handleExecute(QTcpSocket* socket, const McpRequest& req)
+bool McpServer::checkOrigin(const McpRequest& req) const
 {
-    QJsonDocument doc = QJsonDocument::fromJson(
-        QByteArray::fromStdString(req.body));
+    auto it = req.headers.find("origin");
+    if (it == req.headers.end())
+        return true; // non-browser clients (curl, SDKs) send no Origin at all.
 
-    if (doc.isNull() || !doc.isObject()) {
-        sendJsonResponse(socket, 400, {
-            {"success", false},
-            {"data", QJsonValue::Null},
-            {"error", "Invalid JSON body"}
-        });
+    const QString origin = QString::fromStdString(it->second);
+    const quint16 port = serverPort();
+    return origin.compare(QString("http://127.0.0.1:%1").arg(port), Qt::CaseInsensitive) == 0
+        || origin.compare(QString("http://localhost:%1").arg(port), Qt::CaseInsensitive) == 0;
+}
+
+bool McpServer::validateHeaders(const McpRequest& req, const QJsonValue& id, const QString& method,
+                                const QJsonObject& params, QJsonObject& errorOut) const
+{
+    auto header = [&req](const char* name) -> std::optional<std::string> {
+        auto it = req.headers.find(name);
+        if (it == req.headers.end())
+            return std::nullopt;
+        return it->second;
+    };
+
+    auto protocolVersionHeader = header("mcp-protocol-version");
+    if (!protocolVersionHeader) {
+        errorOut = McpProtocol::buildError(id, McpProtocol::ErrorCode::HeaderMismatch,
+            "Missing required header: 'MCP-Protocol-Version'");
+        return false;
+    }
+    const QString bodyVersion = params.value("_meta").toObject()
+        .value(McpProtocol::kMetaProtocolVersion).toString();
+    const QString headerVersion = QString::fromStdString(*protocolVersionHeader);
+    if (headerVersion != bodyVersion) {
+        errorOut = McpProtocol::buildError(id, McpProtocol::ErrorCode::HeaderMismatch,
+            QString("Header mismatch: 'MCP-Protocol-Version' (%1) does not match "
+                    "body value (%2)").arg(headerVersion, bodyVersion));
+        return false;
+    }
+
+    auto methodHeader = header("mcp-method");
+    if (!methodHeader) {
+        errorOut = McpProtocol::buildError(id, McpProtocol::ErrorCode::HeaderMismatch,
+            "Missing required header: 'Mcp-Method'");
+        return false;
+    }
+    const QString headerMethod = QString::fromStdString(*methodHeader);
+    if (headerMethod != method) {
+        errorOut = McpProtocol::buildError(id, McpProtocol::ErrorCode::HeaderMismatch,
+            QString("Header mismatch: 'Mcp-Method' (%1) does not match body "
+                    "'method' (%2)").arg(headerMethod, method));
+        return false;
+    }
+
+    if (method == QLatin1String("tools/call")) {
+        auto nameHeader = header("mcp-name");
+        if (!nameHeader) {
+            errorOut = McpProtocol::buildError(id, McpProtocol::ErrorCode::HeaderMismatch,
+                "Missing required header: 'Mcp-Name'");
+            return false;
+        }
+        const QString headerName = QString::fromStdString(
+            McpProtocol::decodeHeaderValue(*nameHeader));
+        const QString bodyName = params.value("name").toString();
+        if (headerName != bodyName) {
+            errorOut = McpProtocol::buildError(id, McpProtocol::ErrorCode::HeaderMismatch,
+                QString("Header mismatch: 'Mcp-Name' (%1) does not match body "
+                        "'params.name' (%2)").arg(headerName, bodyName));
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void McpServer::handleMcpEndpoint(QTcpSocket* socket, const McpRequest& req)
+{
+    if (!checkOrigin(req)) {
+        sendJsonResponse(socket, 403, {{"error", "Origin not allowed"}});
         return;
     }
 
-    QJsonObject obj = doc.object();
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(req.body));
+    if (!doc.isObject()) {
+        QJsonObject error = McpProtocol::buildError(QJsonValue(),
+            McpProtocol::ErrorCode::ParseError, "Invalid JSON-RPC request body");
+        sendJsonResponse(socket, statusCodeForResponse(error), error);
+        return;
+    }
+    QJsonObject body = doc.object();
 
-    if (!obj.contains("tool") || !obj["tool"].isString()) {
-        sendJsonResponse(socket, 400, {
-            {"success", false},
-            {"data", QJsonValue::Null},
-            {"error", "Missing required field: 'tool'"}
-        });
+    QJsonValue id;
+    QString method;
+    QJsonObject params;
+    QJsonObject error;
+
+    if (!McpProtocol::parseRequest(body, id, method, params, error)) {
+        sendJsonResponse(socket, statusCodeForResponse(error), error);
         return;
     }
 
-    std::string toolName = obj["tool"].toString().toStdString();
+    if (!McpProtocol::validateMeta(id, params, error)) {
+        sendJsonResponse(socket, statusCodeForResponse(error), error);
+        return;
+    }
+
+    if (!validateHeaders(req, id, method, params, error)) {
+        sendJsonResponse(socket, statusCodeForResponse(error), error);
+        return;
+    }
+
+    QJsonObject response = dispatch(id, method, params);
+    sendJsonResponse(socket, statusCodeForResponse(response), response);
+}
+
+QJsonObject McpServer::dispatch(const QJsonValue& id, const QString& method, const QJsonObject& params)
+{
+    if (method == QLatin1String("server/discover"))
+        return handleDiscover(id);
+    if (method == QLatin1String("tools/list"))
+        return handleToolsList(id);
+    if (method == QLatin1String("tools/call"))
+        return handleToolsCall(id, params);
+
+    return McpProtocol::buildError(id, McpProtocol::ErrorCode::MethodNotFound,
+        QString("Unknown method: '%1'").arg(method));
+}
+
+QJsonObject McpServer::handleDiscover(const QJsonValue& id)
+{
+    return McpProtocol::buildResult(id, QJsonObject{
+        {"supportedVersions", QJsonArray{QString(McpProtocol::kVersion)}},
+        {"capabilities", QJsonObject{{"tools", QJsonObject{}}}},
+        {"instructions",
+         "Hazor Studio image editor automation. Tools act on the document "
+         "currently focused in the running editor and are undoable from the "
+         "app's history like manual edits. Call tools/list for parameters."},
+    });
+}
+
+QJsonObject McpServer::handleToolsList(const QJsonValue& id)
+{
+    QJsonArray tools;
+    for (const auto& def : ToolCatalog::allTools())
+        tools.append(McpProtocol::toolToJson(def));
+
+    return McpProtocol::buildResult(id, QJsonObject{{"tools", tools}});
+}
+
+QJsonObject McpServer::handleToolsCall(const QJsonValue& id, const QJsonObject& params)
+{
+    if (!params.value("name").isString()) {
+        return McpProtocol::buildError(id, McpProtocol::ErrorCode::InvalidParams,
+            "Missing required field: 'params.name'");
+    }
+    const std::string toolName = params.value("name").toString().toStdString();
 
     const ToolDefinition* def = ToolCatalog::findTool(toolName);
     if (!def) {
-        sendJsonResponse(socket, 404, {
-            {"success", false},
-            {"data", QJsonValue::Null},
-            {"error", QString("Unknown tool: '%1'")
-                          .arg(QString::fromStdString(toolName))}
-        });
-        return;
+        return McpProtocol::buildError(id, McpProtocol::ErrorCode::InvalidParams,
+            QString("Unknown tool: '%1'").arg(QString::fromStdString(toolName)));
     }
+
+    QJsonObject arguments = params.value("arguments").toObject();
 
     ToolCall call;
     call.name = toolName;
 
-    QJsonObject paramsObj = obj["params"].toObject();
-
     for (const auto& pdef : def->params) {
-        QString pname = QString::fromStdString(pdef.name);
+        const QString pname = QString::fromStdString(pdef.name);
 
         if (pdef.type == "string") {
             std::string val;
-            if (paramsObj.contains(pname)) {
-                QJsonValue v = paramsObj[pname];
-                if (v.isString())
-                    val = v.toString().toStdString();
-            }
+            QJsonValue v = arguments.value(pname);
+            if (v.isString())
+                val = v.toString().toStdString();
             call.params[pdef.name] = val;
-        } else {
-            double val = pdef.defaultVal;
-
-            if (paramsObj.contains(pname)) {
-                QJsonValue v = paramsObj[pname];
-                if (v.isDouble()) {
-                    val = v.toDouble();
-                } else {
-                    sendJsonResponse(socket, 422, {
-                        {"success", false},
-                        {"data", QJsonValue::Null},
-                        {"error", QString("Parameter '%1' must be a number")
-                                      .arg(pname)}
-                    });
-                    return;
-                }
-            }
-
-            if (val < pdef.minVal || val > pdef.maxVal) {
-                sendJsonResponse(socket, 422, {
-                    {"success", false},
-                    {"data", QJsonValue::Null},
-                    {"error", QString("Parameter '%1': value %2 out of range [%3, %4]")
-                                  .arg(pname).arg(val)
-                                  .arg(pdef.minVal).arg(pdef.maxVal)}
-                });
-                return;
-            }
-
-            call.params[pdef.name] = val;
+            continue;
         }
+
+        double val = pdef.defaultVal;
+        if (arguments.contains(pname)) {
+            QJsonValue v = arguments.value(pname);
+            if (!v.isDouble()) {
+                return buildToolExecutionError(id,
+                    QString("Parameter '%1' must be a number").arg(pname));
+            }
+            val = v.toDouble();
+        }
+
+        if (val < pdef.minVal || val > pdef.maxVal) {
+            return buildToolExecutionError(id,
+                QString("Parameter '%1': value %2 out of range [%3, %4]")
+                    .arg(pname).arg(val).arg(pdef.minVal).arg(pdef.maxVal));
+        }
+
+        call.params[pdef.name] = val;
     }
 
     QElapsedTimer timer;
     timer.start();
-
     ToolResult result = m_executor->execute(call);
-
     int elapsed = static_cast<int>(timer.elapsed());
 
-    emit requestHandled(QString::fromStdString(toolName),
-                        result.success, elapsed);
+    emit requestHandled(QString::fromStdString(toolName), result.success, elapsed);
 
-    if (result.success) {
-        sendJsonResponse(socket, 200, {
-            {"success", true},
-            {"data", QJsonObject{
-                {"tool", QString::fromStdString(toolName)},
-                {"message", QString::fromStdString(result.message)},
-                {"durationMs", elapsed}
-            }},
-            {"error", QJsonValue::Null}
-        });
-    } else {
-        sendJsonResponse(socket, 500, {
-            {"success", false},
-            {"data", QJsonValue::Null},
-            {"error", QString::fromStdString(result.message)}
-        });
-    }
-}
-
-void McpServer::handleListTools(QTcpSocket* socket)
-{
-    QJsonArray toolsArr;
-    for (const auto& def : ToolCatalog::allTools()) {
-        QJsonArray paramsArr;
-        for (const auto& p : def.params) {
-            QJsonObject pObj;
-            pObj["name"] = QString::fromStdString(p.name);
-            pObj["type"] = QString::fromStdString(p.type);
-            pObj["min"] = p.minVal;
-            pObj["max"] = p.maxVal;
-            pObj["default"] = p.defaultVal;
-            paramsArr.append(pObj);
-        }
-
-        QJsonObject tObj;
-        tObj["name"] = QString::fromStdString(def.name);
-        tObj["description"] = QString::fromStdString(def.description);
-        tObj["category"] = QString::fromStdString(def.category);
-        tObj["params"] = paramsArr;
-        toolsArr.append(tObj);
-    }
-
-    QJsonObject dataObj;
-    dataObj["tools"] = toolsArr;
-
-    sendJsonResponse(socket, 200, {
-        {"success", true},
-        {"data", dataObj},
-        {"error", QJsonValue::Null}
+    const QString message = QString::fromStdString(result.message);
+    return McpProtocol::buildResult(id, QJsonObject{
+        {"content", QJsonArray{QJsonObject{
+            {"type", "text"},
+            {"text", message},
+        }}},
+        {"structuredContent", QJsonObject{
+            {"success", result.success},
+            {"message", message},
+            {"durationMs", elapsed},
+        }},
+        {"isError", !result.success},
     });
 }

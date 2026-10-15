@@ -306,6 +306,8 @@ add_executable(Hazor WIN32
 
     src/mcp/McpServer.cpp
     src/mcp/McpServer.hpp
+    src/mcp/McpProtocol.cpp
+    src/mcp/McpProtocol.hpp
     src/mcp/McpSettings.hpp
     src/mcp/HttpParser.cpp
     src/mcp/HttpParser.hpp

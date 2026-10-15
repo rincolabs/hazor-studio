@@ -36,8 +36,9 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **AI selection & matting** — ONNX-powered object selection (SAM) and
   background removal / matting (BiRefNet, ModNet, RMBG), with CPU/CUDA/TensorRT
   execution providers selectable at runtime.
-- **MCP server** — an HTTP tool endpoint (port 8080) so external agents and
-  automation scripts can drive the editor (see [docs/MCP.md](docs/MCP.md)).
+- **MCP server** — a [Model Context Protocol](https://modelcontextprotocol.io)
+  server (port 8085) so external agents and automation scripts can drive the
+  editor (see [docs/MCP.md](docs/MCP.md)).
 - **Non-linear history** — jump to any point in the undo/redo timeline.
 - **Theming & shortcuts** — light/dark semantic theme system and 77 fully
   configurable keyboard shortcuts.
@@ -57,7 +58,7 @@ Build instructions, dependencies, and CMake options are documented separately:
 ## Documentation
 
 - **[docs/BUILD.md](docs/BUILD.md)** — building from source, dependencies, and CMake options
-- **[docs/MCP.md](docs/MCP.md)** — the local tool HTTP server (port 8080) for driving the editor from external agents like Claude Code
+- **[docs/MCP.md](docs/MCP.md)** — the embedded MCP server (port 8085) for driving the editor from external agents like Claude Code
 
 ## License
 
