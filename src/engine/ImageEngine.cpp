@@ -509,7 +509,6 @@ cv::Mat ImageEngine::crop(const cv::Mat& input, int x, int y, int w, int h)
 
 cv::Mat ImageEngine::rotate(const cv::Mat& input, float angleDeg)
 {
-    cv::Mat out;
     cv::Point2f center(input.cols / 2.0f, input.rows / 2.0f);
     cv::Mat rot = cv::getRotationMatrix2D(center, angleDeg, 1.0);
 
@@ -517,8 +516,11 @@ cv::Mat ImageEngine::rotate(const cv::Mat& input, float angleDeg)
     rot.at<double>(0, 2) += bbox.width / 2.0 - center.x;
     rot.at<double>(1, 2) += bbox.height / 2.0 - center.y;
 
-    cv::warpAffine(input, out, rot, bbox.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-    return out;
+    // Cubic, not linear: this is a destructive edit, so the sampling quality
+    // is baked into the layer and into the export. BORDER_REPLICATE is kept —
+    // the rotated corners inherit the edge pixel rather than a hard cut.
+    return warpAffinePremultiplied(input, rot, bbox.size(), cv::INTER_CUBIC,
+                                   cv::BORDER_REPLICATE);
 }
 
 cv::Mat ImageEngine::flipHorizontal(const cv::Mat& input)
@@ -537,8 +539,83 @@ cv::Mat ImageEngine::flipVertical(const cv::Mat& input)
 
 cv::Mat ImageEngine::resize(const cv::Mat& input, int w, int h)
 {
+    // INTER_AREA integrates the discarded pixels, which is what decimation
+    // needs — but OpenCV degenerates it to nearest-neighbour when an axis
+    // *grows*, which is why enlarging a layer used to come out blocky. Pick
+    // by direction instead; mixed axes count as growing, because the area
+    // path only implements the shrinking case.
+    const bool shrinking = w <= input.cols && h <= input.rows;
+    return resizePremultiplied(input, cv::Size(w, h),
+                               shrinking ? cv::INTER_AREA : cv::INTER_CUBIC);
+}
+
+// ── Premultiplied resampling (see the contract in ImageEngine.hpp) ───────
+
+void ImageEngine::premultiplyInPlace(cv::Mat& bgra8)
+{
+    if (bgra8.empty() || bgra8.channels() != 4 || bgra8.depth() != CV_8U)
+        return;
+    std::vector<cv::Mat> ch;
+    cv::split(bgra8, ch);
+    for (int c = 0; c < 3; ++c)
+        cv::multiply(ch[c], ch[3], ch[c], 1.0 / 255.0);   // rounds, saturates
+    cv::merge(ch, bgra8);
+}
+
+void ImageEngine::unpremultiplyInPlace(cv::Mat& bgra8)
+{
+    if (bgra8.empty() || bgra8.channels() != 4 || bgra8.depth() != CV_8U)
+        return;
+    std::vector<cv::Mat> ch;
+    cv::split(bgra8, ch);
+    for (int c = 0; c < 3; ++c) {
+        // colour ≤ alpha is an invariant of premultiplied data, but cubic and
+        // Lanczos kernels have negative lobes and can overshoot past it. Left
+        // alone that unpremultiplies to a value above white and rings as a
+        // bright halo along high-contrast edges, so clamp back into gamut.
+        cv::min(ch[c], ch[3], ch[c]);
+        cv::divide(ch[c], ch[3], ch[c], 255.0);           // alpha 0 → 0
+    }
+    cv::merge(ch, bgra8);
+}
+
+cv::Mat ImageEngine::warpAffinePremultiplied(const cv::Mat& input, const cv::Mat& m,
+                                             cv::Size dsize, int flags,
+                                             int borderMode,
+                                             const cv::Scalar& borderValue)
+{
+    if (input.empty() || dsize.width <= 0 || dsize.height <= 0)
+        return {};
+    cv::Mat src = input;
+    const bool premul = input.channels() == 4 && input.depth() == CV_8U;
+    if (premul) {
+        src = input.clone();
+        premultiplyInPlace(src);
+    }
     cv::Mat out;
-    cv::resize(input, out, cv::Size(w, h), 0, 0, cv::INTER_AREA);
+    cv::warpAffine(src, out, m, dsize, flags, borderMode, borderValue);
+    if (premul)
+        unpremultiplyInPlace(out);
+    return out;
+}
+
+cv::Mat ImageEngine::resizePremultiplied(const cv::Mat& input, cv::Size dsize,
+                                         int interpolation)
+{
+    if (input.empty() || dsize.width <= 0 || dsize.height <= 0)
+        return {};
+    if (input.size() == dsize)
+        return input.clone();
+    cv::Mat src = input;
+    const bool premul = input.channels() == 4 && input.depth() == CV_8U;
+    if (premul) {
+        src = input.clone();
+        premultiplyInPlace(src);
+    }
+    cv::Mat out;
+    cv::resize(src, out, dsize, 0, 0, interpolation);
+    if (premul)
+        unpremultiplyInPlace(out);
     return out;
 }
 

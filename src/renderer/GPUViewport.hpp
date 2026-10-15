@@ -300,6 +300,8 @@ private:
         float mainMaskDensity = -2.0f;
         float mainSourcePremultiplied = -2.0f;
         float mainAlphaWeightedSampling = -2.0f;
+        float mainSharpMagnify = -2.0f;
+        int   mainMipLevels = -2;
         QVector2D mainUvScale{-2.0f, -2.0f};
         QVector2D mainUvOffset{-2.0f, -2.0f};
         QVector2D mainMaskUvScale{-2.0f, -2.0f};
@@ -319,6 +321,7 @@ private:
         GLint transform = -1, texture = -1, opacity = -1;
         GLint maskTexture = -1, hasMask = -1, maskDensity = -1;
         GLint sourcePremultiplied = -1, alphaWeightedSampling = -1;
+        GLint sharpMagnify = -1, mipLevels = -1;
         GLint uvScale = -1, uvOffset = -1;
         GLint maskUvScale = -1, maskUvOffset = -1;
         GLint instanced = -1;
@@ -334,6 +337,7 @@ private:
         GLint viewportSize = -1, hasMask = -1, maskDensity = -1;
         GLint maskUvScale = -1, maskUvOffset = -1;
         GLint srcPremultiplied = -1, dstPremultiplied = -1;
+        GLint sharpMagnify = -1, mipLevels = -1;
     } m_blendU;
 
     // ── Uniform layout: selection program ──
@@ -383,6 +387,19 @@ private:
     bool ensureBlendTarget(int viewportW, int viewportH);
     void setMainSourcePremultiplied(bool premultiplied);
     void setMainAlphaWeightedSampling(bool enabled);
+    // Lets the resampling box narrow below one texel when magnifying (crisp
+    // zoom-in). Only valid for draws whose source texture is already in
+    // document space and whose MVP is the pure view mapping — drawProjection
+    // and the top-level popGroupFbo. Those are view operations, so they cannot
+    // diverge from the CPU compositor, which is the visual source of truth at
+    // document resolution; a layer magnified by its own transform must stay
+    // bilinear because that scaling is baked into the document.
+    void setMainSharpMagnification(bool enabled);
+    // Highest level of a premultiplied mip pyramid on the bound texture (0 =
+    // none). The sampler picks the level whose residual footprint lands in
+    // [1,2) so minification stays an exact area filter at any zoom instead of
+    // undersampling a fixed tap grid. Only the projection texture has one.
+    void setMainMipLevels(int levels);
 
     // ── Display colour-management (final stage) ──
     // Rebuilds + uploads the 3D LUT when the display state changes; returns true

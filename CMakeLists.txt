@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ImageEditor VERSION 0.0.1 LANGUAGES CXX)
+project(ImageEditor VERSION 0.0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -398,6 +398,7 @@ add_executable(Hazor WIN32
     src/renderer/BlendRules.hpp
     src/renderer/BlendMath.hpp
     src/renderer/BlendShaderLib.hpp
+    src/renderer/SamplingShaderLib.hpp
     src/renderer/ProjectionCache.hpp
     src/renderer/ProjectionCache.cpp
     src/renderer/AsyncProjectionBuilder.hpp

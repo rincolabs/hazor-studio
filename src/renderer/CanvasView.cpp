@@ -59,6 +59,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <limits>
 
 static bool snapDebugEnabled()
@@ -1210,9 +1211,13 @@ void CanvasView::onPreviewReady(const QImage& previewImage)
             cv::Mat maskFull = m_doc->selectionMaskForLayer(
                 lw, lh, m_previewSourceNode->accumulatedTransform());
             if (!maskFull.empty()) {
-                cv::Mat origSmall, maskSmall;
+                cv::Mat maskSmall;
                 cv::Mat origFull = ImageEngine::toCvMatFast(sourceImg);
-                cv::resize(origFull,  origSmall, cv::Size(pw, ph), 0, 0, cv::INTER_AREA);
+                // Layer pixels go through the premultiplied path so the
+                // unfiltered surround matches PreviewRenderer's downscale; the
+                // mask is single channel and stays a plain resize.
+                cv::Mat origSmall = ImageEngine::resizePremultiplied(
+                    origFull, cv::Size(pw, ph), cv::INTER_AREA);
                 cv::resize(maskFull,  maskSmall, cv::Size(pw, ph), 0, 0, cv::INTER_AREA);
                 cv::Mat previewCv = ImageEngine::toCvMatFast(previewImage);
                 previewCv.copyTo(origSmall, maskSmall);
@@ -3027,9 +3032,25 @@ void CanvasView::clampPanOffset()
     const QPointF clamped = core::ViewportCamera::clampPan(
         QPointF(specX, specY), QSizeF(vw, vh), QSizeF(cw, ch), m_overscrollEnabled);
 
-    // Convert the clamped top-left back to centre-NDC.
-    const double newPanX = (clamped.x() + cw * 0.5) * 2.0 / vw - 1.0;
-    const double newPanY = 1.0 - (clamped.y() + ch * 0.5) * 2.0 / vh;
+    // Pixel-grid alignment — the reason this is the LAST step before storing.
+    // The canvas top-left lands at (viewport - canvas)/2 device pixels when
+    // centred, i.e. on a HALF pixel whenever that difference is odd. A half-pixel
+    // offset makes the viewport sample the projection between two texels, so every
+    // pixel on screen becomes a blend of its neighbours and the whole image looks
+    // soft — even at 100% zoom, where nothing should be resampled at all. Snapping
+    // the top-left to whole device pixels is what GIMP gets for free by keeping its
+    // scroll offsets integral (gint offset_x/offset_y, app/display/gimpdisplayshell.h).
+    // Snapping here (rather than when building the MVP) keeps overlays, hit-testing
+    // and the scroll bars reading the exact same aligned value.
+    // Stable under repetition: clampPan() may pull a snapped value back by at most
+    // half a pixel, and rounding maps it straight back to the same snapped value.
+    const double dpr = std::max(1.0, static_cast<double>(devicePixelRatioF()));
+    const double snappedX = std::round(clamped.x() * dpr) / dpr;
+    const double snappedY = std::round(clamped.y() * dpr) / dpr;
+
+    // Convert the clamped + snapped top-left back to centre-NDC.
+    const double newPanX = (snappedX + cw * 0.5) * 2.0 / vw - 1.0;
+    const double newPanY = 1.0 - (snappedY + ch * 0.5) * 2.0 / vh;
 
     m_doc->panOffset = QPointF(newPanX, newPanY);
 }
@@ -3365,16 +3386,57 @@ void CanvasView::setZoom(float zoom)
     update();
 }
 
+// Zoom ladder — simple fractions and whole multiples, mirroring GIMP's preset
+// table (libgimpwidgets/gimpzoommodel.c). Stepping by a bare factor (the old
+// zoom * 1.25) never lands on an exact ratio: from 100% it walks 125%, 156.25%,
+// 195.3%… so the viewport is always resampling the projection by an arbitrary
+// fraction. On a ladder, the zoom levels people actually stop at (1:1, 1:2, 1:4,
+// 2:1, 4:1) are exact pixel replications/decimations, which is the single
+// cheapest sharpness win available for the display path.
+// Trimmed to the zoom range setZoom() clamps to (0.01 .. 100).
+static constexpr float kZoomPresets[] = {
+    1.0f / 90,  1.0f / 64,  1.0f / 45, 1.0f / 32,
+    1.0f / 23,  1.0f / 16,  1.0f / 11, 1.0f / 8,
+    2.0f / 11,  1.0f / 4,   1.0f / 3,  1.0f / 2,
+    2.0f / 3,
+    1.0f,
+    3.0f / 2,   2.0f,       3.0f,      4.0f,
+    11.0f / 2,  8.0f,       11.0f,     16.0f,
+    23.0f,      32.0f,      45.0f,     64.0f,
+    90.0f,
+};
+
+// Next/previous ladder entry. The relative epsilon keeps a zoom that is already
+// sitting on a preset (or a hair off it after a float round-trip) from being
+// treated as "between" that preset and the next one, which would make a step
+// silently do nothing.
+static float steppedZoom(float current, bool zoomIn)
+{
+    constexpr int   kCount = static_cast<int>(std::size(kZoomPresets));
+    constexpr float kEps   = 1e-3f;
+
+    if (zoomIn) {
+        for (int i = 0; i < kCount; ++i)
+            if (kZoomPresets[i] > current * (1.0f + kEps))
+                return kZoomPresets[i];
+        return kZoomPresets[kCount - 1];
+    }
+    for (int i = kCount - 1; i >= 0; --i)
+        if (kZoomPresets[i] < current * (1.0f - kEps))
+            return kZoomPresets[i];
+    return kZoomPresets[0];
+}
+
 void CanvasView::zoomIn()
 {
     if (!m_doc) return;
-    setZoom(m_doc->zoom * 1.25f);
+    setZoom(steppedZoom(m_doc->zoom, true));
 }
 
 void CanvasView::zoomOut()
 {
     if (!m_doc) return;
-    setZoom(m_doc->zoom / 1.25f);
+    setZoom(steppedZoom(m_doc->zoom, false));
 }
 
 void CanvasView::resizeEvent(QResizeEvent* e)
@@ -3454,11 +3516,13 @@ void CanvasView::wheelEvent(QWheelEvent* e)
 {
     if (!m_doc) return;
 
-    float factor = 1.1f;
+    // One ladder step per notch (same as the zoom buttons and GIMP's wheel
+    // binding), so wheel zooming also stops on exact ratios instead of drifting
+    // onto arbitrary 1.1^n factors that force a resample at every level.
     if (e->angleDelta().y() > 0)
-        setZoom(m_doc->zoom * factor);
+        zoomIn();
     else
-        setZoom(m_doc->zoom / factor);
+        zoomOut();
 
     // The selection drag overlays store screen points; a mid-gesture zoom
     // would otherwise leave the preview displaced from the real (doc-space)
@@ -4093,6 +4157,10 @@ void CanvasView::keyPressEvent(QKeyEvent* e)
                 validIndices.push_back(idx);
                 beforeXfs.push_back(node->transform);
                 translateNodeByDocumentDelta(node, QPointF(dx, dy));
+                // dx/dy are whole pixels, so this only matters for a layer that
+                // was already off-grid: the nudge then also realigns it instead
+                // of carrying the fractional offset (and its softness) along.
+                snapNodeToPixelGrid(node);
                 afterXfs.push_back(node->transform);
             }
             if (!validIndices.empty())
@@ -4453,11 +4521,11 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         return;
 
     if (tool == Tool::Zoom) {
-        float factor = 1.5f;
-        float newZoom = (e->modifiers() & Qt::AltModifier)
-            ? m_doc->zoom / factor
-            : m_doc->zoom * factor;
-        setZoom(newZoom);
+        // Ladder step (Alt = out), matching the wheel and the zoom buttons.
+        if (e->modifiers() & Qt::AltModifier)
+            zoomOut();
+        else
+            zoomIn();
         return;
     }
 
@@ -9087,6 +9155,13 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
         const QTransform before = node->transform;
         const QTransform after = transformWithDocumentDelta(node, startTransform, adjustedDeltaDoc);
         node->transform = after;
+        // Quantise the drag to whole document pixels (see snapNodeToPixelGrid):
+        // the mouse delta is continuous, and leaving the layer on a fractional
+        // offset makes both compositors resample it from here on. Applied every
+        // frame, not only on release, so the live preview shows exactly the
+        // pixels that get committed. Stable because `after` is always recomputed
+        // from startTransform rather than accumulated.
+        snapNodeToPixelGrid(node);
         if (snapDebugEnabled()) {
             qInfo().noquote()
                 << "[Snap][apply-node]"
@@ -9096,7 +9171,9 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
                 << "startTx" << startTransform.m31()
                 << "startTy" << startTransform.m32()
                 << "afterTx" << after.m31()
-                << "afterTy" << after.m32();
+                << "afterTy" << after.m32()
+                << "gridTx" << node->transform.m31()
+                << "gridTy" << node->transform.m32();
         }
     };
 
@@ -9154,6 +9231,35 @@ void CanvasView::translateNodeByDocumentDelta(LayerTreeNode* node, QPointF delta
                 t.m21(), t.m22(), t.m23(),
                 t.m31() + localDx, t.m32() + localDy, t.m33());
     node->transform = t;
+}
+
+void CanvasView::snapNodeToPixelGrid(LayerTreeNode* node)
+{
+    if (!m_doc || !node)
+        return;
+
+    // Why this exists: a move writes a continuous screen delta into the node
+    // transform, so the layer lands on a fractional document offset and every
+    // compositor — CPU projection and GPU preview alike — has to resample it.
+    // The softness then persists for as long as the layer stays there, which is
+    // why a single drag made a freshly pasted (sharp) layer blurry "forever".
+    // GIMP never hits this because layer offsets are integers by construction
+    // (gint, gimp_item_get_offset / gimp_item_translate).
+    //
+    // Only the translation is corrected, by at most half a pixel. A scaled or
+    // rotated layer is resampled regardless, so for those this is neither a fix
+    // nor a regression — their sharpness is a transform-quality problem.
+    const QRectF bounds = nodeDocumentBounds(node);
+    if (bounds.isNull() && bounds.isEmpty())
+        return;
+
+    const QPointF tl = bounds.topLeft();
+    const QPointF correction(std::round(tl.x()) - tl.x(),
+                             std::round(tl.y()) - tl.y());
+    if (std::abs(correction.x()) < 1e-6 && std::abs(correction.y()) < 1e-6)
+        return;
+
+    translateNodeByDocumentDelta(node, correction);
 }
 
 void CanvasView::applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers)
@@ -9647,14 +9753,18 @@ static TransformQuad remapQuadByTransformDelta(const TransformQuad& quad,
     return out;
 }
 
-// Warp `src` (whose full rect maps onto `srcQuadDoc` in document px) into the
+// Warp `srcPm` (whose full rect maps onto `srcQuadDoc` in document px) into the
 // quad `dstQuadDoc`. Returns the rendered RGBA image and its document-px origin.
+// `srcPm` must be Format_RGBA8888_Premultiplied — resampling straight alpha
+// bleeds the colour of transparent pixels into every soft edge as a dark fringe
+// (the rule and the 8-bit trade-off are stated in engine/ImageEngine.hpp). The
+// caller keeps the premultiplied copy so a live drag converts it only once.
 // `highQuality` selects cubic (commit/idle) vs linear (live drag) interpolation.
 // `previewScale` (≤1.0) renders into a proportionally smaller buffer for live
 // drags — the GPU upsamples it to the same document footprint, so distorting a
 // huge layer stays cheap. `outFootprint` reports the full document-px footprint
 // the result covers (independent of the buffer's pixel size), used to place it.
-static QImage warpDistort(const QImage& src,
+static QImage warpDistort(const QImage& srcPm,
                           const TransformQuad& srcQuadDoc,
                           const TransformQuad& dstQuadDoc,
                           bool highQuality,
@@ -9662,7 +9772,7 @@ static QImage warpDistort(const QImage& src,
                           QPoint* outOrigin,
                           QSize* outFootprint)
 {
-    if (src.isNull() || !dstQuadDoc.isValid())
+    if (srcPm.isNull() || !dstQuadDoc.isValid())
         return QImage();
 
     QRect dstBounds = dstQuadDoc.toPolygon().boundingRect().toAlignedRect();
@@ -9684,8 +9794,8 @@ static QImage warpDistort(const QImage& src,
     const double sx = static_cast<double>(outW) / dstBounds.width();
     const double sy = static_cast<double>(outH) / dstBounds.height();
 
-    const QImage srcRgba = src.format() == QImage::Format_RGBA8888
-        ? src : src.convertToFormat(QImage::Format_RGBA8888);
+    const QImage srcRgba = srcPm.format() == QImage::Format_RGBA8888_Premultiplied
+        ? srcPm : srcPm.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
 
     // Source points: where srcQuadDoc lands in source-image pixels. srcQuadDoc
     // maps the image's full rect, so invert that rect→quad map and apply it to
@@ -9715,6 +9825,14 @@ static QImage warpDistort(const QImage& src,
                         cv::Size(outW, outH),
                         highQuality ? cv::INTER_CUBIC : cv::INTER_LINEAR,
                         cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+
+    // Back to straight alpha, the format cpuImage is in. Done through the
+    // shared helper rather than Qt's conversion because cubic has negative
+    // lobes: a channel can overshoot past alpha, and qUnpremultiply() assumes
+    // it never does — it masks instead of clamping, so colour 255 at alpha 100
+    // computes 651 and stores 651 & 0xff = 139, a dark speck on a white edge.
+    // unpremultiplyInPlace() clamps colour to alpha first.
+    ImageEngine::unpremultiplyInPlace(dstMat);
 
     QImage out(dstMat.data, dstMat.cols, dstMat.rows,
                static_cast<int>(dstMat.step), QImage::Format_RGBA8888);
@@ -9773,7 +9891,13 @@ void CanvasView::renderDistortLayer(bool highQuality)
             const QRect fp = dd.quad.toPolygon().boundingRect().toAlignedRect();
             previewScale = distortPreviewScale(fp);
         }
-        warped = warpDistort(dd.sourceImage, dd.sourceQuad, dd.quad,
+        if (m_distortPremulSource.isNull()
+            || m_distortPremulKey != dd.sourceImage.cacheKey()) {
+            m_distortPremulSource = dd.sourceImage.convertToFormat(
+                QImage::Format_RGBA8888_Premultiplied);
+            m_distortPremulKey = dd.sourceImage.cacheKey();
+        }
+        warped = warpDistort(m_distortPremulSource, dd.sourceQuad, dd.quad,
                              highQuality, previewScale, &origin, &footprint);
     }
     if (warped.isNull()) return;
@@ -10094,6 +10218,8 @@ void CanvasView::commitDistort()
     m_distortBeforeData = nullptr;
     m_distortDragBeforeImage = QImage();
     m_distortDragBeforeData = nullptr;
+    m_distortPremulSource = QImage();
+    m_distortPremulKey = 0;
     if (m_distortOverlay) m_distortOverlay->finish();
     if (m_doc) ++m_doc->compositionGeneration;
 
@@ -10119,6 +10245,8 @@ void CanvasView::cancelDistort()
     m_distortBeforeData = nullptr;
     m_distortDragBeforeImage = QImage();
     m_distortDragBeforeData = nullptr;
+    m_distortPremulSource = QImage();
+    m_distortPremulKey = 0;
     if (m_distortOverlay) m_distortOverlay->finish();
 
     if (m_controller && stepsToUndo > 0) {

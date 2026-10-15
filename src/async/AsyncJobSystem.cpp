@@ -327,8 +327,10 @@ void AsyncJobSystem::applyImageEngine(const std::string& toolName,
         const QColor color(i("red", 255), i("green", 255), i("blue", 255), i("alpha", 255));
         mat = ImageEngine::fillRegion(mat, x, y, ImageEngine::qColorToScalar(color), tolerance);
     } else if (toolName == "resize_layer") {
-        int w = i("width", mat.cols);
-        int h = i("height", mat.rows);
+        // Clamped for the same reason as the synchronous resize_layer path in
+        // ImageController_Tools: the parameters come from the tool surface.
+        int w = std::max(1, i("width", mat.cols));
+        int h = std::max(1, i("height", mat.rows));
         mat = ImageEngine::resize(mat, w, h);
     }
 }

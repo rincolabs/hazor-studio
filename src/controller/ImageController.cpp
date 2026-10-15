@@ -638,7 +638,13 @@ static void stampResetTransformRecursive(LayerTreeNode* node)
         stampResetTransformRecursive(child.get());
 }
 
-static cv::InterpolationFlags toCvInterpolation(ResizeInterpolation interpolation)
+// `shrinking` is true only when BOTH axes lose pixels. That is what makes
+// "Bicubic Automatic" automatic: of the four kernels only the area filter
+// integrates the pixels that are about to be thrown away, so a cubic
+// downscale aliases. Mixed axes count as growing, because OpenCV's area path
+// only implements the shrinking case (it degenerates to nearest otherwise).
+static cv::InterpolationFlags toCvInterpolation(ResizeInterpolation interpolation,
+                                                bool shrinking)
 {
     switch (interpolation) {
     case ResizeInterpolation::Nearest:
@@ -646,12 +652,19 @@ static cv::InterpolationFlags toCvInterpolation(ResizeInterpolation interpolatio
     case ResizeInterpolation::Bilinear:
         return cv::INTER_LINEAR;
     case ResizeInterpolation::Bicubic:
-    case ResizeInterpolation::BicubicAutomatic:
         return cv::INTER_CUBIC;
+    case ResizeInterpolation::BicubicAutomatic:
+        return shrinking ? cv::INTER_AREA : cv::INTER_CUBIC;
     case ResizeInterpolation::Lanczos:
         return cv::INTER_LANCZOS4;
     }
     return cv::INTER_CUBIC;
+}
+
+static bool isShrink(const QImage& source, const QSize& targetSize)
+{
+    return targetSize.width() <= source.width()
+        && targetSize.height() <= source.height();
 }
 
 static QImage resampleRgbaImage(const QImage& source,
@@ -663,11 +676,12 @@ static QImage resampleRgbaImage(const QImage& source,
     if (source.size() == targetSize)
         return source.copy();
 
+    // Premultiplied: this bakes into the layer and into the export, so a dark
+    // fringe picked up here is permanent (ImageEngine.hpp states the rule).
     cv::Mat src = ImageEngine::toCvMat(source);
-    cv::Mat dst;
-    cv::resize(src, dst,
-               cv::Size(targetSize.width(), targetSize.height()),
-               0.0, 0.0, toCvInterpolation(interpolation));
+    cv::Mat dst = ImageEngine::resizePremultiplied(
+        src, cv::Size(targetSize.width(), targetSize.height()),
+        toCvInterpolation(interpolation, isShrink(source, targetSize)));
     if (dst.empty())
         return source.copy();
     return ImageEngine::toQImage(dst).convertToFormat(QImage::Format_RGBA8888);
@@ -686,10 +700,12 @@ static QImage resampleMaskImage(const QImage& source,
     cv::Mat src(gray.height(), gray.width(), CV_8UC1,
                 const_cast<uchar*>(gray.constBits()),
                 static_cast<size_t>(gray.bytesPerLine()));
+    // Single channel: no alpha to premultiply by, so this stays a plain
+    // cv::resize (see the mask note in ImageEngine.hpp).
     cv::Mat dst;
     cv::resize(src, dst,
                cv::Size(targetSize.width(), targetSize.height()),
-               0.0, 0.0, toCvInterpolation(interpolation));
+               0.0, 0.0, toCvInterpolation(interpolation, isShrink(source, targetSize)));
     if (dst.empty())
         return source.copy();
 
@@ -5127,9 +5143,12 @@ bool ImageController::extractSelectedDocRegion(Layer* layer, cv::Mat& outCropped
     // Bake the layer mask in layer space, BEFORE warping, so the copy matches
     // the composited (masked) appearance rather than the raw pixels.
     applyLayerMaskToCvImage(layer, layerMat);
-    cv::Mat canvas(dh, dw, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-    cv::warpAffine(layerMat, canvas, xform, canvas.size(),
-                   cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+    // Premultiplied cubic: the copied pixels go to the clipboard and may be
+    // pasted back, so a dark fringe or a bilinear smear here is permanent.
+    cv::Mat canvas = ImageEngine::warpAffinePremultiplied(
+        layerMat, xform, cv::Size(dw, dh), cv::INTER_CUBIC,
+        cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+    if (canvas.empty()) return false;
 
     cv::Mat selMask(dh, dw, CV_8UC1,
                     const_cast<uchar*>(m_doc->selection.constBits()),
@@ -5561,10 +5580,22 @@ bool ImageController::importImage(const QImage& img, const QString& name)
     const int docH = std::max(1, m_doc->size.height());
     const float halfW = static_cast<float>(converted.width()) / static_cast<float>(docW);
     const float halfH = static_cast<float>(converted.height()) / static_cast<float>(docH);
+
+    // Centre the layer on a WHOLE-pixel grid. A pure scale transform puts the
+    // image at ((docW - imgW)/2, (docH - imgH)/2) canvas pixels, which is a HALF
+    // pixel whenever that difference is odd — and a half-pixel offset forces both
+    // compositors to resample the whole layer bilinearly, baking the softness into
+    // the projection and into the export (not just the preview). The nudge is that
+    // missing half pixel expressed in the transform's NDC units: one canvas pixel
+    // is 2/docW in x, and pixel Y runs opposite to NDC Y, hence the minus.
+    const double offX = (docW - converted.width()) * 0.5;
+    const double offY = (docH - converted.height()) * 0.5;
+    const double nudgeX = std::round(offX) - offX;   // 0 or ±0.5 px
+    const double nudgeY = std::round(offY) - offY;
     node->transform.setMatrix(
         halfW, 0.0, 0.0,
         0.0, halfH, 0.0,
-        0.0, 0.0, 1.0);
+        2.0 * nudgeX / docW, -2.0 * nudgeY / docH, 1.0);
     node->layer->resetTransform = node->transform;
     node->layer->hasResetTransform = true;
 
@@ -6169,9 +6200,12 @@ void ImageController::copy()
                 cv::Mat layerMat = ImageEngine::toCvMat(srcLayerImage);
                 // Honour each layer's mask so the composited copy matches display.
                 applyLayerMaskToCvImage(l, layerMat);
-                cv::Mat canvas(dh, dw, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-                cv::warpAffine(layerMat, canvas, xform, canvas.size(),
-                               cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                // Premultiplied cubic, as in extractSelectedDocRegion: these
+                // layers are about to be composited into clipboard pixels.
+                cv::Mat canvas = ImageEngine::warpAffinePremultiplied(
+                    layerMat, xform, cv::Size(dw, dh), cv::INTER_CUBIC,
+                    cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                if (canvas.empty()) continue;
                 mats.push_back(std::move(canvas));
                 ops.push_back(n->opacity);
                 vis.push_back(true);
@@ -6233,6 +6267,31 @@ void ImageController::copy()
     emit clipboardChanged();
 }
 
+// QMimeData::imageData() does not guarantee a lossless format is preferred: on
+// some platforms/sources (e.g. a browser publishing a JPEG fallback alongside
+// a PNG), Qt's own format negotiation can hand back the lossy one even though
+// a pixel-exact format is also on the clipboard. Decode known-lossless raw
+// formats directly, in priority order, before falling back to Qt's negotiation.
+static QImage decodeClipboardImage(const QMimeData* mime)
+{
+    if (!mime) return {};
+    static const char* kLosslessFormats[] = {
+        "image/png", "image/bmp", "image/x-bmp", "image/tiff", "image/x-portable-pixmap"
+    };
+    for (const char* fmt : kLosslessFormats) {
+        if (!mime->hasFormat(QString::fromLatin1(fmt))) continue;
+        const QByteArray raw = mime->data(QString::fromLatin1(fmt));
+        QImage img;
+        if (!raw.isEmpty() && img.loadFromData(raw) && !img.isNull())
+            return img;
+    }
+    if (mime->hasImage()) {
+        QImage img = qvariant_cast<QImage>(mime->imageData());
+        if (!img.isNull()) return img;
+    }
+    return {};
+}
+
 void ImageController::paste()
 {
     if (!m_doc) return;
@@ -6256,12 +6315,10 @@ void ImageController::paste()
         && mime && mime->hasFormat(kInternalClipboardMime)
         && QString::fromUtf8(mime->data(kInternalClipboardMime)) == clip.token();
     if (!internalCurrent) {
-        if (mime && mime->hasImage()) {
-            const QImage img = qvariant_cast<QImage>(mime->imageData());
-            if (!img.isNull()) {
-                importImage(img, tr("Pasted Layer"));
-                return;
-            }
+        const QImage img = decodeClipboardImage(mime);
+        if (!img.isNull()) {
+            importImage(img, tr("Pasted Layer"));
+            return;
         }
         const bool systemEmpty = !mime || mime->formats().isEmpty();
         if (!systemEmpty)

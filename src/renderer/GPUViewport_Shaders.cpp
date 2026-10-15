@@ -1,5 +1,6 @@
 #include "GPUViewport.hpp"
 #include "BlendShaderLib.hpp"
+#include "SamplingShaderLib.hpp"
 #include "ShaderCompat.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -42,8 +43,9 @@ void GPUViewport::initShaders()
         }
     )";
 
-    const char* fSrc = R"(
-        #version 330 core
+    const QByteArray fSrcRaw = QByteArray("#version 330 core\n")
+        + sampling_glsl::kLib
+        + R"(
         in vec2 vUV;
         out vec4 fragColor;
         uniform sampler2D uTexture;
@@ -53,70 +55,20 @@ void GPUViewport::initShaders()
         uniform float uMaskDensity;
         uniform float uSourcePremultiplied;
         uniform float uAlphaWeightedSampling;
+        uniform float uSharpMagnify;
+        uniform int uMipLevels;
         uniform vec2 uUVScale;
         uniform vec2 uUVOffset;
         uniform vec2 uMaskUVScale;
         uniform vec2 uMaskUVOffset;
-        vec4 unpremultiply(vec4 c) {
-            if (c.a > 0.0) {
-                c.rgb /= c.a;
-            } else {
-                c.rgb = vec3(0.0);
-            }
-            return c;
-        }
-        vec4 premulTexel(sampler2D tex, ivec2 p, float straightAlpha) {
-            vec4 c = texelFetch(tex, p, 0);
-            if (straightAlpha > 0.5)
-                c.rgb *= c.a;
-            return c;
-        }
-        vec4 samplePremultipliedAt(sampler2D tex, vec2 p, float straightAlpha) {
-            ivec2 ts = textureSize(tex, 0);
-            ivec2 hi = ts - ivec2(1);
-            ivec2 i0 = ivec2(floor(p));
-            ivec2 i1 = i0 + ivec2(1);
-            vec2 f = fract(p);
-
-            ivec2 p00 = clamp(i0, ivec2(0), hi);
-            ivec2 p10 = clamp(ivec2(i1.x, i0.y), ivec2(0), hi);
-            ivec2 p01 = clamp(ivec2(i0.x, i1.y), ivec2(0), hi);
-            ivec2 p11 = clamp(i1, ivec2(0), hi);
-
-            vec4 c00 = premulTexel(tex, p00, straightAlpha);
-            vec4 c10 = premulTexel(tex, p10, straightAlpha);
-            vec4 c01 = premulTexel(tex, p01, straightAlpha);
-            vec4 c11 = premulTexel(tex, p11, straightAlpha);
-
-            vec4 c0 = mix(c00, c10, f.x);
-            vec4 c1 = mix(c01, c11, f.x);
-            return mix(c0, c1, f.y);
-        }
-        vec4 sampleAlphaWeighted(sampler2D tex, vec2 uv, float straightAlpha) {
-            ivec2 ts = textureSize(tex, 0);
-            vec2 p = uv * vec2(ts) - vec2(0.5);
-            vec2 footprint = max(fwidth(uv) * vec2(ts), vec2(1.0));
-            if (max(footprint.x, footprint.y) <= 1.25)
-                return unpremultiply(samplePremultipliedAt(tex, p, straightAlpha));
-
-            vec2 stepPx = footprint / 4.0;
-            vec2 first = p - footprint * 0.5 + stepPx * 0.5;
-            vec4 sum = vec4(0.0);
-            for (int y = 0; y < 4; ++y) {
-                for (int x = 0; x < 4; ++x) {
-                    sum += samplePremultipliedAt(
-                        tex, first + vec2(float(x), float(y)) * stepPx, straightAlpha);
-                }
-            }
-            return unpremultiply(sum * 0.0625);
-        }
         vec4 sampleSource(sampler2D tex, vec2 uv) {
             vec4 c = texture(tex, uv);
             if (uAlphaWeightedSampling > 0.5)
-                return sampleAlphaWeighted(
-                    tex, uv, uSourcePremultiplied > 0.5 ? 0.0 : 1.0);
+                return sm_sampleSurface(
+                    tex, uv, uSourcePremultiplied > 0.5 ? 0.0 : 1.0,
+                    uSharpMagnify, uMipLevels);
             if (uSourcePremultiplied > 0.5)
-                return unpremultiply(c);
+                return sm_unpremultiply(c);
             return c;
         }
         void main() {
@@ -135,7 +87,7 @@ void GPUViewport::initShaders()
     )";
 
     const QByteArray mainVSrc = shader_compat::adaptSource(vSrc);
-    const QByteArray mainFSrc = shader_compat::adaptSource(fSrc);
+    const QByteArray mainFSrc = shader_compat::adaptSource(fSrcRaw.constData());
     shader_compat::bindInstancedAttributes(m_mainProg);
 
     if (!m_mainProg->addShaderFromSourceCode(QOpenGLShader::Vertex, mainVSrc) ||
@@ -189,6 +141,7 @@ void GPUViewport::initShaders()
     // (renderer/BlendShaderLib.hpp), mirrored line-for-line by the CPU
     // compositor's renderer/BlendMath.hpp — do not re-implement formulas here.
     const QByteArray blendFSrcRaw = QByteArray("#version 330 core\n")
+        + sampling_glsl::kLib
         + blend_glsl::kLib
         + R"(
             in vec2 vUV;
@@ -205,63 +158,13 @@ void GPUViewport::initShaders()
             uniform int uBlendMode;
             uniform float uSrcPremultiplied;
             uniform float uDstPremultiplied;
+            uniform float uSharpMagnify;
+            uniform int uMipLevels;
 
-            vec4 unpremultiply(vec4 c) {
-                if (c.a > 0.0) {
-                    c.rgb /= c.a;
-                } else {
-                    c.rgb = vec3(0.0);
-                }
-                return c;
-            }
-            vec4 premulTexel(sampler2D tex, ivec2 p, float straightAlpha) {
-                vec4 c = texelFetch(tex, p, 0);
-                if (straightAlpha > 0.5)
-                    c.rgb *= c.a;
-                return c;
-            }
-            vec4 samplePremultipliedAt(sampler2D tex, vec2 p, float straightAlpha) {
-                ivec2 ts = textureSize(tex, 0);
-                ivec2 hi = ts - ivec2(1);
-                ivec2 i0 = ivec2(floor(p));
-                ivec2 i1 = i0 + ivec2(1);
-                vec2 f = fract(p);
-
-                ivec2 p00 = clamp(i0, ivec2(0), hi);
-                ivec2 p10 = clamp(ivec2(i1.x, i0.y), ivec2(0), hi);
-                ivec2 p01 = clamp(ivec2(i0.x, i1.y), ivec2(0), hi);
-                ivec2 p11 = clamp(i1, ivec2(0), hi);
-
-                vec4 c00 = premulTexel(tex, p00, straightAlpha);
-                vec4 c10 = premulTexel(tex, p10, straightAlpha);
-                vec4 c01 = premulTexel(tex, p01, straightAlpha);
-                vec4 c11 = premulTexel(tex, p11, straightAlpha);
-
-                vec4 c0 = mix(c00, c10, f.x);
-                vec4 c1 = mix(c01, c11, f.x);
-                return mix(c0, c1, f.y);
-            }
-            vec4 sampleAlphaWeighted(sampler2D tex, vec2 uv, float straightAlpha) {
-                ivec2 ts = textureSize(tex, 0);
-                vec2 p = uv * vec2(ts) - vec2(0.5);
-                vec2 footprint = max(fwidth(uv) * vec2(ts), vec2(1.0));
-                if (max(footprint.x, footprint.y) <= 1.25)
-                    return unpremultiply(samplePremultipliedAt(tex, p, straightAlpha));
-
-                vec2 stepPx = footprint / 4.0;
-                vec2 first = p - footprint * 0.5 + stepPx * 0.5;
-                vec4 sum = vec4(0.0);
-                for (int y = 0; y < 4; ++y) {
-                    for (int x = 0; x < 4; ++x) {
-                        sum += samplePremultipliedAt(
-                            tex, first + vec2(float(x), float(y)) * stepPx, straightAlpha);
-                    }
-                }
-                return unpremultiply(sum * 0.0625);
-            }
             vec4 sampleSource(sampler2D tex, vec2 uv) {
-                return sampleAlphaWeighted(
-                    tex, uv, uSrcPremultiplied > 0.5 ? 0.0 : 1.0);
+                return sm_sampleSurface(
+                    tex, uv, uSrcPremultiplied > 0.5 ? 0.0 : 1.0,
+                    uSharpMagnify, uMipLevels);
             }
             void main() {
                 vec2 st = gl_FragCoord.xy / uViewportSize;
@@ -316,6 +219,8 @@ void GPUViewport::initShaders()
     m_blendU.maskUvOffset = m_blendProg->uniformLocation("uMaskUVOffset");
     m_blendU.srcPremultiplied = m_blendProg->uniformLocation("uSrcPremultiplied");
     m_blendU.dstPremultiplied = m_blendProg->uniformLocation("uDstPremultiplied");
+    m_blendU.sharpMagnify = m_blendProg->uniformLocation("uSharpMagnify");
+    m_blendU.mipLevels   = m_blendProg->uniformLocation("uMipLevels");
 
     // ── Selection / Marching Ants program ──
     m_selectProg = new QOpenGLShaderProgram();
@@ -758,6 +663,8 @@ void GPUViewport::collectUniforms()
     m_mainU.maskDensity = m_mainProg->uniformLocation("uMaskDensity");
     m_mainU.sourcePremultiplied = m_mainProg->uniformLocation("uSourcePremultiplied");
     m_mainU.alphaWeightedSampling = m_mainProg->uniformLocation("uAlphaWeightedSampling");
+    m_mainU.sharpMagnify = m_mainProg->uniformLocation("uSharpMagnify");
+    m_mainU.mipLevels   = m_mainProg->uniformLocation("uMipLevels");
     m_mainU.uvScale     = m_mainProg->uniformLocation("uUVScale");
     m_mainU.uvOffset    = m_mainProg->uniformLocation("uUVOffset");
     m_mainU.maskUvScale = m_mainProg->uniformLocation("uMaskUVScale");

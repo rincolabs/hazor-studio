@@ -627,6 +627,10 @@ private:
     bool applySnapMoveFromStart(QPointF currentMouseScreen,
                                 Qt::KeyboardModifiers modifiers);
     void translateNodeByDocumentDelta(LayerTreeNode* node, QPointF deltaDoc);
+    // Realigns a moved node onto whole document pixels. A layer sitting at a
+    // fractional document offset is resampled by BOTH compositors for as long as
+    // it stays there, so one drag would otherwise leave it permanently soft.
+    void snapNodeToPixelGrid(LayerTreeNode* node);
     void applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers);
     void clearSnapFeedback();
     void clearSnapBoundsCache();
@@ -928,6 +932,13 @@ private:
     std::shared_ptr<DistortData> m_distortDragBeforeData;
     QTransform m_distortDragBeforeTransform;
     int m_distortSessionSteps = 0; // undo entries pushed during this session
+    // DistortData::sourceImage premultiplied, for warpDistort(). Cached because
+    // a live drag re-warps every frame while the source never changes, and
+    // premultiplying a full-resolution source costs more than the warp itself
+    // (the warp is O(preview buffer), the conversion O(source)). Keyed on the
+    // source's QImage cache key, so any reassignment invalidates it.
+    QImage m_distortPremulSource;
+    qint64 m_distortPremulKey = 0;
     void distortMousePress(QMouseEvent* e);
     void distortMouseMove(QMouseEvent* e);
     void distortMouseRelease(QMouseEvent* e);

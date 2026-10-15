@@ -15,6 +15,7 @@
 #include <cmath>
 #include <functional>
 #include <set>
+#include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────
 // CPU compositor — single source of truth for the flattened document image.
@@ -41,100 +42,274 @@ inline uchar toByte(float v)
     return static_cast<uchar>(std::clamp(static_cast<int>(std::lround(v * 255.0f)), 0, 255));
 }
 
-struct PremulSample {
-    float r = 0.0f;
-    float g = 0.0f;
-    float b = 0.0f;
-    float a = 0.0f;
+// ── Resampling (CPU half of the sampling specification) ──────────────────
+//
+// GLSL mirror: sm_boxWeights / sm_cubicWeights / sm_sampleSeparable in
+// renderer/SamplingShaderLib.hpp. Two kernels over premultiplied samples,
+// picked per axis by the footprint — an exact box where the axis minifies, a
+// cubic where it magnifies or only rotates — so a layer that the GPU live
+// preview transforms and the CPU bakes into the document land on the same
+// pixels (docs/RENDER-PIPELINE.md §4.2).
+
+// One output sample's worth of box weights for a `width`-texel box centred at
+// `p`, in texel-centre coordinates (texel i covers [i-0.5, i+0.5]): the weight
+// of texel i is its overlap with [p-width/2, p+width/2] over `width`. Same
+// algebra as sm_boxWeights in SamplingShaderLib.hpp, but evaluated per sample
+// rather than tabulated per axis index — under a rotation the two axes are not
+// separable, so there is no row/column to tabulate against.
+struct BoxTaps {
+    int first = 0;
+    int n     = 1;
 };
 
-PremulSample samplePremultipliedAt(const QImage& rgba, double x, double y)
+BoxTaps boxWeights(double p, double width, double inv, float* w, int maxTaps)
 {
-    const int w = rgba.width();
-    const int h = rgba.height();
-    if (w <= 0 || h <= 0)
-        return {};
-
-    const int ix0 = static_cast<int>(std::floor(x));
-    const int iy0 = static_cast<int>(std::floor(y));
-    const int ix1 = ix0 + 1;
-    const int iy1 = iy0 + 1;
-    const int x0 = std::clamp(ix0, 0, w - 1);
-    const int y0 = std::clamp(iy0, 0, h - 1);
-    const int x1 = std::clamp(ix1, 0, w - 1);
-    const int y1 = std::clamp(iy1, 0, h - 1);
-    const float tx = static_cast<float>(x - ix0);
-    const float ty = static_cast<float>(y - iy0);
-
-    auto texel = [&](int px, int py) {
-        const uchar* p = rgba.constScanLine(py) + px * 4;
-        const float a = p[3] / 255.0f;
-        return PremulSample{
-            (p[0] / 255.0f) * a,
-            (p[1] / 255.0f) * a,
-            (p[2] / 255.0f) * a,
-            a
-        };
-    };
-    auto mix = [](const PremulSample& a, const PremulSample& b, float t) {
-        return PremulSample{
-            a.r + (b.r - a.r) * t,
-            a.g + (b.g - a.g) * t,
-            a.b + (b.b - a.b) * t,
-            a.a + (b.a - a.a) * t
-        };
-    };
-
-    return mix(mix(texel(x0, y0), texel(x1, y0), tx),
-               mix(texel(x0, y1), texel(x1, y1), tx),
-               ty);
+    BoxTaps t;
+    const double lo = p - width * 0.5;
+    const double hi = p + width * 0.5;
+    t.first = static_cast<int>(std::floor(lo + 0.5));
+    // The caller sizes the buffer at ceil(width)+2, which is one slot more
+    // than this can ask for; the clamp is there so a float edge case cannot
+    // turn into an overrun.
+    t.n = std::clamp(static_cast<int>(std::floor(hi + 0.5)) - t.first + 1,
+                     1, maxTaps);
+    for (int i = 0; i < t.n; ++i) {
+        const double c = t.first + i;
+        w[i] = static_cast<float>(
+            std::max(std::min(hi, c + 0.5) - std::max(lo, c - 0.5), 0.0) * inv);
+    }
+    return t;
 }
 
-QImage resampleLikeGpu(const QImage& source, int outW, int outH)
+// Keys cubic, in OpenCV's formulation: A = -0.75 is exactly cv::INTER_CUBIC,
+// which every destructive path already bakes (ImageEngine::
+// warpAffinePremultiplied / resizePremultiplied, docs/RENDER-PIPELINE.md §4.3).
+// Sharing the coefficient means a non-destructive layer scale and the same
+// scale applied for real land on the same pixels instead of differing by a
+// kernel. Four taps at floor(p)-1 .. floor(p)+2, by distance x+1, x, 1-x, 2-x;
+// the last weight is 1 minus the other three (OpenCV does the same), so the
+// weights are a partition of unity by construction — measured at 5e-8 after the
+// store to float, four orders below the 8-bit quantisation step.
+// GLSL mirror: sm_cubicWeights in SamplingShaderLib.hpp.
+constexpr double kCubicA    = -0.75;
+constexpr int    kCubicTaps = 4;
+
+BoxTaps cubicWeights(double p, float* w)
 {
-    if (source.isNull() || outW <= 0 || outH <= 0)
+    BoxTaps t;
+    const double c = std::floor(p);
+    t.first = static_cast<int>(c) - 1;
+    t.n     = kCubicTaps;
+    const double x  = p - c;
+    const double x1 = x + 1.0;
+    const double x2 = 1.0 - x;
+    const double w0 = ((kCubicA * x1 - 5.0 * kCubicA) * x1 + 8.0 * kCubicA) * x1
+                      - 4.0 * kCubicA;
+    const double w1 = ((kCubicA + 2.0) * x - (kCubicA + 3.0)) * x * x + 1.0;
+    const double w2 = ((kCubicA + 2.0) * x2 - (kCubicA + 3.0)) * x2 * x2 + 1.0;
+    w[0] = static_cast<float>(w0);
+    w[1] = static_cast<float>(w1);
+    w[2] = static_cast<float>(w2);
+    w[3] = static_cast<float>(1.0 - w0 - w1 - w2);
+    return t;
+}
+
+// Which kernel an axis gets, decided once from its footprint (source texels per
+// destination pixel) and then applied to every sample — the mirror of the bvec2
+// in sm_sampleSurface.
+//
+// The box is only right where it prefilters: at footprint 1 it *is* plain
+// bilinear, which is softer than a magnified or rotated layer has to be. The
+// 0.1% slack is what keeps the two backends on the same kernel for the common
+// rotated-at-scale-1 layer, which lands exactly on footprint 1 — the shader
+// measures it from screen-space derivatives and this path from the transform,
+// and those agree only to within rounding.
+// GLSL mirror: SM_CUBIC_MAX_FOOTPRINT.
+constexpr double kCubicMaxFootprint = 1.001;
+
+struct AxisKernel {
+    bool   cubic   = true;
+    double width   = 1.0;   // box width in texels; unused when cubic
+    double inv     = 1.0;
+    int    maxTaps = kCubicTaps;
+};
+
+AxisKernel axisKernel(double footprint)
+{
+    AxisKernel k;
+    k.cubic = footprint <= kCubicMaxFootprint;
+    k.width = std::max(footprint, 1.0);
+    k.inv   = 1.0 / k.width;
+    // One slot more than boxWeights() can ask for (see there); never below the
+    // cubic's four.
+    k.maxTaps = std::max(static_cast<int>(std::ceil(k.width)) + 2, kCubicTaps);
+    return k;
+}
+
+BoxTaps axisTaps(const AxisKernel& k, double p, float* w)
+{
+    return k.cubic ? cubicWeights(p, w)
+                   : boxWeights(p, k.width, k.inv, w, k.maxTaps);
+}
+
+// Single-pass affine resample of `source` into a canvas-sized premultiplied
+// image: for every document pixel, inverse-map its centre into source texels
+// and evaluate the kernel there.
+//
+// This exists to remove a *second* resample. The minifying path used to box
+// the source down to a rounded integer size and then let QPainter place that
+// result, which resampled it again: `lround` leaves a residual scale, the
+// destination offset is generally fractional, and QPainter's bilinear tent
+// therefore ran over pixels that were already correctly filtered — at a
+// half-pixel offset that is a plain two-texel average, i.e. blur with no
+// filtering purpose. Evaluating the kernel once at the exact inverse-mapped
+// position skips it.
+//
+// `footprintX`/`footprintY` are source texels per destination pixel along each
+// axis (1/scale), which is what picks the kernel per axis — see axisKernel().
+//
+// Mirror of sm_sampleSeparable (SamplingShaderLib.hpp) with one deliberate
+// difference, documented in docs/RENDER-PIPELINE.md §4.4: the tap count is not
+// capped. The shader's SM_MAX_TAPS budget is a GPU constraint; this is the path
+// that writes the export, so a 20× downscale stays exact instead of degrading
+// to a narrower centred box.
+//
+// Coverage is decided on the destination pixel centre falling inside the
+// source rect, matching the GPU rasterising the layer quad; taps that fall
+// outside clamp to the edge texel, which re-homes their weight rather than
+// dropping it so the weights still sum to 1 at the border.
+QImage resampleAffine(const QImage& source, const QTransform& imgToCanvas,
+                      const QSize& docSize, double footprintX, double footprintY)
+{
+    bool invertible = false;
+    const QTransform inv = imgToCanvas.inverted(&invertible);
+    // isAffine(): the row walk below steps the inverse-mapped position
+    // linearly, which only holds without a projective part. A projective
+    // transform falls back to the QPainter path.
+    if (!invertible || !inv.isAffine() || source.isNull() || docSize.isEmpty())
         return QImage();
 
     const QImage rgba = source.convertToFormat(QImage::Format_RGBA8888);
-    QImage out(outW, outH, QImage::Format_RGBA8888);
-    const double footprintX = static_cast<double>(rgba.width()) / outW;
-    const double footprintY = static_cast<double>(rgba.height()) / outH;
+    const int inW = rgba.width();
+    const int inH = rgba.height();
+    if (inW <= 0 || inH <= 0)
+        return QImage();
+    // Indexed by hand rather than through constScanLine(): that is an
+    // out-of-line Qt call, and at one call per tap row per sample it cost more
+    // than the filtering itself.
+    const uchar*     srcBase = rgba.constBits();
+    const qsizetype  srcBpl  = rgba.bytesPerLine();
 
-    for (int y = 0; y < outH; ++y) {
-        uchar* row = out.scanLine(y);
-        const double centerY = (static_cast<double>(y) + 0.5) * footprintY - 0.5;
-        const double stepY = footprintY / 4.0;
-        const double firstY = centerY - footprintY * 0.5 + stepY * 0.5;
-        for (int x = 0; x < outW; ++x) {
-            const double centerX = (static_cast<double>(x) + 0.5) * footprintX - 0.5;
-            const double stepX = footprintX / 4.0;
-            const double firstX = centerX - footprintX * 0.5 + stepX * 0.5;
+    QImage out(docSize, QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
 
-            PremulSample sum;
-            for (int sy = 0; sy < 4; ++sy) {
-                for (int sx = 0; sx < 4; ++sx) {
-                    const PremulSample s = samplePremultipliedAt(
-                        rgba, firstX + sx * stepX, firstY + sy * stepY);
-                    sum.r += s.r;
-                    sum.g += s.g;
-                    sum.b += s.b;
-                    sum.a += s.a;
-                }
-            }
-            sum.r *= 1.0f / 16.0f;
-            sum.g *= 1.0f / 16.0f;
-            sum.b *= 1.0f / 16.0f;
-            sum.a *= 1.0f / 16.0f;
+    // Only the layer's own footprint is touched; the rest stays transparent.
+    const QRect dest = imgToCanvas.mapRect(QRectF(0, 0, inW, inH))
+                           .toAlignedRect()
+                           .intersected(QRect(QPoint(0, 0), docSize));
+    if (dest.isEmpty())
+        return out;
 
-            uchar* p = row + x * 4;
-            if (sum.a > 0.0f) {
-                p[0] = toByte(sum.r / sum.a);
-                p[1] = toByte(sum.g / sum.a);
-                p[2] = toByte(sum.b / sum.a);
+    // Affine ⇒ constant Jacobian, so the kernel and the tap budget are the
+    // same for every sample and can be decided once.
+    const AxisKernel kx = axisKernel(footprintX);
+    const AxisKernel ky = axisKernel(footprintY);
+    const int maxX = kx.maxTaps;
+    const int maxY = ky.maxTaps;
+    std::vector<float> wx(maxX), wy(maxY);
+
+    // Without rotation or shear the two axes separate again: the x taps are the
+    // same on every row and the y taps are constant along a row. Tabulating
+    // them matters — recomputing weights per sample costs ~20% of the inner
+    // loop, which would make this slower than the two-pass path it replaces for
+    // the very common near-1.0 scales. The table is filled by the same
+    // axisTaps(), so each kernel still has exactly one definition.
+    const bool separable = inv.m12() == 0.0 && inv.m21() == 0.0;
+    const int  destW     = dest.width();
+    std::vector<int>   colN;
+    std::vector<int>   colOff;   // edge-clamped byte offset of each x tap
+    std::vector<float> colW;
+    std::vector<int>   rowOff(maxX);
+    if (separable) {
+        colN.resize(destW);
+        colW.assign(static_cast<size_t>(destW) * maxX, 0.0f);
+        colOff.assign(static_cast<size_t>(destW) * maxX, 0);
+        for (int c = 0; c < destW; ++c) {
+            const double px = inv.m11() * (dest.left() + c + 0.5) + inv.m31();
+            const BoxTaps t = axisTaps(kx, px - 0.5,
+                                       colW.data() + static_cast<size_t>(c) * maxX);
+            colN[c] = t.n;
+            for (int i = 0; i < t.n; ++i)
+                colOff[static_cast<size_t>(c) * maxX + i] =
+                    std::clamp(t.first + i, 0, inW - 1) * 4;
+        }
+    }
+
+    for (int y = dest.top(); y <= dest.bottom(); ++y) {
+        QRgb* row = reinterpret_cast<QRgb*>(out.scanLine(y));
+        // Walk the row incrementally rather than calling inv.map() per pixel.
+        const double y0 = y + 0.5;
+        double sx = inv.m11() * (dest.left() + 0.5) + inv.m21() * y0 + inv.m31();
+        double sy = inv.m12() * (dest.left() + 0.5) + inv.m22() * y0 + inv.m32();
+        BoxTaps tyRow;
+        if (separable)
+            tyRow = axisTaps(ky, sy - 0.5, wy.data());
+        for (int x = dest.left(); x <= dest.right(); ++x,
+             sx += inv.m11(), sy += inv.m12()) {
+            if (sx < 0.0 || sx > inW || sy < 0.0 || sy > inH)
+                continue;                       // outside the layer quad
+
+            int          nx;
+            BoxTaps      ty = tyRow;            // already correct when separable
+            const float* wxp;
+            const int*   offp;
+            if (separable) {
+                const int c = x - dest.left();
+                nx   = colN[c];
+                wxp  = colW.data() + static_cast<size_t>(c) * maxX;
+                offp = colOff.data() + static_cast<size_t>(c) * maxX;
             } else {
-                p[0] = p[1] = p[2] = 0;
+                const BoxTaps tx = axisTaps(kx, sx - 0.5, wx.data());
+                ty  = axisTaps(ky, sy - 0.5, wy.data());
+                nx  = tx.n;
+                wxp = wx.data();
+                for (int i = 0; i < nx; ++i)
+                    rowOff[i] = std::clamp(tx.first + i, 0, inW - 1) * 4;
+                offp = rowOff.data();
             }
-            p[3] = toByte(sum.a);
+
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+            for (int j = 0; j < ty.n; ++j) {
+                const uchar* line = srcBase
+                    + std::clamp(ty.first + j, 0, inH - 1) * srcBpl;
+                float rr = 0.0f, gg = 0.0f, bb = 0.0f, aa = 0.0f;
+                for (int i = 0; i < nx; ++i) {
+                    const uchar* s  = line + offp[i];
+                    const float  av = s[3] * (1.0f / 255.0f);
+                    const float  wi = wxp[i] * (1.0f / 255.0f);
+                    rr += wi * s[0] * av;
+                    gg += wi * s[1] * av;
+                    bb += wi * s[2] * av;
+                    aa += wxp[i] * av;
+                }
+                r += wy[j] * rr;
+                g += wy[j] * gg;
+                b += wy[j] * bb;
+                a += wy[j] * aa;
+            }
+
+            // ARGB32_Premultiplied: keep the premultiplied values, which is
+            // also one fewer round trip than the QPainter path (that one had
+            // to unpremultiply the boxed intermediate and premultiply again).
+            // The clamping here is load-bearing for the cubic, not just LSB
+            // insurance as it was for the box: its negative lobes can push a
+            // channel below 0 or above alpha, and a premultiplied pixel that
+            // violates colour ≤ alpha makes Qt's compositing produce a speck
+            // (toByte() clamps the low end, min() the high one — the mirror of
+            // sm_clampPremultiplied).
+            const uchar av8 = toByte(a);
+            row[x] = qRgba(std::min(toByte(r), av8), std::min(toByte(g), av8),
+                           std::min(toByte(b), av8), av8);
         }
     }
     return out;
@@ -257,43 +432,54 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
     const int lh = source.height();
     if (lw <= 0 || lh <= 0) return;
 
-    QImage stage(doc->size, QImage::Format_ARGB32_Premultiplied);
-    stage.fill(Qt::transparent);
+    const QTransform imgToCanvas = buildImgToCanvas(node, layer, sourceBounds,
+                                                    baseW, baseH, ndcToPixel, isShapeSprite);
+
+    // Anything that actually resamples goes through the premultiplied sampler,
+    // mirroring the shader (renderer/SamplingShaderLib.hpp): the exact area box
+    // where an axis minifies, the cubic where it magnifies, rotates, or is only
+    // offset by a fraction of a pixel. It runs as a *single* pass straight into
+    // the stage — prefilter and placement at once, so a fractional destination
+    // offset no longer costs a second (bilinear) resample on top of a correctly
+    // filtered image. See resampleAffine.
+    //
+    // QPainter keeps the two cases it is better at: a whole-pixel copy, which
+    // is not a resample at all (the common untransformed layer, where walking
+    // the sampler for a 1-tap kernel would only cost time), and a projective
+    // transform, which resampleAffine declines because its row walk steps the
+    // inverse-mapped position linearly.
+    const double effScaleX = std::hypot(imgToCanvas.m11(), imgToCanvas.m12());
+    const double effScaleY = std::hypot(imgToCanvas.m21(), imgToCanvas.m22());
+    const bool degenerate = effScaleX <= 1e-9 || effScaleY <= 1e-9;
+    // Tolerances, not exact comparisons: the transform is composed from
+    // imgToNdc · accumulated · ndcToPixel, so an untransformed layer's unit
+    // scale and integral offset only survive that round trip to within rounding.
+    const bool wholePixelCopy =
+        !degenerate
+        && std::abs(effScaleX - 1.0) < 1e-9 && std::abs(effScaleY - 1.0) < 1e-9
+        && std::abs(imgToCanvas.m12()) < 1e-9 && std::abs(imgToCanvas.m21()) < 1e-9
+        && std::abs(imgToCanvas.dx() - std::round(imgToCanvas.dx())) < 1e-6
+        && std::abs(imgToCanvas.dy() - std::round(imgToCanvas.dy())) < 1e-6;
+    QImage stage;
+    if (!degenerate && !wholePixelCopy) {
+        stage = resampleAffine(source, imgToCanvas, doc->size,
+                               1.0 / effScaleX, 1.0 / effScaleY);
+    }
+    if (stage.isNull()) {
+        stage = QImage(doc->size, QImage::Format_ARGB32_Premultiplied);
+        stage.fill(Qt::transparent);
+        QPainter p(&stage);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        p.setTransform(imgToCanvas);
+        p.drawImage(QRectF(0, 0, lw, lh), source, QRectF(0, 0, lw, lh));
+    }
+
     QPainter layerPainter(&stage);
     layerPainter.setRenderHint(QPainter::SmoothPixmapTransform);
     layerPainter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-
-    const QTransform imgToCanvas = buildImgToCanvas(node, layer, sourceBounds,
-                                                    baseW, baseH, ndcToPixel, isShapeSprite);
     layerPainter.setOpacity(1.0);
     layerPainter.setTransform(imgToCanvas);
-
-    // Match the GPU preview reference: keep small downscales bilinear, and only
-    // switch to premultiplied/alpha-weighted area sampling once the source
-    // footprint exceeds the shader's 1.25 texel threshold.
-    const double effScaleX = std::hypot(imgToCanvas.m11(), imgToCanvas.m12());
-    const double effScaleY = std::hypot(imgToCanvas.m21(), imgToCanvas.m22());
-    bool resampled = false;
-    if (effScaleX < 0.8 || effScaleY < 0.8) {
-        const int sw = std::clamp(
-            static_cast<int>(std::lround(lw * std::min(effScaleX, 1.0))), 1, lw);
-        const int sh = std::clamp(
-            static_cast<int>(std::lround(lh * std::min(effScaleY, 1.0))), 1, lh);
-        if (sw < lw || sh < lh) {
-            const QImage small = resampleLikeGpu(source, sw, sh);
-            if (!small.isNull()) {
-                const QTransform smallToCanvas =
-                    QTransform::fromScale(static_cast<double>(lw) / sw,
-                                          static_cast<double>(lh) / sh) * imgToCanvas;
-                layerPainter.setTransform(smallToCanvas);
-                layerPainter.drawImage(QRectF(0, 0, sw, sh), small, QRectF(0, 0, sw, sh));
-                layerPainter.setTransform(imgToCanvas);
-                resampled = true;
-            }
-        }
-    }
-    if (!resampled)
-        layerPainter.drawImage(QRectF(0, 0, lw, lh), source, QRectF(0, 0, lw, lh));
 
     // Apply layer mask when the effected pipeline hasn't already baked it.
     if (!effectedPipeline && layer->maskVisible
