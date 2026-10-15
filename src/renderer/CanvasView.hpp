@@ -627,6 +627,10 @@ private:
     bool applySnapMoveFromStart(QPointF currentMouseScreen,
                                 Qt::KeyboardModifiers modifiers);
     void translateNodeByDocumentDelta(LayerTreeNode* node, QPointF deltaDoc);
+    // Realigns a moved node onto whole document pixels. A layer sitting at a
+    // fractional document offset is resampled by BOTH compositors for as long as
+    // it stays there, so one drag would otherwise leave it permanently soft.
+    void snapNodeToPixelGrid(LayerTreeNode* node);
     void applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers);
     void clearSnapFeedback();
     void clearSnapBoundsCache();

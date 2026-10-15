@@ -4153,6 +4153,10 @@ void CanvasView::keyPressEvent(QKeyEvent* e)
                 validIndices.push_back(idx);
                 beforeXfs.push_back(node->transform);
                 translateNodeByDocumentDelta(node, QPointF(dx, dy));
+                // dx/dy are whole pixels, so this only matters for a layer that
+                // was already off-grid: the nudge then also realigns it instead
+                // of carrying the fractional offset (and its softness) along.
+                snapNodeToPixelGrid(node);
                 afterXfs.push_back(node->transform);
             }
             if (!validIndices.empty())
@@ -9147,6 +9151,13 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
         const QTransform before = node->transform;
         const QTransform after = transformWithDocumentDelta(node, startTransform, adjustedDeltaDoc);
         node->transform = after;
+        // Quantise the drag to whole document pixels (see snapNodeToPixelGrid):
+        // the mouse delta is continuous, and leaving the layer on a fractional
+        // offset makes both compositors resample it from here on. Applied every
+        // frame, not only on release, so the live preview shows exactly the
+        // pixels that get committed. Stable because `after` is always recomputed
+        // from startTransform rather than accumulated.
+        snapNodeToPixelGrid(node);
         if (snapDebugEnabled()) {
             qInfo().noquote()
                 << "[Snap][apply-node]"
@@ -9156,7 +9167,9 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
                 << "startTx" << startTransform.m31()
                 << "startTy" << startTransform.m32()
                 << "afterTx" << after.m31()
-                << "afterTy" << after.m32();
+                << "afterTy" << after.m32()
+                << "gridTx" << node->transform.m31()
+                << "gridTy" << node->transform.m32();
         }
     };
 
@@ -9214,6 +9227,35 @@ void CanvasView::translateNodeByDocumentDelta(LayerTreeNode* node, QPointF delta
                 t.m21(), t.m22(), t.m23(),
                 t.m31() + localDx, t.m32() + localDy, t.m33());
     node->transform = t;
+}
+
+void CanvasView::snapNodeToPixelGrid(LayerTreeNode* node)
+{
+    if (!m_doc || !node)
+        return;
+
+    // Why this exists: a move writes a continuous screen delta into the node
+    // transform, so the layer lands on a fractional document offset and every
+    // compositor — CPU projection and GPU preview alike — has to resample it.
+    // The softness then persists for as long as the layer stays there, which is
+    // why a single drag made a freshly pasted (sharp) layer blurry "forever".
+    // GIMP never hits this because layer offsets are integers by construction
+    // (gint, gimp_item_get_offset / gimp_item_translate).
+    //
+    // Only the translation is corrected, by at most half a pixel. A scaled or
+    // rotated layer is resampled regardless, so for those this is neither a fix
+    // nor a regression — their sharpness is a transform-quality problem.
+    const QRectF bounds = nodeDocumentBounds(node);
+    if (bounds.isNull() && bounds.isEmpty())
+        return;
+
+    const QPointF tl = bounds.topLeft();
+    const QPointF correction(std::round(tl.x()) - tl.x(),
+                             std::round(tl.y()) - tl.y());
+    if (std::abs(correction.x()) < 1e-6 && std::abs(correction.y()) < 1e-6)
+        return;
+
+    translateNodeByDocumentDelta(node, correction);
 }
 
 void CanvasView::applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers)
