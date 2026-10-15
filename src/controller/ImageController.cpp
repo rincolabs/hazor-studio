@@ -6245,6 +6245,31 @@ void ImageController::copy()
     emit clipboardChanged();
 }
 
+// QMimeData::imageData() does not guarantee a lossless format is preferred: on
+// some platforms/sources (e.g. a browser publishing a JPEG fallback alongside
+// a PNG), Qt's own format negotiation can hand back the lossy one even though
+// a pixel-exact format is also on the clipboard. Decode known-lossless raw
+// formats directly, in priority order, before falling back to Qt's negotiation.
+static QImage decodeClipboardImage(const QMimeData* mime)
+{
+    if (!mime) return {};
+    static const char* kLosslessFormats[] = {
+        "image/png", "image/bmp", "image/x-bmp", "image/tiff", "image/x-portable-pixmap"
+    };
+    for (const char* fmt : kLosslessFormats) {
+        if (!mime->hasFormat(QString::fromLatin1(fmt))) continue;
+        const QByteArray raw = mime->data(QString::fromLatin1(fmt));
+        QImage img;
+        if (!raw.isEmpty() && img.loadFromData(raw) && !img.isNull())
+            return img;
+    }
+    if (mime->hasImage()) {
+        QImage img = qvariant_cast<QImage>(mime->imageData());
+        if (!img.isNull()) return img;
+    }
+    return {};
+}
+
 void ImageController::paste()
 {
     if (!m_doc) return;
@@ -6268,12 +6293,10 @@ void ImageController::paste()
         && mime && mime->hasFormat(kInternalClipboardMime)
         && QString::fromUtf8(mime->data(kInternalClipboardMime)) == clip.token();
     if (!internalCurrent) {
-        if (mime && mime->hasImage()) {
-            const QImage img = qvariant_cast<QImage>(mime->imageData());
-            if (!img.isNull()) {
-                importImage(img, tr("Pasted Layer"));
-                return;
-            }
+        const QImage img = decodeClipboardImage(mime);
+        if (!img.isNull()) {
+            importImage(img, tr("Pasted Layer"));
+            return;
         }
         const bool systemEmpty = !mime || mime->formats().isEmpty();
         if (!systemEmpty)
