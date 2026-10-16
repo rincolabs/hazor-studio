@@ -348,6 +348,28 @@ Two things that are easy to get wrong:
   `unpremultiplyInPlace` clamps colour to alpha first; use it instead of
   converting through `QImage` after a cubic warp.
 
+The Clone Stamp and Healing Brush do not go through `ImageEngine`: they point
+sample the frozen document snapshot per dab pixel
+([`sampleBilinearRgbaRaw`](../src/brush/BrushRenderer.cpp)), as does the
+clone-source preview overlay ([`sampleCanvasBilinear`](../src/renderer/CanvasView.cpp)).
+They carry the premultiplied rule themselves, plus one that is specific to a
+point sampler:
+
+- **Document-pixel coordinates put integers on texel *edges*.** That is the
+  space `layerPixelToDocumentPixel()` and `screenToDocument()` return, so the
+  centre of texel `i` is `i + 0.5`; a tap index instead has the integer *on* the
+  centre. A sampler that skips the half-texel shift does not merely come out
+  offset. The dab loops sample at pixel centres and `beginCloneStampStroke()`
+  rounds the clone offset to whole pixels, so every tap lands at fraction 0.5 on
+  **both** axes and each dab pixel is a flat 2x2 box average of the source: the
+  detail of a pure copy, destroyed by a filter with nothing to filter. With the
+  shift a whole-pixel offset gives fraction 0, which both samplers short-circuit
+  to a texel copy — the §4.4 principle applied to a sampler rather than a pass.
+- **Clamp the taps, do not widen the guard.** The shift moves the first tap of
+  the outer half texel outside the buffer, where there is no neighbour to blend
+  with; clamping to edge there keeps the sampler in bounds while a coordinate
+  outside the document rect still returns transparent.
+
 Kernel choice follows direction, not taste: OpenCV's `INTER_AREA` degenerates to
 nearest-neighbour when an axis *grows*, so it is used only when both axes shrink
 (that is what the Image Size dialog's "Bicubic Automatic" now selects) and

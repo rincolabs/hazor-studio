@@ -243,20 +243,30 @@ static QPointF constrainAngle45(const QPointF& from, const QPointF& to)
                    from.y() + std::sin(snapped) * len);
 }
 
+// x/y are continuous DOCUMENT-pixel coordinates, where integers sit on texel
+// edges and the centre of texel i is i + 0.5; the taps are indexed by texel
+// (integer = centre), so the coordinate is shifted half a texel first. Same
+// convention mismatch as sampleBilinearRgbaRaw had: without the shift this
+// clone-source preview showed a 2x2 box average of the source at 1:1 instead of
+// the pixels the dab actually copies, i.e. the overlay lied about the result.
 static QColor sampleCanvasBilinear(const QImage& image, float x, float y)
 {
     if (image.isNull() || x < 0.0f || y < 0.0f
-        || x > static_cast<float>(image.width() - 1)
-        || y > static_cast<float>(image.height() - 1)) {
+        || x > static_cast<float>(image.width())
+        || y > static_cast<float>(image.height())) {
         return Qt::transparent;
     }
 
-    const int x0 = std::clamp(static_cast<int>(std::floor(x)), 0, image.width() - 1);
-    const int y0 = std::clamp(static_cast<int>(std::floor(y)), 0, image.height() - 1);
-    const int x1 = std::min(x0 + 1, image.width() - 1);
-    const int y1 = std::min(y0 + 1, image.height() - 1);
-    const float tx = x - static_cast<float>(x0);
-    const float ty = y - static_cast<float>(y0);
+    const float ix = x - 0.5f;
+    const float iy = y - 0.5f;
+    // Clamp to edge: in the outer half texel floor() lands outside the image
+    // and there is no neighbour to blend with.
+    const int x0 = std::clamp(static_cast<int>(std::floor(ix)), 0, image.width() - 1);
+    const int y0 = std::clamp(static_cast<int>(std::floor(iy)), 0, image.height() - 1);
+    const int x1 = std::clamp(static_cast<int>(std::floor(ix)) + 1, 0, image.width() - 1);
+    const int y1 = std::clamp(static_cast<int>(std::floor(iy)) + 1, 0, image.height() - 1);
+    const float tx = ix - std::floor(ix);
+    const float ty = iy - std::floor(iy);
     auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
 
     const QColor c00 = image.pixelColor(x0, y0);
@@ -7097,9 +7107,12 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         // translation, no scale/rotate, so a fractional offset buys no extra
         // detail and only forces drawCloneDabToRasterTiles's bilinear sampler
         // to blend neighbouring source texels on every dab — filtering that
-        // has no filtering purpose. The correction is at most half a pixel and
-        // persists for the stroke (and every aligned stroke after it, since
-        // m_cloneOffsetValid keeps this offset alive across strokes).
+        // has no filtering purpose. A whole offset is what lands the sampler on
+        // exact texel centres (it shifts the document coordinate by half a
+        // texel for that), where it copies instead of filtering. The correction
+        // is at most half a pixel and persists for the stroke (and every
+        // aligned stroke after it, since m_cloneOffsetValid keeps this offset
+        // alive across strokes).
         const QPointF rawOffset = documentPos - m_cloneSourcePoint;
         m_cloneSourceOffset = QPointF(std::round(rawOffset.x()), std::round(rawOffset.y()));
         m_cloneOffsetValid = true;
