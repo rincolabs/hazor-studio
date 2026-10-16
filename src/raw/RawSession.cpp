@@ -11,6 +11,7 @@
 
 #include "raw/RawEngine.hpp"
 #include "raw/internal/RawDevelopParamsImpl.hpp"
+#include "rtengine/refreshmap.h"
 #include "rtengine/rtengine.h"
 
 namespace {
@@ -255,7 +256,15 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
 
     rtengine::procparams::ProcParams* next = sip->beginUpdateParams();
     *next = params.impl().procParams;
-    sip->endUpdateParams(rtengine::EvProfileChanged);
+    // Not EvProfileChanged: that maps to the `ALL` refresh bitmask
+    // (refreshmap.h), which deliberately excludes M_MONITOR — the bit
+    // ImProcCoordinator::updatePreviewImage() gates calling
+    // imageListener->imageReady() on (improccoordinator.cc). Without it the
+    // PreviewImageListener callback our PreviewWaiter blocks on never fires
+    // and waitForReady() hangs forever. `FIRST` is `ALL | M_MONITOR` — a
+    // full recompute that always notifies the listener, appropriate for a
+    // one-shot synchronous call like this (not a live/differential GUI edit).
+    sip->endUpdateParams(FIRST);
 
     if (!m_impl->previewWaiter->waitForReady()) {
         return {};
