@@ -660,7 +660,13 @@ public:
         return node->layer.get();
     }
 
-private:
+public:
+    // Pre-effects/pre-adjustment render of this layer's own pixels — what
+    // computeEffectedImage()/effectedImageBounds() return when
+    // usesEffectedPipeline() is false. Exposed (unlike those two, these were
+    // previously private) so clone/heal sampling can render a layer from its
+    // raw pixels when it's also the stroke's paint destination, bypassing its
+    // own baked effects/adjustments — see DocumentCompositor::drawLayerNode.
     QImage baseRenderImage() const {
         if (!layer)
             return QImage();
@@ -685,6 +691,7 @@ private:
         return layer->renderImageBounds();
     }
 
+private:
     QImage maskedBaseImage() const {
         if (!layer)
             return QImage();

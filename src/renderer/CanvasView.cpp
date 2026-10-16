@@ -1857,14 +1857,30 @@ QImage CanvasView::cloneSourceSnapshot() const
     ctx.targetType = RenderTargetType::Canvas;
     ctx.highQuality = true;
 
+    // The active layer is always the paint destination, so it must render raw
+    // (no baked Single-Layer-Mode adjustments/effects) wherever it shows up in
+    // the sample — see DocumentCompositor::drawLayerNode. Any OTHER sampled
+    // layer keeps its own adjustments/effects baked in as usual.
+    const LayerTreeNode* activeNode = m_doc->activeNode();
+
     switch (m_cloneSampleMode) {
     case CloneSampleMode::CurrentLayer:
-        return DocumentCompositor::compositeOnlyFlatIndex(m_doc, m_doc->activeFlatIndex, ctx);
+        return DocumentCompositor::compositeOnlyFlatIndex(m_doc, m_doc->activeFlatIndex, ctx,
+                                                           activeNode);
     case CloneSampleMode::CurrentAndBelow:
-        return DocumentCompositor::compositeFromFlatIndex(m_doc, m_doc->activeFlatIndex, ctx);
+        return DocumentCompositor::compositeFromFlatIndex(m_doc, m_doc->activeFlatIndex, ctx,
+                                                           activeNode);
     case CloneSampleMode::AllLayers:
     default:
-        return DocumentCompositor::composite(m_doc, ctx);
+        // Flat index 0 covers every layer, so this composites the whole
+        // document — but unlike DocumentCompositor::composite(), it still
+        // excludes Normal-Mode adjustments (see compositeFromFlatIndex), so the
+        // clone source isn't sampled with adjustments already baked in. Those
+        // adjustments apply once, live, when the painted dabs are composited
+        // for display — baking them into the sample too would double them, and
+        // the double-up compounds every time cloned pixels are themselves
+        // re-sampled.
+        return DocumentCompositor::compositeFromFlatIndex(m_doc, 0, ctx, activeNode);
     }
 }
 

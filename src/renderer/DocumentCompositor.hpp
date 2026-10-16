@@ -12,10 +12,19 @@ public:
     // Single source of truth for CPU compositing — used by Export, Flatten, and
     // any other operation that needs a pixel-accurate flattened image.
     static QImage composite(const Document* doc, const RenderContext& ctx);
+
+    // rawPixelNode: when non-null (and included by flatIndex), that node is
+    // rendered from its raw stored pixels instead of its baked effected image
+    // — its own layer effects and Single-Layer-Mode (clipped) adjustments are
+    // skipped. Clone/heal sampling passes the paint destination layer here:
+    // those effects re-apply live at render time regardless, so baking them
+    // into the sample too would double them. See drawLayerNode.
     static QImage compositeOnlyFlatIndex(const Document* doc, int flatIndex,
-                                         const RenderContext& ctx);
+                                         const RenderContext& ctx,
+                                         const LayerTreeNode* rawPixelNode = nullptr);
     static QImage compositeFromFlatIndex(const Document* doc, int flatIndex,
-                                         const RenderContext& ctx);
+                                         const RenderContext& ctx,
+                                         const LayerTreeNode* rawPixelNode = nullptr);
 
     // Renders only the given Layer nodes, in their real stacking order, using the
     // exact same pipeline as the full composite (blend modes, opacity, masks,

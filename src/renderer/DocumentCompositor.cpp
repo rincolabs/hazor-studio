@@ -407,14 +407,24 @@ QTransform buildImgToCanvas(const LayerTreeNode* node, const Layer* layer,
 }
 
 // Renders a single Layer node into `target` (canvas-sized, premultiplied).
+// rawPixelNode: when this node IS rawPixelNode, render its stored pixels
+// straight — skipping its own layer effects and Single-Layer-Mode (clipped)
+// adjustment children, bypassing the baked effected image entirely. Used by
+// clone/heal sampling: that node is also the stroke's paint destination, and
+// those effects/adjustments re-apply live from the raw pixels at render time
+// regardless, so baking them into the sample too would double them (and the
+// double-up compounds every time the cloned pixels are themselves sampled
+// again). Other included layers keep rendering through their own effected
+// image as usual — they aren't being painted into, so no double-up risk.
 void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* doc,
-                   const QTransform& ndcToPixel)
+                   const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode = nullptr)
 {
     auto* layer = node->layer.get();
+    const bool bypassEffects = rawPixelNode && node == rawPixelNode;
     // Layers with effects OR Single-Layer-Mode adjustments render through the
     // baked effected image (mask included) — same source the GPU live path
     // draws via effectedTexture, so the two stay pixel-identical.
-    const bool effectedPipeline = node->usesEffectedPipeline();
+    const bool effectedPipeline = !bypassEffects && node->usesEffectedPipeline();
     const bool useShapeBase = layer->isShapeLayer() && !effectedPipeline;
     const bool isShapeSprite = !useShapeBase && layer->shapeSpriteRenderable();
 
@@ -425,9 +435,11 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
     if (baseW <= 0 || baseH <= 0) return;
 
     const QImage source = useShapeBase ? layer->renderImage()
-                                       : node->computeEffectedImage();
+                                       : bypassEffects ? node->baseRenderImage()
+                                                       : node->computeEffectedImage();
     const QRectF sourceBounds = useShapeBase ? layer->renderImageBounds()
-                                             : node->effectedImageBounds();
+                                             : bypassEffects ? node->baseRenderImageBounds()
+                                                             : node->effectedImageBounds();
     const int lw = source.width();
     const int lh = source.height();
     if (lw <= 0 || lh <= 0) return;
@@ -672,7 +684,8 @@ void renderNodesFiltered(QImage& target,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough);
+                         bool groupsPassThrough,
+                         const LayerTreeNode* rawPixelNode = nullptr);
 
 void renderNodes(QImage& target,
                  const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
@@ -704,7 +717,8 @@ void renderNodesFiltered(QImage& target,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough)
+                         bool groupsPassThrough,
+                         const LayerTreeNode* rawPixelNode)
 {
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
@@ -736,7 +750,7 @@ void renderNodesFiltered(QImage& target,
                 // them twice (see DocumentCompositor::compositeSubset).
                 renderNodesFiltered(target, node->children, doc, ndcToPixel,
                                     includeLayer, applyAdjustments,
-                                    groupsPassThrough);
+                                    groupsPassThrough, rawPixelNode);
             } else {
                 // Isolated group model — the group's mask/effects/opacity/blend
                 // apply once to the composed children, in this order:
@@ -745,7 +759,7 @@ void renderNodesFiltered(QImage& target,
                 groupStage.fill(Qt::transparent);
                 renderNodesFiltered(groupStage, node->children, doc, ndcToPixel,
                                     includeLayer, applyAdjustments,
-                                    groupsPassThrough);
+                                    groupsPassThrough, rawPixelNode);
                 applyGroupMask(groupStage, node);                 // no-op until group masks exist
                 applyGroupEffects(groupStage, node, doc->size);
                 compositeStage(target, groupStage, node->blendMode, node->opacity);
@@ -758,7 +772,7 @@ void renderNodesFiltered(QImage& target,
         if (!includeLayer(node))
             continue;
 
-        drawLayerNode(target, node, doc, ndcToPixel);
+        drawLayerNode(target, node, doc, ndcToPixel, rawPixelNode);
     }
 }
 
@@ -793,7 +807,8 @@ QRect nonTransparentBounds(const QImage& img)
 QImage compositeFiltered(const Document* doc,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough = false)
+                         bool groupsPassThrough = false,
+                         const LayerTreeNode* rawPixelNode = nullptr)
 {
     if (!doc || doc->flatCount() == 0 || doc->size.isEmpty())
         return QImage();
@@ -809,7 +824,7 @@ QImage compositeFiltered(const Document* doc,
     ndcToPixel.scale(cw * 0.5, -ch * 0.5);
 
     renderNodesFiltered(result, doc->roots, doc, ndcToPixel, includeLayer,
-                        applyAdjustments, groupsPassThrough);
+                        applyAdjustments, groupsPassThrough, rawPixelNode);
 
     return result.convertToFormat(QImage::Format_RGBA8888);
 }
@@ -822,7 +837,8 @@ QImage DocumentCompositor::composite(const Document* doc, const RenderContext& /
 }
 
 QImage DocumentCompositor::compositeOnlyFlatIndex(const Document* doc, int flatIndex,
-                                                  const RenderContext& /*ctx*/)
+                                                  const RenderContext& /*ctx*/,
+                                                  const LayerTreeNode* rawPixelNode)
 {
     if (!doc)
         return QImage();
@@ -832,15 +848,19 @@ QImage DocumentCompositor::compositeOnlyFlatIndex(const Document* doc, int flatI
 
     // Clone/heal sampling: exclude Normal-Mode adjustments so painting the
     // sampled pixels back into a layer doesn't bake (and double-apply) them.
-    // Single-Layer-Mode adjustments are part of the layer's own render and
-    // stay included via computeEffectedImage.
+    // rawPixelNode (when given, typically == active, the paint destination)
+    // additionally renders raw — see drawLayerNode — so its own Single-Layer-
+    // Mode adjustments aren't baked into the sample either. Any OTHER included
+    // layer's Single-Layer-Mode adjustments still render normally: that layer
+    // isn't being painted into, so no double-apply risk.
     return compositeFiltered(doc, [active](const LayerTreeNode* node) {
         return node == active;
-    }, false);
+    }, false, false, rawPixelNode);
 }
 
 QImage DocumentCompositor::compositeFromFlatIndex(const Document* doc, int flatIndex,
-                                                  const RenderContext& /*ctx*/)
+                                                  const RenderContext& /*ctx*/,
+                                                  const LayerTreeNode* rawPixelNode)
 {
     if (!doc)
         return QImage();
@@ -853,10 +873,11 @@ QImage DocumentCompositor::compositeFromFlatIndex(const Document* doc, int flatI
     }
 
     // See compositeOnlyFlatIndex: stack adjustments are excluded from clone
-    // sampling sources.
+    // sampling sources, and rawPixelNode's own Single-Layer-Mode adjustments
+    // (if any) are excluded too.
     return compositeFiltered(doc, [included](const LayerTreeNode* node) {
         return included.count(node) > 0;
-    }, false);
+    }, false, false, rawPixelNode);
 }
 
 QImage DocumentCompositor::compositeSubset(
