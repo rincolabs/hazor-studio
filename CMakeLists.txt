@@ -482,6 +482,7 @@ add_executable(Hazor WIN32
     src/raw/RawEngineAvailability.hpp
     src/raw/RawMetadata.hpp
     src/raw/RawGeometry.hpp
+    src/raw/RawGeometry.cpp
     src/raw/RawImageBuffer.hpp
     src/raw/RawDevelopParams.hpp
     src/raw/RawDevelopParams.cpp
@@ -489,6 +490,11 @@ add_executable(Hazor WIN32
     src/raw/RawSession.cpp
     src/raw/RawEngine.hpp
     src/raw/RawEngine.cpp
+
+    # ── RAW Layer in the document model (Fase 4) ──
+    src/raw/RawLayerData.hpp
+    src/raw/RawDevelopService.hpp
+    src/raw/RawDevelopService.cpp
 
     src/brush/BrushTypes.hpp
     src/brush/DabContext.hpp

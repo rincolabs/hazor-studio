@@ -83,6 +83,12 @@ RawGeometry geometryFromParams(const rtengine::procparams::ProcParams& pp, int f
     geo.cropWidth = pp.crop.w;
     geo.cropHeight = pp.crop.h;
     geo.resizeScale = pp.resize.enabled ? pp.resize.scale : 1.0;
+    // Fine (sub-degree) rotation and an active perspective correction shift
+    // the frame in a way reframeTransform() (RawGeometry.hpp, Fase 4.4)
+    // cannot represent from coarse/crop/resize alone.
+    geo.reframeExact = pp.rotate.degree == 0.0
+        && !(pp.perspective.render
+             && (pp.perspective.horizontal != 0.0 || pp.perspective.vertical != 0.0));
     return geo;
 }
 

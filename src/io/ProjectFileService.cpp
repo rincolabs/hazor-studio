@@ -7,6 +7,7 @@
 #include "core/ShapeTypes.hpp"
 #include "transform/TransformTypes.hpp"
 #include "text/TextTypes.hpp"
+#include "raw/RawLayerData.hpp"
 
 #include <QBuffer>
 #include <QCoreApplication>
@@ -27,7 +28,11 @@
 
 namespace {
 constexpr quint32 kMagic = 0x485A5331; // "HZS1"
-constexpr quint32 kFormatVersion = 1;
+// Version 1: everything before the RAW Layer (Fase 4.9). Version 2 adds the
+// "rawData" node field + its blobs. The loader accepts both; the saver only
+// writes 2 when the document actually has a RAW Layer, so a document with
+// none still opens in older Hazor builds (see documentHasRawLayer() below).
+constexpr quint32 kMaxFormatVersion = 2;
 
 QString nodeTypeToString(LayerTreeNode::Type type)
 {
@@ -481,6 +486,100 @@ QJsonObject distortDataToJson(const DistortData& d, const QString& sourceImageRe
     return o;
 }
 
+QJsonObject rawGeometryToJson(const RawGeometry& g)
+{
+    QJsonObject o;
+    o["fullWidth"] = g.fullWidth;
+    o["fullHeight"] = g.fullHeight;
+    o["coarseRotationDegrees"] = g.coarseRotationDegrees;
+    o["mirrorHorizontal"] = g.mirrorHorizontal;
+    o["mirrorVertical"] = g.mirrorVertical;
+    o["cropEnabled"] = g.cropEnabled;
+    o["cropX"] = g.cropX;
+    o["cropY"] = g.cropY;
+    o["cropWidth"] = g.cropWidth;
+    o["cropHeight"] = g.cropHeight;
+    o["resizeScale"] = g.resizeScale;
+    o["reframeExact"] = g.reframeExact;
+    return o;
+}
+
+RawGeometry rawGeometryFromJson(const QJsonObject& o)
+{
+    RawGeometry g;
+    g.fullWidth = o.value("fullWidth").toInt(0);
+    g.fullHeight = o.value("fullHeight").toInt(0);
+    g.coarseRotationDegrees = o.value("coarseRotationDegrees").toInt(0);
+    g.mirrorHorizontal = o.value("mirrorHorizontal").toBool(false);
+    g.mirrorVertical = o.value("mirrorVertical").toBool(false);
+    g.cropEnabled = o.value("cropEnabled").toBool(false);
+    g.cropX = o.value("cropX").toInt(0);
+    g.cropY = o.value("cropY").toInt(0);
+    g.cropWidth = o.value("cropWidth").toInt(0);
+    g.cropHeight = o.value("cropHeight").toInt(0);
+    g.resizeScale = o.value("resizeScale").toDouble(1.0);
+    g.reframeExact = o.value("reframeExact").toBool(true);
+    return g;
+}
+
+QJsonObject rawMetadataToJson(const RawMetadata& m)
+{
+    QJsonObject o;
+    o["cameraMake"] = QString::fromStdString(m.cameraMake);
+    o["cameraModel"] = QString::fromStdString(m.cameraModel);
+    o["lens"] = QString::fromStdString(m.lens);
+    o["isoSpeed"] = m.isoSpeed;
+    o["fNumber"] = m.fNumber;
+    o["focalLengthMm"] = m.focalLengthMm;
+    o["shutterSpeedSeconds"] = m.shutterSpeedSeconds;
+    o["exposureCompensationEv"] = m.exposureCompensationEv;
+    o["orientationDegrees"] = m.orientationDegrees;
+    o["orientationMirrored"] = m.orientationMirrored;
+    o["width"] = m.width;
+    o["height"] = m.height;
+    return o;
+}
+
+RawMetadata rawMetadataFromJson(const QJsonObject& o)
+{
+    RawMetadata m;
+    m.cameraMake = o.value("cameraMake").toString().toStdString();
+    m.cameraModel = o.value("cameraModel").toString().toStdString();
+    m.lens = o.value("lens").toString().toStdString();
+    m.isoSpeed = o.value("isoSpeed").toInt(0);
+    m.fNumber = o.value("fNumber").toDouble(0.0);
+    m.focalLengthMm = o.value("focalLengthMm").toDouble(0.0);
+    m.shutterSpeedSeconds = o.value("shutterSpeedSeconds").toDouble(0.0);
+    m.exposureCompensationEv = o.value("exposureCompensationEv").toDouble(0.0);
+    m.orientationDegrees = o.value("orientationDegrees").toInt(0);
+    m.orientationMirrored = o.value("orientationMirrored").toBool(false);
+    m.width = o.value("width").toInt(0);
+    m.height = o.value("height").toInt(0);
+    return m;
+}
+
+// RawLayerData is serialized as JSON (mode/state/source metadata); the
+// Embedded source's bytes (when present) are a separate blob, same pattern
+// as distortData's sourceImage. Linked mode stores only the path — the
+// bytes are never duplicated into the project file.
+QJsonObject rawDataToJson(const RawLayerData& d, const QString& embeddedBytesRef)
+{
+    QJsonObject o;
+    o["mode"] = d.mode == RawStorageMode::Embedded
+        ? QStringLiteral("embedded") : QStringLiteral("linked");
+    o["path"] = d.source ? d.source->path : QString();
+    if (d.source)
+        o["metadata"] = rawMetadataToJson(d.source->meta);
+    if (!embeddedBytesRef.isEmpty())
+        o["embeddedBytes"] = embeddedBytesRef;
+    o["pp3"] = d.state.pp3;
+    o["developedWidth"] = d.state.developedSize.width();
+    o["developedHeight"] = d.state.developedSize.height();
+    o["geometry"] = rawGeometryToJson(d.state.geometry);
+    o["revision"] = QString::number(d.state.revision); // quint64: keep full range as text
+    return o;
+}
+
 QJsonValue variantToJson(const QVariant& value)
 {
     if (value.canConvert<QColor>()) {
@@ -642,6 +741,15 @@ QJsonObject nodeToJson(const LayerTreeNode& node,
             blobs.insert(distSource, encodePng(node.layer->distortData->sourceImage));
             o["distortData"] = distortDataToJson(*node.layer->distortData, distSource);
         }
+        if (node.layer->rawData) {
+            QString embeddedRef;
+            if (node.layer->rawData->mode == RawStorageMode::Embedded
+                && node.layer->rawData->source && !node.layer->rawData->source->bytes.isEmpty()) {
+                embeddedRef = QStringLiteral("layers/%1_raw.bin").arg(id);
+                blobs.insert(embeddedRef, node.layer->rawData->source->bytes);
+            }
+            o["rawData"] = rawDataToJson(*node.layer->rawData, embeddedRef);
+        }
     }
 
     QJsonArray children;
@@ -795,6 +903,34 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
                 node->layer->distortData = dd;
             }
         }
+        if (o.contains("rawData") && o.value("rawData").isObject()) {
+            const QJsonObject rj = o.value("rawData").toObject();
+            const bool embedded = rj.value("mode").toString() == QLatin1String("embedded");
+            const QString embeddedRef = rj.value("embeddedBytes").toString();
+            // Embedded mode requires its bytes blob; a missing blob (file
+            // trimmed, corrupted archive) can't be treated as Linked either
+            // — there is no on-disk file to fall back to — so the layer
+            // loses its RAW payload rather than silently mis-reporting its
+            // storage mode. The layer still loads and renders from the
+            // cached cpuImage; re-reveal is simply unavailable for it.
+            if (!embedded || blobs.contains(embeddedRef)) {
+                auto source = std::make_shared<RawSource>();
+                source->path = rj.value("path").toString();
+                source->meta = rawMetadataFromJson(rj.value("metadata").toObject());
+                if (embedded)
+                    source->bytes = blobs.value(embeddedRef);
+
+                auto rd = std::make_shared<RawLayerData>();
+                rd->source = source;
+                rd->mode = embedded ? RawStorageMode::Embedded : RawStorageMode::Linked;
+                rd->state.pp3 = rj.value("pp3").toString();
+                rd->state.developedSize = QSize(rj.value("developedWidth").toInt(0),
+                                                rj.value("developedHeight").toInt(0));
+                rd->state.geometry = rawGeometryFromJson(rj.value("geometry").toObject());
+                rd->state.revision = rj.value("revision").toString().toULongLong();
+                node->layer->rawData = rd;
+            }
+        }
     }
 
     for (const auto v : o.value("children").toArray()) {
@@ -806,6 +942,19 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
     }
     return node;
 }
+
+// Gates the format-version bump (see kMaxFormatVersion): a document with no
+// RAW Layer still saves as version 1 so it keeps opening in older builds.
+bool documentHasRawLayer(const std::vector<std::unique_ptr<LayerTreeNode>>& nodes)
+{
+    for (const auto& n : nodes) {
+        if (n->layer && n->layer->rawData)
+            return true;
+        if (documentHasRawLayer(n->children))
+            return true;
+    }
+    return false;
+}
 } // namespace
 
 bool ProjectFileService::saveProject(const Document& doc, const QString& path, QString* error)
@@ -815,10 +964,12 @@ bool ProjectFileService::saveProject(const Document& doc, const QString& path, Q
         return false;
     }
 
+    const quint32 formatVersion = documentHasRawLayer(doc.roots) ? kMaxFormatVersion : 1;
+
     QMap<QString, QByteArray> blobs;
     QJsonObject manifest;
     manifest["format"] = QStringLiteral("UPS_PROJECT");
-    manifest["formatVersion"] = static_cast<int>(kFormatVersion);
+    manifest["formatVersion"] = static_cast<int>(formatVersion);
     manifest["appName"] = QStringLiteral("Hazor Studio");
     manifest["appVersion"] = QCoreApplication::applicationVersion();
     const QString now = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
@@ -872,7 +1023,7 @@ bool ProjectFileService::saveProject(const Document& doc, const QString& path, Q
     QDataStream out(&file);
     out.setVersion(QDataStream::Qt_5_15);
     out << kMagic;
-    out << kFormatVersion;
+    out << formatVersion;
     out << manifestBytes;
     out << documentBytes;
     out << static_cast<quint32>(blobs.size());
@@ -924,7 +1075,7 @@ ProjectLoadResult ProjectFileService::loadProject(const QString& path)
         result.error = QStringLiteral("Invalid project format.");
         return result;
     }
-    if (version != kFormatVersion) {
+    if (version < 1 || version > kMaxFormatVersion) {
         result.error = QStringLiteral("Unsupported project version.");
         return result;
     }

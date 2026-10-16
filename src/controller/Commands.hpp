@@ -794,6 +794,7 @@ public:
                      QImage beforeImage, QTransform beforeTransform,
                      std::shared_ptr<TextLayerData> beforeTextData,
                      std::shared_ptr<ShapeData> beforeShapeData,
+                     std::shared_ptr<RawLayerData> beforeRawData,
                      QImage afterImage, QTransform afterTransform,
                      QString commandName)
         : m_doc(doc)
@@ -802,19 +803,23 @@ public:
         , m_beforeTransform(beforeTransform)
         , m_beforeTextData(std::move(beforeTextData))
         , m_beforeShapeData(std::move(beforeShapeData))
+        , m_beforeRawData(std::move(beforeRawData))
         , m_afterImage(std::move(afterImage))
         , m_afterTransform(afterTransform)
         , m_name(std::move(commandName))
     {}
 
-    void execute() override { apply(m_afterImage, m_afterTransform, nullptr, nullptr); }
-    void undo() override { apply(m_beforeImage, m_beforeTransform, m_beforeTextData, m_beforeShapeData); }
+    void execute() override { apply(m_afterImage, m_afterTransform, nullptr, nullptr, nullptr); }
+    void undo() override {
+        apply(m_beforeImage, m_beforeTransform, m_beforeTextData, m_beforeShapeData, m_beforeRawData);
+    }
     QString name() const override { return m_name; }
 
 private:
     void apply(const QImage& img, const QTransform& t,
                std::shared_ptr<TextLayerData> textData,
-               std::shared_ptr<ShapeData> shapeData) {
+               std::shared_ptr<ShapeData> shapeData,
+               std::shared_ptr<RawLayerData> rawData) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
             return;
@@ -822,6 +827,7 @@ private:
         node->transform = t;
         node->layer->textData = textData;
         node->layer->shapeData = shapeData;
+        node->layer->rawData = rawData;
         node->layer->textureOutdated = true;
         node->invalidateEffects();
     }
@@ -832,6 +838,7 @@ private:
     QTransform m_beforeTransform;
     std::shared_ptr<TextLayerData> m_beforeTextData;
     std::shared_ptr<ShapeData> m_beforeShapeData;
+    std::shared_ptr<RawLayerData> m_beforeRawData;
     QImage m_afterImage;
     QTransform m_afterTransform;
     QString m_name;
@@ -894,6 +901,69 @@ private:
     QImage m_afterImage;
     QTransform m_afterTransform;
     std::shared_ptr<DistortData> m_afterData;
+    QString m_name;
+};
+
+// Non-destructive re-reveal: captures a RAW Layer's rendered pixels,
+// RawLayerData (PP3 + geometry + revision) and — when the reveal's framing
+// changed — the node transform/mask that RawDevelopService recomputed to
+// compensate (Fase 4.4), before/after a RawDevelopService render. The layer
+// remains a re-editable RAW layer (RawLayerData preserved, RawSource shared
+// — never copied, see RawLayerData.hpp).
+class RawDevelopCommand : public Command {
+public:
+    struct State {
+        QImage image;
+        QTransform transform;
+        QImage maskImage;
+        QPoint maskOrigin;
+        std::shared_ptr<RawLayerData> data;
+    };
+
+    RawDevelopCommand(Document* doc, int flatIndex,
+                      State before, State after,
+                      QString commandName)
+        : m_doc(doc)
+        , m_flatIndex(flatIndex)
+        , m_before(std::move(before))
+        , m_after(std::move(after))
+        , m_name(std::move(commandName))
+    {}
+
+    void execute() override { apply(m_after); }
+    void undo() override { apply(m_before); }
+    QString name() const override { return m_name; }
+
+private:
+    void apply(const State& s) {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
+            return;
+        Layer* layer = node->layer.get();
+        if (layer->rasterStorage.isEnabled())
+            layer->rasterStorage.clear();
+        layer->cpuImage = s.image;
+        layer->tiledSystem = false;
+        layer->tileManager.clear();
+        layer->dirtyRegion.clear();
+        layer->textureOutdated = true;
+        layer->pendingGpuUpload = true;
+        node->transform = s.transform;
+        layer->maskImage = s.maskImage;
+        layer->maskOrigin = s.maskOrigin;
+        layer->maskTextureOutdated = true;
+        layer->maskThumbDirty = true;
+        // Copies the small RawLayerData by value (shares the immutable
+        // RawSource) so later edits don't mutate the stored undo state.
+        layer->rawData = s.data ? std::make_shared<RawLayerData>(*s.data) : nullptr;
+        node->invalidateEffects();
+        ++m_doc->compositionGeneration;
+    }
+
+    Document* m_doc;
+    int m_flatIndex;
+    State m_before;
+    State m_after;
     QString m_name;
 };
 

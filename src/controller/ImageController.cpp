@@ -26,6 +26,8 @@
 #include "ai/models/AiModelRegistry.hpp"
 #include "ai/upscale/RealEsrganProcessBackend.hpp"
 #include "ai/upscale/UpscaleService.hpp"
+#include "raw/RawDevelopService.hpp"
+#include "raw/RawDevelopParams.hpp"
 
 #include <QImage>
 #include <QPainter>
@@ -80,7 +82,11 @@ static void convertDocumentContentToProfile(Document* doc,
 ImageController::ImageController(QObject* parent)
     : QObject(parent)
     , m_upscaleService(std::make_unique<UpscaleService>())
+    , m_rawDevelopService(std::make_unique<RawDevelopService>())
 {
+    connect(m_rawDevelopService.get(), &RawDevelopService::developFinished,
+            this, &ImageController::onRawLayerDevelopFinished);
+
     m_history.setChangeCallback([this]() {
         emit historyChanged();
     });
@@ -3431,7 +3437,7 @@ uint64_t ImageController::upscale(const UpscaleOptions& options)
         sourceLayerIndex = m_doc->activeFlatIndex;
         auto* node = m_doc->nodeAt(sourceLayerIndex);
         auto* layer = node && node->type == LayerTreeNode::Type::Layer ? node->layer.get() : nullptr;
-        if (!node || !layer || layer->isTextLayer() || layer->isShapeLayer()) {
+        if (!node || !layer || !layer->hasDirectlyEditablePixels()) {
             emit operationBlocked(tr("Rasterize or select a pixel layer to use AI Upscale."));
             return 0;
         }
@@ -3526,7 +3532,7 @@ bool ImageController::convertDocumentToProfile(const ColorProfile& destinationPr
 bool ImageController::checkDestructiveOp(Layer* layer)
 {
     if (!layer) return false;
-    if (layer->isTextLayer() || layer->isShapeLayer()) {
+    if (!layer->hasDirectlyEditablePixels()) {
         emit operationBlocked(tr("This operation requires a rasterized layer."));
         return false;
     }
@@ -4685,7 +4691,7 @@ void ImageController::rasterizeNode(int flatIndex)
     if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
         return;
     auto* layer = node->layer.get();
-    if (!layer->textData && !layer->shapeData) return;
+    if (!layer->textData && !layer->shapeData && !layer->rawData) return;
     if (node->isPixelEditingLocked()) {
         emit operationBlocked(tr("This layer is locked and cannot be rasterized."));
         return;
@@ -4695,6 +4701,26 @@ void ImageController::rasterizeNode(int flatIndex)
     QTransform beforeXf = node->transform;
     auto beforeText = layer->textData;
     auto beforeShape = layer->shapeData;
+
+    // RAW Layer: discard the develop payload, keep the already-rendered
+    // pixels as-is (Fase 4.7) — no re-render, just drop the re-edit path.
+    auto beforeRaw = layer->rawData;
+    if (layer->rawData) {
+        layer->rawData.reset();
+        m_rawDevelopService->release(node);
+        m_pendingRawDevelops.erase(node);
+        markLayerDirty(layer);
+        m_history.push(std::make_unique<RasterizeCommand>(
+            m_doc, flatIndex,
+            std::move(beforeImg), beforeXf,
+            std::move(beforeText), std::move(beforeShape), std::move(beforeRaw),
+            layer->cpuImage.copy(), node->transform,
+            tr("Rasterize Layer")));
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        if (m_doc) ++m_doc->compositionGeneration;
+        return;
+    }
 
     if (layer->shapeData) {
         QTransform accum = node->accumulatedTransform();
@@ -4730,13 +4756,206 @@ void ImageController::rasterizeNode(int flatIndex)
     m_history.push(std::make_unique<RasterizeCommand>(
         m_doc, flatIndex,
         std::move(beforeImg), beforeXf,
-        std::move(beforeText), std::move(beforeShape),
+        std::move(beforeText), std::move(beforeShape), nullptr,
         layer->cpuImage.copy(), node->transform,
         tr("Rasterize Layer")));
 
     emit layerChanged(flatIndex);
     emit imageChanged();
     if (m_doc) ++m_doc->compositionGeneration;
+}
+
+// Resamples a layer mask from one layer-pixel space into another, given the
+// affine `m` reframeTransform() derived between a RAW Layer's old and new
+// develop geometry (Fase 4.4). Returns the remapped mask; *outOrigin
+// receives its new maskOrigin. Mirrors warpMaskDocToLayer/warpMaskLayerToDoc
+// above (cv::warpAffine with the inverse map), but between two layer-pixel
+// spaces directly — no document-space round trip, and no NDC scaling since
+// `m` already operates in plain pixel coordinates.
+static QImage warpMaskByReframeTransform(const QImage& maskIn, const QPoint& maskOrigin,
+                                         const QTransform& m, QPoint* outOrigin)
+{
+    if (maskIn.isNull()) {
+        *outOrigin = QPoint(0, 0);
+        return maskIn;
+    }
+
+    const QRectF oldRect(maskOrigin, maskIn.size());
+    const QRect newRect = m.mapRect(oldRect).toAlignedRect();
+    const int mw = std::max(1, newRect.width());
+    const int mh = std::max(1, newRect.height());
+    *outOrigin = newRect.topLeft();
+
+    // old-mask-local -> old-layer (translate) -> new-layer (m) -> new-mask-local (translate).
+    const QTransform maskSpace =
+        QTransform(1, 0, 0, 1, maskOrigin.x(), maskOrigin.y())
+        * m
+        * QTransform(1, 0, 0, 1, -newRect.x(), -newRect.y());
+    bool invertible = false;
+    const QTransform inv = maskSpace.inverted(&invertible);
+    if (!invertible) {
+        *outOrigin = maskOrigin;
+        return maskIn;
+    }
+
+    cv::Mat xf = (cv::Mat_<double>(2, 3) <<
+        inv.m11(), inv.m21(), inv.m31(),
+        inv.m12(), inv.m22(), inv.m32());
+
+    QImage src = maskIn.convertToFormat(QImage::Format_Grayscale8);
+    cv::Mat srcMat(src.height(), src.width(), CV_8UC1, src.bits(),
+                  static_cast<size_t>(src.bytesPerLine()));
+    QImage out(mw, mh, QImage::Format_Grayscale8);
+    out.fill(255);
+    cv::Mat outMat(mh, mw, CV_8UC1, out.bits(),
+                  static_cast<size_t>(out.bytesPerLine()));
+    cv::warpAffine(srcMat, outMat, xf, cv::Size(mw, mh),
+                  cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                  cv::BORDER_CONSTANT, cv::Scalar(255));
+    return out;
+}
+
+bool ImageController::rerevealRawLayer(int flatIndex, const RawDevelopParams& params)
+{
+    if (!m_doc) return false;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer || !node->layer->rawData)
+        return false;
+    // The RAW develop profile is this layer's non-destructive "content",
+    // same gate as a text/shape edit (see LayerTreeNode::canEditContent()).
+    if (!node->canEditContent()) {
+        emit operationBlocked(tr("This layer is locked and cannot be re-revealed."));
+        return false;
+    }
+    if (m_rawDevelopService->isBusy(node))
+        return false;
+
+    Layer* layer = node->layer.get();
+
+    PendingRawDevelop pending;
+    pending.beforeImage = layer->cpuImage.copy();
+    pending.beforeTransform = node->transform;
+    pending.beforeMask = layer->maskImage;
+    pending.beforeMaskOrigin = layer->maskOrigin;
+    pending.beforeData = layer->rawData;
+    pending.pp3 = QString::fromStdString(params.toPP3String());
+    pending.flatIndex = flatIndex;
+
+    const std::shared_ptr<const RawSource> source = layer->rawData->source;
+    const RawStorageMode mode = layer->rawData->mode;
+    m_pendingRawDevelops[node] = std::move(pending);
+
+    if (!m_rawDevelopService->requestDevelop(node, source, mode, params)) {
+        m_pendingRawDevelops.erase(node);
+        return false;
+    }
+    return true;
+}
+
+void ImageController::onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopResult result)
+{
+    auto it = m_pendingRawDevelops.find(node);
+    if (it == m_pendingRawDevelops.end())
+        return;
+    PendingRawDevelop pending = std::move(it->second);
+    m_pendingRawDevelops.erase(it);
+
+    if (!result.ok) {
+        emit rawLayerDevelopFinished(pending.flatIndex, false, result.errorMessage);
+        return;
+    }
+    if (!m_doc) {
+        emit rawLayerDevelopFinished(pending.flatIndex, false, tr("The document is no longer open."));
+        return;
+    }
+
+    // The node may have moved (reorder) or been deleted while the render
+    // ran — re-resolve by identity rather than trusting pending.flatIndex.
+    const auto flat = m_doc->flatten();
+    const auto flatIt = std::find(flat.begin(), flat.end(), node);
+    if (flatIt == flat.end() || node->type != LayerTreeNode::Type::Layer
+        || !node->layer || !node->layer->rawData) {
+        emit rawLayerDevelopFinished(pending.flatIndex, false,
+            tr("The layer is no longer available."));
+        return;
+    }
+    const int flatIndex = static_cast<int>(flatIt - flat.begin());
+    Layer* layer = node->layer.get();
+
+    auto afterData = std::make_shared<RawLayerData>(*layer->rawData);
+    afterData->state.pp3 = pending.pp3;
+    afterData->state.developedSize = result.developedSize;
+    afterData->state.geometry = result.geometry;
+    afterData->state.revision = pending.beforeData->state.revision + 1;
+
+    RawDevelopCommand::State after;
+    after.image = result.image;
+    after.transform = pending.beforeTransform;
+    after.maskImage = pending.beforeMask;
+    after.maskOrigin = pending.beforeMaskOrigin;
+    after.data = afterData;
+
+    // Fase 4.4: if the framing changed (coarse rotation/flip/crop/resize),
+    // compensate the node transform (and remap the mask) so the composited
+    // result does not move. When it's not derivable (fine rotation,
+    // perspective), keep the previous framing and warn instead of guessing.
+    const auto m = reframeTransform(pending.beforeData->state.geometry, result.geometry);
+    QString warning;
+    if (m.has_value()) {
+        // QTransform's `*` applies its left operand first (A*B ⇒ B.map(A.map(p))):
+        // we need new-pixel-space mapped back to old-pixel-space (m->inverted(),
+        // applied first) and then through the old canvas placement, so the same
+        // scene point lands on the same canvas position it did before.
+        after.transform = m->inverted() * pending.beforeTransform;
+        if (!pending.beforeMask.isNull()) {
+            after.maskImage = warpMaskByReframeTransform(
+                pending.beforeMask, pending.beforeMaskOrigin, *m, &after.maskOrigin);
+        }
+    } else if (pending.beforeData->state.geometry.fullWidth > 0) {
+        // No derivable M, but there WAS a previous reveal to compare
+        // against — conservatively warn rather than assume the framing
+        // happens to still match (see reframeTransform()'s doc comment).
+        warning = tr("This re-reveal changed the RAW frame in a way Hazor can't "
+                     "compensate for automatically (fine rotation or perspective "
+                     "correction). The layer keeps its previous position; use "
+                     "Rasterize if you want to keep the new framing.");
+    }
+
+    RawDevelopCommand::State before;
+    before.image = pending.beforeImage;
+    before.transform = pending.beforeTransform;
+    before.maskImage = pending.beforeMask;
+    before.maskOrigin = pending.beforeMaskOrigin;
+    before.data = pending.beforeData;
+
+    // Commands only record before/after for Undo/Redo (see CommandHistory::
+    // push()) — apply `after` to the live layer/node ourselves first, same
+    // as every other call site that pushes a Command here.
+    if (layer->rasterStorage.isEnabled())
+        layer->rasterStorage.clear();
+    layer->cpuImage = after.image;
+    layer->tiledSystem = false;
+    layer->tileManager.clear();
+    layer->dirtyRegion.clear();
+    layer->textureOutdated = true;
+    layer->pendingGpuUpload = true;
+    node->transform = after.transform;
+    layer->maskImage = after.maskImage;
+    layer->maskOrigin = after.maskOrigin;
+    layer->maskTextureOutdated = true;
+    layer->maskThumbDirty = true;
+    layer->rawData = afterData;
+    node->invalidateEffects();
+    ++m_doc->compositionGeneration;
+
+    m_history.push(std::make_unique<RawDevelopCommand>(
+        m_doc, flatIndex, std::move(before), std::move(after), tr("Re-reveal RAW Layer")));
+
+    markLayerDirty(layer);
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+
+    emit rawLayerDevelopFinished(flatIndex, true, warning);
 }
 
 void ImageController::mergeVisibleLayers()

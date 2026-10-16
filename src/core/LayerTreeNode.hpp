@@ -17,6 +17,7 @@
 #include "text/TextTypes.hpp"
 #include "ShapeTypes.hpp"
 #include "transform/TransformTypes.hpp"
+#include "raw/RawLayerData.hpp"
 
 class LayerTreeNode {
 public:
@@ -552,7 +553,12 @@ public:
     bool isTransparencyLocked() const { return (lockFlags & (LockTransparent | LockAll)) != 0; }
 
     // Can raster pixels be edited (brush, eraser, fill, clone, filters, clear)?
-    bool canEditPixels() const { return !isPixelEditingLocked(); }
+    // Folds in Layer::hasDirectlyEditablePixels() so text/shape/RAW layers are
+    // blocked here too, not just by lock state — the single gate every raster
+    // tool should route through (see Layer.hpp's doc comment on that method).
+    bool canEditPixels() const {
+        return !isPixelEditingLocked() && (!layer || layer->hasDirectlyEditablePixels());
+    }
     // Can the node be moved/transformed/resized/rotated/flipped/nudged/aligned?
     // Adjustment layers are non-spatial (they apply per-pixel over the backdrop
     // / their parent layer), so they are never transformable — no move,
@@ -560,7 +566,13 @@ public:
     bool canTransform() const {
         return type != Type::Adjustment && !isPositionLocked();
     }
-    // Can editable content change (text string/style, shape geometry/fill/stroke)?
+    // Can a layer's own non-destructive content change (text string/style,
+    // shape geometry/fill/stroke, RAW develop params)? Deliberately does NOT
+    // fold in hasDirectlyEditablePixels(): that predicate is false for
+    // exactly these layer types, since their content model is the
+    // alternative to direct pixel edits, not a second restriction on top of
+    // it. Callers already know the layer is one of these types (they switch
+    // on textData/shapeData/rawData first); this only gates lock state.
     bool canEditContent() const { return !isPixelEditingLocked(); }
     // Can the layer mask be painted/edited? Only the master lock blocks the mask;
     // Lock Image Pixels protects the image, not the mask.
@@ -642,6 +654,11 @@ public:
                 node->layer->shapeData = std::make_shared<ShapeData>(*layer->shapeData);
             if (layer->distortData)
                 node->layer->distortData = std::make_shared<DistortData>(*layer->distortData);
+            if (layer->rawData)
+                // Copies RawLayerData by value (cheap: a QString + a
+                // RawGeometry + the revision counter) while sharing the
+                // immutable RawSource — see RawLayerData.hpp.
+                node->layer->rawData = std::make_shared<RawLayerData>(*layer->rawData);
         }
 
         for (auto& child : children) {

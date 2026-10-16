@@ -1825,9 +1825,7 @@ bool CanvasView::canPaintActiveRasterLayer() const
         return false;
     if (!node->visible)
         return false;
-    if (node->isPixelEditingLocked())
-        return false;
-    if (layer->isTextLayer() || layer->isShapeLayer())
+    if (!node->canEditPixels())
         return false;
     return true;
 }
@@ -7259,7 +7257,7 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     // from the source warp), so drop the distort metadata before the stroke.
     if (!m_editingMask && layer->isDistortLayer())
         layer->distortData.reset();
-    if (!m_editingMask && !layer->isTextLayer() && !layer->isShapeLayer()) {
+    if (!m_editingMask && layer->hasDirectlyEditablePixels()) {
         layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
         m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
         if (m_brushUsingRasterTiles)
@@ -9729,9 +9727,9 @@ bool CanvasView::activeLayerSupportsDistort() const
     if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
         return false;
     if (node->isPositionLocked()) return false;
-    // Text/shape keep their own non-destructive model; only raster or an
+    // Text/shape/RAW keep their own non-destructive model; only raster or an
     // existing distort layer qualifies.
-    if (node->layer->isTextLayer() || node->layer->isShapeLayer())
+    if (!node->layer->hasDirectlyEditablePixels())
         return false;
     return !node->layer->compositeImage().isNull();
 }

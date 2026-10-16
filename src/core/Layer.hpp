@@ -19,6 +19,7 @@ struct TextLayerData;
 struct ShapeData;
 struct DistortData;
 struct GradientFillData;
+struct RawLayerData;
 class LayerTreeNode;
 
 enum class BlendMode {
@@ -90,6 +91,21 @@ public:
     bool isShapeLayer() const { return shapeData != nullptr; }
     bool isDistortLayer() const { return distortData != nullptr; }
     bool isGradientFillLayer() const { return gradientFillData != nullptr; }
+    bool isRawLayer() const { return rawData != nullptr; }
+
+    // True for layer types whose cpuImage can be edited directly (brush,
+    // eraser, fill, clone, filters, clear). False for the non-destructive
+    // content models (text, shape, RAW) whose rendered pixels are derived
+    // and must go through their own re-edit path or Rasterize instead.
+    // Distort layers stay true: a direct edit on one is handled by dropping
+    // distortData, not by blocking the edit (see ImageController::
+    // checkDestructiveOp). Centralizes what used to be a handful of ad hoc
+    // `isTextLayer() || isShapeLayer()` checks scattered across tools, so
+    // adding RAW didn't mean patching each one by hand — see
+    // LayerTreeNode::canEditPixels().
+    bool hasDirectlyEditablePixels() const {
+        return !isTextLayer() && !isShapeLayer() && !isRawLayer();
+    }
 
     // Single predicate for "render this shape layer through its viewport-adaptive
     // sprite cache". A layer mask vetoes the sprite: the mask lives in layer-image
@@ -109,6 +125,10 @@ public:
     // Future non-destructive Gradient Fill layer payload. Raster application is
     // implemented today; this keeps the layer model ready for editable fills.
     std::shared_ptr<GradientFillData> gradientFillData;
+    // Non-destructive RAW develop metadata (original file + PP3 + geometry).
+    // When present, cpuImage holds the rendered (8-bit) develop result; the
+    // RAW file is never modified and the develop profile stays re-editable.
+    std::shared_ptr<RawLayerData> rawData;
 
     // Transform snapshot used by "Reset Transform" to restore the layer's
     // initial placement/scale when the layer was created/imported/pasted.

@@ -24,11 +24,16 @@
 #include "color/ColorProfile.hpp"
 #include "ai/AiRemoveTypes.hpp"
 #include "ai/upscale/UpscaleTypes.hpp"
+#include "raw/RawLayerData.hpp"
 
 namespace cv { class Mat; }
 namespace nlohmann { class json; }
 class ImageGenProvider;
 class UpscaleService;
+class RawDevelopService;
+class RawDevelopParams;
+class LayerTreeNode;
+struct RawDevelopResult;
 struct InpaintResult;
 struct InpaintError;
 struct GradientApplication;
@@ -277,6 +282,12 @@ public:
     // adjustment children. Returns -1 when there is no layer below.
     int mergeDownTargetFlat(int srcFlat) const;
     void rasterizeNode(int flatIndex);
+    // Re-reveals a RAW Layer's PP3 off the UI thread (RawDevelopService,
+    // Fase 4.8) and, on success, pushes a RawDevelopCommand so the result is
+    // undoable. No-op (returns false) when flatIndex isn't a RAW layer, the
+    // layer is pixel-locked, or a re-reveal for it is already in flight —
+    // callers retry once rawLayerDevelopFinished() fires for this index.
+    bool rerevealRawLayer(int flatIndex, const RawDevelopParams& params);
     bool isLayerEmpty(int flatIndex) const;
     void flushGpuChanges();
 
@@ -375,6 +386,10 @@ signals:
     void maskOverlayChanged();
     void guidesChanged();
     void operationBlocked(const QString& reason);
+    // RawDevelopService finished re-revealing flatIndex's RAW layer (see
+    // rerevealRawLayer()). `ok` false means the render failed or the layer
+    // was gone by the time it finished; errorMessage is empty on success.
+    void rawLayerDevelopFinished(int flatIndex, bool ok, QString errorMessage);
     void progressOperationStarted(uint64_t jobId, const QString& message, bool cancelable);
     void progressOperationMessageChanged(uint64_t jobId, const QString& message);
     void progressOperationProgressChanged(uint64_t jobId, int progress);
@@ -420,6 +435,21 @@ private:
     bool anyFullyLockedLayer(bool visibleOnly = false) const;
     void onAsyncJobCompleted(uint64_t jobId);
     void onProgressiveBatch(uint64_t jobId, QVector<QRect> tileRects);
+    void onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopResult result);
+
+    // State captured at rerevealRawLayer() dispatch time, needed to build
+    // the RawDevelopCommand once onRawLayerDevelopFinished() fires. Keyed by
+    // node identity (not flatIndex, which may shift while the render runs).
+    struct PendingRawDevelop {
+        QImage beforeImage;
+        QTransform beforeTransform;
+        QImage beforeMask;
+        QPoint beforeMaskOrigin;
+        std::shared_ptr<RawLayerData> beforeData;
+        QString pp3;
+        int flatIndex = -1;
+    };
+    std::unordered_map<const LayerTreeNode*, PendingRawDevelop> m_pendingRawDevelops;
 
     Document* m_doc = nullptr;
     CommandHistory m_history;
@@ -451,6 +481,7 @@ private:
     uint64_t m_nextDocumentOperationId = 1000000;
 
     std::unique_ptr<UpscaleService> m_upscaleService;
+    std::unique_ptr<RawDevelopService> m_rawDevelopService;
     std::unordered_map<uint64_t, UpscaleOptions> m_pendingUpscaleJobs;
     std::unordered_map<uint64_t, int> m_pendingUpscaleLayers;
 
