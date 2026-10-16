@@ -7,6 +7,7 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include "theme/ScrollBarStyle.hpp"
+#include "ui/AppMessageDialog.hpp"
 
 #include <QtConcurrent>
 #include <QFutureWatcher>
@@ -398,7 +399,7 @@ void BrushLibraryListView::showSourceInfo(const QModelIndex& index)
 {
     const QString text = index.data(Qt::ToolTipRole).toString();
     if (!text.isEmpty())
-        QMessageBox::information(this, tr("Brush Source Info"), text);
+        AppMessageDialog::information(this, tr("Brush Source Info"), text);
 }
 
 // ── Preset Manager (SettingsManager mode) ─────────────────────
@@ -486,12 +487,11 @@ void BrushLibraryListView::resetDefaultPresets()
 {
     if (m_mode != BrushPresetListMode::SettingsManager || !m_manager)
         return;
-    if (QMessageBox::warning(
+    if (!AppMessageDialog::confirm(
             this, tr("Reset Default Brushes"),
             tr("Reset the brush library to the default presets?\n"
                "Every custom preset and folder will be deleted.\n"
-               "This action cannot be undone."),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+               "This action cannot be undone.")))
         return;
     // Wipe the library and rebuild the built-in kit; the manager emits
     // presetsChanged → the model rebuilds.
@@ -596,7 +596,7 @@ void BrushLibraryListView::createFolderUnder(const QModelIndex& parentFolderInde
     QStringList full = base;
     full += parts;
     if (m_treeModel->indexForFolderPath(full).isValid()) {
-        QMessageBox::warning(this, tr("New Folder"),
+        AppMessageDialog::warning(this, tr("New Folder"),
             tr("A folder named \"%1\" already exists here.").arg(parts.last()));
         return;
     }
@@ -636,11 +636,10 @@ void BrushLibraryListView::deletePresetByName(const QString& name)
 {
     if (!m_manager || name.isEmpty())
         return;
-    if (QMessageBox::question(
+    if (!AppMessageDialog::confirm(
             this, tr("Delete Preset"),
             tr("Do you really want to delete the preset \"%1\"?\n"
-               "This action cannot be undone.").arg(name),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+               "This action cannot be undone.").arg(name)))
         return;
 
     // Pick a neighbour (in storage order) to land on after removal.
@@ -664,7 +663,7 @@ void BrushLibraryListView::deleteFolder(const QModelIndex& folderIndex)
     if (!m_manager || !m_treeModel)
         return;
     if (!m_treeModel->isManagedFolder(folderIndex)) {
-        QMessageBox::information(this, tr("Delete Folder"),
+        AppMessageDialog::information(this, tr("Delete Folder"),
             tr("This folder is protected and cannot be deleted."));
         return;
     }
@@ -672,11 +671,10 @@ void BrushLibraryListView::deleteFolder(const QModelIndex& folderIndex)
     const QString folderName = path.isEmpty() ? QString() : path.last();
     const QStringList names = m_treeModel->presetNamesUnder(folderIndex);
 
-    if (QMessageBox::question(
+    if (!AppMessageDialog::confirm(
             this, tr("Delete Folder"),
             tr("Do you really want to delete the folder \"%1\" and all presets inside it?\n"
-               "This action cannot be undone.").arg(folderName),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+               "This action cannot be undone.").arg(folderName)))
         return;
 
     m_manager->removeFolderTree(path.join(QLatin1Char('/')), names);
@@ -697,7 +695,7 @@ void BrushLibraryListView::renamePreset(const QString& name)
     if (!ok || newName.isEmpty() || newName == name)
         return;
     if (m_manager->contains(newName)) {
-        QMessageBox::warning(this, tr("Rename Preset"),
+        AppMessageDialog::warning(this, tr("Rename Preset"),
             tr("A preset named \"%1\" already exists.").arg(newName));
         return;
     }
@@ -710,7 +708,7 @@ void BrushLibraryListView::renameFolder(const QModelIndex& folderIndex)
     if (!m_treeModel)
         return;
     if (!m_treeModel->isManagedFolder(folderIndex)) {
-        QMessageBox::information(this, tr("Rename Folder"),
+        AppMessageDialog::information(this, tr("Rename Folder"),
             tr("This folder is protected and cannot be renamed."));
         return;
     }
@@ -725,14 +723,14 @@ void BrushLibraryListView::renameFolder(const QModelIndex& folderIndex)
     if (!ok || newName.isEmpty() || newName == oldName)
         return;
     if (newName.contains(QLatin1Char('/'))) {
-        QMessageBox::warning(this, tr("Rename Folder"),
+        AppMessageDialog::warning(this, tr("Rename Folder"),
             tr("A folder name cannot contain '/'."));
         return;
     }
     QStringList newPath = path;
     newPath.last() = newName;
     if (!m_treeModel->relocateFolder(folderIndex, newPath)) {
-        QMessageBox::warning(this, tr("Rename Folder"),
+        AppMessageDialog::warning(this, tr("Rename Folder"),
             tr("Could not rename the folder — a folder with that name may already exist."));
         return;
     }
@@ -788,19 +786,24 @@ bool BrushLibraryListView::runSaveAsDialog(QString* outName, QString* outGroup)
             return false;
         const QString name = nameEdit->text().trimmed();
         if (name.isEmpty()) {
-            QMessageBox::warning(&dlg, tr("Save Preset As"), tr("Please enter a name."));
+            AppMessageDialog::warning(&dlg, tr("Save Preset As"), tr("Please enter a name."));
             continue;
         }
         const QString group =
             BrushLibraryTreeModel::groupFromUserPath(folderCombo->currentText());
         if (m_manager->contains(name)) {
-            const auto res = QMessageBox::question(
+            const QList<AppMessageDialog::ButtonSpec> buttons = {
+                { tr("Yes"), QMessageBox::AcceptRole },
+                { tr("No"), QMessageBox::ActionRole },
+                { tr("Cancel"), QMessageBox::RejectRole },
+            };
+            const int res = AppMessageDialog::choice(
                 &dlg, tr("Save Preset As"),
                 tr("A preset named \"%1\" already exists. Replace it?").arg(name),
-                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::No);
-            if (res == QMessageBox::Cancel)
+                AppMessageDialog::Icon::Question, buttons, /*defaultIndex=*/1);
+            if (res == 2) // Cancel
                 return false;
-            if (res == QMessageBox::No)
+            if (res == 1) // No
                 continue;            // let the user pick a different name
         }
         *outName = name;

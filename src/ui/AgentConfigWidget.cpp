@@ -3,6 +3,7 @@
 #include "agent/LLMClient.hpp"
 #include "agent/AgentPresetManager.hpp"
 #include "tools/ToolCatalog.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ui/IconUtils.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -766,23 +767,18 @@ void AgentConfigWidget::discardChanges()
 
 AgentConfigWidget::PendingChangesChoice AgentConfigWidget::promptPendingChanges()
 {
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(tr("Unsaved Changes"));
-    box.setText(tr("There are unsaved changes. Do you want to save before continuing?"));
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Save"), QMessageBox::AcceptRole },
+        { tr("Discard Changes"), QMessageBox::DestructiveRole },
+        { tr("Cancel"), QMessageBox::RejectRole },
+    };
+    const int clicked = AppMessageDialog::choice(
+        this, tr("Unsaved Changes"),
+        tr("There are unsaved changes. Do you want to save before continuing?"),
+        AppMessageDialog::Icon::Warning, buttons, /*defaultIndex=*/0);
 
-    auto* saveBtn = box.addButton(tr("Save"), QMessageBox::AcceptRole);
-    auto* discardBtn = box.addButton(tr("Discard Changes"), QMessageBox::DestructiveRole);
-    auto* cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.setDefaultButton(qobject_cast<QPushButton*>(saveBtn));
-    box.exec();
-
-    if (box.clickedButton() == saveBtn)
-        return PendingChangesChoice::Save;
-    if (box.clickedButton() == discardBtn)
-        return PendingChangesChoice::Discard;
-    if (box.clickedButton() == cancelBtn)
-        return PendingChangesChoice::Cancel;
+    if (clicked == 0) return PendingChangesChoice::Save;
+    if (clicked == 1) return PendingChangesChoice::Discard;
     return PendingChangesChoice::Cancel;
 }
 
@@ -852,10 +848,9 @@ void AgentConfigWidget::onDeletePreset()
     QString name = m_presetCombo->currentData().toString();
     if (m_manager->presetNames().size() <= 1) return;
 
-    auto result = QMessageBox::question(this, tr("Delete Agent"),
-        tr("Delete agent \"%1\"?").arg(name),
-        QMessageBox::Yes | QMessageBox::No);
-    if (result != QMessageBox::Yes) return;
+    if (!AppMessageDialog::confirm(this, tr("Delete Agent"),
+            tr("Delete agent \"%1\"?").arg(name)))
+        return;
 
     m_manager->remove(name);
     refreshPresetCombo();

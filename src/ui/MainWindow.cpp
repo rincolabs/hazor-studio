@@ -8,6 +8,7 @@
 #include "transform/TransformController.hpp"
 #include "core/ViewportCamera.hpp"
 #include "renderer/CanvasView.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ui/LayerPanel.hpp"
 #include "ui/LayerStylesDialog.hpp"
 #include "ui/PropertiesPanel.hpp"
@@ -518,7 +519,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
 
         if (!m_ctrl->convertDocumentToProfile(destination, dlg.conversionOptions())) {
-            QMessageBox::warning(this, tr("Convert to Profile"),
+            AppMessageDialog::warning(this, tr("Convert to Profile"),
                 tr("The selected color conversion is not supported by the current color engine."));
             return;
         }
@@ -2513,19 +2514,16 @@ void MainWindow::showViewportStatusMessage(const QString& message, int timeoutMs
 
 MainWindow::DroppedImageAction MainWindow::askDroppedImageAction()
 {
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Question);
-    box.setWindowTitle(tr("Open Image"));
-    box.setText(tr("How do you want to use this image?"));
-    QPushButton* openBtn = box.addButton(tr("Open Image"), QMessageBox::AcceptRole);
-    QPushButton* insertBtn = box.addButton(tr("Insert into Canvas"), QMessageBox::ActionRole);
-    box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.setDefaultButton(insertBtn);
-
-    box.exec();
-    QAbstractButton* clicked = box.clickedButton();
-    if (clicked == openBtn) return DroppedImageAction::OpenAsNewDocument;
-    if (clicked == insertBtn) return DroppedImageAction::InsertIntoCanvas;
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Open Image"), QMessageBox::AcceptRole },
+        { tr("Insert into Canvas"), QMessageBox::ActionRole },
+        { tr("Cancel"), QMessageBox::RejectRole },
+    };
+    const int clicked = AppMessageDialog::choice(
+        this, tr("Open Image"), tr("How do you want to use this image?"),
+        AppMessageDialog::Icon::Question, buttons, /*defaultIndex=*/1);
+    if (clicked == 0) return DroppedImageAction::OpenAsNewDocument;
+    if (clicked == 1) return DroppedImageAction::InsertIntoCanvas;
     return DroppedImageAction::Cancel;
 }
 
@@ -2566,7 +2564,7 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
     // New, empty document: there is no prior pan/zoom state to place the drop
     // relative to, so every imported path lands centered (dropCanvasNdc = origin).
     if (m_ctrl && !m_ctrl->importExternalImages(paths, QPointF(0.0, 0.0))) {
-        QMessageBox::warning(this, tr("Import Image"),
+        AppMessageDialog::warning(this, tr("Import Image"),
             tr("No supported image could be imported from the dropped files."));
     }
 
@@ -2821,7 +2819,7 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
 
         const QPointF ndc = canvas->screenToCanvasNdc(screenPos);
         if (!m_ctrl->importExternalImages(paths, ndc)) {
-            QMessageBox::warning(this, tr("Import Image"),
+            AppMessageDialog::warning(this, tr("Import Image"),
                 tr("No supported image could be imported from the dropped files."));
             return;
         }
@@ -2975,7 +2973,7 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
             [this](uint64_t jobId, const QString& error) {
         if (jobId == m_activeProgressJobId) {
             closeProgress();
-            QMessageBox::warning(this, tr("Progress"), error);
+            AppMessageDialog::warning(this, tr("Progress"), error);
         }
     });
     connect(ctrlPtr, &ImageController::upscaleNewDocumentReady, this,
@@ -3394,7 +3392,7 @@ void MainWindow::onOpenFile()
 
     if (path.endsWith(".hzs", Qt::CaseInsensitive)) {
         if (!loadProjectAsNewTab(path)) {
-            QMessageBox::warning(this, tr("Open Project"), tr("Failed to open project."));
+            AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
         }
         return;
     }
@@ -3407,7 +3405,7 @@ void MainWindow::onOpenFile()
         closeProgress();
 
         if (!loaded.ok) {
-            QMessageBox::warning(this, tr("Could Not Open Image"), loaded.errorMessage);
+            AppMessageDialog::warning(this, tr("Could Not Open Image"), loaded.errorMessage);
             return;
         }
 
@@ -3421,7 +3419,7 @@ void MainWindow::onOpenFile()
 
         QImage preview = convertDocumentImageToQImage(colorManaged->image).convertToFormat(QImage::Format_RGBA8888);
         if (preview.isNull()) {
-            QMessageBox::warning(this, tr("Could Not Open Image"),
+            AppMessageDialog::warning(this, tr("Could Not Open Image"),
                 tr("The image was decoded but could not be converted for the current document pipeline."));
             return;
         }
@@ -3604,7 +3602,7 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
     closeProgress();
 
     if (!result.first) {
-        QMessageBox::warning(this, tr("Save Project"),
+        AppMessageDialog::warning(this, tr("Save Project"),
             result.second.isEmpty() ? tr("Failed to save project.") : result.second);
         return false;
     }
@@ -3632,21 +3630,22 @@ bool MainWindow::ensureTabCanBeDiscardedOrSaved(int index)
         ? tab.name
         : QFileInfo(tab.currentProjectPath).fileName();
 
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(tr("Unsaved Changes"));
-    box.setText(tr("The project \"%1\" has unsaved changes.").arg(displayName));
-    box.setInformativeText(tr("Do you want to save your changes?"));
-    auto* saveBtn = box.addButton(tr("Save"), QMessageBox::AcceptRole);
-    auto* discardBtn = box.addButton(tr("Discard"), QMessageBox::DestructiveRole);
-    auto* cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.exec();
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Save"), QMessageBox::AcceptRole },
+        { tr("Discard"), QMessageBox::DestructiveRole },
+        { tr("Cancel"), QMessageBox::RejectRole },
+    };
+    const int clicked = AppMessageDialog::choice(
+        this, tr("Unsaved Changes"),
+        tr("The project \"%1\" has unsaved changes.").arg(displayName),
+        AppMessageDialog::Icon::Warning, buttons, /*defaultIndex=*/0,
+        tr("Do you want to save your changes?"));
 
-    if (box.clickedButton() == saveBtn)
+    if (clicked == 0)
         return saveProjectForTab(index, false);
-    if (box.clickedButton() == discardBtn)
+    if (clicked == 1)
         return true;
-    return box.clickedButton() != cancelBtn ? true : false;
+    return false;
 }
 
 void MainWindow::markActiveTabDirty(bool dirty)
@@ -3687,7 +3686,7 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
 {
     const ProjectLoadResult loaded = ProjectFileService::loadProject(path);
     if (!loaded.ok) {
-        QMessageBox::warning(this, tr("Open Project"),
+        AppMessageDialog::warning(this, tr("Open Project"),
             loaded.error.isEmpty() ? tr("Invalid project file.") : loaded.error);
         return false;
     }
@@ -3749,7 +3748,7 @@ int MainWindow::openProjectFiles(const QStringList& files)
         if (!path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
             continue;
         if (!QFileInfo(path).isFile()) {
-            QMessageBox::warning(this, tr("Open Project"),
+            AppMessageDialog::warning(this, tr("Open Project"),
                 tr("File not found:\n%1").arg(path));
             continue;
         }
@@ -3792,11 +3791,10 @@ void MainWindow::runImageExport(const QString& format, const QString& suggestedB
 
     // Manual overwrite check (only same full path)
     if (QFile::exists(path)) {
-        auto ret = QMessageBox::question(this, tr("Confirm Save As"),
-            tr("%1 already exists.\nDo you want to replace it?")
-                .arg(QFileInfo(path).fileName()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ret != QMessageBox::Yes) return;
+        if (!AppMessageDialog::confirm(this, tr("Confirm Save As"),
+                tr("%1 already exists.\nDo you want to replace it?")
+                    .arg(QFileInfo(path).fileName())))
+            return;
     }
 
     beginProgressDelayed(tr("Progress"), tr("Exporting Image"), false);
@@ -3806,7 +3804,7 @@ void MainWindow::runImageExport(const QString& format, const QString& suggestedB
         watcher->deleteLater();
         closeProgress();
         if (!result.first)
-            QMessageBox::warning(this, tr("Could Not Export Image"),
+            AppMessageDialog::warning(this, tr("Could Not Export Image"),
                 result.second.isEmpty() ? tr("Failed to export image.") : result.second);
     });
     watcher->setFuture(QtConcurrent::run([path, save]() {
@@ -3849,7 +3847,7 @@ void MainWindow::onExportNode(int flatIndex)
     if (!m_doc) return;
     LayerTreeNode* node = m_doc->nodeAt(flatIndex);
     if (!node || !node->hasIsolatedExportContent()) {
-        QMessageBox::information(this, tr("Export Layer"),
+        AppMessageDialog::information(this, tr("Export Layer"),
             tr("This adjustment has no content of its own to export — it only "
                "modifies the layers beneath it."));
         return;
@@ -3894,7 +3892,7 @@ void MainWindow::onImportImage()
         closeProgress();
 
         if (!loaded.ok) {
-            QMessageBox::warning(this, tr("Could Not Import Image"), loaded.errorMessage);
+            AppMessageDialog::warning(this, tr("Could Not Import Image"), loaded.errorMessage);
             return;
         }
 
@@ -3913,7 +3911,7 @@ void MainWindow::onImportImage()
 
         QImage img = convertDocumentImageToQImage(colorManaged->image).convertToFormat(QImage::Format_RGBA8888);
         if (img.isNull()) {
-            QMessageBox::warning(this, tr("Could Not Import Image"),
+            AppMessageDialog::warning(this, tr("Could Not Import Image"),
                 tr("The image was decoded but could not be converted for the current document pipeline."));
             return;
         }
@@ -5865,7 +5863,7 @@ void MainWindow::onGenerativeFill()
 {
     if (!m_ctrl) return;
     if (m_presetManager->presetNames(Generative).isEmpty()) {
-        QMessageBox::information(this, tr("Generative Fill"),
+        AppMessageDialog::information(this, tr("Generative Fill"),
             tr("No Generative preset is configured. Open the AI Agent settings "
                "and create a preset of type \"Generative\" first."));
         return;

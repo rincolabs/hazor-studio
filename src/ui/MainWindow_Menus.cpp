@@ -29,8 +29,7 @@
 #include "ui/dialogs/RemoveBgDialog.hpp"
 #include "colorpicker/ColorPickerDialog.hpp"
 #include "core/SolidColorData.hpp"
-
-#include <QMessageBox>
+#include "ui/AppMessageDialog.hpp"
 
 // ── execToolDialog helper ─────────────────────────────────────────
 
@@ -119,10 +118,9 @@ void MainWindow::onMenuRemoveLayer()
     if (idx < 0) return;
 
     if (!m_ctrl->isLayerEmpty(idx)) {
-        auto ret = QMessageBox::question(this, tr("Delete Layer"),
-            tr("This layer is not empty. Delete it anyway?"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ret != QMessageBox::Yes) return;
+        if (!AppMessageDialog::confirm(this, tr("Delete Layer"),
+                tr("This layer is not empty. Delete it anyway?")))
+            return;
     }
 
     m_ctrl->removeSelectedNodes();
@@ -582,16 +580,14 @@ void MainWindow::showAiUpscaleDialog(UpscaleTarget target)
     UpscaleOptions options = dlg.options();
     if (options.target == UpscaleTarget::CurrentDocument
         && options.output == UpscaleOutputMode::ReplaceDocument) {
-        QMessageBox::warning(this, tr("AI Upscale"),
+        AppMessageDialog::warning(this, tr("AI Upscale"),
             tr("Replace Document is disabled until full document snapshots are available. Use New Document."));
         return;
     }
     if (options.target == UpscaleTarget::CurrentLayer
         && options.output == UpscaleOutputMode::ReplaceLayer) {
-        const auto answer = QMessageBox::question(this, tr("AI Upscale"),
-            tr("Replace the current layer with the upscaled result?"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (answer != QMessageBox::Yes)
+        if (!AppMessageDialog::confirm(this, tr("AI Upscale"),
+                tr("Replace the current layer with the upscaled result?")))
             return;
     }
 

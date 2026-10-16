@@ -449,6 +449,8 @@ add_executable(Hazor WIN32
     src/ui/SwatchesPanel.hpp
     src/ui/AppComboBox.cpp
     src/ui/AppComboBox.hpp
+    src/ui/AppMessageDialog.hpp
+    src/ui/AppMessageDialog.cpp
     src/ui/ColorMixerPanel.cpp
     src/ui/ColorMixerPanel.hpp
     src/ui/ColorPaletteBar.cpp

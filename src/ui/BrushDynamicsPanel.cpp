@@ -10,6 +10,7 @@
 #include "brush/BrushTipLibrary.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ui/IconUtils.hpp"
 
 #include <QVBoxLayout>
@@ -1452,21 +1453,20 @@ bool BrushDynamicsPanel::confirmDiscardChanges()
     if (!hasUnsavedChanges())
         return true;
 
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Question);
-    box.setWindowTitle(tr("Unsaved Changes"));
-    box.setText(tr("The preset \"%1\" has been changed.").arg(m_selectedPresetName));
-    box.setInformativeText(tr("Do you want to save the changes?"));
-    QPushButton *saveBtn = box.addButton(tr("Save"), QMessageBox::AcceptRole);
-    box.addButton(tr("Discard"), QMessageBox::DestructiveRole);
-    QPushButton *cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.setDefaultButton(saveBtn);
-    box.exec();
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Save"), QMessageBox::AcceptRole },
+        { tr("Discard"), QMessageBox::DestructiveRole },
+        { tr("Cancel"), QMessageBox::RejectRole },
+    };
+    const int clicked = AppMessageDialog::choice(
+        this, tr("Unsaved Changes"),
+        tr("The preset \"%1\" has been changed.").arg(m_selectedPresetName),
+        AppMessageDialog::Icon::Question, buttons, /*defaultIndex=*/0,
+        tr("Do you want to save the changes?"));
 
-    QAbstractButton *clicked = box.clickedButton();
-    if (clicked == cancelBtn)
+    if (clicked == 2) // Cancel
         return false;                       // veto the switch/close
-    if (clicked == saveBtn) {
+    if (clicked == 0) { // Save
         // Overwrite the selected preset with the live state, then re-baseline.
         if (m_presets.manager)
             m_presets.manager->overwritePreset(m_selectedPresetName, currentSettings());

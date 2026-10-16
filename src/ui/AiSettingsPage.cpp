@@ -2,6 +2,7 @@
 #include "AppSettingsMetrics.hpp"
 #include "AppCheckBox.hpp"
 #include "AppComboBox.hpp"
+#include "ui/AppMessageDialog.hpp"
 
 #include "ai/runtime/AiRuntimeManager.hpp"
 #include "ai/runtime/AiExecutionProvider.hpp"
@@ -27,7 +28,6 @@
 #include <QProgressBar>
 #include <QFrame>
 #include <QFileDialog>
-#include <QMessageBox>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QDir>
@@ -1080,15 +1080,13 @@ void AiSettingsPage::onUseAsDefault(const QString& task, const QString& modelId)
 
 void AiSettingsPage::onRemoveModel(const QString& modelId)
 {
-    const auto ret = QMessageBox::question(
-        this, tr("Remove model"),
-        tr("Remove the downloaded model '%1' and its files? You can download it again later.").arg(modelId),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (ret != QMessageBox::Yes)
+    if (!AppMessageDialog::confirm(
+            this, tr("Remove model"),
+            tr("Remove the downloaded model '%1' and its files? You can download it again later.").arg(modelId)))
         return;
     QString err;
     if (!AiModelRegistry::instance()->removeInstalled(modelId, &err))
-        QMessageBox::warning(this, tr("Remove model"), err);
+        AppMessageDialog::warning(this, tr("Remove model"), err);
     // removeInstalled refreshes the registry → refreshModelList() runs.
 }
 

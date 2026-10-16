@@ -26,7 +26,7 @@
 #include <QtConcurrentRun>
 #include <QFutureWatcher>
 #include <QInputDialog>
-#include <QMessageBox>
+#include "ui/AppMessageDialog.hpp"
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -914,10 +914,9 @@ void ExportImageDialog::onDeletePreset()
     if (idx <= 0) return;
 
     const auto& preset = m_presets[idx - 1];
-    auto ret = QMessageBox::question(this, tr("Delete Preset"),
-        tr("Delete preset \"%1\"?").arg(preset.name),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (ret != QMessageBox::Yes) return;
+    if (!AppMessageDialog::confirm(this, tr("Delete Preset"),
+            tr("Delete preset \"%1\"?").arg(preset.name)))
+        return;
 
     m_presets.removeAt(idx - 1);
     savePresets();
