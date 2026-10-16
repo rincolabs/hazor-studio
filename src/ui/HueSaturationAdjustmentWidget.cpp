@@ -828,8 +828,13 @@ bool HueSaturationAdjustmentWidget::sampleHue(const QImage& input,
         || docPos.x() < 0 || docPos.y() < 0
         || docPos.x() >= input.width() || docPos.y() >= input.height())
         return false;
-    const int x = std::clamp(static_cast<int>(std::lround(docPos.x())), 0, input.width() - 1);
-    const int y = std::clamp(static_cast<int>(std::lround(docPos.y())), 0, input.height() - 1);
+    // docPos is continuous and integers sit on pixel edges (the bounds check
+    // above is [0, size)), so the pixel under the cursor is floor(), not
+    // lround(): rounding took the right/bottom neighbour over three quarters of
+    // every pixel's area, so zoomed in the hue picked depended on where
+    // inside the pixel the click landed.
+    const int x = std::clamp(static_cast<int>(std::floor(docPos.x())), 0, input.width() - 1);
+    const int y = std::clamp(static_cast<int>(std::floor(docPos.y())), 0, input.height() - 1);
     const QColor c = input.pixelColor(x, y);
     if (c.alpha() == 0)
         return false;

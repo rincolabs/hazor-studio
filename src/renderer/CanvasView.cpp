@@ -243,6 +243,19 @@ static QPointF constrainAngle45(const QPointF& from, const QPointF& to)
                    from.y() + std::sin(snapped) * len);
 }
 
+// Which pixel does a continuous document/layer coordinate fall in? Integers sit
+// on pixel EDGES (see screenToDocument), so it is floor(x) — what fillBucket()
+// already does. std::round()/std::lround() pick the neighbour as soon as the
+// fraction reaches 0.5, which covers three quarters of a pixel's area (only the
+// top-left quadrant rounds back to its own pixel): zoomed in, a click in the
+// same visible pixel seeded a different one depending on where inside it it
+// landed. floor also handles negative coordinates, which is what the lround
+// here was reaching for.
+static inline int docPixelIndex(double coordinate)
+{
+    return static_cast<int>(std::floor(coordinate));
+}
+
 // x/y are continuous DOCUMENT-pixel coordinates, where integers sit on texel
 // edges and the centre of texel i is i + 0.5; the taps are indexed by texel
 // (integer = centre), so the coordinate is shifted half a texel first. Same
@@ -5206,8 +5219,12 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         // Check if click is inside existing selection (move mode)
         bool insideSelection = false;
         if (m_selectMode == SelectMode::Replace && m_doc->selection.active() && !m_doc->selection.isEmpty()) {
-            int sx = static_cast<int>(std::round(m_selectStart.x()));
-            int sy = static_cast<int>(std::round(m_selectStart.y()));
+            // Hit-test the pixel the click is in, not its neighbour: with
+            // round(), a click in the right/bottom part of an edge pixel tested
+            // the pixel outside the selection and started a new one instead of
+            // moving it (and the reverse one pixel further out).
+            const int sx = docPixelIndex(m_selectStart.x());
+            const int sy = docPixelIndex(m_selectStart.y());
             insideSelection = m_doc->selection.isSelected(sx, sy);
         }
 
@@ -5259,12 +5276,12 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
             if (m_controller) {
                 // Tool params are document coords (same convention as
                 // select_rect); the handler maps doc→layer itself for
-                // transformed layers. lround (not truncation) so negative
-                // coords don't shift by 1px.
+                // transformed layers. docPixelIndex, so the seed is the pixel
+                // under the cursor rather than its right/bottom neighbour.
                 QPointF docPos = screenToDocument(e->position());
                 m_controller->executeTool("select_magic_wand", {
-                    {"x", static_cast<double>(std::lround(docPos.x()))},
-                    {"y", static_cast<double>(std::lround(docPos.y()))},
+                    {"x", static_cast<double>(docPixelIndex(docPos.x()))},
+                    {"y", static_cast<double>(docPixelIndex(docPos.y()))},
                     {"tolerance", static_cast<double>(m_quickSelectTolerance)},
                     {"contiguous", 1.0},
                     {"mode", static_cast<double>(static_cast<int>(m_selectMode))}
@@ -8094,8 +8111,8 @@ QPointF CanvasView::snapToEdge(QPointF docPos)
 
     // The edge map is in document space; convert the screen-px search radius
     // to doc px so the magnet feels the same at any zoom.
-    int cx = static_cast<int>(std::round(docPos.x()));
-    int cy = static_cast<int>(std::round(docPos.y()));
+    int cx = docPixelIndex(docPos.x());
+    int cy = docPixelIndex(docPos.y());
     const float zoom = m_doc->zoom > 0.01f ? m_doc->zoom : 1.0f;
     int radius = std::max(1, static_cast<int>(std::round(m_magneticSearchRadius / zoom)));
 
@@ -8195,17 +8212,25 @@ QRect CanvasView::doQuickSelectDab(const QPointF& docPos)
         inv12 = sh * 0.5 * (1.0 + invT.m12() - invT.m22() - invT.m32());
     }
 
+    // Fold half a pixel into the translation so the map takes doc-pixel CENTRES
+    // to layer space; flooring that is the layer pixel a doc pixel sits on. The
+    // reads below used to round a corner-mapped coordinate instead, which is
+    // half a layer pixel off as soon as the layer is scaled or rotated (exact
+    // for an untransformed layer, where this is a no-op).
+    const double inv02c = inv02 + 0.5 * (inv00 + inv01);
+    const double inv12c = inv12 + 0.5 * (inv10 + inv11);
+
     // Dab center in doc-pixel coords
-    int cx = static_cast<int>(std::round(docPos.x()));
-    int cy = static_cast<int>(std::round(docPos.y()));
+    int cx = docPixelIndex(docPos.x());
+    int cy = docPixelIndex(docPos.y());
     int brushR = static_cast<int>(m_brushSettings.size * 0.5f);
     if (brushR < 1) brushR = 1;
 
     // Seed color: map dab center (doc-pixel) to layer pixel and read
-    double seedLx = inv00 * cx + inv01 * cy + inv02;
-    double seedLy = inv10 * cx + inv11 * cy + inv12;
-    int seedLxI = std::clamp(static_cast<int>(seedLx + 0.5), 0, sw - 1);
-    int seedLyI = std::clamp(static_cast<int>(seedLy + 0.5), 0, sh - 1);
+    double seedLx = inv00 * cx + inv01 * cy + inv02c;
+    double seedLy = inv10 * cx + inv11 * cy + inv12c;
+    int seedLxI = std::clamp(docPixelIndex(seedLx), 0, sw - 1);
+    int seedLyI = std::clamp(docPixelIndex(seedLy), 0, sh - 1);
     const uchar* sp = srcBits + (seedLyI * sw + seedLxI) * 4;
     int sR = sp[0], sG = sp[1], sB = sp[2], sA = sp[3];
 
@@ -8234,10 +8259,10 @@ QRect CanvasView::doQuickSelectDab(const QPointF& docPos)
             const int dx = x - cx;
             if (dx * dx + dy * dy > brushR2) continue;
             // Map doc-pixel to layer-pixel for color reading
-            double lx = inv00 * x + inv01 * y + inv02;
-            double ly = inv10 * x + inv11 * y + inv12;
-            int lxI = std::clamp(static_cast<int>(lx + 0.5), 0, sw - 1);
-            int lyI = std::clamp(static_cast<int>(ly + 0.5), 0, sh - 1);
+            double lx = inv00 * x + inv01 * y + inv02c;
+            double ly = inv10 * x + inv11 * y + inv12c;
+            int lxI = std::clamp(docPixelIndex(lx), 0, sw - 1);
+            int lyI = std::clamp(docPixelIndex(ly), 0, sh - 1);
             const uchar* px = srcBits + (lyI * sw + lxI) * 4;
             if (SelectionMask::colorMatches(px, sR, sG, sB, sA,
                                             m_quickSelectTolerance)) {
@@ -10784,8 +10809,10 @@ QColor CanvasView::eyedropperSampleColor(QPointF screenPos)
     if (node->type != LayerTreeNode::Type::Layer) return {};
 
     QPointF imgPos = screenToImage(screenPos, layer);
-    int px = static_cast<int>(std::round(imgPos.x()));
-    int py = static_cast<int>(std::round(imgPos.y()));
+    // Same conversion ColorSamplerService::sampleLayer does internally, so the
+    // bounds check and the sample can never disagree about the pixel.
+    const int px = docPixelIndex(imgPos.x());
+    const int py = docPixelIndex(imgPos.y());
 
     int lw = layer->cpuImage.width();
     int lh = layer->cpuImage.height();

@@ -371,6 +371,13 @@ Plus one rule that is specific to a point sampler:
   detail of a pure copy, destroyed by a filter with nothing to filter. With the
   shift a whole-pixel offset gives fraction 0, which both samplers short-circuit
   to a texel copy — the §4.4 principle applied to a sampler rather than a pass.
+- **The same convention decides which pixel a click acts on.** A tool that
+  turns a continuous coordinate into a pixel index — the Eyedropper, the Magic
+  Wand's seed, Quick Select, the selection hit test, the Hue/Saturation and
+  Curves pickers — must use `floor`, like `fillBucket()` does. `round`/`lround`
+  reports the right/bottom neighbour as soon as a fraction reaches 0.5, so only
+  the top-left quadrant of a pixel (25% of its area) reports itself, and it
+  mishandles negative coordinates outside the canvas as a bonus.
 - **Clamp the taps, do not widen the guard.** The shift moves the first tap of
   the outer half texel outside the buffer, where there is no neighbour to blend
   with; clamping to edge there keeps the sampler in bounds while a coordinate

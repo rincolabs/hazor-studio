@@ -8,6 +8,23 @@
 #include <QPainter>
 #include <algorithm>
 
+namespace {
+// Which pixel does a continuous coordinate fall in? Document, layer and
+// framebuffer coordinates all put integers on pixel EDGES (screenToDocument,
+// layerPixelToDocumentPixel, screenPos * devicePixelRatio), so the pixel
+// containing x is floor(x) — the convention Fill Bucket already follows.
+// std::round() is wrong twice over: it picks the neighbour whenever the
+// fraction reaches 0.5, which is three quarters of every pixel's area (only
+// the top-left quadrant rounds back to its own pixel), and it truncates
+// toward zero's wrong side for negative coordinates. Zoomed in, that made the
+// same visible pixel report two different colours depending on where inside it
+// the cursor sat.
+inline int pixelIndex(double coordinate)
+{
+    return static_cast<int>(std::floor(coordinate));
+}
+} // namespace
+
 int ColorSamplerService::sampleRadius(SampleSize size)
 {
     switch (size) {
@@ -68,8 +85,8 @@ QColor ColorSamplerService::sampleLayer(const Layer* layer, QPointF imagePos,
 {
     if (!layer || layer->cpuImage.isNull()) return {};
 
-    int px = static_cast<int>(std::round(imagePos.x()));
-    int py = static_cast<int>(std::round(imagePos.y()));
+    const int px = pixelIndex(imagePos.x());
+    const int py = pixelIndex(imagePos.y());
 
     int radius = sampleRadius(size);
     return averageRegion(layer->cpuImage, px, py, radius);
@@ -149,8 +166,8 @@ QColor ColorSamplerService::sampleComposite(const Document* doc, QPointF docPos,
     }
     p.end();
 
-    int dx = static_cast<int>(std::round(docPos.x()));
-    int dy = static_cast<int>(std::round(docPos.y()));
+    const int dx = pixelIndex(docPos.x());
+    const int dy = pixelIndex(docPos.y());
 
     int radius = sampleRadius(size);
     return averageRegion(composite, dx, dy, radius);
@@ -162,8 +179,10 @@ QColor ColorSamplerService::sampleCompositeFramebuffer(const QImage& fb,
 {
     if (fb.isNull()) return {};
 
-    int sx = static_cast<int>(std::round(screenPos.x()));
-    int sy = static_cast<int>(std::round(screenPos.y()));
+    // screenPos arrives already multiplied by devicePixelRatio, so it is a
+    // continuous framebuffer-pixel coordinate and the same floor rule applies.
+    const int sx = pixelIndex(screenPos.x());
+    const int sy = pixelIndex(screenPos.y());
 
     int radius = sampleRadius(size);
     return averageRegion(fb, sx, sy, radius);
