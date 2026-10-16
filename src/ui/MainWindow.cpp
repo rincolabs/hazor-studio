@@ -1740,6 +1740,8 @@ MainWindow::MainWindow(QWidget* parent)
         m_ctrl->setActiveNode(flatIndex);
         showAiUpscaleDialog(UpscaleTarget::CurrentLayer);
     });
+    connect(m_layerPanel, &LayerPanel::exportNodeRequested,
+            this, &MainWindow::onExportNode);
     connect(m_layerPanel, &LayerPanel::solidColorRequested,
             this, &MainWindow::createSolidColorLayer);
     connect(m_layerPanel, &LayerPanel::solidColorEditRequested,
@@ -3712,16 +3714,10 @@ int MainWindow::openProjectFiles(const QStringList& files)
     return opened;
 }
 
-void MainWindow::onExportFile()
+void MainWindow::runImageExport(const QString& format, const QString& suggestedBaseName,
+                                std::function<bool(const QString&, QString*)> save)
 {
-    if (!m_doc) return;
-
-    ExportImageDialog dlg(m_doc, this);
-    if (dlg.exec() != QDialog::Accepted) return;
-
-    auto opts = dlg.options();
-
-    QString defaultExt = normalizeImageExtension(opts.format);
+    QString defaultExt = normalizeImageExtension(format);
     if (defaultExt == QLatin1String("jpeg"))
         defaultExt = QStringLiteral("jpg");
     if (defaultExt.isEmpty())
@@ -3730,11 +3726,10 @@ void MainWindow::onExportFile()
     // Lock the save dialog to the format chosen in the export dialog, so the
     // user cannot pick a different type here and the extension is applied
     // automatically — like professional editors.
-    const QString lockedFilter =
-        imageCodecRegistry().saveFilterForFormat(opts.format);
+    const QString lockedFilter = imageCodecRegistry().saveFilterForFormat(format);
 
     QString path = QFileDialog::getSaveFileName(
-        this, tr("Export Image"), QString(), lockedFilter, nullptr,
+        this, tr("Export Image"), suggestedBaseName, lockedFilter, nullptr,
         QFileDialog::DontConfirmOverwrite);
     if (path.isEmpty()) return;
 
@@ -3757,19 +3752,6 @@ void MainWindow::onExportFile()
         if (ret != QMessageBox::Yes) return;
     }
 
-    ExportOptions eopts;
-    eopts.quality     = opts.quality;
-    eopts.compression = opts.compression;
-    eopts.progressive = opts.progressive;
-    eopts.preserveAlpha = opts.transparency;
-    // Encode with the format chosen in the export dialog; the path's suffix is
-    // now guaranteed to match it.
-    eopts.format      = normalizeImageExtension(opts.format);
-    eopts.colorMode   = opts.colorMode;
-    eopts.colorSelectedProfile = opts.colorSelectedProfile;
-    if (opts.resizeEnabled && opts.targetSize.isValid())
-        eopts.resizeTo = opts.targetSize;
-
     beginProgressDelayed(tr("Progress"), tr("Exporting Image"), false);
     auto* watcher = new QFutureWatcher<QPair<bool, QString>>(this);
     connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this, [this, watcher]() {
@@ -3780,11 +3762,74 @@ void MainWindow::onExportFile()
             QMessageBox::warning(this, tr("Could Not Export Image"),
                 result.second.isEmpty() ? tr("Failed to export image.") : result.second);
     });
-    watcher->setFuture(QtConcurrent::run([doc = m_doc, path, eopts]() {
+    watcher->setFuture(QtConcurrent::run([path, save]() {
         QString errorMessage;
-        const bool ok = saveImage(doc, path, eopts, &errorMessage);
+        const bool ok = save(path, &errorMessage);
         return QPair<bool, QString>(ok, errorMessage);
     }));
+}
+
+void MainWindow::onExportFile()
+{
+    if (!m_doc) return;
+
+    ExportImageDialog dlg(m_doc, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    auto opts = dlg.options();
+
+    ExportOptions eopts;
+    eopts.quality     = opts.quality;
+    eopts.compression = opts.compression;
+    eopts.progressive = opts.progressive;
+    eopts.preserveAlpha = opts.transparency;
+    // Encode with the format chosen in the export dialog; the path's suffix is
+    // guaranteed to match it (runImageExport locks the save dialog to it).
+    eopts.format      = normalizeImageExtension(opts.format);
+    eopts.colorMode   = opts.colorMode;
+    eopts.colorSelectedProfile = opts.colorSelectedProfile;
+    if (opts.resizeEnabled && opts.targetSize.isValid())
+        eopts.resizeTo = opts.targetSize;
+
+    Document* doc = m_doc;
+    runImageExport(opts.format, QString(), [doc, eopts](const QString& path, QString* errorMessage) {
+        return saveImage(doc, path, eopts, errorMessage);
+    });
+}
+
+void MainWindow::onExportNode(int flatIndex)
+{
+    if (!m_doc) return;
+    LayerTreeNode* node = m_doc->nodeAt(flatIndex);
+    if (!node || !node->hasIsolatedExportContent()) {
+        QMessageBox::information(this, tr("Export Layer"),
+            tr("This adjustment has no content of its own to export — it only "
+               "modifies the layers beneath it."));
+        return;
+    }
+
+    ExportImageDialog dlg(m_doc, node, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    auto opts = dlg.options();
+
+    ExportOptions eopts;
+    eopts.quality     = opts.quality;
+    eopts.compression = opts.compression;
+    eopts.progressive = opts.progressive;
+    eopts.preserveAlpha = opts.transparency;
+    eopts.format      = normalizeImageExtension(opts.format);
+    eopts.colorMode   = opts.colorMode;
+    eopts.colorSelectedProfile = opts.colorSelectedProfile;
+    if (opts.resizeEnabled && opts.targetSize.isValid())
+        eopts.resizeTo = opts.targetSize;
+
+    Document* doc = m_doc;
+    const bool layerBounds = opts.layerBoundsMode;
+    runImageExport(opts.format, node->name,
+                   [doc, node, eopts, layerBounds](const QString& path, QString* errorMessage) {
+        return saveNodeImage(doc, node, path, eopts, layerBounds, errorMessage);
+    });
 }
 
 void MainWindow::onImportImage()

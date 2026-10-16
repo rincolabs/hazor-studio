@@ -2,6 +2,7 @@
 #include "renderer/DocumentCompositor.hpp"
 #include "renderer/RenderContext.hpp"
 #include "core/Document.hpp"
+#include "core/LayerTreeNode.hpp"
 #include "color/ColorManagementService.hpp"
 #include <QFileInfo>
 
@@ -12,6 +13,11 @@ QImage compositeImage(Document* doc)
     ctx.targetType = RenderTargetType::Export;
     if (doc) ctx.outputSize = doc->size;
     return DocumentCompositor::composite(doc, ctx);
+}
+
+QImage compositeNodeImage(Document* doc, const LayerTreeNode* node, bool trimToLayerBounds)
+{
+    return DocumentCompositor::compositeIsolatedNode(doc, node, trimToLayerBounds);
 }
 
 bool saveImage(Document* doc, const QString& path)
@@ -38,15 +44,12 @@ DocumentImage compositeDocumentImage(Document* doc, const QString& sourceFormat)
     return image;
 }
 
-bool saveImage(Document* doc, const QString& path, const ExportOptions& opts, QString* errorMessage)
+// Resizes, colour-manages and writes an already-composited image. Shared by
+// saveImage (full document) and saveNodeImage (isolated layer/group) so the
+// two stay pixel-consistent past the compositing step.
+static bool writeCompositedImage(Document* doc, QImage img, const QString& path,
+                                 const ExportOptions& opts, QString* errorMessage)
 {
-    QImage img = compositeImage(doc);
-    if (img.isNull()) {
-        if (errorMessage)
-            *errorMessage = QStringLiteral("Could not render the document for export.");
-        return false;
-    }
-
     if (opts.resizeTo.isValid() && !opts.resizeTo.isEmpty())
         img = img.scaled(opts.resizeTo, Qt::IgnoreAspectRatio, opts.resampleMode);
 
@@ -89,4 +92,27 @@ bool saveImage(Document* doc, const QString& path, const ExportOptions& opts, QS
     saveOptions.embedColorProfile = (opts.colorMode != ExportColorMode::DoNotEmbedProfile)
         && !image.iccProfile.isEmpty();
     return codec->write(path, image, saveOptions, errorMessage);
+}
+
+bool saveImage(Document* doc, const QString& path, const ExportOptions& opts, QString* errorMessage)
+{
+    QImage img = compositeImage(doc);
+    if (img.isNull()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Could not render the document for export.");
+        return false;
+    }
+    return writeCompositedImage(doc, img, path, opts, errorMessage);
+}
+
+bool saveNodeImage(Document* doc, const LayerTreeNode* node, const QString& path,
+                   const ExportOptions& opts, bool trimToLayerBounds, QString* errorMessage)
+{
+    QImage img = compositeNodeImage(doc, node, trimToLayerBounds);
+    if (img.isNull()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("This layer has no content of its own to export.");
+        return false;
+    }
+    return writeCompositedImage(doc, img, path, opts, errorMessage);
 }

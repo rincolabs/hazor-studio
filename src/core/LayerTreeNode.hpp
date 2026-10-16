@@ -65,6 +65,20 @@ public:
         return type == Type::Adjustment && adjustment != nullptr;
     }
 
+    // True when this node has rendered content of its own that an isolated
+    // composite (Export Layer/Group As...) can show with no other layer in
+    // the document as backdrop. Most Normal-Mode adjustments (Curves,
+    // Levels, Hue/Saturation, ...) only modify whatever is already
+    // composited beneath them and fail this; Solid Color is the one
+    // Adjustment type that is itself a fill, independent of any backdrop.
+    bool hasIsolatedExportContent() const {
+        if (type == Type::Layer) return layer != nullptr;
+        if (type == Type::Group) return true;
+        if (type == Type::Adjustment)
+            return adjustment && adjustment->type == QLatin1String("solidcolor");
+        return false;
+    }
+
     // Single Layer Mode: visible adjustments nested under this Layer node.
     bool hasVisibleAdjustmentChildren() const {
         if (type != Type::Layer) return false;

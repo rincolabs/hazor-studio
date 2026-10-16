@@ -12,6 +12,7 @@
 #include "color/ColorManagementService.hpp"
 
 class Document;
+class LayerTreeNode;
 class QComboBox;
 class QStackedWidget;
 class QSlider;
@@ -60,9 +61,18 @@ public:
         Qt::TransformationMode resampleMode = Qt::SmoothTransformation;
         ExportColorMode colorMode = ExportColorMode::ConvertToSRgbAndEmbed;
         ColorProfile colorSelectedProfile;
+
+        // Only meaningful when the dialog was opened for Export Layer/Group
+        // As... (exportNode != nullptr): true trims to the node's own
+        // rendered bounds (Layer Bounds), false keeps the document's canvas
+        // size (Preserve Canvas Size).
+        bool layerBoundsMode = true;
     };
 
     explicit ExportImageDialog(Document* doc, QWidget* parent = nullptr);
+    // Export Layer/Group As...: isolates exportNode instead of the whole
+    // document. exportNode must satisfy hasIsolatedExportContent().
+    ExportImageDialog(Document* doc, const LayerTreeNode* exportNode, QWidget* parent = nullptr);
     Options options() const;
 
 protected:
@@ -79,6 +89,7 @@ private slots:
     void onHeightChanged(int value);
     void onConstrainToggled(bool checked);
     void onResampleChanged(int index);
+    void onDimensionModeChanged(int index);
     void onColorModeChanged(int index);
     void onColorProfileChanged(int index);
     void onPresetSelected(int index);
@@ -100,14 +111,18 @@ private:
     void syncSizeLink();
     void updateColorWarning();
     QString formatFileSize(qint64 bytes) const;
+    QImage computeSourceImage() const;
 
     Document* m_doc = nullptr;
+    const LayerTreeNode* m_exportNode = nullptr;
     Options m_opts;
     QImage m_fullImage;
     QImage m_previewSourceImage;
     QVector<ExportPreset> m_presets;
 
     // UI
+    QComboBox* m_dimensionModeCombo = nullptr;
+    QLabel* m_emptyContentWarningLabel = nullptr;
     QComboBox* m_formatCombo = nullptr;
     QComboBox* m_presetCombo = nullptr;
     QStackedWidget* m_optionsStack = nullptr;

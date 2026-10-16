@@ -151,8 +151,16 @@ File: [src/renderer/DocumentCompositor.cpp](../src/renderer/DocumentCompositor.c
 | `compositeOnlyFlatIndex` | a single layer (clone/heal sampling, without stack adjustments) |
 | `compositeFromFlatIndex` | from the index down (clone "current & below") |
 | `compositeSubset(doc, layers, applyAdjustments, ctx, ancestorGroupsPassThrough)` | subset in the real stack order — basis for Merge Down. With `ancestorGroupsPassThrough=true`, ancestor groups are **not** isolated (the group opacity/blend/effects stay live in the tree, not baked into the pixels) |
+| `compositeIsolatedNode(doc, node, trimToLayerBounds)` | one Layer/Group/Solid-Color-adjustment node alone, against a transparent backdrop — Export Layer/Group As... (§3.3) |
 
-Output is always in document space (`doc->size`), `Format_RGBA8888`.
+Output is always in document space (`doc->size`), `Format_RGBA8888`. This
+includes `compositeIsolatedNode`: it renders at full canvas size/alignment
+even though only one node's content ends up in the result, because a nested
+Normal-Mode adjustment's mask (and any future group mask) is anchored in
+absolute document-pixel space — shifting or resizing the render target would
+misalign it. Its Layer Bounds mode crops the *result* to its non-transparent
+pixels afterward instead; a node with no on-canvas pixels (e.g. entirely
+outside the canvas) has nothing to crop to and comes back null.
 
 ### 3.2 Internal flow
 
@@ -187,6 +195,7 @@ compositeFiltered
 |---|---|---|
 | Idle projection | [ProjectionCache](../src/renderer/ProjectionCache.hpp) + [AsyncProjectionBuilder](../src/renderer/AsyncProjectionBuilder.hpp) | `composite` on a worker thread over a COW snapshot (`shallowClone`); result becomes the texture displayed by Path A |
 | Export | [src/io/ImageIO.cpp](../src/io/ImageIO.cpp) | `composite` |
+| Export Layer/Group As... | [src/io/ImageIO.cpp](../src/io/ImageIO.cpp) (`compositeNodeImage`) | `compositeIsolatedNode`: one Layer/Group/Solid-Color-adjustment node against a transparent backdrop, no other node in the document, rendered canvas-sized/aligned like any other composite. Layer Bounds mode then alpha-trims the result to its non-transparent pixels (null if there are none, e.g. the node sits entirely outside the canvas). A non-Solid-Color Adjustment has no content of its own (`LayerTreeNode::hasIsolatedExportContent`) and is rejected before rendering. |
 | Merge Down | `applyMergeLayersState` ([ImageController.cpp](../src/controller/ImageController.cpp)) | `compositeSubset` of the pair, siblings from the same container, ancestor groups pass-through; blend mode survives when only one side has pixels |
 | Merge Visible / Flatten | `applyMergeVisibleState` / `applyFlattenImageState` | full `composite`; result is hoisted to the root |
 | Clone/Heal sampling | `compositeOnlyFlatIndex` / `compositeFromFlatIndex` | without stack adjustments (do not "bake" twice) |

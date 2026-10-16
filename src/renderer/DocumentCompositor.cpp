@@ -762,6 +762,34 @@ void renderNodesFiltered(QImage& target,
     }
 }
 
+// Bounding box of the non-transparent pixels of an RGBA8888 image, in its own
+// pixel coordinates. Empty when the whole image is transparent.
+QRect nonTransparentBounds(const QImage& img)
+{
+    const int w = img.width();
+    const int h = img.height();
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+    for (int y = 0; y < h; ++y) {
+        const uchar* row = img.constScanLine(y);
+        int first = -1, last = -1;
+        for (int x = 0; x < w; ++x) {
+            if (row[x * 4 + 3] == 0)
+                continue;
+            if (first < 0) first = x;
+            last = x;
+        }
+        if (first < 0)
+            continue;
+        if (minY > y) minY = y;
+        maxY = y;
+        minX = std::min(minX, first);
+        maxX = std::max(maxX, last);
+    }
+    if (maxX < minX)
+        return QRect();
+    return QRect(QPoint(minX, minY), QPoint(maxX, maxY));
+}
+
 QImage compositeFiltered(const Document* doc,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
@@ -843,4 +871,68 @@ QImage DocumentCompositor::compositeSubset(
     return compositeFiltered(doc, [&includeLayers](const LayerTreeNode* node) {
         return includeLayers.count(node) > 0;
     }, applyAdjustments, ancestorGroupsPassThrough);
+}
+
+QImage DocumentCompositor::compositeIsolatedNode(const Document* doc, const LayerTreeNode* node,
+                                                 bool trimToLayerBounds)
+{
+    if (!doc || !node || doc->size.isEmpty())
+        return QImage();
+
+    // Every node without content of its own (a non-Solid-Color adjustment,
+    // an Effect entry, ...) only modifies whatever is already composited
+    // beneath it — exactly the "backdrop dependency" the feature must block.
+    if (!node->hasIsolatedExportContent())
+        return QImage();
+
+    const bool isGroup = node->type == LayerTreeNode::Type::Group;
+    const bool isLayer = node->type == LayerTreeNode::Type::Layer;
+
+    const double cw = doc->size.width();
+    const double ch = doc->size.height();
+    QTransform ndcToPixel;
+    ndcToPixel.translate(cw * 0.5, ch * 0.5);
+    ndcToPixel.scale(cw * 0.5, -ch * 0.5);
+
+    // Always canvas-sized and canvas-aligned, like every other CPU composite
+    // — a Normal-Mode adjustment nested inside an exported group, or a
+    // layer's own mask, is positioned in absolute document-pixel space
+    // (maskOrigin etc.), so rendering into anything but the real canvas grid
+    // would misalign them. Layer Bounds crops the result afterward instead
+    // of resizing the render target, which also means content entirely
+    // outside the canvas has nothing to crop to and is reported as empty.
+    //
+    // Node visibility is intentionally bypassed here (exporting a hidden
+    // layer/group must still render it); descendants keep their own
+    // visibility via renderNodesFiltered's normal check.
+    QImage result(doc->size, QImage::Format_ARGB32_Premultiplied);
+    result.fill(Qt::transparent);
+
+    if (isLayer) {
+        drawLayerNode(result, node, doc, ndcToPixel);
+    } else if (isGroup) {
+        QImage childStage(doc->size, QImage::Format_ARGB32_Premultiplied);
+        childStage.fill(Qt::transparent);
+        renderNodesFiltered(childStage, node->children, doc, ndcToPixel,
+                            [](const LayerTreeNode*) { return true; },
+                            /*applyAdjustments=*/true, /*groupsPassThrough=*/false);
+        applyGroupMask(childStage, node);                 // no-op until group masks exist
+        applyGroupEffects(childStage, node, childStage.size());
+        // The group's own blend mode/opacity, composited against a
+        // transparent backdrop (no layers below it in an isolated export) —
+        // same W3C fade semantics as any other isolated composite here.
+        compositeStage(result, childStage, node->blendMode, node->opacity);
+    } else {
+        applyAdjustmentNode(result, node);
+    }
+
+    QImage rgba = result.convertToFormat(QImage::Format_RGBA8888);
+    if (trimToLayerBounds) {
+        const QRect trimmed = nonTransparentBounds(rgba);
+        if (trimmed.isEmpty())
+            return QImage(); // nothing visible of this node's own content
+        if (trimmed != QRect(QPoint(0, 0), rgba.size()))
+            rgba = rgba.copy(trimmed);
+    }
+    return rgba;
 }

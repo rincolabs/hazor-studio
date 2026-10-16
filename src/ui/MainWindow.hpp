@@ -90,6 +90,7 @@ private slots:
     void onSaveFile();
     void onSaveAsFile();
     void onExportFile();
+    void onExportNode(int flatIndex);
     void onImportImage();
     void onEditDocument();
     void onAddLayer();
@@ -277,6 +278,13 @@ private:
     void showLayerStylesDialog(int flatIndex);
     void refreshLayerPanel();
     void refreshPropertiesPanel();
+
+    // Shared tail of onExportFile/onExportNode: locks the save dialog to
+    // `format`, confirms overwrite, then runs `save` off the UI thread and
+    // reports the result. `suggestedBaseName` seeds the save dialog's file
+    // name (empty keeps the OS default).
+    void runImageExport(const QString& format, const QString& suggestedBaseName,
+                        std::function<bool(const QString& path, QString* errorMessage)> save);
 
     // Structural layer operations shared by the Layer menu actions and the
     // ShortcutManager callbacks (single source of truth for the behaviour).

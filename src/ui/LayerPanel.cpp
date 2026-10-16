@@ -440,6 +440,7 @@ LayerPanel::LayerPanel(QWidget* parent)
     connect(m_tree, &QTreeWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
         QMenu menu(this);
+        menu.setToolTipsVisible(true);
 
         QTreeWidgetItem* item = m_tree->itemAt(pos);
         int idx = item ? item->data(0, Qt::UserRole).toInt() : -1;
@@ -521,6 +522,23 @@ LayerPanel::LayerPanel(QWidget* parent)
                     menu.addAction(tr("Clear Layer Style"), [this, idx]() {
                         if (m_controller) m_controller->clearLayerEffects(idx);
                     });
+                }
+            }
+
+            // ── Export Layer/Group As... ──
+            if (node && node->type != LayerTreeNode::Type::Effect) {
+                menu.addSeparator();
+                auto* exportAction = menu.addAction(
+                    node->type == LayerTreeNode::Type::Group
+                        ? tr("Export Group As...") : tr("Export Layer As..."),
+                    [this, idx]() {
+                        emit exportNodeRequested(idx);
+                    });
+                exportAction->setEnabled(node->hasIsolatedExportContent());
+                if (!exportAction->isEnabled()) {
+                    exportAction->setToolTip(tr(
+                        "This adjustment has no content of its own — it only "
+                        "modifies the layers beneath it."));
                 }
             }
 

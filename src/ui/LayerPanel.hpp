@@ -36,6 +36,8 @@ signals:
     void grayscaleViewRequested(bool enabled);
     void layerStylesRequested(int index);
     void aiUpscaleRequested(int index);
+    // "Export Layer As..." / "Export Group As..." from the context menu.
+    void exportNodeRequested(int index);
     // Solid Color fill layer: the "New Adjustment Layer ▸ Solid Color" entry was
     // chosen (MainWindow runs the picker-first creation flow).
     void solidColorRequested();

@@ -37,4 +37,23 @@ public:
                                   bool applyAdjustments,
                                   const RenderContext& ctx,
                                   bool ancestorGroupsPassThrough = false);
+
+    // Renders a single Layer/Group/Solid-Color-adjustment node in isolation —
+    // its own transform/opacity/mask/effects/blend against a transparent
+    // backdrop, excluding every other node in the document (used by Export
+    // Layer/Group As...). Rendered at the document's canvas size/alignment,
+    // like every other CPU composite (a nested adjustment's mask is anchored
+    // in absolute document-pixel space, so the render target can't be
+    // shifted off that grid without misaligning it). Node visibility is
+    // bypassed for `node` itself but honoured for its descendants. Returns a
+    // null QImage when the node has no renderable content of its own (e.g. a
+    // Curves/Levels adjustment).
+    //
+    // trimToLayerBounds selects the two dimension modes: false keeps the
+    // image canvas-sized with the node positioned within it (Preserve Canvas
+    // Size); true crops to the composited result's own non-transparent
+    // bounds (Layer Bounds) — null when the node has no on-canvas pixels at
+    // all (e.g. it sits entirely outside the canvas).
+    static QImage compositeIsolatedNode(const Document* doc, const LayerTreeNode* node,
+                                        bool trimToLayerBounds);
 };
