@@ -109,6 +109,7 @@
 #include <QDesktopServices>
 #include <QFontDialog>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QLabel>
 #include <QPainter>
 #include <QImage>
@@ -2510,6 +2511,73 @@ void MainWindow::showViewportStatusMessage(const QString& message, int timeoutMs
     }
 }
 
+MainWindow::DroppedImageAction MainWindow::askDroppedImageAction()
+{
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("Open Image"));
+    box.setText(tr("How do you want to use this image?"));
+    QPushButton* openBtn = box.addButton(tr("Open Image"), QMessageBox::AcceptRole);
+    QPushButton* insertBtn = box.addButton(tr("Insert into Canvas"), QMessageBox::ActionRole);
+    box.addButton(tr("Cancel"), QMessageBox::RejectRole);
+    box.setDefaultButton(insertBtn);
+
+    box.exec();
+    QAbstractButton* clicked = box.clickedButton();
+    if (clicked == openBtn) return DroppedImageAction::OpenAsNewDocument;
+    if (clicked == insertBtn) return DroppedImageAction::InsertIntoCanvas;
+    return DroppedImageAction::Cancel;
+}
+
+bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
+{
+    if (paths.isEmpty()) return false;
+
+    const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
+    std::optional<ColorManagedOpenResult> colorManaged;
+    if (loaded.ok) {
+        colorManaged = prepareImageForOpenWithDialogs(
+            this,
+            loaded.image,
+            ColorManagementService::instance().defaultOpenContext(paths.front()));
+        if (!colorManaged)
+            return false;
+    }
+    const QImage probe = colorManaged
+        ? convertDocumentImageToQImage(colorManaged->image)
+        : QImage();
+    const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
+
+    auto& tab = createTab(tr("Untitled"), s);
+    tab.isDirty = false;
+    tab.currentProjectPath.clear();
+    if (m_doc) {
+        m_doc->size = s;
+        m_doc->selection.resize(s.width(), s.height());
+        m_doc->selection.clear();
+        m_doc->selection.setActive(false);
+        if (colorManaged && colorManaged->finalDocumentProfile.isValid()) {
+            m_doc->setColorProfile(colorManaged->finalDocumentProfile);
+            m_doc->setProfileSource(colorManaged->finalDocumentProfile.source());
+        }
+    }
+
+    // New, empty document: there is no prior pan/zoom state to place the drop
+    // relative to, so every imported path lands centered (dropCanvasNdc = origin).
+    if (m_ctrl && !m_ctrl->importExternalImages(paths, QPointF(0.0, 0.0))) {
+        QMessageBox::warning(this, tr("Import Image"),
+            tr("No supported image could be imported from the dropped files."));
+    }
+
+    refreshLayerPanel();
+    refreshPropertiesPanel();
+    updateLayerMenuState();
+    updateStatusFromDocument();
+    if (colorManaged && !colorManaged->warningMessage.isEmpty())
+        showViewportStatusMessage(colorManaged->warningMessage, 7000);
+    return true;
+}
+
 MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize& size)
 {
     auto doc = std::make_unique<Document>();
@@ -2737,41 +2805,19 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     connect(canvas, &CanvasView::externalImagesDropped, this, [this, canvas](const QStringList& paths, QPointF screenPos) {
         if (!canvas || paths.isEmpty()) return;
 
+        // No document open: nothing to offer a choice for, open directly.
         if (!m_ctrl || !m_doc) {
-            const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
-            std::optional<ColorManagedOpenResult> colorManaged;
-            if (loaded.ok) {
-                colorManaged = prepareImageForOpenWithDialogs(
-                    this,
-                    loaded.image,
-                    ColorManagementService::instance().defaultOpenContext(paths.front()));
-                if (!colorManaged)
-                    return;
-            }
-            const QImage probe = colorManaged
-                ? convertDocumentImageToQImage(colorManaged->image)
-                : QImage();
-            const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
-            auto& tab = createTab(tr("Untitled"), s);
-            tab.isDirty = false;
-            tab.currentProjectPath.clear();
-            if (m_doc) {
-                m_doc->size = s;
-                m_doc->selection.resize(s.width(), s.height());
-                m_doc->selection.clear();
-                m_doc->selection.setActive(false);
-                if (colorManaged && colorManaged->finalDocumentProfile.isValid()) {
-                    m_doc->setColorProfile(colorManaged->finalDocumentProfile);
-                    m_doc->setProfileSource(colorManaged->finalDocumentProfile.source());
-                }
-            }
-            updateStatusFromDocument();
-            if (colorManaged && !colorManaged->warningMessage.isEmpty())
-                showViewportStatusMessage(colorManaged->warningMessage, 7000);
-            updateLayerMenuState();
+            openDroppedImagesAsNewDocument(paths);
+            return;
         }
 
-        if (!m_ctrl || !m_doc) return;
+        const DroppedImageAction action = askDroppedImageAction();
+        if (action == DroppedImageAction::Cancel) return;
+        if (action == DroppedImageAction::OpenAsNewDocument) {
+            openDroppedImagesAsNewDocument(paths);
+            return;
+        }
+
         const QPointF ndc = canvas->screenToCanvasNdc(screenPos);
         if (!m_ctrl->importExternalImages(paths, ndc)) {
             QMessageBox::warning(this, tr("Import Image"),
@@ -5629,56 +5675,11 @@ void MainWindow::dropEvent(QDropEvent* e)
         return;
     }
 
-    const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
-    std::optional<ColorManagedOpenResult> colorManaged;
-    if (loaded.ok) {
-        colorManaged = prepareImageForOpenWithDialogs(
-            this,
-            loaded.image,
-            ColorManagementService::instance().defaultOpenContext(paths.front()));
-        if (!colorManaged) {
-            e->ignore();
-            return;
-        }
-    }
-    const QImage probe = colorManaged
-        ? convertDocumentImageToQImage(colorManaged->image)
-        : QImage();
-    const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
-    auto& tab = createTab(tr("Untitled"), s);
-    tab.isDirty = false;
-    tab.currentProjectPath.clear();
-    if (m_doc) {
-        m_doc->size = s;
-        m_doc->selection.resize(s.width(), s.height());
-        m_doc->selection.clear();
-        m_doc->selection.setActive(false);
-        if (colorManaged && colorManaged->finalDocumentProfile.isValid()) {
-            m_doc->setColorProfile(colorManaged->finalDocumentProfile);
-            m_doc->setProfileSource(colorManaged->finalDocumentProfile.source());
-        }
-    }
-
-    if (!m_ctrl || !m_canvas) {
+    // No document open at all: nothing to offer a choice for, open directly.
+    if (!openDroppedImagesAsNewDocument(paths)) {
         e->ignore();
         return;
     }
-
-    const QPoint localOnCanvas = m_canvas->mapFrom(this, e->position().toPoint());
-    const QPointF ndc = m_canvas->screenToCanvasNdc(localOnCanvas);
-    if (!m_ctrl->importExternalImages(paths, ndc)) {
-        QMessageBox::warning(this, tr("Import Image"),
-            tr("No supported image could be imported from the dropped files."));
-        e->ignore();
-        return;
-    }
-
-    refreshLayerPanel();
-    refreshPropertiesPanel();
-    updateLayerMenuState();
-    updateStatusFromDocument();
-    if (colorManaged && !colorManaged->warningMessage.isEmpty())
-        showViewportStatusMessage(colorManaged->warningMessage, 7000);
     e->acceptProposedAction();
 }
 

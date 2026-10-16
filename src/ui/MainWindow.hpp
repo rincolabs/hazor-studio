@@ -279,6 +279,17 @@ private:
     void refreshLayerPanel();
     void refreshPropertiesPanel();
 
+    // Drag-and-drop of image file(s): when a document is already open, asks
+    // whether to open them as a new document or insert them into the active
+    // canvas as new layers. Cancel discards the drop.
+    enum class DroppedImageAction { OpenAsNewDocument, InsertIntoCanvas, Cancel };
+    DroppedImageAction askDroppedImageAction();
+    // Opens dropped image file(s) directly as a new document: reuses the same
+    // color-management-aware open pipeline as Open Image (prepareImageForOpenWithDialogs),
+    // then imports every path as a layer via ImageController::importExternalImages.
+    // Returns false if the user canceled before a tab was created.
+    bool openDroppedImagesAsNewDocument(const QStringList& paths);
+
     // Shared tail of onExportFile/onExportNode: locks the save dialog to
     // `format`, confirms overwrite, then runs `save` off the UI thread and
     // reports the result. `suggestedBaseName` seeds the save dialog's file
