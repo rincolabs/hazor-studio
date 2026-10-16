@@ -11,6 +11,7 @@ QT_DIR="${QT_DIR:-$THIRD_PARTY_DIR/Qt/6.8.3/gcc_64}"
 ONNXRUNTIME_DIR="${ONNXRUNTIME_DIR:-$THIRD_PARTY_DIR/onnx/runtime/onnxruntime-linux-x64-gpu-1.26.0}"
 REALESRGAN_DIR="${REALESRGAN_DIR:-$THIRD_PARTY_DIR/realesrgan}"
 REALESRGAN_MODELS_DIR="${REALESRGAN_MODELS_DIR:-$THIRD_PARTY_DIR/realesrgan/models}"
+RAWENGINE_DEPS_DIR="${RAWENGINE_DEPS_DIR:-$THIRD_PARTY_DIR/rawengine}"
 
 require_dir() {
     local path="$1"
@@ -35,6 +36,7 @@ echo "Qt: $QT_DIR"
 echo "ONNX Runtime: $ONNXRUNTIME_DIR"
 echo "RealESRGAN: $REALESRGAN_DIR"
 echo "RealESRGAN models: $REALESRGAN_MODELS_DIR"
+echo "RawEngine deps: $RAWENGINE_DEPS_DIR"
 
 mkdir -p "$BUILD_DIR"
 
@@ -43,6 +45,7 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_PREFIX_PATH="$QT_DIR" \
   -DONNXRUNTIME_ROOT="$ONNXRUNTIME_DIR" \
   -DONNXRUNTIME_INCLUDE_DIR="$ONNXRUNTIME_DIR/include" \
-  -DONNXRUNTIME_LIBRARY="$ONNXRUNTIME_DIR/lib/libonnxruntime.so"
+  -DONNXRUNTIME_LIBRARY="$ONNXRUNTIME_DIR/lib/libonnxruntime.so" \
+  -DRAWENGINE_DEPS_DIR="$RAWENGINE_DEPS_DIR"
 
 cmake --build "$BUILD_DIR" -j"$(nproc)" --target Hazor

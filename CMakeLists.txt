@@ -54,6 +54,110 @@ if(ENABLE_ONNXRUNTIME)
     endif()
 endif()
 
+# ── RawEngine (optional) ─────────────────────────────────────
+# Native RAW development engine derived from RawTherapee's rtengine, vendored
+# under src/rawengine/ (see src/rawengine/PROVENANCE.md). Fase 1 of
+# tmp/feat-raw-therapee-plan.md: builds the standalone `rawengine` static
+# library; nothing in Hazor links it yet (that is Fase 3's RawEngine API).
+# Same optional-dependency pattern as ENABLE_ONNXRUNTIME (invariant 10): with
+# OFF, or with required dependencies missing, Hazor still builds untouched.
+option(ENABLE_RAWENGINE "Build the native RAW development engine (rawengine)" ON)
+option(RAWENGINE_WITH_LENSFUN "Build RawEngine with lensfun lens-correction support" ON)
+set(RAWENGINE_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/rawengine" CACHE PATH
+    "Root of the vendored RawEngine dependencies (zlib, libjpeg-turbo, libpng, libtiff, expat, lcms2, fftw3f, exiv2, lensfun)")
+
+# Helper for the plain "static .a + include/ dir" vendored deps below — all of
+# them except exiv2 (ships its own CMake package) and lensfun (also needs
+# glib-2.0). Every RawEngine dependency is pinned to its own vendored copy
+# under RAWENGINE_DEPS_DIR rather than whatever version the system/Hazor's own
+# OpenCV happen to have — RawEngine's only real constraint here is exact,
+# reproducible dependency versions, not where the files physically live.
+function(_rawengine_add_imported_lib target header libname subdir)
+    find_path(${target}_INCLUDE_DIR "${header}" HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/include")
+    find_library(${target}_LIBRARY NAMES "${libname}" HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/lib")
+    if(${target}_INCLUDE_DIR AND ${target}_LIBRARY AND NOT TARGET ${target})
+        add_library(${target} STATIC IMPORTED)
+        set_target_properties(${target} PROPERTIES
+            IMPORTED_LOCATION "${${target}_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${${target}_INCLUDE_DIR}")
+    endif()
+endfunction()
+
+set(RAWENGINE_FOUND OFF)
+if(ENABLE_RAWENGINE)
+    find_package(Threads)
+
+    _rawengine_add_imported_lib(Rawengine::ZLIB zlib.h z zlib)
+    _rawengine_add_imported_lib(Rawengine::JPEG jpeglib.h jpeg libjpeg-turbo)
+    _rawengine_add_imported_lib(Rawengine::PNG png.h png libpng)
+    _rawengine_add_imported_lib(Rawengine::TIFF tiff.h tiff libtiff)
+    _rawengine_add_imported_lib(Rawengine::EXPAT expat.h expat expat)
+    if(TARGET Rawengine::PNG)
+        set_property(TARGET Rawengine::PNG APPEND PROPERTY INTERFACE_LINK_LIBRARIES Rawengine::ZLIB)
+    endif()
+    if(TARGET Rawengine::TIFF)
+        set_property(TARGET Rawengine::TIFF APPEND PROPERTY INTERFACE_LINK_LIBRARIES Rawengine::ZLIB Rawengine::JPEG)
+    endif()
+
+    find_path(LCMS2_INCLUDE_DIR lcms2.h HINTS "${RAWENGINE_DEPS_DIR}/lcms2/include")
+    find_library(LCMS2_LIBRARY NAMES lcms2 HINTS "${RAWENGINE_DEPS_DIR}/lcms2/lib")
+    if(LCMS2_INCLUDE_DIR AND LCMS2_LIBRARY AND NOT TARGET LCMS2::LCMS2)
+        add_library(LCMS2::LCMS2 STATIC IMPORTED)
+        set_target_properties(LCMS2::LCMS2 PROPERTIES
+            IMPORTED_LOCATION "${LCMS2_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${LCMS2_INCLUDE_DIR}")
+    endif()
+
+    find_path(FFTW3F_INCLUDE_DIR fftw3.h HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/include")
+    find_library(FFTW3F_LIBRARY NAMES fftw3f HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/lib")
+    find_library(FFTW3F_THREADS_LIBRARY NAMES fftw3f_threads HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/lib")
+    if(FFTW3F_INCLUDE_DIR AND FFTW3F_LIBRARY AND FFTW3F_THREADS_LIBRARY AND NOT TARGET FFTW3F::FFTW3F)
+        add_library(FFTW3F::FFTW3F STATIC IMPORTED)
+        set_target_properties(FFTW3F::FFTW3F PROPERTIES
+            IMPORTED_LOCATION "${FFTW3F_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${FFTW3F_INCLUDE_DIR}"
+            INTERFACE_LINK_LIBRARIES "${FFTW3F_THREADS_LIBRARY}")
+    endif()
+
+    # exiv2 ships its own CMake package config (and the Exiv2::exiv2lib
+    # target) — the prebuilt upstream release tarball, same vendoring pattern
+    # as ONNX Runtime, rather than a from-source build of the whole library.
+    find_package(exiv2 CONFIG QUIET
+        PATHS "${RAWENGINE_DEPS_DIR}/exiv2/lib/cmake/exiv2"
+        NO_DEFAULT_PATH)
+
+    set(LENSFUN_FOUND OFF)
+    if(RAWENGINE_WITH_LENSFUN)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(GLIB2 glib-2.0)
+        endif()
+        find_path(LENSFUN_INCLUDE_DIR lensfun/lensfun.h HINTS "${RAWENGINE_DEPS_DIR}/lensfun/include")
+        find_library(LENSFUN_LIBRARY NAMES lensfun HINTS "${RAWENGINE_DEPS_DIR}/lensfun/lib")
+        if(LENSFUN_INCLUDE_DIR AND LENSFUN_LIBRARY AND GLIB2_FOUND)
+            set(LENSFUN_FOUND ON)
+            if(NOT TARGET Lensfun::Lensfun)
+                add_library(Lensfun::Lensfun STATIC IMPORTED)
+                set_target_properties(Lensfun::Lensfun PROPERTIES
+                    IMPORTED_LOCATION "${LENSFUN_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${LENSFUN_INCLUDE_DIR}"
+                    INTERFACE_LINK_LIBRARIES "${GLIB2_LIBRARIES}")
+            endif()
+        endif()
+    endif()
+
+    if(Threads_FOUND AND
+       TARGET Rawengine::ZLIB AND TARGET Rawengine::JPEG AND TARGET Rawengine::PNG AND
+       TARGET Rawengine::TIFF AND TARGET Rawengine::EXPAT AND
+       TARGET LCMS2::LCMS2 AND TARGET FFTW3F::FFTW3F AND TARGET Exiv2::exiv2lib AND
+       (LENSFUN_FOUND OR NOT RAWENGINE_WITH_LENSFUN))
+        set(RAWENGINE_FOUND ON)
+        add_subdirectory(src/rawengine)
+    else()
+        message(WARNING "ENABLE_RAWENGINE is ON but required dependencies were not found under RAWENGINE_DEPS_DIR='${RAWENGINE_DEPS_DIR}' (zlib/libjpeg-turbo/libpng/libtiff/expat/lcms2/fftw3f/exiv2/lensfun). Building without RAW support.")
+    endif()
+endif()
+
 # Single source of truth for the app version: project(... VERSION ...) above.
 # Everything that displays a version (splash screen, About dialog, MCP server
 # info, packaging) derives from the generated header instead of a hardcoded literal.

@@ -15,11 +15,19 @@ Linux AppImage builds are also produced automatically in CI — see
 | zlib | — | Brush import (`.kpp` / `.bundle`) |
 | OpenGL | 3.3 Core | Runtime GPU viewport |
 | ONNX Runtime | 1.26.x | **Optional** — enables AI selection / background removal |
+| zlib, libjpeg-turbo, libpng, libtiff, expat, lcms2, fftw3f (+threads), exiv2, lensfun | — | **Optional** — [`src/rawengine/`](../src/rawengine/) (native RAW engine); all 9 are vendored under `3rdparty/rawengine/`, independent of Hazor's own system `zlib`/OpenCV above, so RawEngine's dependency versions never drift with the host system |
 
 > The editor **builds and runs without ONNX Runtime**. The AI inference layer
 > (SAM object selection, matting / background removal) simply reports itself as
 > unavailable at runtime. CPU/CUDA/TensorRT are chosen as runtime *Execution
 > Providers* in Settings — they are never separate builds.
+
+> The editor **builds and runs without the RAW engine**. See
+> [`src/rawengine/PROVENANCE.md`](../src/rawengine/PROVENANCE.md) for what is
+> vendored and the current port status — as of this writing `rawengine` itself
+> does not link cleanly yet (Fase 2 of `tmp/feat-raw-therapee-plan.md` is
+> pending), but nothing in `Hazor` depends on it, so this never affects the
+> main build.
 
 ## Dependency downloads
 
@@ -71,6 +79,34 @@ From the [Real-ESRGAN v0.2.5.0 release](https://github.com/xinntao/Real-ESRGAN/r
 | Linux | [`realesrgan-ncnn-vulkan-20220424-ubuntu.zip`](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip) |
 | Windows | [`realesrgan-ncnn-vulkan-20220424-windows.zip`](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip) |
 
+### RawEngine dependencies — *optional*
+
+Native RAW development engine ([`src/rawengine/`](../src/rawengine/)), still
+under construction — see
+[`src/rawengine/PROVENANCE.md`](../src/rawengine/PROVENANCE.md). All 9
+dependencies are vendored under `3rdparty/rawengine/<lib>/` with a pinned
+version each, same philosophy as Qt/ONNX Runtime/RealESRGAN above but
+deliberately **not** sharing versions with Hazor's own system `zlib`/OpenCV —
+RawEngine's only real constraint here is an exact, reproducible version per
+dependency, not where the files happen to live. A prebuilt release where
+upstream publishes one, built from source into that same layout otherwise:
+
+| Library | Version | How it got into `3rdparty/rawengine/<lib>/` |
+|---------|---------|----------------------------------------------|
+| exiv2 | 0.28.9 | Prebuilt: [`exiv2-0.28.9-Linux-x86_64.tar.gz`](https://github.com/Exiv2/exiv2/releases/download/v0.28.9/exiv2-0.28.9-Linux-x86_64.tar.gz) extracted as-is |
+| zlib | 1.3.2 | Built from [source](https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz) (CMake): `-DZLIB_BUILD_SHARED=OFF -DZLIB_BUILD_EXAMPLES=OFF` |
+| libjpeg-turbo | 3.2.0 | Built from [source](https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.0.tar.gz) (CMake): `-DENABLE_SHARED=OFF -DWITH_SIMD=OFF -DWITH_TURBOJPEG=OFF -DWITH_JPEG8=ON` (`WITH_SIMD=OFF` because this build has no `nasm`) |
+| libpng | 1.6.59 | Built from [source](https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.59.tar.gz) (CMake) against the vendored zlib above: `-DPNG_SHARED=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF` |
+| libtiff | 4.7.2 | Built from [source](https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz) (CMake) against the vendored zlib + libjpeg-turbo above, with jbig/lzma/zstd/webp/libdeflate off: `-DBUILD_SHARED_LIBS=OFF -Dtiff-tools=OFF -Dtiff-tests=OFF` |
+| expat | 2.9.0 | Built from [source](https://github.com/libexpat/libexpat/releases/download/R_2_9_0/expat-2.9.0.tar.gz) (CMake): `-DEXPAT_SHARED_LIBS=OFF -DEXPAT_BUILD_TESTS=OFF` |
+| lcms2 | 2.16 | Built from [source](https://github.com/mm2/Little-CMS/releases/download/lcms2.16/lcms2-2.16.tar.gz): `./configure --prefix=.../lcms2 --disable-shared --enable-static --with-pic && make install` |
+| fftw3f | 3.3.10 | Built from [source](https://www.fftw.org/fftw-3.3.10.tar.gz): `./configure --prefix=.../fftw3f --enable-float --enable-threads --disable-shared --enable-static --with-pic && make install` |
+| lensfun | 0.3.4 | Built from [source](https://github.com/lensfun/lensfun/archive/refs/tags/v0.3.4.tar.gz) (CMake): `-DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DBUILD_DOC=OFF -DINSTALL_PYTHON_MODULE=OFF`; also needs `glib-2.0` (system) |
+
+`RAWENGINE_WITH_LENSFUN=OFF` drops the lensfun requirement (Lens Corrections
+becomes unavailable, nothing else is affected) if the above proves awkward on
+a given platform — see the plan's risk notes.
+
 ### Bundled ONNX models (optional, cross-platform)
 
 Downloaded once and placed under the app's model directory; not required to
@@ -93,8 +129,19 @@ the paths with environment variables.
 3rdparty/
 ├── Qt/6.8.3/gcc_64/                              # Qt 6 SDK
 ├── onnx/runtime/onnxruntime-linux-x64-gpu-1.26.0/ # ONNX Runtime (include/ + lib/)
-└── realesrgan/                                    # RealESRGAN binaries
-    └── models/                                    # RealESRGAN models
+├── realesrgan/                                    # RealESRGAN binaries
+│   └── models/                                    # RealESRGAN models
+└── rawengine/                                      # RawEngine deps (include/ + lib/ each)
+    ├── zlib/
+    ├── libjpeg-turbo/
+    ├── libpng/
+    ├── libtiff/
+    ├── expat/
+    ├── lcms2/
+    ├── fftw3f/
+    ├── exiv2/
+    ├── lensfun/
+    └── rtdata/                                      # Runtime resources (profiles, ICC, DCP) — see licenses/
 ```
 
 Each path can be overridden via environment variable:
@@ -105,6 +152,7 @@ Each path can be overridden via environment variable:
 | `THIRD_PARTY_DIR` | `<root>/3rdparty` |
 | `QT_DIR` | `$THIRD_PARTY_DIR/Qt/6.8.3/gcc_64` |
 | `ONNXRUNTIME_DIR` | `$THIRD_PARTY_DIR/onnx/runtime/onnxruntime-linux-x64-gpu-1.26.0` |
+| `RAWENGINE_DEPS_DIR` | `$THIRD_PARTY_DIR/rawengine` |
 | `REALESRGAN_DIR` | `$THIRD_PARTY_DIR/realesrgan` |
 | `REALESRGAN_MODELS_DIR` | `$THIRD_PARTY_DIR/realesrgan/models` |
 
@@ -143,6 +191,8 @@ cmake --build build -j"$(nproc)" --target Hazor
 | Option | Default | Effect |
 |--------|---------|--------|
 | `ENABLE_ONNXRUNTIME` | `ON` | Build with ONNX Runtime AI inference support |
+| `ENABLE_RAWENGINE` | `ON` | Build the native RAW engine (`rawengine` target); nothing in `Hazor` links it yet |
+| `RAWENGINE_WITH_LENSFUN` | `ON` | Build RawEngine with lensfun lens-correction support |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |
 | `CMAKE_BUILD_TYPE` | — | `Release` for optimized builds, `Debug` for tests |
 
