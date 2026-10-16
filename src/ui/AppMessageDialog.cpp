@@ -2,7 +2,9 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
+#include <QBoxLayout>
 #include <QCoreApplication>
+#include <QDialogButtonBox>
 #include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -89,6 +91,22 @@ void wrapMessageText(QMessageBox& box)
     grid->addWidget(wrapper, row, col, rowSpan, colSpan);
 }
 
+// QDialogButtonBox positions buttons by ButtonRole according to the active
+// style's platform layout policy, not by the order they were added — so a
+// caller-specified button order has no visual effect on its own. Re-inserting
+// the buttons into the box's own layout, in caller order, overrides that.
+void reorderButtons(QMessageBox& box, const QList<QAbstractButton*>& orderedButtons)
+{
+    auto* buttonBox = box.findChild<QDialogButtonBox*>();
+    auto* buttonLayout = buttonBox ? qobject_cast<QBoxLayout*>(buttonBox->layout()) : nullptr;
+    if (!buttonLayout)
+        return;
+    for (QAbstractButton* btn : orderedButtons)
+        buttonLayout->removeWidget(btn);
+    for (QAbstractButton* btn : orderedButtons)
+        buttonLayout->addWidget(btn);
+}
+
 // Scoped to this QMessageBox instance only, not the global QLabel style.
 void applyMinimumTextHeight(QMessageBox& box)
 {
@@ -166,6 +184,7 @@ int choice(QWidget* parent, const QString& title, const QString& text, Icon icon
     }
     if (defaultIndex >= 0 && defaultIndex < buttonPtrs.size())
         box.setDefaultButton(qobject_cast<QPushButton*>(buttonPtrs[defaultIndex]));
+    reorderButtons(box, buttonPtrs);
 
     box.exec();
 

@@ -2515,15 +2515,15 @@ void MainWindow::showViewportStatusMessage(const QString& message, int timeoutMs
 MainWindow::DroppedImageAction MainWindow::askDroppedImageAction()
 {
     const QList<AppMessageDialog::ButtonSpec> buttons = {
-        { tr("Open Image"), QMessageBox::AcceptRole },
-        { tr("Insert into Canvas"), QMessageBox::ActionRole },
         { tr("Cancel"), QMessageBox::RejectRole },
+        { tr("Insert into Canvas"), QMessageBox::ActionRole },
+        { tr("Open Image"), QMessageBox::AcceptRole },
     };
     const int clicked = AppMessageDialog::choice(
         this, tr("Open Image"), tr("How do you want to use this image?"),
         AppMessageDialog::Icon::Question, buttons, /*defaultIndex=*/1);
-    if (clicked == 0) return DroppedImageAction::OpenAsNewDocument;
     if (clicked == 1) return DroppedImageAction::InsertIntoCanvas;
+    if (clicked == 2) return DroppedImageAction::OpenAsNewDocument;
     return DroppedImageAction::Cancel;
 }
 
