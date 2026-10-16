@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(ImageEditor VERSION 0.0.2 LANGUAGES CXX)
+# C is needed for src/rawengine/external/cJSON (a plain-C library): without a
+# C compiler registered, CMake silently drops its .c source from the target
+# instead of erroring, which only surfaces as undefined cJSON_* references at
+# final link time, once something actually links `rawengine` into Hazor.
+project(ImageEditor VERSION 0.0.2 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -56,11 +60,13 @@ endif()
 
 # ── RawEngine (optional) ─────────────────────────────────────
 # Native RAW development engine derived from RawTherapee's rtengine, vendored
-# under src/rawengine/ (see src/rawengine/PROVENANCE.md). Fase 1 of
-# tmp/feat-raw-therapee-plan.md: builds the standalone `rawengine` static
-# library; nothing in Hazor links it yet (that is Fase 3's RawEngine API).
+# under src/rawengine/ (see src/rawengine/PROVENANCE.md) and built as the
+# standalone `rawengine` static library. src/raw/ (Fase 3 of
+# tmp/feat-raw-therapee-plan.md) is the only part of Hazor that links it —
+# see the "RawEngine link" block below, near the ONNX Runtime one it mirrors.
 # Same optional-dependency pattern as ENABLE_ONNXRUNTIME (invariant 10): with
-# OFF, or with required dependencies missing, Hazor still builds untouched.
+# OFF, or with required dependencies missing, Hazor still builds untouched —
+# src/raw/*.cpp just compiles without HAVE_RAWENGINE instead.
 option(ENABLE_RAWENGINE "Build the native RAW development engine (rawengine)" ON)
 option(RAWENGINE_WITH_LENSFUN "Build RawEngine with lensfun lens-correction support" ON)
 set(RAWENGINE_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/rawengine" CACHE PATH
@@ -470,6 +476,20 @@ add_executable(Hazor WIN32
     src/io/ProjectFileService.cpp
     src/io/ProjectFileService.hpp
 
+    # ── Native RAW engine API (Fase 3, tmp/feat-raw-therapee-plan.md) ──
+    # The only part of Hazor allowed to #include "rtengine/..."; compiles in
+    # both ENABLE_RAWENGINE configurations (see RawEngineAvailability.hpp).
+    src/raw/RawEngineAvailability.hpp
+    src/raw/RawMetadata.hpp
+    src/raw/RawGeometry.hpp
+    src/raw/RawImageBuffer.hpp
+    src/raw/RawDevelopParams.hpp
+    src/raw/RawDevelopParams.cpp
+    src/raw/RawSession.hpp
+    src/raw/RawSession.cpp
+    src/raw/RawEngine.hpp
+    src/raw/RawEngine.cpp
+
     src/brush/BrushTypes.hpp
     src/brush/DabContext.hpp
     src/brush/Brush.hpp
@@ -852,6 +872,17 @@ if(ONNXRUNTIME_FOUND)
     set_target_properties(Hazor PROPERTIES
         BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
         INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}")
+endif()
+
+# ── RawEngine link ────────────────────────────────────────────
+# Fase 3: src/raw/ is now the first (and only) thing in Hazor that links
+# `rawengine` — HAVE_RAWENGINE gates every src/raw/*.cpp accordingly.
+# rawengine's PUBLIC include dir (src/rawengine/) comes along transitively,
+# so src/raw/*.cpp's `#include "rtengine/..."` resolves without a separate
+# target_include_directories call.
+if(RAWENGINE_FOUND)
+    target_compile_definitions(Hazor PRIVATE HAVE_RAWENGINE=1)
+    target_link_libraries(Hazor PRIVATE rawengine)
 endif()
 
 # Theme sources — object library for reuse by tests

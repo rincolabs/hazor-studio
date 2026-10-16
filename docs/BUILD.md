@@ -22,12 +22,13 @@ Linux AppImage builds are also produced automatically in CI — see
 > unavailable at runtime. CPU/CUDA/TensorRT are chosen as runtime *Execution
 > Providers* in Settings — they are never separate builds.
 
-> The editor **builds and runs without the RAW engine**. See
-> [`src/rawengine/PROVENANCE.md`](../src/rawengine/PROVENANCE.md) for what is
-> vendored and the current port status — `rawengine` now builds and links
-> cleanly on Linux (Fase 2 of `tmp/feat-raw-therapee-plan.md`; MSVC/Windows
-> not yet attempted), but nothing in `Hazor` depends on it yet (that is
-> Fase 3), so this never affects the main build.
+> The editor **builds and runs without the RAW engine** (`ENABLE_RAWENGINE=OFF`,
+> or with its dependencies missing): `Hazor` just builds without
+> [`src/raw/`](../src/raw/)'s `HAVE_RAWENGINE` support, same pattern as ONNX
+> Runtime above. See [`docs/RAW-ENGINE.md`](RAW-ENGINE.md) for the native API
+> surface and [`src/rawengine/PROVENANCE.md`](../src/rawengine/PROVENANCE.md)
+> for what is vendored and the current port status (Linux only — MSVC/Windows
+> not yet attempted).
 
 ## Dependency downloads
 
@@ -191,7 +192,7 @@ cmake --build build -j"$(nproc)" --target Hazor
 | Option | Default | Effect |
 |--------|---------|--------|
 | `ENABLE_ONNXRUNTIME` | `ON` | Build with ONNX Runtime AI inference support |
-| `ENABLE_RAWENGINE` | `ON` | Build the native RAW engine (`rawengine` target); nothing in `Hazor` links it yet |
+| `ENABLE_RAWENGINE` | `ON` | Build the native RAW engine (`rawengine` target) and link it into `Hazor` via [`src/raw/`](../src/raw/) (see [`docs/RAW-ENGINE.md`](RAW-ENGINE.md)) |
 | `RAWENGINE_WITH_LENSFUN` | `ON` | Build RawEngine with lensfun lens-correction support |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |
 | `CMAKE_BUILD_TYPE` | — | `Release` for optimized builds, `Debug` for tests |

@@ -55,7 +55,14 @@ public:
     bool useBundledProfiles = true;
     Glib::ustring defProfRaw = DEFPROFILE_RAW;
     Glib::ustring defProfImg = DEFPROFILE_IMG;
-    rtengine::Settings rtSettings;
+    // Value-initialized (`{}`): Settings has no constructor of its own, and
+    // upstream relies on `Options` being a static-duration global (so this
+    // sub-object is zero-initialized before any constructor runs) to leave
+    // every field upstream's own setDefaults() doesn't explicitly set at a
+    // safe 0/false/"" rather than indeterminate. Our Options lives on the
+    // heap instead (App::m_options), which does not get that guarantee for
+    // free — RawEngine::initialize() (Fase 3) relies on this `{}` holding.
+    rtengine::Settings rtSettings{};
     std::vector<int> baBehav;
 
     // Fields added by Hazor's App::options() refactor of the vendored tree

@@ -102,6 +102,27 @@ What `rtcompat/` covers, concretely:
 `dcraw.cc`, `__attribute__((always_inline))` in two headers) and 8's W2
 OpenMP milestone are not done; see the plan file for what's left.
 
+## Status: Fase 3 of `tmp/feat-raw-therapee-plan.md` (Linux)
+
+`src/raw/` (outside this directory, see its own header comments) is the
+native API surface built on top of `rawengine` — the first thing to actually
+**link** it into `Hazor`, which surfaced two build-system gaps (neither in
+the vendored sources themselves, both fixed at the root/`rtcompat` level):
+
+- The root `CMakeLists.txt` never enabled the C language
+  (`project(... LANGUAGES CXX)`). `external/cJSON/src/cJSON.c` is the only
+  standalone `.c` source in the whole vendored tree — CMake silently drops a
+  `.c` source from a target's compile rules instead of erroring when no C
+  compiler is registered, so this only surfaced as undefined `cJSON_*`
+  references at the first real link of an executable needing them. Fixed by
+  `project(... LANGUAGES CXX C)`.
+- `rtcompat/rtgui/options.hpp`'s `rtengine::Settings rtSettings` member
+  needed `{}` (value-initialization). Upstream leaves several `Settings`
+  fields unset in its own `setDefaults()`, relying on `Options` being a
+  static-duration global (zero-initialized for free); our `Options` lives on
+  the heap (`App::m_options`), which doesn't get that guarantee without the
+  `{}`. See `tmp/feat-raw-therapee-plan.md`'s Fase 3 status for the detail.
+
 ## DCP camera profiles
 
 `rtdata/dcpprofiles/` (161 `.dcp` + `camera_model_aliases.json`, ~80 MB) is
