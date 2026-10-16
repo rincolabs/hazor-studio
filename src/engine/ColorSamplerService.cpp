@@ -56,6 +56,13 @@ QColor ColorSamplerService::averageRegion(const QImage& source, int cx, int cy, 
     int x2 = std::min(w - 1, cx + radius);
     int y2 = std::min(h - 1, cy + radius);
 
+    // This averages neighbouring pixels, so it has to weight colour by alpha
+    // (RENDER-PIPELINE.md 4.3). The colour stored in a transparent pixel is
+    // arbitrary — 0 in a composite that starts from fill(Qt::transparent) — yet
+    // a plain RGBA mean gave it full weight, so sampling across a soft or
+    // antialiased edge reported a colour dragged toward black: an 11x11 window
+    // half covered by a white stroke came back mid-grey. Alpha itself stays a
+    // plain mean, because it is the coverage of the region, not a colour.
     double r = 0, g = 0, b = 0, a = 0;
     int count = 0;
 
@@ -64,19 +71,23 @@ QColor ColorSamplerService::averageRegion(const QImage& source, int cx, int cy, 
         const uchar* row = source.constScanLine(y);
         for (int x = x1; x <= x2; ++x) {
             const uchar* px = row + x * 4;
-            r += px[0];
-            g += px[1];
-            b += px[2];
-            a += px[3];
+            const double w = px[3];
+            r += px[0] * w;
+            g += px[1] * w;
+            b += px[2] * w;
+            a += w;
             ++count;
         }
     }
 
     if (count == 0) return {};
 
-    return QColor(static_cast<int>(r / count + 0.5),
-                  static_cast<int>(g / count + 0.5),
-                  static_cast<int>(b / count + 0.5),
+    // An entirely transparent window has no colour to report; returning the
+    // straight mean of arbitrary colours is what this used to do.
+    const double norm = a > 0.0 ? 1.0 / a : 0.0;
+    return QColor(static_cast<int>(r * norm + 0.5),
+                  static_cast<int>(g * norm + 0.5),
+                  static_cast<int>(b * norm + 0.5),
                   static_cast<int>(a / count + 0.5));
 }
 

@@ -352,6 +352,12 @@ The Clone Stamp and Healing Brush do not go through `ImageEngine`: they point
 sample the frozen document snapshot per dab pixel
 ([`sampleBilinearRgbaRaw`](../src/brush/BrushRenderer.cpp)), as does the
 clone-source preview overlay ([`sampleCanvasBilinear`](../src/renderer/CanvasView.cpp)).
+The Eyedropper's 3x3/5x5/11x11 sample sizes average a neighbourhood too, in
+[`ColorSamplerService::averageRegion`](../src/engine/ColorSamplerService.cpp),
+and weight colour by alpha for the same reason — a plain RGBA mean reported a
+white stroke's edge as mid-grey. Its alpha stays a plain mean, since that is the
+coverage of the region rather than a colour.
+
 They carry the premultiplied rule themselves — the sampler mixes its four taps
 that way, and the Healing Brush's box blur stages premultiplied copies of both
 patches so each low-frequency base is an alpha-weighted average,
