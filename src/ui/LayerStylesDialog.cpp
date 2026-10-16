@@ -381,6 +381,10 @@ void LayerStylesDialog::addIntRow(QFormLayout* form, int row, const QString& lab
         effectAt(row).params[key] = value;
         emitPreview();
     });
+    connect(slider, &QSlider::sliderPressed, this,
+            [this]() { emit liveEditChanged(true); });
+    connect(slider, &QSlider::sliderReleased, this,
+            [this]() { emit liveEditChanged(false); });
 
     form->addRow(label, container);
 }
@@ -442,6 +446,10 @@ void LayerStylesDialog::addDoubleRow(QFormLayout* form, int row, const QString& 
         effectAt(row).params[key] = static_cast<double>(value) / factor;
         emitPreview();
     });
+    connect(slider, &QSlider::sliderPressed, this,
+            [this]() { emit liveEditChanged(true); });
+    connect(slider, &QSlider::sliderReleased, this,
+            [this]() { emit liveEditChanged(false); });
 
     form->addRow(label, container);
 }

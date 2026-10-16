@@ -3006,6 +3006,11 @@ void CanvasView::initializeGL()
     m_gpuViewport->setProjectionRepaintCallback([this]() {
         QMetaObject::invokeMethod(this, [this]() { update(); }, Qt::QueuedConnection);
     });
+    // Repaint when an off-thread layer-style bake finishes (Fase D async):
+    // the next paint's needsLayerSync poll uploads the freshly baked effect.
+    m_gpuViewport->setStyleBakeRepaintCallback([this]() {
+        QMetaObject::invokeMethod(this, [this]() { update(); }, Qt::QueuedConnection);
+    });
     m_brushRenderer.initGL();
     updateCanvasRect();
     m_antTimer.start();

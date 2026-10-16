@@ -7,6 +7,7 @@
 #include <QPainter>
 #include <QRectF>
 #include <cmath>
+#include <cstdint>
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -145,18 +146,23 @@ public:
         if (!m_styledBaseDirty && !m_styledBaseImage.isNull())
             return m_styledBaseImage;
 
+        // Everything below is full-resolution work — the tile composite and the
+        // mask pass in maskedBaseImage() just as much as the OpenCV blur in
+        // applyEffectStack(). On a large layer the whole function costs hundreds
+        // of milliseconds, so the live-preview path never calls it on the UI
+        // thread: StyleBakePool runs it on a COW node snapshot off-thread and
+        // hands the result back through commitStyledBaseBake().
+        //
+        // It must fire on a style/pixel/mask change but stay SILENT during an
+        // adjustment-layer drag — that silence is the proof the per-frame style
+        // re-render is gone.
         QImage source = maskedBaseImage();
         if (source.isNull()) {
-            m_styledBaseImage = QImage();
-            m_styledBaseBounds = QRectF();
-            m_styledBaseDirty = false;
+            commitStyledBaseBake(QImage(), QRectF(), m_styledBaseRevision);
             return m_styledBaseImage;
         }
 
         const QMargins padding = LayerEffect::effectPadding(effects);
-        // Verification log: this is the costly style blur. It must fire on a
-        // style/pixel/mask change but stay SILENT during an adjustment-layer drag
-        // — that silence is the proof the per-frame style re-render is gone.
         QImage result(source.width() + padding.left() + padding.right(),
                       source.height() + padding.top() + padding.bottom(),
                       QImage::Format_RGBA8888);
@@ -173,21 +179,76 @@ public:
         result = applyEffectStack(result, effects);
 
         const QRectF baseBounds = baseRenderImageBounds();
-        m_styledBaseImage = result;
-        m_styledBaseBounds = QRectF(baseBounds.left() - padding.left(),
+        commitStyledBaseBake(result,
+                             QRectF(baseBounds.left() - padding.left(),
                                     baseBounds.top() - padding.top(),
-                                    result.width(), result.height());
-        m_styledBaseDirty = false;
+                                    result.width(), result.height()),
+                             m_styledBaseRevision);
         return m_styledBaseImage;
     }
 
+    // True while computeStyledBaseImage() would actually have to recompute
+    // (as opposed to returning the cached bake). Lets GPUViewport/
+    // StyleBakePool decide whether a node needs the (potentially costly)
+    // async bake path at all before touching it.
+    bool styledBaseDirty() const { return m_styledBaseDirty; }
+
+    // Bumped by invalidateEffects() every time the node's pixels/mask/styles
+    // actually change. StyleBakePool tags each dispatched bake with the
+    // revision it was built for; commitStyledBaseBake() discards a bake whose
+    // revision is no longer the latest — a param change that lands while a bake
+    // is in flight leaves the node dirty so a fresh bake gets dispatched for
+    // the new params.
+    uint64_t styledBaseRevision() const { return m_styledBaseRevision; }
+
+    // Stores a styled-base bake — computed either inline by
+    // computeStyledBaseImage() or off-thread by StyleBakePool from a COW node
+    // snapshot — back into the cache. `bakedRevision` must be the
+    // styledBaseRevision() that was current when the bake was started.
+    //
+    // Revision discard (same rule as ProjectionCache): a bake whose revision is
+    // no longer the current one — the user moved the slider again, or painted
+    // another dab, while it was running — is dropped, never stored. This cache
+    // feeds the CPU consumers that must show the truth (computeEffectedImage →
+    // export, the projection, the panel thumbnails), so a style the user has
+    // already dragged past cannot live here. The GPU may still *display* such a
+    // bake: StyleBakePool hands it to the upload as an interim preview, which
+    // carries its own bounds (uploadedEffectedBounds) and leaves the node dirty,
+    // and dispatches a fresh bake for the current params.
+    void commitStyledBaseBake(const QImage& image, const QRectF& bounds,
+                              uint64_t bakedRevision) const {
+        if (bakedRevision != m_styledBaseRevision)
+            return;
+        m_styledBaseImage = image;
+        m_styledBaseBounds = bounds;
+        m_styledBaseDirty = false;
+    }
+
     // Padded bounds of the styled base (== effected bounds — clipped adjustments
-    // don't change image size). Used to place styledBaseTexture in the FBO.
+    // don't change image size). Rebuilds the bake when stale, so it is only for
+    // CPU consumers that want the current-params geometry (projection, export).
     QRectF styledBaseImageBounds() const {
         if (m_styledBaseDirty || m_styledBaseImage.isNull())
             computeStyledBaseImage();
         return m_styledBaseBounds;
     }
+
+    // Geometry of the styled base sitting in the cache, without rebuilding it.
+    // Only for the GPU upload site, which copies it into
+    // uploadedStyledBaseBounds together with the pixels it uploads.
+    QRectF styledBaseBakeBounds() const { return m_styledBaseBounds; }
+
+    // Bounds styledBaseTexture/effectedTexture were actually uploaded FROM —
+    // the only correct placement for them, and never a rebuild. The cache's own
+    // bounds are the wrong answer here in three states, all normal: an async
+    // bake in flight (the node is dirty but the texture still holds the previous
+    // bake), an interim upload of a superseded bake, and a CPU consumer (export,
+    // the histogram's composite of the live document) baking the node inline
+    // without uploading anything. Padding grows and shrinks with the effect
+    // params, so placing a texture by bounds it wasn't built for stretches it.
+    // Calling styledBaseImageBounds() here would also run the full-res style
+    // bake on the UI thread — the stall StyleBakePool exists to avoid.
+    QRectF styledBaseTextureBounds() const { return uploadedStyledBaseBounds; }
 
     QImage computeEffectedImage() const {
         if (!usesEffectedPipeline()) {
@@ -380,6 +441,10 @@ public:
         // its GPU texture) must be rebuilt too — not just the adjustment bake.
         m_styledBaseDirty = true;
         styledBaseTextureOutdated = true;
+        // See styledBaseRevision(): bumped on every invalidation so
+        // StyleBakePool can tell an in-flight async bake was started for
+        // params that are no longer the latest.
+        ++m_styledBaseRevision;
         invalidateEffectedBake();
         // A Single-Layer-Mode adjustment is baked into its parent layer's
         // effected image — invalidating the child must invalidate that bake
@@ -402,7 +467,20 @@ public:
         return m_effectedBounds;
     }
 
+    // effectedTexture's placement — see styledBaseTextureBounds().
+    QRectF effectedTextureBounds() const {
+        if (!usesEffectedPipeline())
+            return layer ? baseRenderImageBounds() : QRectF();
+        return uploadedEffectedBounds;
+    }
+
+    // Geometry of the effected bake sitting in the cache, without rebuilding it
+    // — the upload-site counterpart of styledBaseBakeBounds().
+    QRectF effectedBakeBounds() const { return m_effectedBounds; }
+
     unsigned int effectedTexture = 0;
+    // Bounds effectedTexture was uploaded FROM (see effectedTextureBounds()).
+    QRectF uploadedEffectedBounds;
     // GPU-side staleness for effectedTexture, distinct from the CPU m_effectsDirty
     // (see invalidateEffects). Set on every effect/adjustment invalidation,
     // cleared only when the texture is uploaded.
@@ -414,6 +492,8 @@ public:
     // when styledBaseTextureOutdated (style / pixel / mask change), NOT per
     // adjustment-drag frame, so the style blur and upload happen once.
     unsigned int styledBaseTexture = 0;
+    // Bounds styledBaseTexture was uploaded FROM (see styledBaseTextureBounds()).
+    QRectF uploadedStyledBaseBounds;
     bool styledBaseTextureOutdated = true;
 
     QImage cachedThumb;
@@ -440,6 +520,9 @@ public:
     mutable QImage m_styledBaseImage;
     mutable QRectF m_styledBaseBounds;
     mutable bool m_styledBaseDirty = true;
+    // See styledBaseRevision()/invalidateEffects() — identifies which params
+    // the cached/in-flight styled base was (or is being) built for.
+    mutable uint64_t m_styledBaseRevision = 0;
 
     QTransform accumulatedTransform() const {
         QTransform xf;

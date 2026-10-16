@@ -68,6 +68,25 @@ void uploadR8TextureFromImage(const QImage& image)
     glPixelStorei(GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
 }
 
+// Uploads a full-resolution RGBA8 bake (effected image / styled base) into
+// `texture`, creating it on first use. Shared by the cache-backed uploads in
+// syncLayersToGpu and their interim-preview variants, so both place the same
+// filtering/wrap state on the texture (see StyleBakePool::InterimBake).
+void uploadRgba8Texture(unsigned int& texture, const QImage& image)
+{
+    if (texture == 0)
+        glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                 image.width(), image.height(),
+                 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 image.constBits());
+}
+
 void readR8TextureToImage(QImage& image)
 {
     GLint prevPackAlignment = 4;
@@ -1374,6 +1393,9 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
     m_renderCache.markInvalid();
 
     auto flat = doc->flatten();
+    // Deleting a layer doesn't run cleanupDocumentLayers (tab close only), so
+    // drop the style bakers of nodes that are gone before reusing the pool.
+    m_styleBakes.retain(flat);
     for (auto* node : flat) {
         if (!node->layer) continue;
         auto* layer = node->layer.get();
@@ -1450,21 +1472,36 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
         // previewed live on the GPU (FBO isolation in LayerCompositor) — that is
         // the whole point of the GPU path. The CPU projection commit still bakes
         // them as the source of truth; this only affects the live preview.
+        //
+        // The styled base underneath computeEffectedImage() is the costly part
+        // (full-res tile composite + mask pass + the OpenCV blur for
+        // shadows/glows) — ensureFresh() keeps it off this (UI) thread by
+        // baking it on a worker when a style/pixel/mask change actually
+        // requires a rebuild. While that bake is in flight it returns false:
+        // this node's cache-backed upload is skipped for the frame and the
+        // canvas draws the interim bake (a result the next edit superseded, see
+        // StyleBakePool::InterimBake) or else keeps the previous texture.
         if (node->usesEffectedPipeline() && !node->clippedAdjustmentsOnGpu()) {
-            QImage effected = node->computeEffectedImage();
-            if (!effected.isNull()) {
-                if (!node->effectedTexture)
-                    glGenTextures(1, &node->effectedTexture);
-                glBindTexture(GL_TEXTURE_2D, node->effectedTexture);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                             effected.width(), effected.height(),
-                             0, GL_RGBA, GL_UNSIGNED_BYTE,
-                             effected.constBits());
-                node->effectedTextureOutdated = false;
+            // The interim bake is the styled base alone, which equals the
+            // effected image only when no Single-Layer-Mode adjustment is baked
+            // on top — the ordinary styles-only layer. With adjustment children
+            // (text / masked shape hosts) uploading it would drop them, so
+            // don't ask for one and keep showing the last complete bake.
+            StyleBakePool::InterimBake interim;
+            const bool wantInterim = !node->hasVisibleAdjustmentChildren();
+            if (m_styleBakes.ensureFresh(node, node->effectedTexture != 0,
+                                         wantInterim ? &interim : nullptr)) {
+                QImage effected = node->computeEffectedImage();
+                if (!effected.isNull()) {
+                    uploadRgba8Texture(node->effectedTexture, effected);
+                    node->uploadedEffectedBounds = node->effectedBakeBounds();
+                    node->effectedTextureOutdated = false;
+                }
+            } else if (!interim.isNull()) {
+                // Preview only: effectedTextureOutdated deliberately stays set,
+                // so the fresh bake still replaces this the moment it lands.
+                uploadRgba8Texture(node->effectedTexture, interim.image);
+                node->uploadedEffectedBounds = interim.bounds;
             }
         }
 
@@ -1474,22 +1511,25 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
         // it (instead of a per-frame computeEffectedImage CPU bake). Uploaded only
         // when outdated — i.e. on a style/pixel/mask change — never per adjustment
         // frame, so the costly style blur runs once and the drag stays on the GPU.
+        // Same async bake as above: ensureFresh() returning false means it is
+        // still running on a worker, so upload the interim bake if there is one
+        // (the GPU applies the clipped adjustments over whatever styled base it
+        // gets) and otherwise keep showing the previous styledBaseTexture.
         if (node->clippedAdjustmentsOnGpu() && !node->effects.empty()
             && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)) {
-            QImage styled = node->computeStyledBaseImage();
-            if (!styled.isNull()) {
-                if (!node->styledBaseTexture)
-                    glGenTextures(1, &node->styledBaseTexture);
-                glBindTexture(GL_TEXTURE_2D, node->styledBaseTexture);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                             styled.width(), styled.height(),
-                             0, GL_RGBA, GL_UNSIGNED_BYTE,
-                             styled.constBits());
-                node->styledBaseTextureOutdated = false;
+            StyleBakePool::InterimBake interim;
+            if (m_styleBakes.ensureFresh(node, node->styledBaseTexture != 0,
+                                         &interim)) {
+                QImage styled = node->computeStyledBaseImage();
+                if (!styled.isNull()) {
+                    uploadRgba8Texture(node->styledBaseTexture, styled);
+                    node->uploadedStyledBaseBounds = node->styledBaseBakeBounds();
+                    node->styledBaseTextureOutdated = false;
+                }
+            } else if (!interim.isNull()) {
+                // Preview only — styledBaseTextureOutdated stays set.
+                uploadRgba8Texture(node->styledBaseTexture, interim.image);
+                node->uploadedStyledBaseBounds = interim.bounds;
             }
         }
 
@@ -1550,6 +1590,7 @@ void GPUViewport::cleanupDocumentLayers(Document* doc)
             glDeleteTextures(1, &node->styledBaseTexture);
             node->styledBaseTexture = 0;
         }
+        m_styleBakes.release(node);
         // Clean up LOD textures
         for (int i = 1; i <= 3; ++i) {
             if (layer->lodTextures[i]) {
@@ -1818,9 +1859,15 @@ void GPUViewport::render(const RenderParams& p)
         // Clipped-adjustment layers handled live on the GPU never upload an
         // effectedTexture (see syncLayersToGpu) — don't force a sync (and thus a
         // CPU bake) for them; LayerCompositor isolates them per frame instead.
+        // While the node's style bake is on a worker the texture stays
+        // outdated by design — re-entering the full syncLayersToGpu for it
+        // every frame would re-upload every mask and drop the projection
+        // cache for nothing. StyleBakePool's ready callback schedules the
+        // repaint that performs the upload once the result lands.
         if (node->usesEffectedPipeline()
             && !node->clippedAdjustmentsOnGpu()
-            && (node->effectedTextureOutdated || node->effectedTexture == 0)) {
+            && (node->effectedTextureOutdated || node->effectedTexture == 0)
+            && !m_styleBakes.isBuilding(node)) {
             needsLayerSync = true;
             break;
         }
@@ -1830,7 +1877,8 @@ void GPUViewport::render(const RenderParams& p)
         // once after such a change and never per drag frame — the drag itself
         // reuses the texture and runs entirely through drawAdjustmentPass.
         if (node->clippedAdjustmentsOnGpu() && !node->effects.empty()
-            && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)) {
+            && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)
+            && !m_styleBakes.isBuilding(node)) {
             needsLayerSync = true;
             break;
         }

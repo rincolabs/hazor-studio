@@ -405,6 +405,10 @@ add_executable(Hazor WIN32
     src/renderer/ProjectionCache.cpp
     src/renderer/AsyncProjectionBuilder.hpp
     src/renderer/AsyncProjectionBuilder.cpp
+    src/renderer/AsyncStyleBaker.hpp
+    src/renderer/AsyncStyleBaker.cpp
+    src/renderer/StyleBakePool.hpp
+    src/renderer/StyleBakePool.cpp
     src/renderer/GPUViewport.cpp
     src/renderer/GPUViewport_Shaders.cpp
     src/renderer/GPUViewport_Overlays.cpp

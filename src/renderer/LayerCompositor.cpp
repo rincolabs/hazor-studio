@@ -589,7 +589,13 @@ void LayerCompositor::renderNodes(
         if (hasEffects && shapeSpriteActive
             && baseTextureSize.width() > 0
             && baseTextureSize.height() > 0) {
-            const QRectF bounds = node->effectedImageBounds();
+            // effectedTextureBounds(), never effectedImageBounds(): this must
+            // place the texture that is actually bound, and the *Image* variant
+            // rebuilds the bake inline (full-res composite + mask + blur) when
+            // the node is dirty — which is exactly its state while StyleBakePool
+            // is baking the new params on a worker. That inline rebuild was the
+            // UI-thread stall during a Layer Styles drag.
+            const QRectF bounds = node->effectedTextureBounds();
             const QTransform& spriteXf = node->layer->shapeCache.spriteTransform;
             const double baseW = baseTextureSize.width();
             const double baseH = baseTextureSize.height();
@@ -627,7 +633,8 @@ void LayerCompositor::renderNodes(
         if (hasEffects && baseTextureSize.width() > 0
             && baseTextureSize.height() > 0
             && !shapeEffectTransformApplied) {
-            const QRectF bounds = node->effectedImageBounds();
+            // See above: bounds of the bound texture, no inline rebuild.
+            const QRectF bounds = node->effectedTextureBounds();
             const double baseW = baseTextureSize.width();
             const double baseH = baseTextureSize.height();
             const double left = -1.0 + 2.0 * bounds.left() / baseW;
@@ -1001,7 +1008,11 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
     // adjustments). The styled base is uploaded once per style/pixel change, so
     // the drag itself does no CPU bake and no re-upload.
     if (!node->effects.empty() && node->styledBaseTexture) {
-        const QRectF bounds = node->styledBaseImageBounds();
+        // Bounds of the uploaded bake (styledBaseTextureBounds), not of the
+        // current params — see the effectedTextureBounds() note in
+        // renderNodes(): the *ImageBounds() variant would re-run the style
+        // bake on the UI thread while the async one is still in flight.
+        const QRectF bounds = node->styledBaseTextureBounds();
         const QSize baseSize = shapeSpriteActive
             ? layer->shapeCache.image.size()
             : layer->rasterBaseSize();

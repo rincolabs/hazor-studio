@@ -129,6 +129,90 @@ rule, same HSL model (`core/HueSaturationData`), same mask density ramp.
   `effectedTexture` (bake of effects/clipped adjustments),
   `styledBaseTexture` (base with style for live Single Layer Mode).
 
+### 2.4.1 Async layer-style bake
+
+Files: [src/renderer/StyleBakePool.\*](../src/renderer/StyleBakePool.hpp),
+[src/renderer/AsyncStyleBaker.\*](../src/renderer/AsyncStyleBaker.hpp)
+
+`computeStyledBaseImage()` (`LayerTreeNode.hpp`) runs on a worker thread
+instead of inline on `syncLayersToGpu`, mirroring `ProjectionCache`/
+`AsyncProjectionBuilder` but keyed per node rather than per document (Layer
+Styles editing targets one layer). The **whole** bake goes off-thread, not just
+`applyEffectStack`'s OpenCV blur: `maskedBaseImage()` is a full-resolution tile
+composite plus a per-pixel mask pass, so assembling the pre-blur source on the
+UI thread would stall it nearly as much as the blur does.
+
+```
+syncLayersToGpu, per node with effects:
+ StyleBakePool::ensureFresh(node, canDefer, &interim)
+  ├─ node not styledBaseDirty() / no effects → true (nothing to bake, normal
+  │    computeStyledBaseImage()/computeEffectedImage() call below is a cache
+  │    hit; any result a worker still owes is dropped, not hoarded)
+  ├─ a worker result is waiting → commit it (LayerTreeNode::commitStyledBaseBake)
+  │    and return true, if it still matches node->styledBaseRevision(); if a
+  │    newer edit landed meanwhile the result is kept OUT of the cache (export,
+  │    the projection and the thumbnails must not show a style the user already
+  │    dragged past) and handed back as `interim` for a preview-only upload,
+  │    then a fresh build is dispatched and this returns false
+  ├─ canDefer == false (no texture uploaded for this node yet) → true, so the
+  │    caller bakes synchronously: there is nothing to keep showing and a
+  │    deferred bake would draw the layer unstyled for a frame
+  └─ nothing in flight → dispatch one (AsyncStyleBaker::request over
+       node->shallowClone() — a COW snapshot, Layer struct copy with the GPU
+       handles zeroed and no pixel copy, so the worker never reads the live
+       node) and return false
+```
+
+`false` means the caller uploads `interim` if it got one and otherwise keeps the
+previous `effectedTexture`/`styledBaseTexture` — a Layer Styles slider drag
+never blocks the UI thread. `AsyncStyleBaker::ready()` (via
+`GPUViewport::setStyleBakeRepaintCallback`, wired in `CanvasView::initializeGL`
+like the projection's) requests a repaint once the bake lands, so the next
+`needsLayerSync` poll uploads it. `styledBaseRevision()` (bumped by
+`invalidateEffects()`) is what lets a superseded bake be kept out of the cache
+instead of frozen in as the final result.
+
+The interim upload is what keeps the preview *moving*. Every edit bumps the
+revision, so during a continuous gesture — a slider drag, but equally a brush
+stroke on a styled layer, which invalidates the node per dab — every bake that
+lands is already superseded. Without handing those over the texture would stay
+frozen for the whole gesture: the preview (and the dabs) would only appear once
+the user paused longer than one bake. Uploaded interim pixels are a preview
+only: the node stays dirty and `effectedTextureOutdated` / `styledBaseTextureOutdated`
+stay set, so the fresh bake still replaces them. For the `effectedTexture` path
+the interim is only requested when the node has no Single-Layer-Mode adjustment
+children — the styled base equals the effected image exactly then.
+
+Three rules keep the UI thread out of that bake while it is in flight — break
+any one of them and the drag stalls again even though the worker is running:
+
+1. **Place the textures with `styledBaseTextureBounds()` /
+   `effectedTextureBounds()`**, never with `styledBaseImageBounds()` /
+   `effectedImageBounds()`. The `*Image*` pair rebuilds the bake inline when the
+   node is dirty — which is precisely its state mid-bake — so `LayerCompositor`
+   asking for it ran the full style bake on the UI thread every frame. The
+   `*Texture*` pair reports `uploadedEffectedBounds` /
+   `uploadedStyledBaseBounds`, recorded by the upload itself, which is the only
+   correct placement for the pixels the GPU actually holds: the padded bounds
+   move with the effect params, and the cache's own bounds run ahead of the
+   texture whenever a bake is in flight, an interim was uploaded, or a CPU
+   consumer (export, the histogram panel's composite of the *live* document)
+   baked the node inline without uploading anything.
+2. **A style change must not set `layer->textureOutdated`** (see
+   `ImageController::previewLayerEffects`): styles touch no pixel, and that flag
+   makes `syncLayersToGpu` `markAllGpuDirty()` the whole raster — a full
+   re-upload of every tile of the layer per slider frame.
+3. **The lazy `needsLayerSync` poll skips nodes with `StyleBakePool::isBuilding`**.
+   Their style texture stays outdated by design until the bake lands; without
+   the guard every frame re-entered the full `syncLayersToGpu`, which re-uploads
+   every mask and drops the projection cache for nothing.
+
+The drag itself is additionally bracketed as a live composite edit
+(`LayerStylesDialog::liveEditChanged` → `ImageController::setAdjustmentLiveEdit`,
+the same hold an adjustment slider drag uses), so the CPU projection is not
+re-snapshotted and the layer panel does not rebuild its full-resolution
+thumbnails on every slider step.
+
 ### 2.5 Frame caches
 
 - [src/cache/RenderCache.cpp](../src/cache/RenderCache.cpp): replays the last
@@ -504,6 +588,7 @@ through the normal CPU path.
 | GPU compositor | `renderer/LayerCompositor.cpp`, `renderer/TileRenderer.cpp`, `renderer/MipmapCache.cpp` |
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
+| Async layer-style bake | `renderer/StyleBakePool.*`, `renderer/AsyncStyleBaker.*` (§2.4.1) |
 | Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp` |
 | Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
 | Caches | `cache/RenderCache.*` |

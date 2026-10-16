@@ -116,9 +116,12 @@ public:
     // the editor around the gesture. Applies `after` and pushes the command.
     void commitAdjustmentParams(int flatIndex, const QVariantMap& before,
                                 const QVariantMap& after, const QString& label);
-    // Brackets a live adjustment-param drag so the canvas renders through the GPU
+    // Brackets a live composite drag so the canvas renders through the GPU
     // per-layer compositor (fast) instead of a full CPU projection recomposite
-    // every frame. The editor calls true on gesture begin, false on commit.
+    // every frame, and the layer panel holds its last frame instead of re-baking
+    // thumbnails per step. The editor calls true on gesture begin, false on
+    // commit. Also used by the Layer Styles dialog's slider drags, which mutate
+    // the composite per frame in exactly the same way.
     void setAdjustmentLiveEdit(bool active) { emit adjustmentLiveEditChanged(active); }
     void removeNode(int flatIndex);
     void duplicateNode(int flatIndex);

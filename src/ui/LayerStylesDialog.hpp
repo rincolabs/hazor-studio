@@ -24,6 +24,13 @@ public:
 
 signals:
     void stylesChanged();
+    // A slider is being dragged (true) / was released (false). The host turns
+    // this into ImageController::setAdjustmentLiveEdit so a style drag gets the
+    // same live-composite hold an adjustment drag gets: the canvas previews on
+    // the GPU per-layer compositor instead of recompositing the whole CPU
+    // projection per frame, and the layer panel holds its last frame instead of
+    // rebuilding the tree and re-baking thumbnails on every slider step.
+    void liveEditChanged(bool active);
 
 private:
     struct StyleDef {

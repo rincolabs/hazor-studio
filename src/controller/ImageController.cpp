@@ -2375,9 +2375,16 @@ void ImageController::previewLayerEffects(int flatIndex, const std::vector<Layer
     node->effects = effects;
     node->invalidateEffects();
     node->thumbnailDirty = true;
-    node->layer->textureOutdated = true;
+    // Deliberately NOT textureOutdated: a style change touches no layer pixel,
+    // and that flag makes syncLayersToGpu markAllGpuDirty() the whole raster —
+    // a full re-upload of every tile of the layer on every slider frame, which
+    // alone stalled the UI on a large image. The style result reaches the GPU
+    // through effectedTexture/styledBaseTexture (see StyleBakePool).
     if (m_doc) ++m_doc->compositionGeneration;
-    emit layerChanged(flatIndex);
+    // Live preview: imageChanged only, like updateAdjustmentParamsLive. Emitting
+    // layerChanged here forced an unconditional LayerPanel::refresh() (tree
+    // rebuild + a full-res thumbnail re-bake of the styled layer) per frame; the
+    // panel is refreshed once when the gesture commits.
     emit imageChanged();
 }
 

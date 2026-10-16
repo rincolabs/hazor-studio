@@ -5,6 +5,7 @@
 #include "MipmapCache.hpp"
 #include "BlendRules.hpp"
 #include "ProjectionCache.hpp"
+#include "StyleBakePool.hpp"
 #include "cache/RenderCache.hpp"
 
 #include <QOpenGLFunctions>
@@ -52,6 +53,19 @@ public:
         m_projection.setReadyCallback([this]() {
             m_renderCache.markInvalid();
             if (m_projectionRepaint) m_projectionRepaint();
+        });
+    }
+
+    // Host repaint hook for the async layer-style bake (Fase D). When an
+    // off-thread style bake finishes, the render cache is invalidated and
+    // `cb` is invoked to request a repaint — the next frame's needsLayerSync
+    // poll uploads the freshly baked effect/styled-base texture.
+    void setStyleBakeRepaintCallback(std::function<void()> cb)
+    {
+        m_styleBakeRepaint = std::move(cb);
+        m_styleBakes.setReadyCallback([this]() {
+            m_renderCache.markInvalid();
+            if (m_styleBakeRepaint) m_styleBakeRepaint();
         });
     }
 
@@ -281,6 +295,12 @@ private:
     ProjectionCache m_projection;
     bool m_useProjectionDisplay = true;
     std::function<void()> m_projectionRepaint; // async-projection repaint hook
+
+    // ── Async layer-style bake (Fase D) ──
+    // Keeps the costly layer-style blur (drop shadow/glow/stroke/...) off the
+    // UI thread during live preview — see StyleBakePool.
+    StyleBakePool m_styleBakes;
+    std::function<void()> m_styleBakeRepaint;
     // Returns true if the projection was displayed; false if unavailable
     // (e.g. document exceeds GL_MAX_TEXTURE_SIZE) so the caller falls back to
     // the per-layer compositor.

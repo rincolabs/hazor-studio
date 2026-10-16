@@ -271,16 +271,29 @@ void MainWindow::showLayerStylesDialog(int idx)
     dlg->setWindowModality(Qt::NonModal);
     dlg->setModal(false);
 
+    // A slider drag is a live composite edit, exactly like an adjustment
+    // slider drag: hold the CPU projection and the layer panel for its
+    // duration so each frame only costs the (off-thread) style bake.
+    connect(dlg, &LayerStylesDialog::liveEditChanged, this, [this](bool active) {
+        if (m_ctrl) m_ctrl->setAdjustmentLiveEdit(active);
+    });
+
     connect(dlg, &LayerStylesDialog::stylesChanged, this, [this, dlg, idx]() {
         if (!m_ctrl || !m_canvas) return;
         m_ctrl->previewLayerEffects(idx, dlg->styles());
         m_canvas->syncLayersToGpu();
         m_canvas->update();
-        refreshLayerPanel();
+        // No refreshLayerPanel() here: previewLayerEffects' imageChanged already
+        // refreshes the panel when no drag is in progress, and during a drag the
+        // panel is deliberately held (its styled-layer thumbnail is a full-res
+        // bake). The commit/reject handlers below refresh it once at the end.
     });
 
     connect(dlg, &QDialog::accepted, this, [this, dlg, idx, before]() {
         if (!m_ctrl || !m_canvas) return;
+        // A dialog closed mid-drag never sees sliderReleased — make sure the
+        // live-composite hold is lifted before the final commit renders.
+        m_ctrl->setAdjustmentLiveEdit(false);
         m_ctrl->commitLayerEffects(idx, before, dlg->styles());
         m_canvas->syncLayersToGpu();
         m_canvas->update();
@@ -292,6 +305,7 @@ void MainWindow::showLayerStylesDialog(int idx)
 
     connect(dlg, &QDialog::rejected, this, [this, idx, before]() {
         if (!m_ctrl || !m_canvas) return;
+        m_ctrl->setAdjustmentLiveEdit(false);
         m_ctrl->previewLayerEffects(idx, before);
         m_canvas->syncLayersToGpu();
         m_canvas->update();
