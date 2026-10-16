@@ -183,6 +183,21 @@ stay set, so the fresh bake still replaces them. For the `effectedTexture` path
 the interim is only requested when the node has no Single-Layer-Mode adjustment
 children — the styled base equals the effected image exactly then.
 
+A bake that outlives the gesture also surfaces the app's standard delayed
+loading dialog: `StyleBakePool::setBusyCallback` →
+`GPUViewport::setStyleBakeBusyCallback` → `CanvasView` (queued — the callback
+fires from inside `paintGL`, and a modal dialog spins a nested event loop) →
+`ImageController::setStyleBakeBusy` → `progressOperationStarted/Finished`, the
+same contract the async document operations use, so `MainWindow::
+beginProgressDelayed` shows its `ProgressDialog` only when the bake is still
+running after 220 ms. The policy lives in the controller and is deliberately
+narrow: only while a Layer Styles edit is waiting for its result — never the
+per-dab bakes of a brush stroke on a styled layer, which would put a modal
+dialog over every stroke — and only outside the gesture, because the dialog is
+application-modal and would steal the slider's mouse grab. The idle edge is
+debounced 150 ms so the gaps between a gesture's back-to-back bakes neither
+flicker the dialog nor restart its show delay.
+
 Three rules keep the UI thread out of that bake while it is in flight — break
 any one of them and the drag stalls again even though the worker is running:
 

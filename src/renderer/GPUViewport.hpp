@@ -69,6 +69,15 @@ public:
         });
     }
 
+    // Host hook for "a layer-style bake is running". Drives the app's standard
+    // delayed loading dialog for a bake the user is waiting on — the policy
+    // (which bakes those are) lives in ImageController::setStyleBakeBusy, not
+    // here. See StyleBakePool::setBusyCallback.
+    void setStyleBakeBusyCallback(std::function<void(bool)> cb)
+    {
+        m_styleBakes.setBusyCallback(std::move(cb));
+    }
+
     // ── GPU sync (called from outside render) ───────────────
     void syncLayersToGpu(Document* doc, Layer* editingMaskLayer = nullptr);
     void syncLayerFromGpu(Layer* layer);

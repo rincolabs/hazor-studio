@@ -40,6 +40,7 @@
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QFutureWatcher>
+#include <QTimer>
 #include <QtConcurrent>
 #include <GL/gl.h>
 #include <QDebug>
@@ -306,6 +307,19 @@ void ImageController::cancelLongOperation(uint64_t jobId)
 {
     if (jobId != 0 && jobId == m_genJobId && m_genProvider) {
         m_genProvider->cancel();        // onGenerativeFailed(Canceled) follows
+        return;
+    }
+
+    // Layer-style bake: there is nothing to cancel in the worker (the result
+    // lands and is uploaded whenever it is ready, see StyleBakePool), so this
+    // only stops the waiting — the dialog closes and the canvas keeps showing
+    // the interim preview until the bake arrives. Reported as finished, not
+    // canceled, because the edit itself is still on its way; "Operation
+    // canceled" would claim the opposite.
+    if (jobId != 0 && jobId == m_styleBakeJobId) {
+        m_styleBakeJobId = 0;
+        m_styleEditPending = false;
+        emit progressOperationFinished(jobId);
         return;
     }
 
@@ -2368,6 +2382,64 @@ void ImageController::setNodeLockFlags(int flatIndex, int newFlags)
     emit layerChanged(flatIndex);
 }
 
+void ImageController::setStyleBakeBusy(bool busy)
+{
+    if (m_styleBakeBusy == busy)
+        return;
+    m_styleBakeBusy = busy;
+
+    if (busy) {
+        ++m_styleBakeIdleToken;   // cancel a pending close
+        updateStyleBakeProgress();
+        return;
+    }
+
+    // Debounce the idle edge. A gesture dispatches one bake after another with
+    // a short gap in between (the result lands, the next snapshot goes out), and
+    // closing the progress op in every gap would flicker the dialog — worse, it
+    // would restart its 220 ms show delay each time and so never appear on the
+    // one bake that really is slow.
+    const uint64_t token = ++m_styleBakeIdleToken;
+    QTimer::singleShot(150, this, [this, token]() {
+        if (token != m_styleBakeIdleToken || m_styleBakeBusy)
+            return;
+        updateStyleBakeProgress();
+    });
+}
+
+void ImageController::updateStyleBakeProgress()
+{
+    // Only a bake the user is actually waiting on earns the dialog:
+    //  - m_styleEditPending: a Layer Styles edit, not the per-dab bakes a brush
+    //    stroke on a styled layer dispatches (a modal dialog per stroke would
+    //    make painting on a styled layer impossible);
+    //  - !m_liveCompositeEdit: not mid-drag — the dialog is application-modal
+    //    and would steal the slider's mouse grab, and the drag already shows
+    //    each bake as it lands.
+    const bool want = m_styleEditPending && m_styleBakeBusy && !m_liveCompositeEdit;
+
+    if (want && m_styleBakeJobId == 0) {
+        m_styleBakeJobId = m_nextDocumentOperationId++;
+        // Cancelable: the bake itself cannot be stopped (it will land and be
+        // uploaded like any other), but the user must always be able to stop
+        // WAITING for it — see cancelLongOperation.
+        emit progressOperationStarted(m_styleBakeJobId,
+                                      tr("Applying layer style…"), true);
+        emit progressOperationProgressChanged(m_styleBakeJobId, -1);
+    } else if (!want && m_styleBakeJobId != 0) {
+        const uint64_t jobId = m_styleBakeJobId;
+        m_styleBakeJobId = 0;
+        emit progressOperationFinished(jobId);
+    }
+
+    // The edit is settled once its bake is done and the gesture is over; bakes
+    // after that (painting, mask edits) must not resurrect the dialog. Keeping
+    // it armed DURING the gesture is deliberate: the gaps between a drag's
+    // bakes would otherwise clear it before the release.
+    if (!m_styleBakeBusy && !m_liveCompositeEdit)
+        m_styleEditPending = false;
+}
+
 void ImageController::previewLayerEffects(int flatIndex, const std::vector<LayerEffect>& effects)
 {
     auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
@@ -2375,6 +2447,10 @@ void ImageController::previewLayerEffects(int flatIndex, const std::vector<Layer
     node->effects = effects;
     node->invalidateEffects();
     node->thumbnailDirty = true;
+    // From here until the bake lands, the user is waiting on this edit — that
+    // is what qualifies a style bake for the loading dialog (setStyleBakeBusy).
+    m_styleEditPending = true;
+    updateStyleBakeProgress();
     // Deliberately NOT textureOutdated: a style change touches no layer pixel,
     // and that flag makes syncLayersToGpu markAllGpuDirty() the whole raster —
     // a full re-upload of every tile of the layer on every slider frame, which
@@ -2404,6 +2480,8 @@ void ImageController::commitLayerEffects(
     node->invalidateEffects();
     node->thumbnailDirty = true;
     node->layer->textureOutdated = true;
+    m_styleEditPending = true;   // see previewLayerEffects
+    updateStyleBakeProgress();
     m_history.push(std::make_unique<LayerEffectsCommand>(
         m_doc, flatIndex, beforeEffects, afterEffects, tr("Layer Styles")));
     if (m_doc) ++m_doc->compositionGeneration;

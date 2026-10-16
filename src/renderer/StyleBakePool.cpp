@@ -15,13 +15,31 @@ StyleBakePool::Entry& StyleBakePool::entryFor(LayerTreeNode* node)
     if (inserted) {
         e.baker = std::make_unique<AsyncStyleBaker>();
         QObject::connect(e.baker.get(), &AsyncStyleBaker::ready,
-                         e.baker.get(), [this]() { if (m_onReady) m_onReady(); });
+                         e.baker.get(), [this]() {
+            // The worker that just finished may have been the last one. Report
+            // it here too, not only from ensureFresh(): if nothing asks for
+            // this node again (its texture turned out to be up to date) the
+            // repaint below is the last event in the chain, and a busy state
+            // left hanging would keep the host's loading dialog up forever.
+            notifyBusyChanged();
+            if (m_onReady) m_onReady();
+        });
     }
     return e;
 }
 
 bool StyleBakePool::ensureFresh(LayerTreeNode* node, bool canDefer,
                                 InterimBake* interim)
+{
+    // One evaluation per call, after any re-dispatch below, so a gesture's
+    // back-to-back bakes read as one continuous busy state.
+    const bool ready = ensureFreshImpl(node, canDefer, interim);
+    notifyBusyChanged();
+    return ready;
+}
+
+bool StyleBakePool::ensureFreshImpl(LayerTreeNode* node, bool canDefer,
+                                    InterimBake* interim)
 {
     if (!node)
         return true;
@@ -87,6 +105,24 @@ bool StyleBakePool::isBuilding(const LayerTreeNode* node) const
         && it->second.baker->isBuilding();
 }
 
+void StyleBakePool::notifyBusyChanged()
+{
+    bool busy = false;
+    for (const auto& [node, entry] : m_entries) {
+        if (entry.baker && entry.baker->isBuilding()) {
+            busy = true;
+            break;
+        }
+    }
+    // Draining bakers are deliberately not counted: their node is gone, so
+    // nobody is waiting for their result (retain() throws it away).
+    if (busy == m_busy)
+        return;
+    m_busy = busy;
+    if (m_onBusyChanged)
+        m_onBusyChanged(busy);
+}
+
 void StyleBakePool::discardPending(const LayerTreeNode* node)
 {
     auto it = m_entries.find(node);
@@ -109,6 +145,7 @@ void StyleBakePool::release(const LayerTreeNode* node)
     if (it->second.baker && it->second.baker->isBuilding())
         m_draining.push_back(std::move(it->second.baker));
     m_entries.erase(it);
+    notifyBusyChanged();
 }
 
 void StyleBakePool::retain(const std::vector<LayerTreeNode*>& liveNodes)
@@ -136,4 +173,5 @@ void StyleBakePool::retain(const std::vector<LayerTreeNode*>& liveNodes)
             m_draining.push_back(std::move(it->second.baker));
         it = m_entries.erase(it);
     }
+    notifyBusyChanged();
 }

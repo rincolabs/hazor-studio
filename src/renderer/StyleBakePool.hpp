@@ -84,6 +84,16 @@ public:
     // request a repaint; the next needsLayerSync poll uploads the result.
     void setReadyCallback(std::function<void()> cb) { m_onReady = std::move(cb); }
 
+    // Invoked (UI thread) when "some node's bake is running" changes, so the
+    // host can surface the app's standard delayed loading dialog for a bake the
+    // user is actually waiting on (ImageController::setStyleBakeBusy decides
+    // which those are — never the ones a brush stroke triggers per dab).
+    // The brief idle between one bake's result and the dispatch of its
+    // successor is NOT reported: ensureFresh() evaluates the state once, after
+    // the re-dispatch, so a gesture reads as one continuous bake.
+    void setBusyCallback(std::function<void(bool)> cb) { m_onBusyChanged = std::move(cb); }
+    bool isBusy() const { return m_busy; }
+
     // Drop the pooled baker for one node (document/layer teardown).
     void release(const LayerTreeNode* node);
 
@@ -101,10 +111,13 @@ private:
         uint64_t dispatchedRevision = 0;
     };
     Entry& entryFor(LayerTreeNode* node);
+    bool ensureFreshImpl(LayerTreeNode* node, bool canDefer, InterimBake* interim);
     // Throw away a result nobody needs any more (the node's cache was baked
     // elsewhere meanwhile) instead of holding a full-resolution QImage until
     // the node goes dirty again.
     void discardPending(const LayerTreeNode* node);
+    // Re-reads the bakers and fires m_onBusyChanged if isBusy() changed.
+    void notifyBusyChanged();
 
     std::unordered_map<const LayerTreeNode*, Entry> m_entries;
     // Bakers of nodes that were deleted mid-bake: unkeyed (so a node later
@@ -112,4 +125,6 @@ private:
     // owned until the worker finishes, then destroyed by the next retain().
     std::vector<std::unique_ptr<AsyncStyleBaker>> m_draining;
     std::function<void()> m_onReady;
+    std::function<void(bool)> m_onBusyChanged;
+    bool m_busy = false;
 };

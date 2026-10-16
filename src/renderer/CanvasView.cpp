@@ -3011,6 +3011,17 @@ void CanvasView::initializeGL()
     m_gpuViewport->setStyleBakeRepaintCallback([this]() {
         QMetaObject::invokeMethod(this, [this]() { update(); }, Qt::QueuedConnection);
     });
+    // A style bake the user is waiting on (a style edit, not the per-dab bakes
+    // of a brush stroke — ImageController decides) gets the app's standard
+    // delayed loading dialog. Queued like the repaint above: this fires from
+    // inside syncLayersToGpu, i.e. from paintGL with the GL context current,
+    // and a modal dialog spins a nested event loop.
+    m_gpuViewport->setStyleBakeBusyCallback([this](bool busy) {
+        QMetaObject::invokeMethod(this, [this, busy]() {
+            if (m_controller)
+                m_controller->setStyleBakeBusy(busy);
+        }, Qt::QueuedConnection);
+    });
     m_brushRenderer.initGL();
     updateCanvasRect();
     m_antTimer.start();

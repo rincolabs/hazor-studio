@@ -122,7 +122,23 @@ public:
     // thumbnails per step. The editor calls true on gesture begin, false on
     // commit. Also used by the Layer Styles dialog's slider drags, which mutate
     // the composite per frame in exactly the same way.
-    void setAdjustmentLiveEdit(bool active) { emit adjustmentLiveEditChanged(active); }
+    void setAdjustmentLiveEdit(bool active) {
+        m_liveCompositeEdit = active;
+        emit adjustmentLiveEditChanged(active);
+        // A style bake still running when the gesture ENDS is a wait the user
+        // should see; one in the middle of the gesture must not raise a modal
+        // dialog over the slider being dragged.
+        updateStyleBakeProgress();
+    }
+
+    // Renderer → UI: a layer-style bake (StyleBakePool) started or finished.
+    // Wired from CanvasView. Not every bake is a wait worth reporting — a brush
+    // stroke on a styled layer dispatches one per dab — so this only surfaces
+    // the app's delayed progress dialog while a Layer Styles edit is waiting
+    // for its result and no live gesture is in progress. The 220 ms delay in
+    // MainWindow::beginProgressDelayed keeps it invisible on layers whose bake
+    // is quick.
+    void setStyleBakeBusy(bool busy);
     void removeNode(int flatIndex);
     void duplicateNode(int flatIndex);
     void setActiveNode(int flatIndex);
@@ -421,6 +437,14 @@ private:
 
     float  m_opacityBefore = -1.0f;
     int    m_opacityLayerIdx = -1;
+
+    // ── Layer-style bake progress (see setStyleBakeBusy) ──
+    void updateStyleBakeProgress();
+    bool m_styleEditPending = false;   // a style edit is waiting for its bake
+    bool m_styleBakeBusy = false;
+    bool m_liveCompositeEdit = false;  // a slider/curve drag is in progress
+    uint64_t m_styleBakeJobId = 0;     // non-zero while the progress op is open
+    uint64_t m_styleBakeIdleToken = 0;
 
     std::unordered_map<uint64_t, std::shared_ptr<AsyncJob>> m_pendingAsyncJobs;
     std::unordered_map<uint64_t, std::shared_ptr<std::atomic_bool>> m_pendingDocumentOperations;
