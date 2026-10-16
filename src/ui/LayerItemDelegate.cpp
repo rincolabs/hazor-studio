@@ -225,6 +225,22 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
                 painter->setBrush(Qt::NoBrush);
                 painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
                 hasVisiblePixels = true;
+            } else if (node->layer->isRawLayer()) {
+                static QPixmap rawPix(":/icons/raw-layer.png");
+                painter->fillRect(innerThumb, th->colorBackgroundSecondary);
+                const QRect rawIconRect(
+                    thumbRect.center().x() - kTextThumbIconSize / 2,
+                    thumbRect.center().y() - kTextThumbIconSize / 2,
+                    kTextThumbIconSize,
+                    kTextThumbIconSize);
+                painter->save();
+                painter->setOpacity(th->iconOpacity);
+                painter->drawPixmap(rawIconRect, rawPix);
+                painter->restore();
+                painter->setPen(QPen(QColor(QStringLiteral("#ffffff")), 0));
+                painter->setBrush(Qt::NoBrush);
+                painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
+                hasVisiblePixels = true;
             } else {
                 // Thumbnails are ALWAYS baked off the UI thread by LayerPanel
                 // (scheduleThumbnailBuild): scaling a layer image here would freeze
@@ -244,7 +260,7 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
         }
 
         if (node->type != LayerTreeNode::Type::Adjustment
-            && !(node->layer && node->layer->isTextLayer())) {
+            && !(node->layer && (node->layer->isTextLayer() || node->layer->isRawLayer()))) {
             painter->setPen(QPen(QColor(QStringLiteral("#ffffff")), 0));
             painter->setBrush(Qt::NoBrush);
             painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
@@ -480,6 +496,20 @@ int LayerItemDelegate::handleSolidColorThumbDoubleClick(const QStyleOptionViewIt
         return -1;
     const int flat = index.data(Qt::UserRole).toInt();
     emit solidColorThumbDoubleClicked(flat);
+    return flat;
+}
+
+int LayerItemDelegate::handleRawThumbDoubleClick(const QStyleOptionViewItem& option,
+                                                 const QModelIndex& index,
+                                                 const QPoint& pos)
+{
+    auto* node = nodeFromIndex(index);
+    if (!node || !node->layer || !node->layer->isRawLayer())
+        return -1;
+    if (!thumbRect(option, index).contains(pos))
+        return -1;
+    const int flat = index.data(Qt::UserRole).toInt();
+    emit rawThumbDoubleClicked(flat);
     return flat;
 }
 

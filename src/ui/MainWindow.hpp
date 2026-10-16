@@ -363,6 +363,12 @@ private:
                          const QVariantMap& defaultParams);
 
     DocumentTab& createTab(const QString& name, const QSize& size);
+    // RAW extensions (RawEngine::isSupportedExtension()) are diverted here from
+    // onOpenFile() instead of going through imageCodecRegistry(): opens `path`
+    // off the UI thread with RawDevelopParams::cameraDefaults() and creates a
+    // new tab whose single layer carries RawLayerData (Fase 5), so it stays
+    // non-destructively re-revealable instead of a flattened import.
+    void openRawFileAsNewTab(const QString& path);
     CanvasView* activeCanvas() const;
     Document* activeDocument() const;
     ImageController* activeController() const;

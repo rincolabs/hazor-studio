@@ -44,6 +44,10 @@ signals:
     // The colour thumbnail of a Solid Color fill layer was double-clicked
     // (MainWindow selects it and opens the colour picker).
     void solidColorEditRequested(int index);
+    // The thumbnail of a RAW Layer was double-clicked. Not yet consumed by
+    // MainWindow — the Camera Raw dialog that would react to this is a later
+    // phase (see tmp/feat-raw-therapee-plan.md's "Fora de escopo").
+    void rawEditRequested(int index);
 
 private slots:
     void onCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* previous);

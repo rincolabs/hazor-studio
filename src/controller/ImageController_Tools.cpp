@@ -8,6 +8,8 @@
 #include "shape/ShapeCommands.hpp"
 #include "async/AsyncJobSystem.hpp"
 #include "processing/FilterProcessor.hpp"
+#include "raw/RawDevelopParams.hpp"
+#include "raw/RawLayerData.hpp"
 
 #include <QImage>
 #include <QPainter>
@@ -1018,6 +1020,29 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         if (idx >= 0) {
             rasterizeNode(idx);
         } else { success = false; }
+    }
+    else if (toolName == "raw_develop") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        auto* node = m_doc ? m_doc->nodeAt(idx) : nullptr;
+        if (!node || !node->layer || !node->layer->rawData) {
+            success = false;
+        } else {
+            RawDevelopParams params = RawDevelopParams::fromPP3String(
+                node->layer->rawData->state.pp3.toStdString());
+
+            RawDevelopParams::WhiteBalance wb = params.whiteBalance();
+            wb.temperatureKelvin = getInt("white_balance_temperature", wb.temperatureKelvin);
+            wb.green = get("white_balance_green", wb.green);
+            wb.method = getStr("white_balance_method", wb.method);
+            params.setWhiteBalance(wb);
+
+            RawDevelopParams::Exposure exposure = params.exposure();
+            exposure.compensationEv = get("exposure_compensation", exposure.compensationEv);
+            exposure.autoExposure = getInt("auto_exposure", exposure.autoExposure ? 1 : 0) != 0;
+            params.setExposure(exposure);
+
+            success = rerevealRawLayer(idx, params);
+        }
     }
     else if (toolName == "layer_mask_add") {
         int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);

@@ -148,7 +148,17 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
         {"merge_down", "Merge the active layer into the layer directly below it", "Layer", {}},
         {"merge_layers", "Merge all visible layers (alias of merge_visible)", "Layer", {}},
         {"flatten_image", "Flatten the whole document into a single layer", "Layer", {}},
-        {"rasterize_layer", "Rasterize the active layer (convert text/shape/vector to pixels)", "Layer", {}},
+        {"rasterize_layer", "Rasterize the active layer (convert text/shape/RAW to pixels)", "Layer", {}},
+        {"raw_develop", "Adjust a RAW Layer's develop settings (white balance, exposure) "
+            "and re-reveal it from the original file. Only unspecified params keep their "
+            "current value. white_balance_method: 'Camera', 'Auto' or 'Custom'. Runs "
+            "asynchronously off the UI thread.", "Layer",
+            {{"index", "int", -1, 100, -1},
+             {"white_balance_temperature", "int", 2000, 12000, 6504},
+             {"white_balance_green", "float", 0.1, 5.0, 1.0},
+             {"white_balance_method", "string", 0, 0, 0},
+             {"exposure_compensation", "float", -5, 5, 0},
+             {"auto_exposure", "int", 0, 1, 0}}},
         {"zoom", "Set zoom level", "Viewport",
             {{"level", "float", 0.1, 10, 1}}},
         {"reset_view", "Reset zoom and pan to default", "Viewport", {}},

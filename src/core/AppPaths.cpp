@@ -87,4 +87,14 @@ QString bundledModelsDir()
     return QDir(thirdPartyDir()).filePath(QStringLiteral("onnx/models"));
 }
 
+QString rawEngineResourceDir()
+{
+    return QDir(thirdPartyDir()).filePath(QStringLiteral("rawengine/rtdata"));
+}
+
+QString rawUserDir()
+{
+    return subDir(QStringLiteral("raw"));
+}
+
 } // namespace AppPaths

@@ -35,14 +35,12 @@ so file routing can still recognize a RAW file and report it as unsupported
 in this build, rather than mis-handling it as a regular image.
 
 `RawEngine::isAvailable()` additionally requires a successful
-`RawEngine::initialize(resourceDir, userDir)` call — not yet wired into
-startup (that lands with Fase 5, when `registerDefaultImageCodecs()` /
-`MainWindow::onOpenFile()` first need to open a RAW file). `resourceDir` must
-point at the bundled runtime resources rtengine reads at startup
-(`iccprofiles/`, `profiles/`, `dcpprofiles/`, `camconst.json`,
-`cammatrices.json`, `dcraw.json` — currently under
-`3rdparty/rawengine/rtdata/`); `userDir` is Hazor's own per-user RAW data
-directory (e.g. for user-dropped DCP profiles).
+`RawEngine::initialize(resourceDir, userDir)` call — wired into `main()`
+(Fase 5), once, before the main window is created. `resourceDir`/`userDir`
+are `AppPaths::rawEngineResourceDir()` (`3rdparty/rawengine/rtdata/` —
+`iccprofiles/`, `profiles/`, `dcpprofiles/`, `camconst.json`,
+`cammatrices.json`, `dcraw.json`) and `AppPaths::rawUserDir()` (Hazor's own
+per-user RAW data directory, e.g. for user-dropped DCP profiles).
 
 ## API surface
 
@@ -78,8 +76,35 @@ last resort — is `RawImageSource::findInputProfile()`'s own cascade, never
 reimplemented. `RawEngine::matchedCameraProfile(metadata)` runs that same
 DCP→ICC lookup read-only, for the UI to show what a RAW file resolves to.
 
+## Opening RAW files
+
+`RawImageCodec` ([`src/io/ImageCodec.cpp`](../src/io/ImageCodec.cpp)) is
+registered first in `registerDefaultImageCodecs()`, ahead of
+`QtImageCodec`/`OpenCvImageCodec`, so a RAW extension is always claimed here
+instead of risking a generic codec mis-decoding it (e.g. a DNG's embedded
+TIFF structure). It feeds `RawEngine::supportedExtensions()` into
+`ImageCodecRegistry::openFileFilter()` (the Open dialog's filter) and exists
+as a flattened fallback (`RawDevelopParams::cameraDefaults()`) for any path
+that reaches the generic codec registry (drag & drop, "Insert into Canvas").
+
+The primary path is `MainWindow::onOpenFile()`, which diverts a RAW
+extension to `openRawFileAsNewTab()` *before* reaching the codec registry:
+it opens the file and renders camera defaults off the UI thread, then
+creates a new tab whose single layer carries a `RawLayerData` (Linked mode —
+see "RAW Layer" below) instead of a flattened import. The layer shows a
+dedicated thumbnail icon in the Layers panel (same mechanism as a Text
+layer's), and its thumbnail's double-click hook
+(`LayerItemDelegate::rawThumbDoubleClicked` →
+`LayerPanel::rawEditRequested`) is wired through but not yet connected to
+anything — the Camera Raw dialog that will consume it is a later phase.
+
+`raw_develop` (tool catalog / MCP / agent surface) adjusts a RAW Layer's
+white balance and exposure and re-reveals it via
+`ImageController::rerevealRawLayer()`; `rasterize_layer` already covered RAW
+layers from Fase 4 onward (`ImageController::rasterizeNode()`), so it did not
+need a separate tool.
+
 ## Not yet done
 
-Camera Raw UI (dialog, live preview with sliders, before/after), the RAW
-Layer in the document model, and wiring `RawEngine::initialize()` into
-startup are later phases — see `tmp/feat-raw-therapee-plan.md`.
+Camera Raw UI (dialog, live preview with sliders, before/after) is the
+remaining later phase — see `tmp/feat-raw-therapee-plan.md`.

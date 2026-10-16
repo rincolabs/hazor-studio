@@ -42,4 +42,16 @@ QString thirdPartyDir();
 // downloaded/custom models never mix with the trusted bundled set.
 QString bundledModelsDir();
 
+// Read-only RawEngine runtime resources distributed with the app
+// ("3rdparty/rawengine/rtdata" — iccprofiles/, profiles/, dcpprofiles/,
+// camconst.json, cammatrices.json, dcraw.json). Passed to
+// RawEngine::initialize() as resourceDir. Mirrors bundledModelsDir().
+QString rawEngineResourceDir();
+
+// Hazor's own per-user RAW data directory (e.g. user-dropped DCP profiles
+// under "<rawUserDir()>/dcpprofiles"), under dataDir() so it survives
+// alongside the rest of the user's data. Passed to RawEngine::initialize()
+// as userDir.
+QString rawUserDir();
+
 } // namespace AppPaths

@@ -639,6 +639,8 @@ void LayerPanel::setController(ImageController* ctrl)
             this, &LayerPanel::layerStylesRequested);
     connect(m_delegate, &LayerItemDelegate::solidColorThumbDoubleClicked,
             this, &LayerPanel::solidColorEditRequested);
+    connect(m_delegate, &LayerItemDelegate::rawThumbDoubleClicked,
+            this, &LayerPanel::rawEditRequested);
 
     connect(m_delegate, &LayerItemDelegate::maskToggled,
             this, [this](int flatIndex, Qt::KeyboardModifiers mods) {
@@ -1207,6 +1209,13 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
         // Checked here because this filter consumes thumbnail double-clicks before
         // the view/delegate ever see them.
         if (delegate->handleSolidColorThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
+            return true;
+
+        // Double-click on a RAW Layer's thumbnail (emits rawThumbDoubleClicked →
+        // rawEditRequested). Consumed here for the same reason as the Solid
+        // Color case above: this filter runs before the view/delegate's own
+        // in-place-rename double-click handling.
+        if (delegate->handleRawThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
             return true;
 
         if (!delegate->labelRect(option, index).contains(mouseEvent->pos()))

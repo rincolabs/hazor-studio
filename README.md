@@ -22,11 +22,16 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **Full tool set** — Move, Brush (advanced brush engine with smoothing,
   dynamics, dual/texture brushes), Eraser, Select, Shape (vector layers), Crop,
   Text, Fill Bucket, Gradient, Eyedropper, Zoom, and Hand.
-- **Layers** — Raster, Text, Shape, Group, and non-destructive Adjustment
+- **Layers** — Raster, Text, Shape, Group, RAW, and non-destructive Adjustment
   layers; layer masks, layer styles (drop shadow, stroke, glows, overlays…),
   blend modes, grouping, and multi-layer transforms. Any layer or group can
   also be exported on its own (Export Layer/Group As...), trimmed to its
   rendered bounds or kept at the document's canvas size.
+- **RAW support** — a native RAW development engine (derived from
+  RawTherapee's `rtengine`, vendored and built directly into Hazor — no
+  external process) opens CR2, CR3, NEF, ARW, RAF, DNG, ORF, RW2, PEF, SRW
+  and more as a non-destructive RAW Layer: the original file is never
+  modified and the develop profile stays re-editable.
 - **Selections** — Rectangular, elliptical, lasso, magic wand, quick select, and
   magnetic lasso, with feather/grow/shrink refinement, saved alpha channels, and
   quick mask.

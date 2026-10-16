@@ -15,9 +15,11 @@
 #include "ui/SplashScreen.hpp"
 #include "mcp/McpServer.hpp"
 #include "async/AsyncJobSystem.hpp"
+#include "core/AppPaths.hpp"
 #include "core/CrashHandler.hpp"
 #include "core/Version.hpp"
 #include "brush/import/BrushImportManager.hpp"
+#include "raw/RawEngine.hpp"
 
 class NoDialogButtonIconsStyle : public QProxyStyle {
 public:
@@ -162,6 +164,13 @@ int main(int argc, char* argv[])
     app.setWindowIcon(QIcon(":/icons/app-icon.png"));
     QImageReader::setAllocationLimit(0); // remove Qt's default 128 MB decoded-image cap
     AsyncJobSystem::create();
+
+    // Process-wide RawEngine startup (Fase 5): safe to call even when
+    // HAVE_RAWENGINE isn't compiled in (isAvailable() just stays false) or
+    // when the resource directory doesn't exist yet. Must run once, before
+    // any RAW file is opened (registerDefaultImageCodecs()/onOpenFile()).
+    RawEngine::initialize(AppPaths::rawEngineResourceDir().toStdString(),
+                          AppPaths::rawUserDir().toStdString());
 
     QSurfaceFormat fmt;
     fmt.setSwapInterval(1);

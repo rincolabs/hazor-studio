@@ -64,6 +64,15 @@ public:
     // document closed, or the layer stopped being a RAW layer).
     void release(const LayerTreeNode* node);
 
+    // The single named point where a RawImageBuffer's 16-bit/float pixels
+    // become the compositor's 8-bit Format_RGBA8888 (Fase 4.2) — the
+    // boundary between the RAW engine's own precision and Hazor's current
+    // (8-bit) compositor, documented here rather than buried in the engine.
+    // Public (not just requestDevelop()'s own worker task) so the initial
+    // RAW file open (Fase 5, MainWindow::onOpenFile()) shares the same
+    // conversion instead of duplicating it.
+    static QImage convertToRgba8888(const RawImageBuffer& buffer, bool dither);
+
 signals:
     // Always emitted on the UI thread, exactly once per requestDevelop()
     // that returned true.
@@ -106,12 +115,6 @@ private:
 
     Entry& entryFor(LayerTreeNode* node);
     void onFinished(LayerTreeNode* node);
-
-    // The single named point where a RawImageBuffer's 16-bit/float pixels
-    // become the compositor's 8-bit Format_RGBA8888 (Fase 4.2) — the
-    // boundary between the RAW engine's own precision and Hazor's current
-    // (8-bit) compositor, documented here rather than buried in the engine.
-    static QImage convertToRgba8888(const RawImageBuffer& buffer, bool dither);
 
     std::unordered_map<const LayerTreeNode*, std::unique_ptr<Entry>> m_entries;
 };

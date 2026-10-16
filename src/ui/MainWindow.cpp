@@ -77,6 +77,13 @@
 #include "io/ImageIO.hpp"
 #include "io/ProjectFileService.hpp"
 #include "color/ColorManagementService.hpp"
+#include "color/ColorProfile.hpp"
+#include "raw/RawDevelopParams.hpp"
+#include "raw/RawDevelopService.hpp"
+#include "raw/RawEngine.hpp"
+#include "raw/RawImageBuffer.hpp"
+#include "raw/RawLayerData.hpp"
+#include "raw/RawSession.hpp"
 #include "ui/color/AssignProfileDialog.hpp"
 #include "ui/color/ConvertToProfileDialog.hpp"
 #include "ui/color/MissingProfileDialog.hpp"
@@ -3397,6 +3404,14 @@ void MainWindow::onOpenFile()
         return;
     }
 
+    // RAW files get their own non-destructive RAW Layer (Fase 5) instead of
+    // the generic codec path below, which would flatten them on import.
+    if (RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(path).suffix()).toStdString())) {
+        openRawFileAsNewTab(path);
+        return;
+    }
+
     beginProgressDelayed(tr("Progress"), tr("Opening Image"), false);
     auto* watcher = new QFutureWatcher<ImageLoadResult>(this);
     connect(watcher, &QFutureWatcher<ImageLoadResult>::finished, this, [this, watcher, path]() {
@@ -3473,6 +3488,121 @@ void MainWindow::onOpenFile()
     });
     watcher->setFuture(QtConcurrent::run([path]() {
         return imageCodecRegistry().readImage(path);
+    }));
+}
+
+namespace {
+// Worker-thread result for openRawFileAsNewTab()'s QtConcurrent job: unlike
+// the generic open path, this carries the pieces a RawLayerData needs
+// (metadata, PP3, develop geometry), not just a flattened DocumentImage.
+struct RawOpenResult {
+    bool ok = false;
+    QString errorMessage;
+    QImage image;              // Format_RGBA8888 (RawDevelopService::convertToRgba8888)
+    RawMetadata metadata;
+    QString pp3;
+    QSize developedSize;
+    RawGeometry geometry;
+};
+} // namespace
+
+void MainWindow::openRawFileAsNewTab(const QString& path)
+{
+    if (!RawEngine::isAvailable()) {
+        AppMessageDialog::warning(this, tr("Open RAW Image"),
+            tr("RAW support is not built into this copy of Hazor."));
+        return;
+    }
+
+    beginProgressDelayed(tr("Progress"), tr("Opening RAW Image"), false);
+    auto* watcher = new QFutureWatcher<RawOpenResult>(this);
+    connect(watcher, &QFutureWatcher<RawOpenResult>::finished, this, [this, watcher, path]() {
+        const RawOpenResult loaded = watcher->result();
+        watcher->deleteLater();
+        closeProgress();
+
+        if (!loaded.ok) {
+            AppMessageDialog::warning(this, tr("Could Not Open RAW Image"), loaded.errorMessage);
+            return;
+        }
+
+        const QImage& preview = loaded.image;
+        m_tabWidget->setUpdatesEnabled(false);
+        const QString title = QFileInfo(path).fileName();
+        auto& tab = createTab(title, QSize(preview.width(), preview.height()));
+        if (m_doc) {
+            // Camera defaults, no colour-management dialog (Fase 5 scope):
+            // rtengine always bakes its own output ICC profile (sRGB by
+            // default) into renderFull()'s result, so there is no embedded-
+            // profile question to ask the user about here.
+            m_doc->setColorProfile(ColorProfile::sRgb());
+            m_doc->setProfileSource(ColorProfileSource::GeneratedDefault);
+        }
+
+        if (m_ctrl) {
+            auto node = std::make_unique<LayerTreeNode>();
+            node->type = LayerTreeNode::Type::Layer;
+            node->name = title;
+            node->layer = std::make_shared<Layer>();
+            node->layer->name = title;
+            node->layer->cpuImage = preview;
+            node->layer->owner = node.get();
+            node->layer->resetTransform = node->transform;
+            node->layer->hasResetTransform = true;
+
+            auto source = std::make_shared<RawSource>();
+            source->path = path;
+            source->meta = loaded.metadata;
+            auto rawData = std::make_shared<RawLayerData>();
+            rawData->source = std::move(source);
+            rawData->state.pp3 = loaded.pp3;
+            rawData->state.developedSize = loaded.developedSize;
+            rawData->state.geometry = loaded.geometry;
+            rawData->mode = RawStorageMode::Linked;
+            node->layer->rawData = std::move(rawData);
+
+            m_doc->selection.resize(preview.width(), preview.height());
+            m_doc->roots.push_back(std::move(node));
+            m_doc->activeFlatIndex = 0;
+            m_doc->selectedFlatIndices.clear();
+            m_doc->selectedFlatIndices.insert(0);
+            m_canvas->syncLayersToGpu();
+            m_canvas->fitToView();
+            m_canvas->update();
+        }
+
+        tab.currentProjectPath.clear();
+        tab.isDirty = false;
+        m_tabWidget->setUpdatesEnabled(true);
+        updateStatusFromDocument();
+        refreshLayerPanel();
+        refreshPropertiesPanel();
+        updateLayerMenuState();
+        updateDirtyUi();
+    });
+    watcher->setFuture(QtConcurrent::run([path]() {
+        RawOpenResult result;
+        std::string errorMessage;
+        std::unique_ptr<RawSession> session = RawEngine::openFile(path.toStdString(), &errorMessage);
+        if (!session) {
+            result.errorMessage = QString::fromStdString(errorMessage);
+            return result;
+        }
+
+        RawDevelopParams params = RawDevelopParams::cameraDefaults();
+        const RawImageBuffer buffer = session->renderFull(params);
+        if (buffer.isEmpty()) {
+            result.errorMessage = QStringLiteral("RAW develop failed.");
+            return result;
+        }
+
+        result.ok = true;
+        result.image = RawDevelopService::convertToRgba8888(buffer, /*dither=*/false);
+        result.metadata = session->metadata();
+        result.pp3 = QString::fromStdString(params.toPP3String());
+        result.developedSize = QSize(buffer.width, buffer.height);
+        result.geometry = buffer.geometry;
+        return result;
     }));
 }
 

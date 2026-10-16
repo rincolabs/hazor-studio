@@ -1802,6 +1802,16 @@ void ImageController::removeNode(int flatIndex)
             aj->cancelForLayer(node->layer.get());
     }
 
+    // RawDevelopService's cache is keyed by this node's address: the node
+    // (not just its clone) is about to be destroyed below, so drop the
+    // cache/pending-reveal entries now rather than leaving them keyed to a
+    // dangling pointer a future heap allocation could reuse (see
+    // RawDevelopService::release()'s doc comment).
+    if (node->layer && node->layer->rawData) {
+        m_rawDevelopService->release(node);
+        m_pendingRawDevelops.erase(node);
+    }
+
     auto clone = node->clone();
 
     (void)m_doc->takeNodeAt(flatIndex);
@@ -2144,6 +2154,12 @@ void ImageController::removeSelectedNodes()
         if (node->layer) {
             if (auto* aj = AsyncJobSystem::instance())
                 aj->cancelForLayer(node->layer.get());
+        }
+        // See removeNode()'s comment: the node (not just its clone) is about
+        // to be destroyed, so drop its RawDevelopService entry now.
+        if (node->layer && node->layer->rawData) {
+            m_rawDevelopService->release(node);
+            m_pendingRawDevelops.erase(node);
         }
 
         auto clone = node->clone();
