@@ -2548,7 +2548,8 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
         : QImage();
     const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
 
-    auto& tab = createTab(tr("Untitled"), s);
+    const QString title = QFileInfo(paths.front()).fileName();
+    auto& tab = createTab(title, s);
     tab.isDirty = false;
     tab.currentProjectPath.clear();
     if (m_doc) {
