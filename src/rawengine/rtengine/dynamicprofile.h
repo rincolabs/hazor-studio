@@ -18,7 +18,7 @@
  */
 #pragma once
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 #include <vector>
 
 namespace rtengine

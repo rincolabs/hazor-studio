@@ -23,7 +23,7 @@
 #include "rawimage.h"
 #include "rt_math.h"
 #include "color.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "opthelper.h"
 #include "median.h"
 //#define BENCHMARK

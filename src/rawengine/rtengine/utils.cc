@@ -20,7 +20,7 @@
 #include <cstring>
 #include <cstdio>
 #include <fstream>
-#include <glibmm/convert.h>
+#include "rtcompat/glib/textconv.hpp"
 #include "rt_math.h"
 
 #include "utils.h"

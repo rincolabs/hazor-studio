@@ -20,7 +20,7 @@
 
 #include "rawimagesource.h"
 #include "rt_math.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "StopWatch.h"
 
 using namespace std;

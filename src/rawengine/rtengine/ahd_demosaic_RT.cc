@@ -27,7 +27,7 @@
 #include "rtengine.h"
 #include "rawimagesource.h"
 #include "rt_math.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "median.h"
 //#define BENCHMARK
 #include "StopWatch.h"

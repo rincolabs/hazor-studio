@@ -21,7 +21,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include <glib/gstdio.h>
+#include "rtcompat/glib/fileio.hpp"
 
 #include "opthelper.h"
 

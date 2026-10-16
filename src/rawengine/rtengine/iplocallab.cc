@@ -35,7 +35,7 @@
 #include "jaggedarray.h"
 #include "rt_algo.h"
 #include "settings.h"
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 #include "utils.h"
 #include "iccmatrices.h"
 #ifdef _OPENMP

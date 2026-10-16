@@ -20,7 +20,7 @@
 #include <array>
 #include <utility>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "rtengine.h"
 #include "color.h"

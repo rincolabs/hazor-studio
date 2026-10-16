@@ -24,8 +24,9 @@
 #include <map>
 #include <sstream>
 
-#include <giomm.h>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/misc.hpp"
+#include "rtcompat/glib/ustring.hpp"
 
 #include "dfmanager.h"
 
@@ -36,7 +37,7 @@
 #include "rawimage.h"
 #include "utils.h"
 
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 
 namespace
 {

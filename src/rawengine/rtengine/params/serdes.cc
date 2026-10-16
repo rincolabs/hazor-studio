@@ -19,9 +19,9 @@
 
 #include "serdes.h"
 
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
-#include <glibmm/keyfile.h>
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/keyfile.hpp"
 
 Glib::ustring expandRelativePath(const Glib::ustring &procparams_fname, const Glib::ustring &prefix, Glib::ustring embedded_fname)
 {

@@ -20,16 +20,16 @@
 #include <algorithm>
 #include <map>
 
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
 
 #include "profilestore.h"
 
 #include "dynamicprofile.h"
 #include "procparams.h"
 
-#include "rtgui/options.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/options.hpp"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 
 using namespace rtengine;
 using namespace rtengine::procparams;

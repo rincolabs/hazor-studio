@@ -18,7 +18,7 @@
  */
 #include <fstream>
 
-#include <glibmm/thread.h>
+#include "rtcompat/glib/misc.hpp"
 
 #include "improccoordinator.h"
 
@@ -33,6 +33,7 @@
 #include "image8.h"
 #include "imagefloat.h"
 #include "improcfun.h"
+#include "rtcompat/rtgui/labgrid.hpp"
 #include "metadata.h"
 #include "labimage.h"
 #include "lcp.h"
@@ -42,9 +43,8 @@
 #include "refreshmap.h"
 #include "utils.h"
 #include "rt_algo.h"
-#include "rtgui/labgrid.h"
 
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>

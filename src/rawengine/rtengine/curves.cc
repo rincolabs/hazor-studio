@@ -22,7 +22,7 @@
 #include <memory>
 #include <cmath>
 #include <cstring>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "rt_math.h"
 

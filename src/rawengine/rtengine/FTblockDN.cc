@@ -43,8 +43,8 @@
 #include "procparams.h"
 #include "rt_math.h"
 #include "sleef.h"
-#include "rtgui/threadutils.h"
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/threadutils.hpp"
+#include "rtcompat/rtgui/options.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>

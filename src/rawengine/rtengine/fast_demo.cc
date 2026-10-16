@@ -24,7 +24,7 @@
 
 #include <cmath>
 #include "rawimagesource.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "opthelper.h"
 
 using namespace std;

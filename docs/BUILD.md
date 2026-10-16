@@ -24,10 +24,10 @@ Linux AppImage builds are also produced automatically in CI — see
 
 > The editor **builds and runs without the RAW engine**. See
 > [`src/rawengine/PROVENANCE.md`](../src/rawengine/PROVENANCE.md) for what is
-> vendored and the current port status — as of this writing `rawengine` itself
-> does not link cleanly yet (Fase 2 of `tmp/feat-raw-therapee-plan.md` is
-> pending), but nothing in `Hazor` depends on it, so this never affects the
-> main build.
+> vendored and the current port status — `rawengine` now builds and links
+> cleanly on Linux (Fase 2 of `tmp/feat-raw-therapee-plan.md`; MSVC/Windows
+> not yet attempted), but nothing in `Hazor` depends on it yet (that is
+> Fase 3), so this never affects the main build.
 
 ## Dependency downloads
 

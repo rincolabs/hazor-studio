@@ -22,11 +22,11 @@
 #include <map>
 #include <vector>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "dynamicprofile.h"
 #include "noncopyable.h"
-#include "rtgui/threadutils.h"
+#include "rtcompat/rtgui/threadutils.hpp"
 
 // forward decl
 namespace rtengine

@@ -24,10 +24,10 @@
 #include <locale.h>
 
 #include <cjson/cJSON.h>
-#include <glib/gstdio.h>
-#include <glibmm/fileutils.h>
-#include <glibmm/keyfile.h>
-#include <glibmm/miscutils.h>
+#include "rtcompat/glib/fileio.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/keyfile.hpp"
+#include "rtcompat/glib/fileutils.hpp"
 
 #include "params/serdes.h"
 
@@ -37,11 +37,11 @@
 #include "curves.h"
 #include "utils.h"
 
-#include "rtgui/multilangmgr.h"
-#include "rtgui/options.h"
-#include "rtgui/paramsedited.h"
-#include "rtgui/ppversion.h"
-#include "rtgui/version.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
+#include "rtcompat/rtgui/options.hpp"
+#include "rtcompat/rtgui/paramsedited.h"
+#include "rtcompat/rtgui/ppversion.h"
+#include "rtcompat/rtgui/version.h"
 
 using namespace std;
 

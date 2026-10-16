@@ -23,7 +23,7 @@
 #include "rtengine.h"
 #include "rawimage.h"
 #include "rawimagesource.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 //#define BENCHMARK
 #include "StopWatch.h"
 

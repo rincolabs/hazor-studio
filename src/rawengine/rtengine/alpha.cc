@@ -19,78 +19,66 @@
 
 #include "alpha.h"
 
+namespace
+{
+
+// Matches cairo_format_stride_for_width(CAIRO_FORMAT_A8, width): one byte
+// per pixel, row stride padded up to a multiple of 4 bytes.
+std::size_t strideForWidth(int width)
+{
+    return static_cast<std::size_t>((width + 3) & ~3);
+}
+
+}
+
 namespace rtengine
 {
 
-Alpha::Alpha () {}
+Alpha::Alpha() : width(-1), height(-1), stride(0) {}
 
-Alpha::Alpha (int width, int height)
+Alpha::Alpha(int w, int h) : width(-1), height(-1), stride(0)
 {
-    if (width > 0 && height > 0) {
-        surface = Cairo::ImageSurface::create (Cairo::FORMAT_A8, width, height);
-    }
+    setSize(w, h);
 }
 
-/*
-Alpha::~Alpha () {
-    surface->unreference();
-}
-*/
-
-void Alpha::setSize (int width, int height)
+void Alpha::setSize(int w, int h)
 {
-    if (width > 0 && height > 0) {
-        if (surface) {
-            if (width != getWidth() && height != getHeight()) {
-                surface.clear();  // does this delete the referenced object? Unreferencing doesn't work, since Cairo expect to have a non null refCount in the destructor!
-            } else {
-                return;
-            }
-        }
-
-        surface = Cairo::ImageSurface::create (Cairo::FORMAT_A8, width, height);
-    } else if (surface) {
-        surface.clear();
+    if (w > 0 && h > 0) {
+        width = w;
+        height = h;
+        stride = strideForWidth(w);
+        data.assign(stride * static_cast<std::size_t>(h), 0);
+    } else {
+        width = -1;
+        height = -1;
+        stride = 0;
+        data.clear();
     }
 }
 
 int Alpha::getWidth() const
 {
-    if (surface) {
-        return surface->get_width();
-    }
-
-    return -1;
+    return width;
 }
 
 int Alpha::getHeight() const
 {
-    if (surface) {
-        return surface->get_height();
-    }
-
-    return -1;
-}
-
-
-Cairo::RefPtr<Cairo::ImageSurface> Alpha::getSurface () const
-{
-    return surface; // to be used in bitmap edition
+    return height;
 }
 
 unsigned char Alpha::operator () (unsigned row, unsigned col) const
 {
-    return * (surface->get_data () + row * surface->get_width () + col);
+    return data[row * stride + col];
 }
 
 unsigned char& Alpha::operator () (unsigned row, unsigned col)
 {
-    return * (surface->get_data () + row * surface->get_width () + col);
+    return data[row * stride + col];
 }
 
 unsigned char* Alpha::operator () (unsigned row) const
 {
-    return surface->get_data () + row * surface->get_width ();
+    return const_cast<unsigned char*>(data.data()) + row * stride;
 }
 
 }

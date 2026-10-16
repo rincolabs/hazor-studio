@@ -21,7 +21,7 @@
 #include "rawimagesource.h"
 #include "rt_math.h"
 #include "color.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "sleef.h"
 #include "opthelper.h"
 #include "median.h"

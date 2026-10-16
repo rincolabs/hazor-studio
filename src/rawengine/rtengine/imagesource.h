@@ -21,7 +21,7 @@
 #include <array>
 #include <vector>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "coord2d.h"
 #include "imagedata.h"

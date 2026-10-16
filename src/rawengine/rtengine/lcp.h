@@ -24,7 +24,7 @@
 #include <string>
 #include <sstream>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 #include <expat.h>
 
 #include "cache.h"

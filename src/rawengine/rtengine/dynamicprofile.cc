@@ -20,14 +20,14 @@
 #include "dynamicprofile.h"
 
 #include <stdlib.h>
-#include <glibmm/regex.h>
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
-#include <glibmm/keyfile.h>
-#include <glibmm/fileutils.h>
+#include "rtcompat/glib/misc.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/keyfile.hpp"
+#include "rtcompat/glib/fileutils.hpp"
 
 #include "rtengine.h"
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 
 using namespace rtengine;
 using namespace rtengine::procparams;

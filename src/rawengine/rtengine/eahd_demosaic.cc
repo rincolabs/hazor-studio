@@ -26,7 +26,7 @@
 #include "jaggedarray.h"
 #include "iccmatrices.h"
 #include "rt_math.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 //#define BENCHMARK
 #include "StopWatch.h"
 

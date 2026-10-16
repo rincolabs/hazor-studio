@@ -19,16 +19,16 @@
  */
 
 #include <stdio.h>
-#include <glib/gstdio.h>
+#include "rtcompat/glib/fileio.hpp"
 #include <iostream>
-#include <giomm.h>
+#include "rtcompat/glib/misc.hpp"
 #include <set>
 
 #include "metadata.h"
 #include "settings.h"
 #include "imagedata.h"
-#include "rtgui/version.h"
-#include "rtgui/pathutils.h"
+#include "rtcompat/rtgui/version.h"
+#include "rtcompat/rtgui/pathutils.hpp"
 #include <ctime>
 
 

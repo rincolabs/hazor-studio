@@ -29,7 +29,7 @@
 #include "pipettebuffer.h"
 #include "array2D.h"
 #include "imagesource.h"
-#include <cairomm/cairomm.h>
+#include "alpha.h"
 
 namespace Glib
 {
@@ -138,7 +138,7 @@ class ImProcFunctions
 {
     cmsHTRANSFORM monitorTransform;
     std::unique_ptr<GamutWarning> gamutWarning;
-    Cairo::RefPtr<Cairo::ImageSurface> locImage;
+    Alpha locImage;
 
     const procparams::ProcParams* params;
     double scale;

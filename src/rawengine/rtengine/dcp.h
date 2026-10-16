@@ -24,9 +24,9 @@
 #include <array>
 #include <memory>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
-#include "rtgui/threadutils.h"
+#include "rtcompat/rtgui/threadutils.hpp"
 
 #include "curves.h"
 #include "noncopyable.h"

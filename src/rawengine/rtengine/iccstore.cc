@@ -21,10 +21,10 @@
 #include <string>
 
 #include <cjson/cJSON.h>
-#include <glibmm/ustring.h>
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
-#include <glib/gstdio.h>
+#include "rtcompat/glib/ustring.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileio.hpp"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -39,8 +39,8 @@
 #include "iccmatrices.h"
 #include "utils.h"
 
-#include "rtgui/options.h"
-#include "rtgui/threadutils.h"
+#include "rtcompat/rtgui/options.hpp"
+#include "rtcompat/rtgui/threadutils.hpp"
 #include "lcms2_plugin.h"
 
 #include "color.h"

@@ -1,14 +1,25 @@
 # `rawengine` — static library wrapping RawTherapee's rtengine. See
 # PROVENANCE.md for what was vendored and the current port status.
 #
-# Fase 1 (tmp/feat-raw-therapee-plan.md): vendoring + build skeleton only. The
-# rtcompat/ compatibility layer that replaces rtengine's glibmm/gtkmm/cairomm/
-# rtgui includes is Fase 2 and does not exist yet, so this target is not
-# expected to compile cleanly until that lands.
+# Fase 1 + Fase 2 (tmp/feat-raw-therapee-plan.md) are done on Linux: this
+# target builds and links cleanly, via the rtcompat/ compatibility layer
+# below that replaces rtengine's glibmm/gtkmm/cairomm/rtgui includes.
+# MSVC/Windows has not been attempted (no toolchain in this environment).
 
 add_subdirectory(external)
 
 add_library(rawengine STATIC
+    # rtcompat/ — the Fase 2 compatibility layer (see PROVENANCE.md /
+    # tmp/feat-raw-therapee-plan.md): everything rtengine used to reach via
+    # glibmm/gtkmm/cairomm/rtgui now reaches via here instead.
+    rtcompat/glib/ustring.cpp
+    rtcompat/glib/textconv.cpp
+    rtcompat/glib/fileio.cpp
+    rtcompat/glib/keyfile.cpp
+    rtcompat/rtgui/options.cpp
+    rtcompat/rtgui/paramsedited.cc
+    rtcompat/rtgui/editcallbacks.cpp
+
     rtengine/newdelete.cc
     rtengine/alpha.cc
     rtengine/ahd_demosaic_RT.cc
@@ -152,4 +163,45 @@ target_link_libraries(rawengine
 if(RAWENGINE_WITH_LENSFUN)
     target_link_libraries(rawengine PUBLIC Lensfun::Lensfun)
     target_compile_definitions(rawengine PUBLIC RAWENGINE_WITH_LENSFUN=1)
+
+    if(RAWENGINE_LENSFUN_HAS_LOAD_DIRECTORY)
+        # See the check in the root CMakeLists.txt: uses lfDatabase's own
+        # directory scan instead of rtlensfun.cc's GLib-based fallback.
+        set_source_files_properties(
+            rtengine/rtlensfun.cc PROPERTIES
+            COMPILE_DEFINITIONS RT_LENSFUN_HAS_LOAD_DIRECTORY
+        )
+    endif()
+endif()
+
+# tmp/feat-raw-therapee-plan.md Fase 2 item 8 — OpenMP policy.
+#
+# GCC/Clang (Linux, primary platform): full, unmodified OpenMP, same as
+# upstream RawTherapee. Without this, every `#pragma omp` in rtengine is
+# silently ignored and the engine runs single-threaded everywhere, not
+# just on Windows.
+#
+# MSVC: deliberately **not** wired up yet (W1 milestone — see the plan).
+# `reduction(max:/min:)` (71 sites / 20 files), `collapse(2)` and
+# `#pragma omp simd` are OpenMP 3.0/3.1/4.0 constructs MSVC's own
+# `/openmp` (2.0) does not support; passing it as-is would fail to build.
+# W2 (RT_OMP(...) + reduction-clause rewrites at just those sites) is a
+# separate, not-yet-done step — until then MSVC gets a correct, serial
+# `rawengine` by simply never seeing `#pragma omp`.
+if(NOT MSVC)
+    find_package(OpenMP)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(rawengine PUBLIC OpenMP::OpenMP_CXX)
+    else()
+        message(WARNING "OpenMP not found: rawengine will build but run single-threaded.")
+    endif()
+else()
+    # MSVC: silence C4068 (unknown pragma) for the `#pragma GCC ivdep` /
+    # `#pragma GCC diagnostic` hints sprinkled through rtengine — they are
+    # harmless on a compiler that doesn't understand them, but noisy.
+    target_compile_options(rawengine PRIVATE /wd4068)
+    # SSE2 is guaranteed on MSVC x86_64, but MSVC never defines the
+    # __SSE2__ macro GCC/Clang use to gate rtengine's SSE2 code paths
+    # (helpersse2.h and friends).
+    target_compile_definitions(rawengine PRIVATE __SSE2__=1)
 endif()

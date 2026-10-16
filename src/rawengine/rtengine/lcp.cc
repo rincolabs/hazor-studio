@@ -21,9 +21,9 @@
 #include <cassert>
 #include <cstring>
 
-#include <glibmm/ustring.h>
-#include <glibmm/fileutils.h>
-#include <glib/gstdio.h>
+#include "rtcompat/glib/ustring.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileio.hpp"
 
 #ifdef _WIN32
 #include <shlobj.h>

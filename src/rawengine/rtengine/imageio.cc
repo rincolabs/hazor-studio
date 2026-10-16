@@ -32,7 +32,7 @@
 #endif
 
 #include <fcntl.h>
-#include <glib/gstdio.h>
+#include "rtcompat/glib/fileio.hpp"
 #include <jpeg_ijg/jpeg.h>
 #include <png.h>
 #include <tiff.h>
@@ -53,8 +53,8 @@
 #include "settings.h"
 #include "utils.h"
 
-#include "rtgui/options.h"
-#include "rtgui/version.h"
+#include "rtcompat/rtgui/options.hpp"
+#include "rtcompat/rtgui/version.h"
 
 
 using namespace std;

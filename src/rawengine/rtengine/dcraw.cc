@@ -13,8 +13,8 @@
 /*RT*/#include <winsock2.h>
 /*RT*/#endif
 
-/*RT*/#include <glib.h>
-/*RT*/#include <glib/gstdio.h>
+/*RT*/#include "rtcompat/glib/misc.hpp"
+/*RT*/#include "rtcompat/glib/fileio.hpp"
 /*RT*/#undef MAX
 /*RT*/#undef MIN
 /*RT*/#undef ABS

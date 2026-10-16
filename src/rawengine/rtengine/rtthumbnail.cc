@@ -22,11 +22,11 @@
 
 #include <lcms2.h>
 
-#include <glib/gstdio.h>
+#include "rtcompat/glib/fileio.hpp"
 
-#include <glibmm/ustring.h>
-#include <glibmm/fileutils.h>
-#include <glibmm/keyfile.h>
+#include "rtcompat/glib/ustring.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/keyfile.hpp"
 #include <jpeg_ijg/jpeg.h>
 
 #include "cieimage.h"

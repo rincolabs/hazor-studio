@@ -22,7 +22,7 @@
 #include <vector>
 
 #include <type_traits>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 namespace rtengine
 {

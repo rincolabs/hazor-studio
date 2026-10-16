@@ -17,11 +17,11 @@
  *  along with RawTherapee.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <giomm/file.h>
-#include <glibmm/miscutils.h>
+#include "rtcompat/glib/misc.hpp"
+#include "rtcompat/glib/fileutils.hpp"
 
 #include "ffmanager.h"
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 #include "rawimage.h"
 #include "imagedata.h"
 #include "median.h"

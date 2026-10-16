@@ -18,8 +18,8 @@
  *  along with RawTherapee.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <glibmm/ustring.h>
-#include <glibmm/timer.h>
+#include "rtcompat/glib/ustring.hpp"
+#include "rtcompat/glib/misc.hpp"
 
 #include "cieimage.h"
 #include "color.h"
@@ -38,7 +38,7 @@
 #include "utils.h"
 #include "iccstore.h"
 
-#include "rtgui/editcallbacks.h"
+#include "rtcompat/rtgui/editcallbacks.hpp"
 
 #pragma GCC diagnostic warning "-Wall"
 #pragma GCC diagnostic warning "-Wextra"

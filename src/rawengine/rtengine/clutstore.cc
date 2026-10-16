@@ -1,7 +1,7 @@
 #include <algorithm>
 
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
 
 #include "clutstore.h"
 
@@ -13,7 +13,7 @@
 #include "rt_math.h"
 #include "stdimagesource.h"
 
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 
 namespace
 {

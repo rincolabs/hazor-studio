@@ -132,6 +132,15 @@ if(ENABLE_RAWENGINE)
         if(PkgConfig_FOUND)
             pkg_check_modules(GLIB2 glib-2.0)
         endif()
+        # rtlensfun.h does `#include <lensfun.h>` (no subdirectory) and
+        # `#include <glib.h>` transitively through it — the layout real
+        # distro packages install (lensfun's own build system flattens
+        # include/lensfun/lensfun.h to <prefix>/include/lensfun.h on
+        # `make install`). Our vendored copy under RAWENGINE_DEPS_DIR keeps
+        # the unflattened source-tree layout, so both the "lensfun/"
+        # subdirectory and glib-2.0's split include dirs (glib.h lives
+        # under one, glibconfig.h under the other) need to be added
+        # explicitly.
         find_path(LENSFUN_INCLUDE_DIR lensfun/lensfun.h HINTS "${RAWENGINE_DEPS_DIR}/lensfun/include")
         find_library(LENSFUN_LIBRARY NAMES lensfun HINTS "${RAWENGINE_DEPS_DIR}/lensfun/lib")
         if(LENSFUN_INCLUDE_DIR AND LENSFUN_LIBRARY AND GLIB2_FOUND)
@@ -140,9 +149,31 @@ if(ENABLE_RAWENGINE)
                 add_library(Lensfun::Lensfun STATIC IMPORTED)
                 set_target_properties(Lensfun::Lensfun PROPERTIES
                     IMPORTED_LOCATION "${LENSFUN_LIBRARY}"
-                    INTERFACE_INCLUDE_DIRECTORIES "${LENSFUN_INCLUDE_DIR}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${LENSFUN_INCLUDE_DIR};${LENSFUN_INCLUDE_DIR}/lensfun;${GLIB2_INCLUDE_DIRS}"
                     INTERFACE_LINK_LIBRARIES "${GLIB2_LIBRARIES}")
             endif()
+
+            # Mirrors RawTherapee's own cmake/Dependencies.cmake check: lensfun
+            # >= 0.3.95 added lfDatabase::LoadDirectory(), which rtlensfun.cc
+            # prefers over its own GLib-based directory-scan fallback when
+            # available. Our vendored lensfun 0.3.4 has it.
+            include(CheckCXXSourceCompiles)
+            set(CMAKE_REQUIRED_INCLUDES "${LENSFUN_INCLUDE_DIR};${LENSFUN_INCLUDE_DIR}/lensfun;${GLIB2_INCLUDE_DIRS}")
+            set(CMAKE_REQUIRED_LIBRARIES "${LENSFUN_LIBRARY};${GLIB2_LIBRARIES}")
+            check_cxx_source_compiles(
+                "
+                #include <lensfun.h>
+                int main()
+                {
+                    lfDatabase *db = 0;
+                    bool b = db->LoadDirectory(0);
+                    return 0;
+                }
+                "
+                RAWENGINE_LENSFUN_HAS_LOAD_DIRECTORY
+            )
+            unset(CMAKE_REQUIRED_INCLUDES)
+            unset(CMAKE_REQUIRED_LIBRARIES)
         endif()
     endif()
 

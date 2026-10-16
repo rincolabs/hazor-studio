@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include <lcms2.h>
 

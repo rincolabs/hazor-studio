@@ -25,7 +25,7 @@
 #include <string>
 #include <memory>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include <lcms2.h>
 
@@ -34,7 +34,7 @@
 #include "procevents.h"
 #include "settings.h"
 
-#include "rtgui/threadutils.h"
+#include "rtcompat/rtgui/threadutils.hpp"
 
 
 /**

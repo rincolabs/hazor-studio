@@ -18,8 +18,8 @@
  */
 #include <cmath>
 
-#include <glib.h>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/misc.hpp"
+#include "rtcompat/glib/ustring.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -49,7 +49,7 @@
 #include "StopWatch.h"
 #include "utils.h"
 
-#include "rtgui/editcallbacks.h"
+#include "rtcompat/rtgui/editcallbacks.hpp"
 
 #pragma GCC diagnostic warning "-Wextra"
 #pragma GCC diagnostic warning "-Wdouble-promotion"

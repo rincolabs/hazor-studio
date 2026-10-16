@@ -25,7 +25,7 @@
 #include "rawimagesource.h"
 #include "rt_algo.h"
 #include "rt_math.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "opthelper.h"
 #include "StopWatch.h"
 

@@ -16,7 +16,7 @@
  *  You should have received a copy of the GNU General Public License
  *  along with RawTherapee.  If not, see <https://www.gnu.org/licenses/>.
  */
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "alignedbuffer.h"
 #include "color.h"
@@ -25,13 +25,12 @@
 #include "image8.h"
 #include "imagefloat.h"
 #include "improcfun.h"
+#include "rtcompat/rtgui/labgrid.hpp"
 #include "labimage.h"
 #include "procparams.h"
 #include "rtengine.h"
 #include "settings.h"
 #include "utils.h"
-#include <fmt/format.h>
-#include "rtgui/labgrid.h"
 
 namespace rtengine
 {
@@ -1881,19 +1880,19 @@ void ImProcFunctions::workingtrc(int sp, Imagefloat* src, Imagefloat* dst, int c
                     p[0] = newprimxy[0];
                     p[1] = newprimxy[1];
                     if(rtengine::settings->verbose) {
-                        fmt::println("newRx_prim={} newRy_prim={}", newprimxy[0], newprimxy[1]);
+                        printf("newRx_prim=%g newRy_prim=%g\n", newprimxy[0], newprimxy[1]);
                     }
                 } else if (i == 1) {
                     p[2] = newprimxy[0];
                     p[3] = newprimxy[1];
                     if(rtengine::settings->verbose) {
-                        fmt::println("newGx_prim={} newGy_prim={}", newprimxy[0], newprimxy[1]);
+                        printf("newGx_prim=%g newGy_prim=%g\n", newprimxy[0], newprimxy[1]);
                     }
                 } else if (i == 2) {
                     p[4] = newprimxy[0];
                     p[5] = newprimxy[1];
                     if(rtengine::settings->verbose) {
-                        fmt::println("newBx_prim={} newBy_prim={}", newprimxy[0], newprimxy[1]);
+                        printf("newBx_prim=%g newBy_prim=%g\n", newprimxy[0], newprimxy[1]);
                     }
                 }
             }

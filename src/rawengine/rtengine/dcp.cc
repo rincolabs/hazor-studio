@@ -24,9 +24,9 @@
 #include <unordered_map>
 
 #include <cjson/cJSON.h>
-#include <glib/gstdio.h>
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
+#include "rtcompat/glib/fileio.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
 
 #include "dcp.h"
 
@@ -37,7 +37,7 @@
 #include "rawimagesource.h"
 #include "rt_math.h"
 #include "utils.h"
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/options.hpp"
 
 using namespace rtengine;
 

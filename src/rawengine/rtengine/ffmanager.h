@@ -23,7 +23,7 @@
 #include <map>
 #include <string>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 namespace rtengine
 {

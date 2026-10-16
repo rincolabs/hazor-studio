@@ -19,7 +19,7 @@
 #pragma once
 
 #include <memory>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "iimage.h"
 #include "imagedimensions.h"

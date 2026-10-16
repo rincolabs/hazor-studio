@@ -11,9 +11,9 @@
 #include <memory>
 #include <vector>
 
-#include <glibmm/fileutils.h>
-#include <glibmm/miscutils.h>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/ustring.hpp"
 
 #include "settings.h"
 #include "rt_math.h"

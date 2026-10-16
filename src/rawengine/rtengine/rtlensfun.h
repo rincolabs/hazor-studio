@@ -24,7 +24,7 @@
 #include <set>
 #include <vector>
 
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include <lensfun.h>
 

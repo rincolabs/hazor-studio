@@ -18,8 +18,6 @@
   - `previewimage.{cc,h}` — GUI-only (Cairo/GTK preview surface).
   - `svgrender.{cc,h}` — GUI-only (renders SVG icons for the GTK UI); has no
     consumer inside `rtengine` itself.
-  - `ashift_lsd.c` — not referenced by `rtengine`'s own `CMakeLists.txt`
-    source list upstream.
   - `CMakeLists.txt` — upstream's own build file; replaced by
     [`../CMakeLists.txt`](CMakeLists.txt) (see below).
 - `external/{libraw,cJSON,jpeg_ijg,klt}` → [`external/`](external/), **minus**
@@ -52,14 +50,57 @@ Replaced with:
   over `rtengine/*.cc`, mirroring upstream's `RTENGINESOURCEFILES` list minus
   the two excluded GUI files above.
 
-## Status: Fase 1 of `tmp/feat-raw-therapee-plan.md`
+## Status: Fase 1 + Fase 2 of `tmp/feat-raw-therapee-plan.md` (Linux)
 
-This is **vendoring + build skeleton only**. `rtengine/*.cc` still `#include`
-`glibmm`/`gtkmm`/`cairomm`/`rtgui/*.h` headers exactly as upstream wrote them —
-the `rtcompat/` compatibility layer that replaces those includes is Fase 2 and
-does not exist yet. Do not expect `rawengine` to link cleanly until Fase 2
-lands; see the repo's build log / Fase 2 tracking for current status instead
-of assuming this file is out of date.
+Fase 1 (vendoring + build skeleton) and Fase 2 (the `rtcompat/` compatibility
+layer) are done on Linux: `rawengine` builds and links cleanly, with OpenMP
+enabled, and `grep -r 'glibmm\|gtkmm\|cairomm\|<glib' src/rawengine/rtengine/`
+(excluding `rtcompat/` include lines) returns empty.
+
+What `rtcompat/` covers, concretely:
+
+- `rtcompat/glib/` — `Glib::ustring` (over `std::string`, ASCII-fold), the
+  PP3 `Glib::KeyFile` codec (locale-C numeric formatting via
+  `<charconv>`), `g_fopen`/`g_open`/`g_stat`/`g_remove`/`g_file_read_link`,
+  UTF-8↔UTF-16 conversion, `Glib::Dir`/`file_test`/`build_filename`,
+  `Glib::Thread`/`Regex`/`ArrayHandle`/`TimeVal`, and the `Gio::File` slice
+  ffmanager.cc/dfmanager.cc/metadata.cc need (directory enumeration,
+  mtime-based cache invalidation).
+- `rtcompat/rtgui/` — a reduced `Options` (the ~20 fields rtengine actually
+  reads, including the ones Hazor's own `App::get().options()` refactor in
+  `rtengine/rtapp.{h,cc}` added on top of upstream), `M()` as identity,
+  `threadutils.h`/`paramsedited.{h,cc}` relocated unchanged,
+  `EditSubscriber`/`EditDataProvider` ported with real (not stubbed) logic
+  — Hazor just never hands them a non-null provider yet — plus the two
+  free constants `rtgui/labgrid.h` exposes outside its GTK widget class.
+- `rtengine/alpha.{h,cc}` — reimplemented over `std::vector<unsigned char>`
+  (Cairo FORMAT_A8's own 4-byte-aligned stride), since cairomm is dropped
+  outright rather than shimmed. `improcfun.h`'s `locImage` field now holds
+  one; `iplab2rgb.cc`/`improccoordinator.cc` no longer pull in
+  `rtgui/labgrid.h` for the GTK widget they don't use.
+- `fmt::println` (3 debug call sites in `iplab2rgb.cc`) replaced with
+  `printf` — `fmt` was never part of the vendored dependency set.
+- `ashift_lsd.c` is now vendored too: it turned out to be a real,
+  unconditional dependency of `ashift_dt.c` (pulled into
+  `perspectivecorrection.cc` by `#include`), not GUI-only as this file
+  previously claimed.
+- Lensfun: the root `CMakeLists.txt` now runs the same
+  `lfDatabase::LoadDirectory()` detection upstream's own
+  `cmake/Dependencies.cmake` does, and adds glib-2.0's split include dirs
+  — `rtlensfun.h` pulls in the *real* `<lensfun.h>`/`<glib.h>` (linked via
+  `GLIB2_LIBRARIES`), not `rtcompat/`, since lensfun's own public headers
+  need real GLib C types.
+- OpenMP: linked via `find_package(OpenMP)` on GCC/Clang. MSVC is
+  deliberately left unwired (Fase 2 item 8's "W1" milestone — MSVC's
+  `/openmp` is 2.0 and can't express the `reduction(max:/min:)` clauses
+  71 sites use; W2's `RT_OMP(...)` macro is not done). MSVC also gets
+  `/wd4068` and `-D__SSE2__` as safe, additive, `if(MSVC)`-gated flags.
+
+**Not attempted: MSVC/Windows.** Everything above is verified on Linux only
+— there is no Windows toolchain in this environment. Fase 2 items 7
+(the handful of real MSVC-only language fixes: `__typeof__` in
+`dcraw.cc`, `__attribute__((always_inline))` in two headers) and 8's W2
+OpenMP milestone are not done; see the plan file for what's left.
 
 ## DCP camera profiles
 

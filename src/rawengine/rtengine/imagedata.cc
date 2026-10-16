@@ -25,8 +25,8 @@
 #include <strings.h>
 #include <time.h>
 #include <tiff.h>
-#include <glib/gstdio.h>
-#include <glibmm/convert.h>
+#include "rtcompat/glib/fileio.hpp"
+#include "rtcompat/glib/textconv.hpp"
 
 #include "dnggainmap.h"
 #include "imagedata.h"

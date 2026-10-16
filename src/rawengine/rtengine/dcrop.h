@@ -20,7 +20,7 @@
 
 #include "rtengine.h"
 #include "pipettebuffer.h"
-#include "rtgui/threadutils.h"
+#include "rtcompat/rtgui/threadutils.hpp"
 
 namespace rtengine
 {

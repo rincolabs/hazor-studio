@@ -22,7 +22,7 @@
 #include "imagefloat.h"
 #include "labimage.h"
 
-#include "rtgui/editcallbacks.h"
+#include "rtcompat/rtgui/editcallbacks.hpp"
 
 namespace rtengine
 {

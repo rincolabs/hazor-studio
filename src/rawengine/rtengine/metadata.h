@@ -20,7 +20,7 @@
 
 #pragma once
 
-#include <glibmm.h>
+#include "rtcompat/glib/misc.hpp"
 #include <exiv2/exiv2.hpp>
 #include <memory>
 #include <unordered_set>

@@ -23,9 +23,9 @@
 #include "serdes.h"
 #include "utils.h"
 
-#include "rtgui/paramsedited.h"
+#include "rtcompat/rtgui/paramsedited.h"
 
-#include <glibmm/keyfile.h>
+#include "rtcompat/glib/keyfile.hpp"
 
 #include <sstream>
 

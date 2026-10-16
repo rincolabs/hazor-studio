@@ -29,7 +29,7 @@
 //#define BENCHMARK
 #include "StopWatch.h"
 #include "opthelper.h"
-#include "rtgui/multilangmgr.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
 #include "improcfun.h"
 #include "boxblur.h"
 #include "median.h"

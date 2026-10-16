@@ -17,8 +17,8 @@
  *  along with RawTherapee.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <glibmm/thread.h>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/misc.hpp"
+#include "rtcompat/glib/ustring.hpp"
 
 #include "cieimage.h"
 #include "clutstore.h"
@@ -41,8 +41,8 @@
 #include "rtengine.h"
 #include "utils.h"
 
-#include "rtgui/multilangmgr.h"
-#include "rtgui/options.h"
+#include "rtcompat/rtgui/multilangmgr.hpp"
+#include "rtcompat/rtgui/options.hpp"
 
 namespace rtengine
 {

@@ -16,13 +16,19 @@
  *  You should have received a copy of the GNU General Public License
  *  along with RawTherapee.  If not, see <http://www.gnu.org/licenses/>.
  */
+// rtcompat note (tmp/feat-raw-therapee-plan.md Fase 2 item 3): reimplemented
+// over std::vector<unsigned char> instead of Cairo::ImageSurface, since
+// cairomm is being eliminated outright rather than shimmed. Preserves
+// Cairo's own FORMAT_A8 layout (one byte per pixel, row stride padded to a
+// multiple of 4 bytes) so behaviour is unchanged for any caller indexing by
+// (row, col) — rtengine itself doesn't currently instantiate this class
+// (improcfun.h's locImage field is unused), but the class is kept faithful
+// in case that changes.
 #ifndef _ALPHA_H_
 #define _ALPHA_H_
 
-#include <cairomm/cairomm.h>
-#include <assert.h>
-
-#define CHECK_BOUNDS 0
+#include <cstddef>
+#include <vector>
 
 namespace rtengine
 {
@@ -31,20 +37,18 @@ namespace rtengine
 class Alpha
 {
 protected:
-    Cairo::RefPtr<Cairo::ImageSurface> surface;
+    int width;
+    int height;
+    std::size_t stride; // bytes per row; Cairo FORMAT_A8 pads this to a multiple of 4.
+    std::vector<unsigned char> data;
 
 public:
-    Alpha ();
-    Alpha (int width, int height);
-    //~Alpha ();
+    Alpha();
+    Alpha(int width, int height);
 
-    void setSize (int width, int height);
+    void setSize(int width, int height);
     int getWidth() const;
     int getHeight() const;
-
-    Cairo::RefPtr<Cairo::ImageSurface> getSurface () const;
-
-    // TODO: to make the editing faster, we should add an iterator class
 
     // Will send back the start of a row
     unsigned char* operator () (unsigned row) const;

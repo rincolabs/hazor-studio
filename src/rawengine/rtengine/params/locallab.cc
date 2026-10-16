@@ -24,10 +24,10 @@
 #include "diagonalcurvetypes.h"
 #include "flatcurvetypes.h"
 
-#include "rtgui/options.h"
-#include "rtgui/paramsedited.h"
+#include "rtcompat/rtgui/options.hpp"
+#include "rtcompat/rtgui/paramsedited.h"
 
-#include <glibmm/keyfile.h>
+#include "rtcompat/glib/keyfile.hpp"
 
 #include <cmath>
 #include <string>

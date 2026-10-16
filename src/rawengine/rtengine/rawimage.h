@@ -22,7 +22,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/ustring.hpp"
 
 #include "dcraw.h"
 #include "imageformat.h"

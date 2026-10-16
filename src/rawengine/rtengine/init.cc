@@ -17,8 +17,8 @@
  *  along with RawTherapee.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include <fftw3.h>
-#include <glibmm/miscutils.h>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/fileutils.hpp"
+#include "rtcompat/glib/ustring.hpp"
 #include "color.h"
 #include "rtengine.h"
 #include "iccstore.h"
@@ -32,7 +32,7 @@
 #include "ffmanager.h"
 #include "rtthumbnail.h"
 #include "profilestore.h"
-#include "rtgui/threadutils.h"
+#include "rtcompat/rtgui/threadutils.hpp"
 #include "rtlensfun.h"
 #include "metadata.h"
 #include "procparams.h"

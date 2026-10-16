@@ -21,9 +21,9 @@
 
 #include "rtengine/curves.h"
 
-#include <glibmm/arrayhandle.h>
-#include <glibmm/keyfile.h>
-#include <glibmm/ustring.h>
+#include "rtcompat/glib/misc.hpp"
+#include "rtcompat/glib/keyfile.hpp"
+#include "rtcompat/glib/ustring.hpp"
 
 #include <map>
 #include <string>
