@@ -352,8 +352,14 @@ The Clone Stamp and Healing Brush do not go through `ImageEngine`: they point
 sample the frozen document snapshot per dab pixel
 ([`sampleBilinearRgbaRaw`](../src/brush/BrushRenderer.cpp)), as does the
 clone-source preview overlay ([`sampleCanvasBilinear`](../src/renderer/CanvasView.cpp)).
-They carry the premultiplied rule themselves, plus one that is specific to a
-point sampler:
+They carry the premultiplied rule themselves — the sampler mixes its four taps
+that way, and the Healing Brush's box blur stages premultiplied copies of both
+patches so each low-frequency base is an alpha-weighted average,
+`blur(colour * a) / blur(a)`, divided by its own blurred alpha. The patches stay
+straight, because the detail term is a *difference* and a difference only
+unpremultiplies cleanly when both halves are normalised by the same alpha.
+
+Plus one rule that is specific to a point sampler:
 
 - **Document-pixel coordinates put integers on texel *edges*.** That is the
   space `layerPixelToDocumentPixel()` and `screenToDocument()` return, so the

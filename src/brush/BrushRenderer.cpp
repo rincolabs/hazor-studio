@@ -1224,11 +1224,23 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
     // avoid per-dab heap churn; every element is overwritten before use.
     const size_t patchFloats = static_cast<size_t>(pcount) * 4;
     thread_local std::vector<float> srcPatch, tgtPatch, srcLow, tgtLow, blurTmp;
+    // The blur mixes neighbouring pixels, so it has to run on premultiplied
+    // alpha (4.3): a transparent texel of the snapshot carries colour 0 (the
+    // composite starts from fill(Qt::transparent)) yet still takes its share of
+    // the kernel weight, which dragged the tone base toward black near any
+    // transparency. The patches themselves stay straight, because the detail
+    // term below is a DIFFERENCE and a difference only unpremultiplies cleanly
+    // when both halves are normalised by the same alpha — so the premultiplied
+    // copies are staged separately and each low-frequency base is divided by
+    // its own blurred alpha.
+    thread_local std::vector<float> srcPre, tgtPre;
     srcPatch.resize(patchFloats);
     tgtPatch.resize(patchFloats);
     srcLow.resize(patchFloats);
     tgtLow.resize(patchFloats);
     blurTmp.resize(patchFloats);
+    srcPre.resize(patchFloats);
+    tgtPre.resize(patchFloats);
     {
         const float lx0 = static_cast<float>(left - br) + 0.5f;
         const float ly0 = static_cast<float>(top - br) + 0.5f;
@@ -1248,6 +1260,15 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
             for (int px = 0; px < pside; ++px, i += 4) {
                 sampleBilinearRgbaRaw(sbits, sbpl, sw, sh, dx, dy, &tgtPatch[i]);
                 sampleBilinearRgbaRaw(sbits, sbpl, sw, sh, dx - offx, dy - offy, &srcPatch[i]);
+                // Premultiplied copies for the blur, staged in the same pass.
+                const float sw_ = srcPatch[i + 3] * (1.0f / 255.0f);
+                const float tw_ = tgtPatch[i + 3] * (1.0f / 255.0f);
+                for (int c = 0; c < 3; ++c) {
+                    srcPre[i + c] = srcPatch[i + c] * sw_;
+                    tgtPre[i + c] = tgtPatch[i + c] * tw_;
+                }
+                srcPre[i + 3] = srcPatch[i + 3];
+                tgtPre[i + 3] = tgtPatch[i + 3];
                 dx += ddx.x();
                 dy += ddx.y();
             }
@@ -1294,8 +1315,8 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
             }
         }
     };
-    boxBlur(srcPatch, srcLow, blurTmp, br);
-    boxBlur(tgtPatch, tgtLow, blurTmp, br);
+    boxBlur(srcPre, srcLow, blurTmp, br);
+    boxBlur(tgtPre, tgtLow, blurTmp, br);
 
     QImage dab(side, side, QImage::Format_ARGB32);
     dab.fill(Qt::transparent);
@@ -1354,10 +1375,18 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
         const float dstA = tgtPatch[i + 3];
         if (dstA <= 0.0f)
             return;
+        // Both bases are premultiplied: undo it with the blurred alpha of the
+        // patch each one came from, which turns the box average into an
+        // alpha-weighted average — blur(colour * a) / blur(a) — so transparent
+        // neighbours carry no colour into either term.
+        const float srcLowA = srcLow[i + 3];
+        const float tgtLowA = tgtLow[i + 3];
+        const float srcNorm = srcLowA > 0.0f ? 255.0f / srcLowA : 0.0f;
+        const float tgtNorm = tgtLowA > 0.0f ? 255.0f / tgtLowA : 0.0f;
         float rgb[3];
         for (int c = 0; c < 3; ++c) {
-            const float high = (srcPatch[i + c] - srcLow[i + c]) * srcA;
-            rgb[c] = std::clamp(tgtLow[i + c] + high, 0.0f, 255.0f);
+            const float high = (srcPatch[i + c] - srcLow[i + c] * srcNorm) * srcA;
+            rgb[c] = std::clamp(tgtLow[i + c] * tgtNorm + high, 0.0f, 255.0f);
         }
         const int alpha = std::clamp(
             static_cast<int>(std::round(dstA * maskAlpha)), 0, 255);
