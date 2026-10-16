@@ -1,4 +1,5 @@
 #include "HueSaturationAdjustmentWidget.hpp"
+#include "ColorTrack.hpp"
 #include "GradientSlider.hpp"
 
 #include "controller/ImageController.hpp"
@@ -194,8 +195,8 @@ void HueRangeBar::paintEvent(QPaintEvent*)
     // Top strip: the original continuous hue spectrum.
     {
         QLinearGradient grad(top.left(), 0, top.right(), 0);
-        for (int i = 0; i <= 6; ++i)
-            grad.setColorAt(i / 6.0, QColor::fromHsv((i * 60) % 360, 255, 255));
+        for (const auto& s : ColorStops::hueSpectrum())
+            grad.setColorAt(s.pos, s.color);
         p.setPen(QPen(border, 1));
         p.setBrush(grad);
         p.drawRoundedRect(top, 2, 2);
@@ -475,24 +476,9 @@ void HueSaturationAdjustmentWidget::buildUi()
     }
 
     // Initial gradient stops (base hue 0; refreshSliderBaseHue() updates 1 & 2).
-    m_sliders[0]->setStops({
-        {0.0,       QColor::fromHsv(0,   255, 255)},
-        {1.0/6.0,   QColor::fromHsv(60,  255, 255)},
-        {2.0/6.0,   QColor::fromHsv(120, 255, 255)},
-        {3.0/6.0,   QColor::fromHsv(180, 255, 255)},
-        {4.0/6.0,   QColor::fromHsv(240, 255, 255)},
-        {5.0/6.0,   QColor::fromHsv(300, 255, 255)},
-        {1.0,       QColor::fromHsv(359, 255, 255)},
-    });
-    m_sliders[1]->setStops({
-        {0.0, QColor::fromHsl(0, 0,   128)},
-        {1.0, QColor::fromHsl(0, 255, 128)},
-    });
-    m_sliders[2]->setStops({
-        {0.0, QColor(0, 0, 0)},
-        {0.5, QColor::fromHsl(0, 255, 128)},
-        {1.0, QColor(255, 255, 255)},
-    });
+    m_sliders[0]->setStops(ColorStops::hueSpectrum());
+    m_sliders[1]->setStops(ColorStops::saturation(0));
+    m_sliders[2]->setStops(ColorStops::lightness(0));
 
     // ── Colorize ──
     m_colorizeCheck = new AppCheckBox();
@@ -703,15 +689,8 @@ void HueSaturationAdjustmentWidget::refreshSliderBaseHue()
         if (r != huesaturation::Range::Master)
             baseHue = static_cast<int>(wrap360f(m_data.band(r).centerHue));
     }
-    m_sliders[1]->setStops({
-        {0.0, QColor::fromHsl(baseHue, 0,   128)},
-        {1.0, QColor::fromHsl(baseHue, 255, 128)},
-    });
-    m_sliders[2]->setStops({
-        {0.0, QColor(0, 0, 0)},
-        {0.5, QColor::fromHsl(baseHue, 255, 128)},
-        {1.0, QColor(255, 255, 255)},
-    });
+    m_sliders[1]->setStops(ColorStops::saturation(baseHue));
+    m_sliders[2]->setStops(ColorStops::lightness(baseHue));
 }
 
 // ── Param plumbing ───────────────────────────────────────────────────────────

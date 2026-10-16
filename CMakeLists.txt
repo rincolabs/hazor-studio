@@ -481,6 +481,8 @@ add_executable(Hazor WIN32
     src/ui/color/SoftProofDialog.hpp
     src/ui/DropdownSlider.cpp
     src/ui/DropdownSlider.hpp
+    src/ui/ColorTrack.cpp
+    src/ui/ColorTrack.hpp
     src/ui/GradientSlider.cpp
     src/ui/GradientSlider.hpp
     src/ui/ScrubbableValueInput.cpp
