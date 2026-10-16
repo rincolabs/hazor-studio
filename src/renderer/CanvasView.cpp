@@ -7092,7 +7092,16 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         return;
 
     if (!m_cloneAligned || !m_cloneOffsetValid) {
-        m_cloneSourceOffset = documentPos - m_cloneSourcePoint;
+        // Snap to the nearest whole document pixel (same reasoning as
+        // snapNodeToPixelGrid for a moved layer): Clone Stamp is a pure
+        // translation, no scale/rotate, so a fractional offset buys no extra
+        // detail and only forces drawCloneDabToRasterTiles's bilinear sampler
+        // to blend neighbouring source texels on every dab — filtering that
+        // has no filtering purpose. The correction is at most half a pixel and
+        // persists for the stroke (and every aligned stroke after it, since
+        // m_cloneOffsetValid keeps this offset alive across strokes).
+        const QPointF rawOffset = documentPos - m_cloneSourcePoint;
+        m_cloneSourceOffset = QPointF(std::round(rawOffset.x()), std::round(rawOffset.y()));
         m_cloneOffsetValid = true;
     }
 
