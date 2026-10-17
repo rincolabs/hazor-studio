@@ -77,6 +77,7 @@
 #include "core/LayerEffect.hpp"
 #include "io/ImageIO.hpp"
 #include "io/ProjectFileService.hpp"
+#include "io/RecentFilesManager.hpp"
 #include "color/ColorManagementService.hpp"
 #include "color/ColorProfile.hpp"
 #include "raw/RawDevelopParams.hpp"
@@ -385,6 +386,10 @@ MainWindow::MainWindow(QWidget* parent)
     openAction->setShortcut(QKeySequence::Open);
     ShortcutManager::instance()->registerAction("file.open", openAction);
     connect(openAction, &QAction::triggered, this, &MainWindow::onOpenFile);
+
+    m_openRecentMenu = fileMenu->addMenu(tr("Open &Recent"));
+    m_openRecentMenu->setToolTipsVisible(true);
+    connect(m_openRecentMenu, &QMenu::aboutToShow, this, &MainWindow::rebuildOpenRecentMenu);
 
     auto* saveAction = fileMenu->addAction(tr("&Save..."));
     saveAction->setShortcut(QKeySequence::Save);
@@ -3415,6 +3420,11 @@ void MainWindow::onOpenFile()
         this, tr("Open Project or Image"), {}, combinedFilter);
     if (path.isEmpty()) return;
 
+    openPathAsNewTab(path);
+}
+
+void MainWindow::openPathAsNewTab(const QString& path)
+{
     if (path.endsWith(".hzs", Qt::CaseInsensitive)) {
         if (!loadProjectAsNewTab(path)) {
             AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
@@ -3430,6 +3440,66 @@ void MainWindow::onOpenFile()
         return;
     }
 
+    openImageFileAsNewTab(path);
+}
+
+void MainWindow::onOpenRecentFile(const QString& path)
+{
+    const QString absolutePath = QFileInfo(path).absoluteFilePath();
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+        if (!m_tabs[i].sourcePath.isEmpty() && m_tabs[i].sourcePath == absolutePath) {
+            m_tabWidget->setCurrentIndex(i);
+            return;
+        }
+    }
+
+    if (!QFileInfo(path).isFile()) {
+        const QList<AppMessageDialog::ButtonSpec> buttons = {
+            { tr("Remove from List"), QMessageBox::DestructiveRole },
+            { tr("OK"), QMessageBox::AcceptRole },
+        };
+        const int clicked = AppMessageDialog::choice(
+            this, tr("File Not Found"),
+            tr("\"%1\" could not be found.").arg(QFileInfo(path).fileName()),
+            AppMessageDialog::Icon::Warning, buttons, /*defaultIndex=*/1,
+            tr("It may have been moved, renamed, or deleted. Remove it from the "
+               "Recent Files list?"));
+        if (clicked == 0)
+            RecentFilesManager::instance()->removeFile(path);
+        return;
+    }
+
+    openPathAsNewTab(path);
+}
+
+void MainWindow::rebuildOpenRecentMenu()
+{
+    m_openRecentMenu->clear();
+
+    const QStringList files = RecentFilesManager::instance()->files();
+    if (files.isEmpty()) {
+        QAction* noneAction = m_openRecentMenu->addAction(tr("No Recent Files"));
+        noneAction->setEnabled(false);
+    } else {
+        for (const QString& path : files) {
+            QAction* action = m_openRecentMenu->addAction(QFileInfo(path).fileName());
+            action->setToolTip(path);
+            connect(action, &QAction::triggered, this, [this, path]() {
+                onOpenRecentFile(path);
+            });
+        }
+    }
+
+    m_openRecentMenu->addSeparator();
+    QAction* clearAction = m_openRecentMenu->addAction(tr("Clear Recent Files"));
+    clearAction->setEnabled(!files.isEmpty());
+    connect(clearAction, &QAction::triggered, this, []() {
+        RecentFilesManager::instance()->clear();
+    });
+}
+
+void MainWindow::openImageFileAsNewTab(const QString& path)
+{
     beginProgressDelayed(tr("Progress"), tr("Opening Image"), false);
     auto* watcher = new QFutureWatcher<ImageLoadResult>(this);
     connect(watcher, &QFutureWatcher<ImageLoadResult>::finished, this, [this, watcher, path]() {
@@ -3494,7 +3564,9 @@ void MainWindow::onOpenFile()
         }
 
         tab.currentProjectPath.clear();
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
         tab.isDirty = false;
+        RecentFilesManager::instance()->addFile(path);
         m_tabWidget->setUpdatesEnabled(true);
         updateStatusFromDocument();
         if (!colorManaged->warningMessage.isEmpty())
@@ -3590,7 +3662,9 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         }
 
         tab.currentProjectPath.clear();
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
         tab.isDirty = false;
+        RecentFilesManager::instance()->addFile(path);
         m_tabWidget->setUpdatesEnabled(true);
         updateStatusFromDocument();
         refreshLayerPanel();
@@ -3802,7 +3876,8 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
         return false;
 
     QString path = tab.currentProjectPath;
-    if (saveAs || path.isEmpty()) {
+    const bool choosingNewPath = saveAs || path.isEmpty();
+    if (choosingNewPath) {
         QString suggested = tab.name;
         if (!suggested.endsWith(".hzs", Qt::CaseInsensitive))
             suggested += ".hzs";
@@ -3840,6 +3915,10 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
     tab.currentProjectPath = path;
     tab.name = QFileInfo(path).fileName();
     tab.isDirty = false;
+    if (choosingNewPath) {
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
+        RecentFilesManager::instance()->addFile(path);
+    }
     if (index < m_tabWidget->count()) {
         m_tabWidget->setTabText(index, tabLabel(tab.name));
         m_tabWidget->setTabToolTip(index, tab.name);
@@ -3954,8 +4033,10 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     // renderer still sampled them at layer size, so the mask shrank on reload).
 
     tab.currentProjectPath = path;
+    tab.sourcePath = QFileInfo(path).absoluteFilePath();
     tab.name = tabName;
     tab.isDirty = false;
+    RecentFilesManager::instance()->addFile(path);
     m_activeTabIndex = m_tabWidget->currentIndex();
     m_doc = tab.document.get();
     m_ctrl = tab.controller.get();

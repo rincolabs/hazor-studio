@@ -270,6 +270,12 @@ private:
     struct DocumentTab {
         QString name;
         QString currentProjectPath;
+        // Absolute path of the file this tab was opened from (project, RAW or
+        // plain image) — empty for untitled/new documents. Used by Open Recent
+        // to detect an already-open file and activate its tab instead of
+        // reopening it. Distinct from currentProjectPath, which only tracks the
+        // .hzs Save/Save As target.
+        QString sourcePath;
         bool isDirty = false;
         std::unique_ptr<Document> document;
         QWidget* page = nullptr;
@@ -365,12 +371,28 @@ private:
                          const QVariantMap& defaultParams);
 
     DocumentTab& createTab(const QString& name, const QSize& size);
+    // Shared tail of onOpenFile() and Open Recent: dispatches `path` to the
+    // project (.hzs), RAW or plain-image open flow by extension. Centralizing
+    // this means both entry points register successful opens with
+    // RecentFilesManager the same way and never grow a parallel open path.
+    void openPathAsNewTab(const QString& path);
+    // Opens `path` as a plain image document (imageCodecRegistry() + the
+    // colour-management dialogs), off the UI thread. Extracted from
+    // onOpenFile() so Open Recent can reuse it verbatim.
+    void openImageFileAsNewTab(const QString& path);
     // RAW extensions (RawEngine::isSupportedExtension()) are diverted here from
     // onOpenFile() instead of going through imageCodecRegistry(): opens `path`
     // off the UI thread with RawDevelopParams::cameraDefaults() and creates a
     // new tab whose single layer carries RawLayerData (Fase 5), so it stays
     // non-destructively re-revealable instead of a flattened import.
     void openRawFileAsNewTab(const QString& path);
+    // File > Open Recent item handler: activates the tab already showing
+    // `path` if there is one, offers to remove `path` from the list if it no
+    // longer exists, otherwise opens it via openPathAsNewTab().
+    void onOpenRecentFile(const QString& path);
+    // Rebuilds the Open Recent submenu from RecentFilesManager::files() —
+    // connected to the submenu's aboutToShow() so it is always current.
+    void rebuildOpenRecentMenu();
     // Opens the independent Hazor Develop window for the RAW Layer at
     // `flatIndex`, or raises the one already open for it. Shared by every
     // place a RAW Layer can come into being:
@@ -472,6 +494,7 @@ private:
     bool m_aiSelectBusy = false;
     QString m_aiLoadingMessage;
 
+    QMenu* m_openRecentMenu = nullptr;
     QAction* m_importAction = nullptr;
     QAction* m_importBrushesAction = nullptr;
     QAction* m_brushPressureAction = nullptr;

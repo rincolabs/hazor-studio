@@ -475,6 +475,8 @@ add_executable(Hazor WIN32
     src/io/ImageCodec.hpp
     src/io/ProjectFileService.cpp
     src/io/ProjectFileService.hpp
+    src/io/RecentFilesManager.cpp
+    src/io/RecentFilesManager.hpp
 
     # ── Native RAW engine API (Fase 3, tmp/feat-raw-therapee-plan.md) ──
     # The only part of Hazor allowed to #include "rtengine/..."; compiles in
