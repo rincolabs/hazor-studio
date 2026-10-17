@@ -21,8 +21,8 @@ class QCloseEvent;
 
 class AppCheckBox;
 class HistogramWidget;
-class ParamRow;
 class CurveGraphWidget;
+class RawDevelopSlider;
 
 // Independent, non-modal RAW development window. It owns only a working copy
 // of the PP3 and a display preview; ImageController remains the sole owner of
@@ -67,7 +67,7 @@ private:
     QWidget* buildDetailPanel();
     QWidget* buildOpticsPanel();
 
-    ParamRow* addParamRow(class QVBoxLayout* layout, const QString& label,
+    RawDevelopSlider* addParamRow(class QVBoxLayout* layout, const QString& label,
                            double min, double max, double defaultValue,
                            int decimals, const QString& toolTip,
                            const std::function<double()>& currentValue,
@@ -128,12 +128,12 @@ private:
     QToolButton* m_highlightClipButton = nullptr;
     QToolButton* m_applyButton = nullptr;
 
-    class GradientSlider* m_temperatureSlider = nullptr;
-    ParamRow* m_tintRow = nullptr;
+    RawDevelopSlider* m_temperatureSlider = nullptr;
+    RawDevelopSlider* m_tintRow = nullptr;
     QComboBox* m_whiteBalanceCombo = nullptr;
     AppCheckBox* m_blackWhiteCheck = nullptr;
 
-    std::array<std::array<ParamRow*, 8>, 3> m_mixerRows{};
+    std::array<std::array<RawDevelopSlider*, 8>, 3> m_mixerRows{};
     std::array<CurveGraphWidget*, 4> m_curveGraphs{};
     std::vector<std::function<void()>> m_syncControls;
 };

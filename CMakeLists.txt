@@ -719,6 +719,8 @@ add_executable(Hazor WIN32
     src/ui/ExportImageDialog.hpp
     src/ui/RawDevelopWindow.cpp
     src/ui/RawDevelopWindow.hpp
+    src/ui/RawDevelopSlider.cpp
+    src/ui/RawDevelopSlider.hpp
     src/ui/NewDocumentDialog.cpp
     src/ui/NewDocumentDialog.hpp
     src/ui/RefineEdgeDialog.cpp

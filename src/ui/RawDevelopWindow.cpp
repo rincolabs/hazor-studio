@@ -10,9 +10,8 @@
 #include "theme/ThemeManager.hpp"
 #include "ui/ColorTrack.hpp"
 #include "ui/CurvesEditorWidget.hpp"
-#include "ui/GradientSlider.hpp"
 #include "ui/HistogramWidget.hpp"
-#include "ui/dialogs/ParamRow.hpp"
+#include "ui/RawDevelopSlider.hpp"
 
 #include <QtConcurrent/QtConcurrent>
 
@@ -297,7 +296,8 @@ void RawDevelopWindow::buildUi()
     side->setMinimumWidth(330);
     side->setMaximumWidth(430);
     auto* sideLayout = new QVBoxLayout(side);
-    sideLayout->setContentsMargins(0, 0, 0, 0);
+    sideLayout->setContentsMargins(theme->spaceMD, theme->spaceSM,
+                                   theme->spaceMD, theme->spaceSM);
     sideLayout->setSpacing(theme->spaceSM);
 
     m_histogram = new HistogramWidget(side);
@@ -488,18 +488,20 @@ void RawDevelopWindow::applyTheme()
     if (!theme)
         return;
 
-    // These selectors only match structural widgets. Keeping them scoped by
-    // object name lets the application's global theme continue to own the
-    // actual controls inside the RAW panels.
+    // Hazor Develop uses one continuous surface for the whole side panel.
+    // Keeping every structural container on that same color prevents
+    // transparent labels and row widgets from revealing alternating bands;
+    // editable controls still retain the global theme's own contrast.
     if (auto* root = centralWidget()) {
         root->setStyleSheet(QStringLiteral(
             "QWidget#rawDevelopRoot { background: %1; color: %2; }"
             "QWidget#rawDevelopPreviewPane { background: %1; }"
             "QWidget#rawDevelopPanel { background: %3; }"
-            "QWidget#rawDevelopSectionHeader { background: %4; border-bottom: %5px solid %6; }"
-            "QWidget#rawDevelopSectionContents { background: %3; }")
+            "QWidget#rawDevelopSectionHeader { background: %3; border-bottom: %4px solid %5; }"
+            "QWidget#rawDevelopSectionContents { background: %3; }"
+            "QWidget#rawDevelopPanel QLabel { background: transparent; border: none; }")
             .arg(theme->colorBackgroundPrimary.name(), theme->colorTextPrimary.name(),
-                 theme->colorPanelBackground.name(), theme->colorSurfaceDark.name())
+                 theme->colorSurface.name())
             .arg(theme->borderThinWidth)
             .arg(theme->colorBorder.name()));
     }
@@ -518,7 +520,7 @@ void RawDevelopWindow::applyTheme()
             "QScrollArea#rawDevelopAdjustments { background: %1; border: none; }"
             "QWidget#rawDevelopAdjustmentsViewport { background: %1; }"
             "QWidget#rawDevelopAdjustmentsContent { background: %1; }")
-            .arg(theme->colorPanelBackground.name()));
+            .arg(theme->colorSurface.name()));
     }
 
     const QString secondary = QStringLiteral("color: %1;").arg(theme->colorTextSecondary.name());
@@ -528,32 +530,20 @@ void RawDevelopWindow::applyTheme()
         m_profileSummary->setStyleSheet(secondary);
 }
 
-ParamRow* RawDevelopWindow::addParamRow(QVBoxLayout* layout, const QString& label,
+RawDevelopSlider* RawDevelopWindow::addParamRow(QVBoxLayout* layout, const QString& label,
                                         double min, double max, double defaultValue,
                                         int decimals, const QString& toolTip,
                                         const std::function<double()>& currentValue,
                                         const std::function<void(double)>& setValue,
                                         bool logarithmic, bool centerZeroLog, double logBase)
 {
-    auto* row = new ParamRow(label, min, max, defaultValue, decimals, logarithmic,
-                              nullptr, centerZeroLog, logBase);
+    auto* row = new RawDevelopSlider(label, min, max, defaultValue, decimals,
+                                     logarithmic, centerZeroLog, logBase);
     row->setToolTip(toolTip);
-    auto* container = new QWidget(row->parentWidget());
-    auto* rowLayout = new QHBoxLayout(container);
-    rowLayout->setContentsMargins(8, 1, 6, 1);
-    rowLayout->setSpacing(2);
-    rowLayout->addWidget(row, 1);
-    auto* reset = new QToolButton(container);
-    reset->setText(QString::fromUtf8("↺"));
-    reset->setToolTip(tr("Reset %1").arg(label));
-    rowLayout->addWidget(reset);
-    layout->addWidget(container);
-    connect(row, &ParamRow::valueChanged, this, [this, setValue](double value) {
+    layout->addWidget(row);
+    connect(row, &RawDevelopSlider::valueChanged, this, [this, setValue](double value) {
         if (m_syncing) return;
         setValue(value); applyParamsChanged();
-    });
-    connect(reset, &QToolButton::clicked, this, [this, row, defaultValue, setValue]() {
-        row->setValue(defaultValue); setValue(defaultValue); applyParamsChanged();
     });
     m_syncControls.push_back([row, currentValue]() { row->setValue(currentValue()); });
     return row;
@@ -579,7 +569,7 @@ QWidget* RawDevelopWindow::buildLightPanel()
     // The engine's own Exposure/Black adjusters use a log scale anchored at
     // zero: 0 sits at the exact slider middle despite the asymmetric range,
     // with each half log-curved. Replicate both the range and that
-    // centering (ParamRow's centerZeroLog), not just the range.
+    // centering (RawDevelopSlider's centerZeroLog), not just the range.
     addParamRow(layout, tr("Exposure"), -5, 12, 0, 2, tr("Exposure compensation, in EV."),
         [this] { return m_params.light().exposureEv; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.exposureEv = value; m_params.setLight(s); },
         /*logarithmic=*/false, /*centerZeroLog=*/true, /*logBase=*/2.0);
@@ -601,9 +591,10 @@ QWidget* RawDevelopWindow::buildColorPanel()
 {
     auto* panel = new QWidget;
     auto* layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(8, 5, 6, 6);
-    layout->setSpacing(4);
+    layout->setContentsMargins(0, 4, 0, 6);
+    layout->setSpacing(1);
     auto* wbRow = new QHBoxLayout;
+    wbRow->setContentsMargins(8, 1, 8, 3);
     wbRow->addWidget(new QLabel(tr("White balance"), panel));
     m_whiteBalanceCombo = new QComboBox(panel);
     const QList<QPair<QString, QString>> methods = {
@@ -622,18 +613,25 @@ QWidget* RawDevelopWindow::buildColorPanel()
     wbRow->addWidget(eyeDropper);
     layout->addLayout(wbRow);
 
-    m_temperatureSlider = new GradientSlider(panel);
-    m_temperatureSlider->setRange(1500, 60000);
-    m_temperatureSlider->setStops({{0.0, QColor("#375caa")}, {0.40, QColor("#f5e9b0")}, {1.0, QColor("#ec6b32")}});
-    auto* tempRow = new QHBoxLayout;
-    tempRow->addWidget(new QLabel(tr("Temperature"), panel));
-    tempRow->addWidget(m_temperatureSlider, 1);
-    layout->addLayout(tempRow);
+    m_temperatureSlider = addParamRow(layout, tr("Temperature"), 1500, 60000, 6504, 0,
+        tr("White-balance color temperature, in Kelvin."),
+        [this] { return m_params.whiteBalance().temperatureKelvin; }, [this](double value) {
+            auto wb = m_params.whiteBalance(); wb.method = "Custom"; wb.temperatureKelvin = qRound(value); m_params.setWhiteBalance(wb);
+            QSignalBlocker blocker(m_whiteBalanceCombo);
+            m_whiteBalanceCombo->setCurrentIndex(m_whiteBalanceCombo->findData(QStringLiteral("Custom")));
+        });
+    const auto* theme = ThemeManager::instance()->current();
+    m_temperatureSlider->setStops({
+        {0.0, theme->colorAccentPressed},
+        {0.42, theme->colorTextSecondary},
+        {0.72, theme->colorWarning},
+        {1.0, theme->colorDanger}
+    });
     // The engine's own Green/Tint adjuster spans the same 0.02..100 range on
     // a log scale because it is a multiplier, not an offset: 1.0 (neutral)
     // sits almost at the left edge of a *linear* 0.02..100 slider, which
     // would make fine adjustment near neutral unusable. Mirror that with
-    // ParamRow's own logarithmic mode.
+    // RawDevelopSlider's own logarithmic mode.
     m_tintRow = addParamRow(layout, tr("Tint"), .02, 100.0, 1.0, 3,
         tr("Engine mapping: green multiplier. There is no Adobe-style centered Tint unit."),
         [this] { return m_params.whiteBalance().green; }, [this](double value) {
@@ -645,22 +643,26 @@ QWidget* RawDevelopWindow::buildColorPanel()
         if (m_syncing) return;
         auto wb = m_params.whiteBalance(); wb.method = m_whiteBalanceCombo->itemData(index).toString().toStdString(); m_params.setWhiteBalance(wb); applyParamsChanged();
     });
-    connect(m_temperatureSlider, &GradientSlider::valueChanged, this, [this](int value) {
-        if (m_syncing) return;
-        auto wb = m_params.whiteBalance(); wb.method = "Custom"; wb.temperatureKelvin = value; m_params.setWhiteBalance(wb); applyParamsChanged();
-        QSignalBlocker blocker(m_whiteBalanceCombo);
-        m_whiteBalanceCombo->setCurrentIndex(m_whiteBalanceCombo->findData(QStringLiteral("Custom")));
-    });
     m_syncControls.push_back([this]() {
         const auto wb = m_params.whiteBalance();
-        m_temperatureSlider->setValue(wb.temperatureKelvin);
         const int index = m_whiteBalanceCombo->findData(QString::fromStdString(wb.method));
         m_whiteBalanceCombo->setCurrentIndex(index >= 0 ? index : m_whiteBalanceCombo->findData(QStringLiteral("Custom")));
     });
-    addParamRow(layout, tr("Vibrance"), -100, 100, 0, 0, tr("Vibrance (protects already-saturated colors)."),
+    m_tintRow->setStops({
+        {0.0, theme->colorSuccess},
+        {0.5, theme->colorTextDisabled},
+        {1.0, theme->colorAccentHover}
+    });
+    auto* vibrance = addParamRow(layout, tr("Vibrance"), -100, 100, 0, 0, tr("Vibrance (protects already-saturated colors)."),
         [this] { return m_params.color().vibrance; }, [this](double value) { auto s = m_params.color(); s.vibrance = qRound(value); m_params.setColor(s); });
-    addParamRow(layout, tr("Saturation"), -100, 100, 0, 0, tr("Tone curve saturation."),
+    vibrance->setStops({
+        {0.0, theme->colorAccentPressed},
+        {0.5, theme->colorTextDisabled},
+        {1.0, theme->colorDanger}
+    });
+    auto* saturation = addParamRow(layout, tr("Saturation"), -100, 100, 0, 0, tr("Tone curve saturation."),
         [this] { return m_params.color().saturation; }, [this](double value) { auto s = m_params.color(); s.saturation = qRound(value); m_params.setColor(s); });
+    saturation->setStops(ColorStops::hueSpectrum());
     return panel;
 }
 
