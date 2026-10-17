@@ -229,7 +229,8 @@ const std::string& RawSession::filePath() const { return m_impl->path; }
 const RawMetadata& RawSession::metadata() const { return m_impl->metadata; }
 
 RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& params,
-                                         RawPreviewUpdate updates, RawCancelToken cancelToken)
+                                         RawPreviewUpdate updates, RawCancelToken cancelToken,
+                                         RawDevelopParams* resolvedParams)
 {
     if (maxEdge <= 0 || (cancelToken && cancelToken->load())) {
         return {};
@@ -283,6 +284,11 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
 
     if (!m_impl->previewWaiter->waitForReady()) {
         return {};
+    }
+
+    if (resolvedParams) {
+        *resolvedParams = params;
+        sip->getParams(&resolvedParams->impl().procParams);
     }
 
     rtengine::IImage8* img = m_impl->previewWaiter->image();
@@ -374,7 +380,8 @@ const RawMetadata& RawSession::metadata() const
     return empty;
 }
 
-RawImageBuffer RawSession::renderPreview(int, const RawDevelopParams&, RawPreviewUpdate, RawCancelToken) { return {}; }
+RawImageBuffer RawSession::renderPreview(int, const RawDevelopParams&, RawPreviewUpdate,
+                                         RawCancelToken, RawDevelopParams*) { return {}; }
 RawImageBuffer RawSession::renderFull(const RawDevelopParams&, RawProgressListener*, RawCancelToken) { return {}; }
 
 #endif

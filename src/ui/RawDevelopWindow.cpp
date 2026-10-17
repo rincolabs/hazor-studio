@@ -326,7 +326,10 @@ void RawDevelopWindow::buildUi()
     connect(m_histogramCache, &HistogramCacheManager::ready, this, [this]() {
         if (!m_histogram)
             return;
-        m_histogram->setData(m_histogramCache->data());
+        const HistogramData& data = m_histogramCache->data();
+        m_histogram->setData(data);
+        if (m_curveEditor)
+            m_curveEditor->setHistogramData(data);
         m_histogram->setStale(false);
     });
     connect(m_histogramCache, &HistogramCacheManager::computingChanged,
@@ -745,20 +748,16 @@ QWidget* RawDevelopWindow::buildCurvePanel()
     layout->setContentsMargins(8, 5, 8, 8);
     auto* note = new QLabel(tr("Point curves map to the engine's diagonal curves. There is no Camera Raw-style parametric-region curve."), panel);
     note->setWordWrap(true); layout->addWidget(note);
-    auto* tabs = new QTabWidget(panel);
-    const std::array<QString, 4> names{tr("RGB"), tr("Red"), tr("Green"), tr("Blue")};
-    const std::array<QColor, 4> colors{QColor(220, 220, 220), QColor(220, 80, 80), QColor(90, 205, 115), QColor(85, 135, 240)};
-    for (int i = 0; i < 4; ++i) {
-        auto* graph = new CurveGraphWidget(tabs);
-        graph->setChannelColor(colors[i]);
-        m_curveGraphs[i] = graph;
-        syncCurveGraph(graph, static_cast<RawDevelopParams::CurveChannel>(i));
-        connect(graph, &CurveGraphWidget::pointsChanged, this, [this, graph, i]() {
-            if (!m_syncing) { setCurveFromGraph(graph, static_cast<RawDevelopParams::CurveChannel>(i)); applyParamsChanged(); }
-        });
-        tabs->addTab(graph, names[i]);
-    }
-    layout->addWidget(tabs);
+    m_curveEditor = new CurvesEditorWidget(panel);
+    m_curveEditor->setStandaloneMode(true);
+    m_curveEditor->setCurveData(curveDataFromParams());
+    connect(m_curveEditor, &CurvesEditorWidget::curveDataChanged, this, [this]() {
+        if (m_syncing)
+            return;
+        setCurvesFromEditor();
+        applyParamsChanged();
+    });
+    layout->addWidget(m_curveEditor);
     return panel;
 }
 
@@ -911,8 +910,8 @@ void RawDevelopWindow::syncControlsFromParams()
     m_syncing = true;
     for (const auto& sync : m_syncControls) sync();
     if (m_blackWhiteCheck) m_blackWhiteCheck->setChecked(m_params.color().blackAndWhite);
-    for (int i = 0; i < 4; ++i)
-        if (m_curveGraphs[i]) syncCurveGraph(m_curveGraphs[i], static_cast<RawDevelopParams::CurveChannel>(i));
+    if (m_curveEditor)
+        m_curveEditor->setCurveData(curveDataFromParams());
     if (m_profileCombo) {
         const int mode = m_params.inputProfileMode() == RawDevelopParams::InputProfileMode::Custom
             ? -1 : static_cast<int>(m_params.inputProfileMode());
@@ -1000,8 +999,11 @@ void RawDevelopWindow::startPreview()
                 return result;
             }
         }
+        result.hasResolvedToneCurve = params.needsAutoMatchedToneCurveResolution();
+        RawDevelopParams* resolvedParams = result.hasResolvedToneCurve
+            ? &result.resolvedParams : nullptr;
         const RawImageBuffer buffer = m_previewSession->renderPreview(
-            previewMaxEdge, params, previewUpdates);
+            previewMaxEdge, params, previewUpdates, nullptr, resolvedParams);
         if (buffer.isEmpty()) {
             result.errorMessage = QObject::tr("RAW preview render failed.");
             return result;
@@ -1019,6 +1021,10 @@ void RawDevelopWindow::previewFinished()
         m_ownsPreviewSourcePath = result.ownsSourcePath;
     }
     if (result.generation == m_previewGeneration && !result.image.isNull()) {
+        if (result.hasResolvedToneCurve) {
+            m_params.adoptResolvedToneCurve(result.resolvedParams);
+            syncControlsFromParams();
+        }
         updatePreviewImage(result.image);
         m_previewStatus->setText(tr("Preview uses interactive quality."));
     } else if (result.generation == m_previewGeneration && !result.errorMessage.isEmpty()) {
@@ -1195,20 +1201,34 @@ void RawDevelopWindow::resetAll()
     applyParamsChanged();
 }
 
-void RawDevelopWindow::setCurveFromGraph(CurveGraphWidget* graph, RawDevelopParams::CurveChannel channel)
+curves::CurvesData RawDevelopWindow::curveDataFromParams() const
 {
-    std::vector<RawDevelopParams::CurvePoint> points;
-    for (const QPoint& point : graph->points())
-        points.push_back({point.x() / 255.0, point.y() / 255.0});
-    m_params.setCurve(channel, points);
+    curves::CurvesData data;
+    for (int i = 0; i < 4; ++i) {
+        curves::PointList points;
+        for (const auto& point : m_params.curve(static_cast<RawDevelopParams::CurveChannel>(i)))
+            points.emplace_back(qRound(point.x * 255.0), qRound(point.y * 255.0));
+        data.points(static_cast<curves::Channel>(i)) = curves::sanitize(points);
+    }
+    data.preset = data.isIdentity() ? QStringLiteral("Default") : QStringLiteral("Custom");
+    return data;
 }
 
-void RawDevelopWindow::syncCurveGraph(CurveGraphWidget* graph, RawDevelopParams::CurveChannel channel)
+void RawDevelopWindow::setCurvesFromEditor()
 {
-    std::vector<QPoint> points;
-    for (const auto& point : m_params.curve(channel))
-        points.emplace_back(qRound(point.x * 255.0), qRound(point.y * 255.0));
-    graph->setPoints(points);
+    if (!m_curveEditor)
+        return;
+    const curves::CurvesData& data = m_curveEditor->curveData();
+    const curves::CurvesData previous = curveDataFromParams();
+    for (int i = 0; i < 4; ++i) {
+        const curves::Channel channel = static_cast<curves::Channel>(i);
+        if (data.points(channel) == previous.points(channel))
+            continue;
+        std::vector<RawDevelopParams::CurvePoint> points;
+        for (const QPoint& point : data.points(channel))
+            points.push_back({point.x() / 255.0, point.y() / 255.0});
+        m_params.setCurve(static_cast<RawDevelopParams::CurveChannel>(i), points);
+    }
 }
 
 void RawDevelopWindow::setApplyInProgress(bool busy)

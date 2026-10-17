@@ -110,6 +110,21 @@ Hazor Develop keeps its PP3 working copy outside the document until **Apply**.
 Its RGB histogram is rebuilt independently through `HistogramCacheManager`;
 camera metadata, profile selector, presets, collapsible panels, zoom/pan,
 Before/After, and clipping overlays are all local UI state.
+The Curve panel reuses the application's complete curves editor in its
+controller-free mode: RGB channel selection, presets, point and pencil editing,
+smoothing, input/output values, black/white points, Auto, and the asynchronously
+computed preview histogram all operate on the PP3 diagonal curves through a
+small `RawDevelopParams` adapter. Adjustment-layer-only actions remain hidden.
+Editing the RGB curve explicitly disables an active auto-matched histogram
+curve, preventing that preset mode from regenerating and replacing the user's
+manual points on each preview.
+Spline, NURBS, and Catmull-Rom PP3 point curves are decoded into the shared
+editor and retain their original curve kind after edits, so bundled presets
+such as the Pop profiles do not appear linear or change interpolation mode.
+Image-specific Auto-Matched Curve presets are read back from the staged
+processor after their first preview and synchronized into the curve editor;
+manual editing therefore starts from the generated curve rather than an
+identity placeholder.
 The interactive image is rendered through one persistent `RawSession` on a
 dedicated serial worker with debounce. The decoded RAW and rtengine's staged
 preview caches therefore survive between slider changes; the preview edge is

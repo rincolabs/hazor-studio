@@ -180,11 +180,13 @@ public:
     ColorMixer colorMixer() const;
     void setColorMixer(const ColorMixer& mixer);
 
-    // The editor only constructs ordinary diagonal spline curves. Existing
-    // PP3 curve kinds remain readable; unsupported kinds come back as their
-    // endpoints, rather than being silently reinterpreted.
+    // Point-based PP3 curves (spline, NURBS and Catmull-Rom) retain their kind
+    // while edited. Parametric curves cannot be represented by this point
+    // editor and come back as identity rather than being reinterpreted.
     std::vector<CurvePoint> curve(CurveChannel channel) const;
     void setCurve(CurveChannel channel, const std::vector<CurvePoint>& points);
+    bool needsAutoMatchedToneCurveResolution() const;
+    void adoptResolvedToneCurve(const RawDevelopParams& resolved);
 
     struct Impl;
     Impl& impl() { return *m_impl; }

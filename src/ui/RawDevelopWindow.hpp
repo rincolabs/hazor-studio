@@ -25,8 +25,9 @@ class QCloseEvent;
 class AppCheckBox;
 class HistogramCacheManager;
 class HistogramWidget;
-class CurveGraphWidget;
+class CurvesEditorWidget;
 class RawDevelopSlider;
+namespace curves { struct CurvesData; }
 
 // Independent, non-modal RAW development window. It owns only a working copy
 // of the PP3 and a display preview; ImageController remains the sole owner of
@@ -58,6 +59,8 @@ private:
         // which reuses the path already cached on m_previewSourcePath.
         QString sourcePath;
         bool ownsSourcePath = false;
+        RawDevelopParams resolvedParams;
+        bool hasResolvedToneCurve = false;
     };
 
     void buildUi();
@@ -96,8 +99,8 @@ private:
     void loadCustomProfile();
     void updateProfileSummary();
     void resetAll();
-    void setCurveFromGraph(CurveGraphWidget* graph, RawDevelopParams::CurveChannel channel);
-    void syncCurveGraph(CurveGraphWidget* graph, RawDevelopParams::CurveChannel channel);
+    curves::CurvesData curveDataFromParams() const;
+    void setCurvesFromEditor();
 
     int m_flatIndex = -1;
     RawLayerData m_rawData;
@@ -144,6 +147,6 @@ private:
     AppCheckBox* m_blackWhiteCheck = nullptr;
 
     std::array<std::array<RawDevelopSlider*, 8>, 3> m_mixerRows{};
-    std::array<CurveGraphWidget*, 4> m_curveGraphs{};
+    CurvesEditorWidget* m_curveEditor = nullptr;
     std::vector<std::function<void()>> m_syncControls;
 };

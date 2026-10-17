@@ -10,6 +10,7 @@
 #include <random>
 #include <sstream>
 
+#include "rtengine/diagonalcurvetypes.h"
 #include "rtcompat/glib/fileio.hpp"
 #include "raw/internal/RawDevelopParamsImpl.hpp"
 
@@ -77,13 +78,27 @@ bool readFileToString(const std::string& path, std::string& out)
     return ok;
 }
 
-constexpr double kDiagonalSpline = 1.0;
 constexpr double kFlatControlPoints = 1.0;
+
+int editableDiagonalCurveKind(int kind)
+{
+    return kind == DCT_Spline || kind == DCT_NURBS || kind == DCT_CatumullRom
+        ? kind : DCT_Spline;
+}
+
+int editableDiagonalCurveKind(const std::vector<double>& curve)
+{
+    return curve.empty() ? DCT_Spline
+                         : editableDiagonalCurveKind(static_cast<int>(curve.front()));
+}
 
 std::vector<RawDevelopParams::CurvePoint> decodeDiagonalCurve(const std::vector<double>& curve)
 {
     std::vector<RawDevelopParams::CurvePoint> points;
-    if (curve.size() >= 5 && static_cast<int>(curve.front()) == static_cast<int>(kDiagonalSpline)) {
+    const int kind = editableDiagonalCurveKind(curve);
+    const bool isPointCurve = !curve.empty()
+        && kind == static_cast<int>(curve.front());
+    if (curve.size() >= 5 && isPointCurve) {
         for (std::size_t i = 1; i + 1 < curve.size(); i += 2)
             points.push_back({std::clamp(curve[i], 0.0, 1.0), std::clamp(curve[i + 1], 0.0, 1.0)});
     }
@@ -92,7 +107,8 @@ std::vector<RawDevelopParams::CurvePoint> decodeDiagonalCurve(const std::vector<
     return points;
 }
 
-std::vector<double> encodeDiagonalCurve(std::vector<RawDevelopParams::CurvePoint> points)
+std::vector<double> encodeDiagonalCurve(std::vector<RawDevelopParams::CurvePoint> points,
+                                        int kind = DCT_Spline)
 {
     for (auto& point : points) {
         point.x = std::clamp(point.x, 0.0, 1.0);
@@ -106,7 +122,7 @@ std::vector<double> encodeDiagonalCurve(std::vector<RawDevelopParams::CurvePoint
 
     std::vector<double> curve;
     curve.reserve(1 + points.size() * 2);
-    curve.push_back(kDiagonalSpline);
+    curve.push_back(editableDiagonalCurveKind(kind));
     for (const auto& point : points) {
         curve.push_back(point.x);
         curve.push_back(point.y);
@@ -467,13 +483,44 @@ std::vector<RawDevelopParams::CurvePoint> RawDevelopParams::curve(CurveChannel c
 void RawDevelopParams::setCurve(CurveChannel channel, const std::vector<CurvePoint>& points)
 {
     auto& params = m_impl->procParams;
-    const auto encoded = encodeDiagonalCurve(points);
     switch (channel) {
-    case CurveChannel::RGB: params.toneCurve.curve = encoded; break;
-    case CurveChannel::Red: params.rgbCurves.rcurve = encoded; params.rgbCurves.enabled = true; break;
-    case CurveChannel::Green: params.rgbCurves.gcurve = encoded; params.rgbCurves.enabled = true; break;
-    case CurveChannel::Blue: params.rgbCurves.bcurve = encoded; params.rgbCurves.enabled = true; break;
+    case CurveChannel::RGB:
+        params.toneCurve.curve = encodeDiagonalCurve(
+            points, editableDiagonalCurveKind(params.toneCurve.curve));
+        // Auto-Matched Curve presets regenerate toneCurve.curve during every
+        // preview while histogram matching remains enabled. A manual edit is
+        // the same boundary RawTherapee uses to leave that automatic mode;
+        // otherwise the freshly written points are immediately overwritten.
+        params.toneCurve.histmatching = false;
+        params.toneCurve.fromHistMatching = false;
+        break;
+    case CurveChannel::Red:
+        params.rgbCurves.rcurve = encodeDiagonalCurve(
+            points, editableDiagonalCurveKind(params.rgbCurves.rcurve));
+        params.rgbCurves.enabled = true;
+        break;
+    case CurveChannel::Green:
+        params.rgbCurves.gcurve = encodeDiagonalCurve(
+            points, editableDiagonalCurveKind(params.rgbCurves.gcurve));
+        params.rgbCurves.enabled = true;
+        break;
+    case CurveChannel::Blue:
+        params.rgbCurves.bcurve = encodeDiagonalCurve(
+            points, editableDiagonalCurveKind(params.rgbCurves.bcurve));
+        params.rgbCurves.enabled = true;
+        break;
     }
+}
+
+bool RawDevelopParams::needsAutoMatchedToneCurveResolution() const
+{
+    const auto& tone = m_impl->procParams.toneCurve;
+    return tone.histmatching && !tone.fromHistMatching;
+}
+
+void RawDevelopParams::adoptResolvedToneCurve(const RawDevelopParams& resolved)
+{
+    m_impl->procParams.toneCurve = resolved.m_impl->procParams.toneCurve;
 }
 
 #else // !HAVE_RAWENGINE
@@ -524,5 +571,7 @@ RawDevelopParams::ColorMixer RawDevelopParams::colorMixer() const { return {}; }
 void RawDevelopParams::setColorMixer(const ColorMixer&) {}
 std::vector<RawDevelopParams::CurvePoint> RawDevelopParams::curve(CurveChannel) const { return {}; }
 void RawDevelopParams::setCurve(CurveChannel, const std::vector<CurvePoint>&) {}
+bool RawDevelopParams::needsAutoMatchedToneCurveResolution() const { return false; }
+void RawDevelopParams::adoptResolvedToneCurve(const RawDevelopParams&) {}
 
 #endif

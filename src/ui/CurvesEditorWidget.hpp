@@ -17,18 +17,29 @@ class QSpinBox;
 class ImageController;
 class CurveGraphWidget;
 class AdjustmentPanelBar;
+struct HistogramData;
 
-// Interactive editor for a Curves adjustment layer. Hosted by PropertiesPanel
-// (and reusable in a standalone dialog later — it depends only on
-// ImageController + a flat index). Reads/writes the active adjustment node's
-// params through the controller: live, undo-less updates while dragging and a
-// single AdjustmentParamsCommand per committed gesture.
+// Interactive curves editor shared by PropertiesPanel and standalone hosts.
+// In adjustment-layer mode it reads/writes the active node through
+// ImageController and commits one command per gesture. Standalone mode exposes
+// the same editing surface through curveDataChanged(), leaving persistence,
+// preview scheduling and undo ownership to the host.
 class CurvesEditorWidget : public QWidget {
     Q_OBJECT
 public:
     explicit CurvesEditorWidget(QWidget* parent = nullptr);
 
     void setController(ImageController* ctrl);
+
+    // Hosts that do not edit an adjustment layer (for example Hazor Develop)
+    // can reuse the complete curve editing surface through this data-driven
+    // mode. Controller, canvas-pick and layer-management controls are hidden;
+    // curveDataChanged() becomes the live-preview boundary owned by the host.
+    void setStandaloneMode(bool standalone);
+    bool isStandaloneMode() const { return m_standalone; }
+    void setCurveData(const curves::CurvesData& data);
+    const curves::CurvesData& curveData() const { return m_data; }
+    void setHistogramData(const HistogramData& data);
 
     // Binds the editor to the curves adjustment at `flatIndex` and reloads its
     // state. Pass -1 to detach.
@@ -51,6 +62,8 @@ signals:
     // target tool. MainWindow routes this to CanvasView::setCurvesPickMode and
     // feeds the sampled color back through applyPickedColor().
     void requestImagePick(int mode);
+    void curveDataChanged();
+    void curveEditCommitted();
 
 protected:
     void hideEvent(QHideEvent* e) override;
@@ -124,6 +137,7 @@ private:
     QVariantMap m_gestureBefore;        // committed state at gesture start
     bool m_previewOn = true;            // false → effect bypassed (identity) live
     bool m_loading = false;             // guard against feedback while syncing UI
+    bool m_standalone = false;
 
     // Cached backdrop histogram bins (recomputed only when binding a different
     // node — stable during editing, not recomputed per-frame).

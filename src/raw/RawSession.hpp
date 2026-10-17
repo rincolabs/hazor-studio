@@ -80,10 +80,13 @@ public:
     // only checked before starting; once rtengine's background update thread
     // is running there is no way to interrupt it, only to wait for it.
     // Returns an empty RawImageBuffer (isEmpty()) if cancelled before
-    // starting or if the engine isn't available.
+    // starting or if the engine isn't available. When resolvedParams is
+    // provided, it receives the processor's effective parameters after the
+    // render, including an image-specific auto-matched tone curve.
     RawImageBuffer renderPreview(int maxEdge, const RawDevelopParams& params,
                                  RawPreviewUpdate updates = RawPreviewUpdate::Full,
-                                 RawCancelToken cancelToken = nullptr);
+                                 RawCancelToken cancelToken = nullptr,
+                                 RawDevelopParams* resolvedParams = nullptr);
 
     // Full-quality, full-resolution render via ProcessingJob::create() +
     // rtengine::processImage(). Always RawPixelFormat::RGBFloat. Same
