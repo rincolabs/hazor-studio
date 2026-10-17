@@ -1239,18 +1239,6 @@ void GPUViewport::renderCanvasDecorations(const RenderParams& p,
         m_mainProg->release();
     }
 
-    // Border
-    m_solidProg->bind();
-    m_solidProg->setUniformValue(m_solidU.transform, sm);
-    m_solidProg->setUniformValue(m_solidU.color, 0.45f, 0.45f, 0.45f, 1.0f);
-    m_fboVao.bind();
-    m_fboVbo.bind();
-    glBufferData(GL_ARRAY_BUFFER, sizeof(outlineVertices), outlineVertices, GL_STATIC_DRAW);
-    glDrawArrays(GL_LINE_LOOP, 0, 4);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
-    m_fboVao.release();
-    m_solidProg->release();
-
     m_vao.bind();
     m_mainProg->bind();
 }
@@ -1775,7 +1763,7 @@ void GPUViewport::render(const RenderParams& p)
         static_cast<float>(p.doc->panOffset.y()));
     m_cachedViewMvp.scale(p.doc->zoom);
 
-    // Decorations (shadow, checkerboard, border)
+    // Decorations (shadow, checkerboard)
     renderCanvasDecorations(p, m_cachedViewMvp);
 
     // Scissor test — clip to canvas bounds
@@ -1800,10 +1788,20 @@ void GPUViewport::render(const RenderParams& p)
     }
     GLint vp[4];
     glGetIntegerv(GL_VIEWPORT, vp);
-    int sx = static_cast<int>(std::floor((leftNdc   + 1.0f) * 0.5f * vp[2] + vp[0]));
-    int sy = static_cast<int>(std::floor((bottomNdc + 1.0f) * 0.5f * vp[3] + vp[1]));
-    int sw = static_cast<int>(std::ceil ((rightNdc  - leftNdc)  * 0.5f * vp[2]));
-    int sh = static_cast<int>(std::ceil ((topNdc    - bottomNdc) * 0.5f * vp[3]));
+    // floor(left)/ceil(right) independently, then derive width/height from
+    // those — NOT ceil(right - left), which isn't the same when the two
+    // edges land on different fractional pixel offsets. That mismatch let the
+    // scissor rect end up a pixel short on one edge depending on zoom/pan,
+    // clipping the real content short and exposing the checkerboard beneath
+    // it along that edge.
+    float leftPx   = (leftNdc   + 1.0f) * 0.5f * vp[2] + vp[0];
+    float rightPx  = (rightNdc  + 1.0f) * 0.5f * vp[2] + vp[0];
+    float bottomPx = (bottomNdc + 1.0f) * 0.5f * vp[3] + vp[1];
+    float topPx    = (topNdc    + 1.0f) * 0.5f * vp[3] + vp[1];
+    int sx = static_cast<int>(std::floor(leftPx));
+    int sy = static_cast<int>(std::floor(bottomPx));
+    int sw = static_cast<int>(std::ceil(rightPx)) - sx;
+    int sh = static_cast<int>(std::ceil(topPx))   - sy;
 
     glEnable(GL_SCISSOR_TEST);
     glScissor(sx, sy, sw, sh);
