@@ -1158,7 +1158,11 @@ CanvasView::CanvasView(Document* doc, ImageController* controller, QWidget* pare
 
 static bool isSupportedDropImagePath(const QString& path)
 {
-    return imageCodecRegistry().findReader(path) != nullptr;
+    // .hzs isn't an image codec format — it's the project container, opened
+    // via MainWindow::loadProjectAsNewTab() — so it must be special-cased
+    // here or a dragged project is silently rejected before the drop fires.
+    return imageCodecRegistry().findReader(path) != nullptr
+        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive);
 }
 
 static QStringList extractValidDropImagePaths(const QMimeData* mime)

@@ -194,7 +194,11 @@ static int shapeToolTypeForPreset(const QString& presetId)
 
 static bool isSupportedDropImagePath(const QString& path)
 {
-    return imageCodecRegistry().findReader(path) != nullptr;
+    // .hzs isn't an image codec format — it's the project container, opened
+    // via loadProjectAsNewTab() — so it must be special-cased here or a
+    // dragged project is silently rejected before the drop even fires.
+    return imageCodecRegistry().findReader(path) != nullptr
+        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive);
 }
 
 static QStringList extractValidDropImagePaths(const QMimeData* mime)
@@ -2546,6 +2550,17 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
 {
     if (paths.isEmpty()) return false;
 
+    // A dropped .hzs opens through the same project path as File > Open —
+    // there is no "insert into canvas" or flatten-on-import interpretation
+    // for a whole project, so it is dispatched before anything else below.
+    if (paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
+        if (!loadProjectAsNewTab(paths.front())) {
+            AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
+            return false;
+        }
+        return true;
+    }
+
     // A RAW file gets its own non-destructive RAW Layer and opens straight
     // into Hazor Develop, same as File > Open — not the generic
     // flatten-on-import codec path below.
@@ -2830,6 +2845,14 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     });
     connect(canvas, &CanvasView::externalImagesDropped, this, [this, canvas](const QStringList& paths, QPointF screenPos) {
         if (!canvas || paths.isEmpty()) return;
+
+        // A project file always opens as its own document — skip the
+        // Insert-into-Canvas/Open-Image question below, which only makes
+        // sense for a plain image.
+        if (paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
+            openDroppedImagesAsNewDocument(paths);
+            return;
+        }
 
         // No document open: nothing to offer a choice for, open directly.
         if (!m_ctrl || !m_doc) {
