@@ -41,7 +41,7 @@ void ThemeManager::setTheme(Theme* theme)
 void ThemeManager::loadSettings()
 {
     QSettings settings;
-    const int savedTheme = settings.value("theme", 0).toInt();
+    const int savedTheme = settings.value("theme", 1).toInt();
     auto* theme = createThemeFromIndex(savedTheme, this);
 
     const int savedOpacity = settings.value("iconOpacity", -1).toInt();
