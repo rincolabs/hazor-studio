@@ -497,6 +497,8 @@ add_executable(Hazor WIN32
     src/raw/RawLayerData.hpp
     src/raw/RawDevelopService.hpp
     src/raw/RawDevelopService.cpp
+    src/raw/RawPreviewCapabilities.hpp
+    src/raw/RawPreviewCapabilities.cpp
 
     src/brush/BrushTypes.hpp
     src/brush/DabContext.hpp
@@ -723,12 +725,16 @@ add_executable(Hazor WIN32
     src/ui/RawDevelopWindow.hpp
     src/ui/RawDevelopSlider.cpp
     src/ui/RawDevelopSlider.hpp
+    src/ui/RawPreviewView.cpp
+    src/ui/RawPreviewView.hpp
     src/ui/NewDocumentDialog.cpp
     src/ui/NewDocumentDialog.hpp
     src/ui/RefineEdgeDialog.cpp
     src/ui/RefineEdgeDialog.hpp
     src/ui/TitleBar.cpp
     src/ui/TitleBar.hpp
+    src/ui/FramelessResizer.cpp
+    src/ui/FramelessResizer.hpp
     src/ui/SplashScreen.cpp
     src/ui/SplashScreen.hpp
     src/ui/TransformFieldsWidget.cpp

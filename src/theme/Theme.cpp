@@ -23,6 +23,7 @@ QString Theme::titleBarStyleSheet() const
     return QStringLiteral(
         "TitleBar { background: %1; }\n"
         "QMenuBar { padding: 0; margin: 0; }\n"
+        "QLabel#titleBarTitle { color: %2; background: transparent; padding-left: 2px; }\n"
         "QPushButton#minBtn, QPushButton#maxBtn, QPushButton#closeBtn {\n"
         "    background: transparent; color: %2;\n"
         "    border: none; border-radius: 0;\n"

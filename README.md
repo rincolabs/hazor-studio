@@ -32,7 +32,11 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   external process) opens CR2, CR3, NEF, ARW, RAF, DNG, ORF, RW2, PEF, SRW
   and more as a non-destructive RAW Layer: the original file is never
   modified and the develop profile stays re-editable in the dedicated Hazor
-  Develop window, including the shared full-featured curves editor.
+  Develop window, including the shared full-featured curves editor. Its
+  viewport offers Fit/100% zoom with drag panning, Before/After and a
+  draggable split view, shadow and highlight clipping overlays, and a status
+  line that reports what the engine is actually showing — including when a
+  stage such as sharpening or noise reduction can only be judged at 100%.
 - **Selections** — Rectangular, elliptical, lasso, magic wand, quick select, and
   magnetic lasso, with feather/grow/shrink refinement, saved alpha channels, and
   quick mask.

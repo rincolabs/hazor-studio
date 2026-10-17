@@ -2,6 +2,7 @@
 
 #include <QFutureWatcher>
 #include <QImage>
+#include <QPixmap>
 #include <QMainWindow>
 #include <QRect>
 #include <QSize>
@@ -12,10 +13,13 @@
 
 #include "raw/RawDevelopParams.hpp"
 #include "raw/RawLayerData.hpp"
+#include "raw/RawPreviewCapabilities.hpp"
 #include "raw/RawSession.hpp"
 
 class QComboBox;
 class QLabel;
+class QProgressBar;
+class QPushButton;
 class QScrollArea;
 class QToolButton;
 class QThreadPool;
@@ -29,6 +33,9 @@ class HistogramCacheManager;
 class HistogramWidget;
 class CurvesEditorWidget;
 class RawDevelopSlider;
+class RawPreviewView;
+class TitleBar;
+class ZoomComboBox;
 namespace curves { struct CurvesData; }
 
 // Independent, non-modal RAW development window. It owns only a working copy
@@ -88,6 +95,9 @@ private:
     };
 
     void buildUi();
+    void buildTitleBar();
+    QWidget* buildPreviewToolbar(QWidget* parent);
+    QWidget* buildPreviewStatusBar(QWidget* parent);
     void applyTheme();
     QWidget* buildLightPanel();
     QWidget* buildColorPanel();
@@ -122,6 +132,19 @@ private:
     // Re-renders when the wanted region moved (zoom, scroll, resize) without
     // any parameter having changed.
     void maybeRequestDetail();
+    // Zoom is held as "fit" plus an explicit factor; effectiveZoom() is what
+    // is actually on screen, which is what both the engine arithmetic and the
+    // zoom readout need.
+    double effectiveZoom() const;
+    QSize frameSize() const;
+    void setZoom(double zoom);
+    void setFitToWindow();
+    void zoomStep(int direction);
+    void updateZoomControls();
+    // Single place where the status line, the alerts and the transient
+    // viewport overlay are derived from the engine's real capabilities.
+    rawpreview::State previewState() const;
+    void refreshPreviewStatus();
     void requestPreview();
     void startPreview();
     void previewFinished();
@@ -148,6 +171,7 @@ private:
     QString m_previewSourcePath;
     bool m_ownsPreviewSourcePath = false;
     bool m_showBefore = false;
+    bool m_splitView = false;
     bool m_clipShadows = false;
     bool m_clipHighlights = false;
     bool m_fitToWindow = true;
@@ -158,6 +182,22 @@ private:
     quint64 m_previewGeneration = 0;
     RawPreviewUpdate m_pendingPreviewUpdates = RawPreviewUpdate::Full;
     quint64 m_histogramGeneration = 0;
+    // Latest engine/source failure, cleared by the next successful render.
+    QString m_previewError;
+    // What the status bar last reported, so the transient viewport overlay
+    // only fires when the condition itself changes.
+    QString m_lastNotice;
+    // The split view's comparison half. The before frame never changes, so
+    // the cache spares a full-resolution crop-and-scale on every render.
+    QPixmap m_splitTile;
+    // Geometry of the tile currently on the view, so a pan that stays inside
+    // it does not trigger a recompose.
+    QRect m_tileRect;
+    QSize m_tileContent;
+    QSize m_splitTileContent;
+    QRect m_splitTileRect;
+    bool m_splitTileClipShadows = false;
+    bool m_splitTileClipHighlights = false;
 
     QFutureWatcher<PreviewResult>* m_previewWatcher = nullptr;
     QThreadPool* m_previewPool = nullptr;
@@ -165,19 +205,26 @@ private:
     std::unique_ptr<RawSession> m_previewSession;
     HistogramCacheManager* m_histogramCache = nullptr;
 
-    QLabel* m_imageLabel = nullptr;
-    QScrollArea* m_previewScroll = nullptr;
+    TitleBar* m_titleBar = nullptr;
+    RawPreviewView* m_preview = nullptr;
     HistogramWidget* m_histogram = nullptr;
     QLabel* m_metadataLabel = nullptr;
     QLabel* m_profileSummary = nullptr;
-    QLabel* m_previewStatus = nullptr;
+    QLabel* m_statusLabel = nullptr;
+    QLabel* m_noticeIcon = nullptr;
+    QLabel* m_noticeLabel = nullptr;
+    QToolButton* m_noticeAction = nullptr;
+    QProgressBar* m_previewProgress = nullptr;
     QComboBox* m_profileCombo = nullptr;
     QComboBox* m_presetCombo = nullptr;
-    QComboBox* m_zoomCombo = nullptr;
+    ZoomComboBox* m_zoomBox = nullptr;
+    QToolButton* m_fitButton = nullptr;
+    QToolButton* m_hundredButton = nullptr;
     QToolButton* m_beforeAfterButton = nullptr;
+    QToolButton* m_splitButton = nullptr;
     QToolButton* m_shadowClipButton = nullptr;
     QToolButton* m_highlightClipButton = nullptr;
-    QToolButton* m_applyButton = nullptr;
+    QPushButton* m_applyButton = nullptr;
 
     RawDevelopSlider* m_temperatureSlider = nullptr;
     RawDevelopSlider* m_tintRow = nullptr;

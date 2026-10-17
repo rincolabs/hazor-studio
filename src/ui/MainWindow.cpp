@@ -175,12 +175,6 @@ static QString documentColorModeSetting(const QString& colorMode, int bitDepth)
     return QStringLiteral("%1, %2 bit").arg(colorMode).arg(bitDepth);
 }
 
-static bool supportsCustomTitleBar()
-{
-    QString pf = QGuiApplication::platformName();
-    return pf != "cocoa" && pf != "wayland" && pf != "offscreen";
-}
-
 static int shapeToolTypeForPreset(const QString& presetId)
 {
     if (presetId == QLatin1String("ellipse")) return 1;
@@ -356,7 +350,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_agentController = new AgentController(m_toolExecutor, this);
     m_presetManager = new AgentPresetManager(this);
 
-    m_useCustomTitleBar = supportsCustomTitleBar();
+    m_useCustomTitleBar = TitleBar::isSupportedPlatform();
 
     if (m_useCustomTitleBar) {
         setWindowFlags(Qt::Window | Qt::FramelessWindowHint);

@@ -6,13 +6,19 @@
 #include "histogram/HistogramGenerator.hpp"
 #include "raw/RawDevelopService.hpp"
 #include "raw/RawEngine.hpp"
+#include "raw/RawPreviewCapabilities.hpp"
 #include "raw/RawSession.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include "ui/ColorTrack.hpp"
 #include "ui/CurvesEditorWidget.hpp"
+#include "ui/FramelessResizer.hpp"
 #include "ui/HistogramWidget.hpp"
+#include "ui/IconUtils.hpp"
 #include "ui/RawDevelopSlider.hpp"
+#include "ui/RawPreviewView.hpp"
+#include "ui/TitleBar.hpp"
+#include "ui/ZoomComboBox.hpp"
 
 #include <QtConcurrent/QtConcurrent>
 
@@ -28,13 +34,14 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
-#include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QRadialGradient>
@@ -48,6 +55,12 @@
 #include <cmath>
 
 namespace {
+
+// The two clipping markers. Functional signal colours rather than theme ones
+// — they have to stay readable over any image — and the toolbar icons paint
+// the same values the overlay does, so a button always matches its overlay.
+const QColor kClipShadowMarker(30, 105, 255);
+const QColor kClipHighlightMarker(255, 55, 35);
 
 // Paints the clipping indicators in place. Shared because the 1:1 detail
 // slice is a second image that has to carry the same markers as the preview
@@ -66,8 +79,16 @@ void markClipping(QImage& image, bool shadows, bool highlights)
             uchar* px = row + x * 4;
             const int lo = std::min({px[0], px[1], px[2]});
             const int hi = std::max({px[0], px[1], px[2]});
-            if (shadows && lo <= 3) { px[0] = 30; px[1] = 105; px[2] = 255; }
-            if (highlights && hi >= 252) { px[0] = 255; px[1] = 55; px[2] = 35; }
+            if (shadows && lo <= 3) {
+                px[0] = kClipShadowMarker.red();
+                px[1] = kClipShadowMarker.green();
+                px[2] = kClipShadowMarker.blue();
+            }
+            if (highlights && hi >= 252) {
+                px[0] = kClipHighlightMarker.red();
+                px[1] = kClipHighlightMarker.green();
+                px[2] = kClipHighlightMarker.blue();
+            }
         }
     }
 }
@@ -75,6 +96,91 @@ void markClipping(QImage& image, bool shadows, bool highlights)
 constexpr int kPreviewDebounceMs = 80;
 constexpr int kPreviewMinEdge = 768;
 constexpr int kPreviewMaxEdge = 1600;
+// Zoom bounds and the stops the −/+ buttons walk. Narrower than the main
+// canvas's: beyond these the engine preview carries no more detail.
+constexpr double kMinZoom = 0.05;
+constexpr double kMaxZoom = 8.0;
+constexpr double kZoomStops[] = {0.0625, 0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0,
+                                 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0};
+// Margin kept between a fitted frame and the viewport edge, so the dotted
+// pasteboard stays visible all around it.
+constexpr int kFitMargin = 12;
+
+// A tonal bar with the clipping marker capping the end it reports on: dark
+// end for shadows, bright end for highlights.
+QIcon clippingIcon(const QColor& marker, bool shadowEnd)
+{
+    const auto* theme = ThemeManager::instance()->current();
+    QPixmap pixmap(18, 18);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QLinearGradient gradient(0, 0, 18, 0);
+    gradient.setColorAt(0.0, theme->colorSurfaceDark);
+    gradient.setColorAt(1.0, theme->colorTextBright);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(gradient);
+    painter.drawRoundedRect(QRectF(1, 3.5, 16, 11), 2, 2);
+    painter.setBrush(marker);
+    painter.drawRoundedRect(shadowEnd ? QRectF(1, 3.5, 4.5, 11) : QRectF(12.5, 3.5, 4.5, 11), 2, 2);
+    return QIcon(pixmap);
+}
+
+// A frame split down the middle: the Before/After divider this button turns on.
+QIcon splitViewIcon()
+{
+    const auto* theme = ThemeManager::instance()->current();
+    QPixmap pixmap(18, 18);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(theme->colorTextPrimary, 1.2));
+    painter.setBrush(theme->colorSurfaceDark);
+    painter.drawRoundedRect(QRectF(1.5, 3.5, 15, 11), 2, 2);
+    painter.setBrush(theme->colorTextPrimary);
+    painter.setPen(Qt::NoPen);
+    painter.drawRect(QRectF(9, 4.1, 7, 9.8));
+    return QIcon(pixmap);
+}
+
+// Severity badge for the status bar: a warning triangle for what the engine
+// cannot show, a dot for what it shows only approximately.
+QPixmap noticeBadge(rawpreview::Severity severity)
+{
+    const auto* theme = ThemeManager::instance()->current();
+    QColor color = theme->colorTextSecondary;
+    if (severity == rawpreview::Severity::Unavailable) color = theme->colorWarning;
+    if (severity == rawpreview::Severity::Error)       color = theme->colorDanger;
+
+    QPixmap pixmap(14, 14);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color);
+    if (severity == rawpreview::Severity::Approximate) {
+        painter.drawEllipse(QPointF(7, 7), 4.0, 4.0);
+        painter.setBrush(theme->colorSurface);
+        painter.drawEllipse(QPointF(7, 7), 1.5, 1.5);
+    } else {
+        const QPointF triangle[3] = {QPointF(7, 1.5), QPointF(13, 12.5), QPointF(1, 12.5)};
+        painter.drawPolygon(triangle, 3);
+        painter.setPen(QPen(theme->colorSurface, 1.4));
+        painter.drawLine(QPointF(7, 5), QPointF(7, 9));
+        painter.drawPoint(QPointF(7, 11));
+    }
+    return pixmap;
+}
+
+QColor noticeAccent(rawpreview::Severity severity)
+{
+    const auto* theme = ThemeManager::instance()->current();
+    switch (severity) {
+        case rawpreview::Severity::Unavailable: return theme->colorWarning;
+        case rawpreview::Severity::Error:       return theme->colorDanger;
+        default:                                return theme->colorAccent;
+    }
+}
 
 class DevelopSection final : public QWidget {
 public:
@@ -252,6 +358,7 @@ RawDevelopWindow::RawDevelopWindow(const RawLayerData& rawData,
     setWindowTitle(tr("Hazor Develop"));
     resize(1480, 920);
     setMinimumSize(980, 620);
+    buildTitleBar();
 
     // RawSession and its StagedImageProcessor are serialized on one persistent
     // worker. Keeping the thread alive also keeps the decoded RAW and rtengine
@@ -289,6 +396,10 @@ void RawDevelopWindow::buildUi()
     rootLayout->setContentsMargins(theme->spaceMD, theme->spaceMD, theme->spaceMD, theme->spaceMD);
     rootLayout->setSpacing(theme->spaceMD);
     setCentralWidget(root);
+    // The root layout's own margin is the strip the resizer turns back into
+    // window edges; no child reaches into it.
+    if (m_titleBar)
+        FramelessResizer::install(root);
 
     auto* body = new QHBoxLayout;
     body->setSpacing(theme->spaceMD);
@@ -300,61 +411,18 @@ void RawDevelopWindow::buildUi()
     previewLayout->setContentsMargins(0, 0, 0, 0);
     previewLayout->setSpacing(theme->spaceSM);
 
-    m_previewScroll = new QScrollArea(previewPane);
-    m_previewScroll->setObjectName(QStringLiteral("rawDevelopPreview"));
-    m_previewScroll->setWidgetResizable(false);
-    m_previewScroll->setAlignment(Qt::AlignCenter);
-    m_previewScroll->setBackgroundRole(QPalette::Dark);
-    m_previewScroll->viewport()->setObjectName(QStringLiteral("rawDevelopPreviewViewport"));
-    m_imageLabel = new QLabel(m_previewScroll);
-    m_imageLabel->setAlignment(Qt::AlignCenter);
-    m_imageLabel->setText(tr("Preparing RAW preview…"));
-    m_previewScroll->setWidget(m_imageLabel);
-    previewLayout->addWidget(m_previewScroll, 1);
-
-    auto* previewTools = new QHBoxLayout;
-    m_zoomCombo = new QComboBox(previewPane);
-    m_zoomCombo->addItem(tr("Fit"), 0.0);
-    m_zoomCombo->addItem(QStringLiteral("25%"), .25);
-    m_zoomCombo->addItem(QStringLiteral("50%"), .50);
-    m_zoomCombo->addItem(QStringLiteral("100%"), 1.0);
-    m_zoomCombo->addItem(QStringLiteral("200%"), 2.0);
-    previewTools->addWidget(m_zoomCombo);
-    auto* fitButton = new QToolButton(previewPane);
-    fitButton->setText(tr("Fit"));
-    fitButton->setToolTip(tr("Fit preview to window"));
-    previewTools->addWidget(fitButton);
-    auto* hundredButton = new QToolButton(previewPane);
-    hundredButton->setText(QStringLiteral("100%"));
-    hundredButton->setToolTip(tr("Show at 100%"));
-    previewTools->addWidget(hundredButton);
-    previewTools->addStretch();
-    m_beforeAfterButton = new QToolButton(previewPane);
-    m_beforeAfterButton->setText(tr("Before"));
-    m_beforeAfterButton->setCheckable(true);
-    m_beforeAfterButton->setToolTip(tr("Toggle Before / After"));
-    previewTools->addWidget(m_beforeAfterButton);
-    m_shadowClipButton = new QToolButton(previewPane);
-    m_shadowClipButton->setText(tr("Shadows"));
-    m_shadowClipButton->setCheckable(true);
-    m_shadowClipButton->setToolTip(tr("Show clipped shadows in blue"));
-    previewTools->addWidget(m_shadowClipButton);
-    m_highlightClipButton = new QToolButton(previewPane);
-    m_highlightClipButton->setText(tr("Highlights"));
-    m_highlightClipButton->setCheckable(true);
-    m_highlightClipButton->setToolTip(tr("Show clipped highlights in red"));
-    previewTools->addWidget(m_highlightClipButton);
-    previewLayout->addLayout(previewTools);
-
-    m_previewStatus = new QLabel(previewPane);
-    m_previewStatus->setStyleSheet(QStringLiteral("color: %1;").arg(theme->colorTextSecondary.name()));
-    previewLayout->addWidget(m_previewStatus);
+    m_preview = new RawPreviewView(previewPane);
+    m_preview->setObjectName(QStringLiteral("rawDevelopPreview"));
+    m_preview->setPlaceholderText(tr("Preparing RAW preview…"));
+    previewLayout->addWidget(m_preview, 1);
+    previewLayout->addWidget(buildPreviewToolbar(previewPane));
+    previewLayout->addWidget(buildPreviewStatusBar(previewPane));
     body->addWidget(previewPane, 1);
 
     auto* side = new QWidget(root);
     side->setObjectName(QStringLiteral("rawDevelopPanel"));
-    side->setMinimumWidth(330);
-    side->setMaximumWidth(430);
+    side->setMinimumWidth(380);
+    side->setMaximumWidth(480);
     auto* sideLayout = new QVBoxLayout(side);
     sideLayout->setContentsMargins(theme->spaceMD, theme->spaceSM,
                                    theme->spaceMD, theme->spaceSM);
@@ -482,15 +550,29 @@ void RawDevelopWindow::buildUi()
     sideLayout->addWidget(adjustmentScroll, 1);
     body->addWidget(side);
 
+    // The window actions are separated from the preview toolbar and its
+    // alerts by a rule, so the three bands read as three different things.
+    auto* actionsSeparator = new QFrame(root);
+    actionsSeparator->setObjectName(QStringLiteral("rawDevelopSeparator"));
+    actionsSeparator->setFrameShape(QFrame::HLine);
+    actionsSeparator->setFrameShadow(QFrame::Plain);
+    actionsSeparator->setFixedHeight(theme->borderThinWidth);
+    rootLayout->addWidget(actionsSeparator);
+
+    // Same roles, names and therefore the same metrics the dialogs use:
+    // #cancelBtn for the secondary actions, #okBtn for the primary one.
     auto* bottom = new QHBoxLayout;
+    bottom->setSpacing(theme->spaceSM);
     auto* resetAllButton = new QPushButton(tr("Restore Defaults"), root);
+    resetAllButton->setObjectName(QStringLiteral("cancelBtn"));
     bottom->addWidget(resetAllButton);
     bottom->addStretch();
     auto* cancelButton = new QPushButton(tr("Cancel"), root);
+    cancelButton->setObjectName(QStringLiteral("cancelBtn"));
     bottom->addWidget(cancelButton);
-    m_applyButton = new QToolButton(root);
-    m_applyButton->setText(tr("Apply"));
-    m_applyButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_applyButton = new QPushButton(tr("Apply"), root);
+    m_applyButton->setObjectName(QStringLiteral("okBtn"));
+    m_applyButton->setDefault(true);
     bottom->addWidget(m_applyButton);
     rootLayout->addLayout(bottom);
 
@@ -501,30 +583,42 @@ void RawDevelopWindow::buildUi()
     connect(m_previewDebounce, &QTimer::timeout, this, &RawDevelopWindow::startPreview);
     connect(m_previewWatcher, &QFutureWatcher<PreviewResult>::finished,
             this, &RawDevelopWindow::previewFinished);
-    connect(m_zoomCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        const double zoom = m_zoomCombo->itemData(index).toDouble();
-        m_fitToWindow = zoom <= 0.0;
-        if (!m_fitToWindow) m_zoom = zoom;
-        updateDisplayedImage();
-        maybeRequestDetail();
-    });
-    connect(fitButton, &QToolButton::clicked, this, [this]() {
-        m_fitToWindow = true; m_zoomCombo->setCurrentIndex(0); updateDisplayedImage(); maybeRequestDetail();
-    });
-    connect(hundredButton, &QToolButton::clicked, this, [this]() {
-        m_fitToWindow = false; m_zoom = 1.0; m_zoomCombo->setCurrentIndex(3); updateDisplayedImage(); maybeRequestDetail();
-    });
+    connect(m_zoomBox, &ZoomComboBox::zoomRequested, this,
+            [this](float zoom) { setZoom(zoom); });
+    connect(m_fitButton, &QToolButton::clicked, this, &RawDevelopWindow::setFitToWindow);
+    connect(m_hundredButton, &QToolButton::clicked, this, [this]() { setZoom(1.0); });
     // Panning moves which part of the frame the 1:1 slice has to cover. The
     // preview debounce is what keeps a drag from queueing a render per pixel.
-    connect(m_previewScroll->horizontalScrollBar(), &QScrollBar::valueChanged,
-            this, &RawDevelopWindow::maybeRequestDetail);
-    connect(m_previewScroll->verticalScrollBar(), &QScrollBar::valueChanged,
-            this, &RawDevelopWindow::maybeRequestDetail);
+    connect(m_preview, &RawPreviewView::scrolled, this, [this]() {
+        // The composed tile carries a margin around the viewport, so a short
+        // pan is already painted and only the engine's 1:1 slice has to
+        // follow it.
+        const QRect visible = QRect(m_preview->scrollOffset(), m_preview->size())
+            .intersected(QRect(QPoint(0, 0), m_preview->contentSize()));
+        if (m_tileContent != m_preview->contentSize() || !m_tileRect.contains(visible))
+            updateDisplayedImage();
+        maybeRequestDetail();
+    });
+    connect(m_preview, &RawPreviewView::zoomStepRequested, this,
+            [this](int steps) { zoomStep(steps > 0 ? 1 : -1); });
     connect(m_beforeAfterButton, &QToolButton::toggled, this, [this](bool before) {
         m_showBefore = before;
-        m_beforeAfterButton->setText(before ? tr("After") : tr("Before"));
+        // Before/After and Split are two ways of looking at the same pair of
+        // frames; showing both at once would leave the button lying about
+        // which half is which.
+        if (before && m_splitButton->isChecked())
+            m_splitButton->setChecked(false);
         updateDisplayedImage();
         updateHistogram(before ? m_beforeImage : m_previewImage);
+        refreshPreviewStatus();
+    });
+    connect(m_splitButton, &QToolButton::toggled, this, [this](bool split) {
+        m_splitView = split;
+        if (split && m_beforeAfterButton->isChecked())
+            m_beforeAfterButton->setChecked(false);
+        m_preview->setSplitEnabled(split);
+        updateDisplayedImage();
+        refreshPreviewStatus();
     });
     connect(m_shadowClipButton, &QToolButton::toggled, this, [this](bool on) {
         m_clipShadows = on; updateDisplayedImage();
@@ -562,11 +656,165 @@ void RawDevelopWindow::buildUi()
     connect(savePresetButton, &QToolButton::clicked, this, &RawDevelopWindow::savePreset);
     connect(resetAllButton, &QPushButton::clicked, this, &RawDevelopWindow::resetAll);
     connect(cancelButton, &QPushButton::clicked, this, &QWidget::close);
-    connect(m_applyButton, &QToolButton::clicked, this, [this]() {
+    connect(m_applyButton, &QPushButton::clicked, this, [this]() {
         if (!m_applyInProgress) emit applyRequested(m_params);
     });
 
     applyTheme();
+    updateZoomControls();
+    refreshPreviewStatus();
+}
+
+void RawDevelopWindow::buildTitleBar()
+{
+    // Same bar the main window wears, so this window follows the theme
+    // instead of the desktop's own decoration. Where the platform cannot
+    // support a frameless window (see TitleBar::isSupportedPlatform) the
+    // native title bar is kept rather than drawing a second, dead one.
+    if (!TitleBar::isSupportedPlatform())
+        return;
+
+    setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
+    m_titleBar = new TitleBar(this);
+    m_titleBar->setTitleText(windowTitle());
+    setMenuWidget(m_titleBar);
+
+    connect(m_titleBar, &TitleBar::minimizeClicked, this, &QWidget::showMinimized);
+    connect(m_titleBar, &TitleBar::maximizeClicked, this, [this]() {
+        if (isMaximized())
+            showNormal();
+        else
+            showMaximized();
+        m_titleBar->updateMaximizeButton(isMaximized());
+    });
+    connect(m_titleBar, &TitleBar::closeClicked, this, &QWidget::close);
+
+    // A frameless window loses the invisible resize border with the frame;
+    // both widgets that reach a window edge hand those pixels back.
+    FramelessResizer::install(m_titleBar);
+}
+
+QWidget* RawDevelopWindow::buildPreviewToolbar(QWidget* parent)
+{
+    const auto* theme = ThemeManager::instance()->current();
+    auto* bar = new QWidget(parent);
+    bar->setObjectName(QStringLiteral("rawDevelopPreviewTools"));
+    auto* layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(theme->spaceXS);
+
+    auto makeButton = [bar](const QString& toolTip, bool checkable) {
+        auto* button = new QToolButton(bar);
+        button->setObjectName(QStringLiteral("rawDevelopToolButton"));
+        button->setToolTip(toolTip);
+        button->setCheckable(checkable);
+        button->setAutoRaise(true);
+        button->setFocusPolicy(Qt::NoFocus);
+        return button;
+    };
+
+    // ── Zoom group ──
+    auto* zoomOut = makeButton(tr("Zoom out"), false);
+    zoomOut->setText(QString::fromUtf8("−"));
+    layout->addWidget(zoomOut);
+
+    m_zoomBox = new ZoomComboBox(bar);
+    m_zoomBox->setZoomRange(static_cast<float>(kMinZoom), static_cast<float>(kMaxZoom));
+    m_zoomBox->setToolTip(tr("Preview zoom"));
+    layout->addWidget(m_zoomBox);
+
+    auto* zoomIn = makeButton(tr("Zoom in"), false);
+    zoomIn->setText(QStringLiteral("+"));
+    layout->addWidget(zoomIn);
+
+    m_fitButton = makeButton(tr("Fit preview to window"), true);
+    m_fitButton->setIcon(makeIcon(QStringLiteral(":/icons/zoom-fit.png")));
+    m_fitButton->setIconSize(QSize(18, 18));
+    layout->addWidget(m_fitButton);
+
+    m_hundredButton = makeButton(tr("Show at 100%"), true);
+    m_hundredButton->setIcon(makeIcon(QStringLiteral(":/icons/zoom-1-1.png")));
+    m_hundredButton->setIconSize(QSize(18, 18));
+    layout->addWidget(m_hundredButton);
+
+    layout->addStretch();
+
+    // ── View group ──
+    m_beforeAfterButton = makeButton(tr("Show the image as it stands, without the current edits"), true);
+    m_beforeAfterButton->setText(tr("Before"));
+    layout->addWidget(m_beforeAfterButton);
+
+    m_splitButton = makeButton(tr("Split view — drag the divider to compare before and after"), true);
+    m_splitButton->setIcon(splitViewIcon());
+    m_splitButton->setIconSize(QSize(18, 18));
+    layout->addWidget(m_splitButton);
+
+    m_shadowClipButton = makeButton(tr("Shadow clipping — clipped shadows are marked in blue"), true);
+    m_shadowClipButton->setIcon(clippingIcon(kClipShadowMarker, true));
+    m_shadowClipButton->setIconSize(QSize(18, 18));
+    layout->addWidget(m_shadowClipButton);
+
+    m_highlightClipButton = makeButton(tr("Highlight clipping — clipped highlights are marked in red"), true);
+    m_highlightClipButton->setIcon(clippingIcon(kClipHighlightMarker, false));
+    m_highlightClipButton->setIconSize(QSize(18, 18));
+    layout->addWidget(m_highlightClipButton);
+
+    connect(zoomOut, &QToolButton::clicked, this, [this]() { zoomStep(-1); });
+    connect(zoomIn, &QToolButton::clicked, this, [this]() { zoomStep(1); });
+    return bar;
+}
+
+QWidget* RawDevelopWindow::buildPreviewStatusBar(QWidget* parent)
+{
+    const auto* theme = ThemeManager::instance()->current();
+    auto* bar = new QWidget(parent);
+    bar->setObjectName(QStringLiteral("rawDevelopStatusBar"));
+    auto* layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(theme->spaceSM);
+
+    m_statusLabel = new QLabel(bar);
+    m_statusLabel->setObjectName(QStringLiteral("rawDevelopStatus"));
+    // Neither band may push the window wider than the panels want it; the
+    // full text of an alert is always on its tooltip and in the overlay.
+    m_statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_statusLabel->setMinimumWidth(0);
+    layout->addWidget(m_statusLabel);
+
+    // Indeterminate: the engine reports no progress fraction for a preview
+    // render. It is only ever visible while one is actually running.
+    m_previewProgress = new QProgressBar(bar);
+    m_previewProgress->setObjectName(QStringLiteral("rawDevelopProgress"));
+    m_previewProgress->setRange(0, 0);
+    m_previewProgress->setTextVisible(false);
+    m_previewProgress->setFixedSize(110, 4);
+    m_previewProgress->setVisible(false);
+    layout->addWidget(m_previewProgress);
+
+    layout->addStretch();
+
+    m_noticeIcon = new QLabel(bar);
+    m_noticeIcon->setFixedSize(14, 14);
+    m_noticeIcon->setVisible(false);
+    layout->addWidget(m_noticeIcon);
+
+    m_noticeLabel = new QLabel(bar);
+    m_noticeLabel->setObjectName(QStringLiteral("rawDevelopNotice"));
+    m_noticeLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_noticeLabel->setMinimumWidth(0);
+    m_noticeLabel->setVisible(false);
+    layout->addWidget(m_noticeLabel);
+
+    m_noticeAction = new QToolButton(bar);
+    m_noticeAction->setObjectName(QStringLiteral("rawDevelopNoticeAction"));
+    m_noticeAction->setText(tr("View at 100%"));
+    m_noticeAction->setAutoRaise(true);
+    m_noticeAction->setFocusPolicy(Qt::NoFocus);
+    m_noticeAction->setVisible(false);
+    layout->addWidget(m_noticeAction);
+
+    connect(m_noticeAction, &QToolButton::clicked, this, [this]() { setZoom(1.0); });
+    return bar;
 }
 
 void RawDevelopWindow::applyTheme()
@@ -581,25 +829,66 @@ void RawDevelopWindow::applyTheme()
     // editable controls still retain the global theme's own contrast.
     if (auto* root = centralWidget()) {
         root->setStyleSheet(QStringLiteral(
+            // The window chrome sits on the same surface the dialogs and the
+            // side panel use; only the image viewport is darker. A rule
+            // between the two columns is what keeps them legible apart.
             "QWidget#rawDevelopRoot { background: %1; color: %2; }"
             "QWidget#rawDevelopPreviewPane { background: %1; }"
-            "QWidget#rawDevelopPanel { background: %3; }"
-            "QWidget#rawDevelopSectionHeader { background: %3; border-bottom: %4px solid %5; }"
-            "QWidget#rawDevelopSectionContents { background: %3; }"
+            "QWidget#rawDevelopPanel { background: %1; border-left: %3px solid %4; }"
+            "QWidget#rawDevelopSectionHeader { background: %1; border-bottom: %3px solid %4; }"
+            "QWidget#rawDevelopSectionContents { background: %1; }"
             "QWidget#rawDevelopPanel QLabel { background: transparent; border: none; }")
-            .arg(theme->colorBackgroundPrimary.name(), theme->colorTextPrimary.name(),
-                 theme->colorSurface.name())
+            .arg(theme->colorSurface.name(), theme->colorTextPrimary.name())
             .arg(theme->borderThinWidth)
             .arg(theme->colorBorder.name()));
     }
 
-    if (m_previewScroll) {
-        m_previewScroll->setStyleSheet(QStringLiteral(
-            "QScrollArea#rawDevelopPreview { background: %1; border: %2px solid %3; }"
-            "QWidget#rawDevelopPreviewViewport { background: %1; }")
-            .arg(theme->colorSurfaceDark.name())
+    if (auto* tools = findChild<QWidget*>(QStringLiteral("rawDevelopPreviewTools"))) {
+        tools->setStyleSheet(QStringLiteral(
+            "QToolButton#rawDevelopToolButton {"
+            "  background: transparent; color: %1; border: %2px solid transparent;"
+            "  border-radius: %3px; padding: 2px 6px; }"
+            "QToolButton#rawDevelopToolButton:hover { background: %4; color: %5; }"
+            "QToolButton#rawDevelopToolButton:checked {"
+            "  background: %6; border-color: %7; color: %5; }")
+            .arg(theme->colorTextSecondary.name())
             .arg(theme->borderThinWidth)
+            .arg(theme->radiusSM)
+            .arg(theme->colorSurfaceHover.name(), theme->colorTextBright.name(),
+                 theme->colorSurfaceSelected.name(), theme->colorBorderFocus.name()));
+    }
+
+    if (m_shadowClipButton)
+        m_shadowClipButton->setIcon(clippingIcon(kClipShadowMarker, true));
+    if (m_highlightClipButton)
+        m_highlightClipButton->setIcon(clippingIcon(kClipHighlightMarker, false));
+    if (m_splitButton)
+        m_splitButton->setIcon(splitViewIcon());
+
+    if (auto* separator = findChild<QFrame*>(QStringLiteral("rawDevelopSeparator"))) {
+        separator->setStyleSheet(QStringLiteral("QFrame#rawDevelopSeparator { background: %1; border: none; }")
             .arg(theme->colorBorder.name()));
+    }
+
+    if (m_previewProgress) {
+        m_previewProgress->setStyleSheet(QStringLiteral(
+            "QProgressBar#rawDevelopProgress { background: %1; border: none; border-radius: %2px; }"
+            "QProgressBar#rawDevelopProgress::chunk { background: %3; border-radius: %2px; }")
+            .arg(theme->colorSurfaceDark.name())
+            .arg(theme->radiusSM)
+            .arg(theme->colorAccent.name()));
+    }
+
+    if (m_noticeAction) {
+        m_noticeAction->setStyleSheet(QStringLiteral(
+            "QToolButton#rawDevelopNoticeAction { background: transparent; color: %1;"
+            "  border: %2px solid %3; border-radius: %4px; padding: 1px 6px; }"
+            "QToolButton#rawDevelopNoticeAction:hover { background: %5; color: %6; }")
+            .arg(theme->colorAccent.name())
+            .arg(theme->borderThinWidth)
+            .arg(theme->colorBorder.name())
+            .arg(theme->radiusSM)
+            .arg(theme->colorSurfaceHover.name(), theme->colorTextBright.name()));
     }
 
     if (auto* adjustmentScroll = findChild<QScrollArea*>(QStringLiteral("rawDevelopAdjustments"))) {
@@ -611,10 +900,14 @@ void RawDevelopWindow::applyTheme()
     }
 
     const QString secondary = QStringLiteral("color: %1;").arg(theme->colorTextSecondary.name());
-    if (m_previewStatus)
-        m_previewStatus->setStyleSheet(secondary);
+    if (m_statusLabel)
+        m_statusLabel->setStyleSheet(secondary);
+    if (m_noticeLabel)
+        m_noticeLabel->setStyleSheet(secondary);
     if (m_profileSummary)
         m_profileSummary->setStyleSheet(secondary);
+    // Severity badges and the overlay accent are theme colours too.
+    refreshPreviewStatus();
 }
 
 RawDevelopSlider* RawDevelopWindow::addParamRow(QVBoxLayout* layout, const QString& label,
@@ -1043,7 +1336,6 @@ void RawDevelopWindow::applyParamsChanged(RawPreviewUpdate update)
     if (m_beforeAfterButton) {
         QSignalBlocker blocker(m_beforeAfterButton);
         m_beforeAfterButton->setChecked(false);
-        m_beforeAfterButton->setText(tr("Before"));
     }
     requestPreview();
 }
@@ -1063,23 +1355,154 @@ QRect RawDevelopWindow::detailRegionRequest() const
     // four enabled the slice would hold nothing the fast preview doesn't
     // already show, so it would not be worth the full-quality demosaic it
     // forces on the whole preview (see RawDetailRegion).
-    if (m_fitToWindow || m_zoom < 1.0 || !detailStagesActive()) {
+    // Keyed off the zoom actually on screen, not the explicit factor: a small
+    // frame can reach 1:1 (or past it) while the view is still in Fit, and
+    // the stages are just as renderable there.
+    const double zoom = effectiveZoom();
+    if (zoom < 1.0 || !detailStagesActive()) {
         return {};
     }
-    if (!m_previewScroll || m_previewFullSize.isEmpty()) {
+    if (!m_preview || m_previewFullSize.isEmpty()) {
         return {};
     }
 
-    // The label carries the frame at m_zoom, so both the scroll offset and
-    // the viewport size divide by it to land in the engine's 1:1 space. When
-    // the zoomed frame is smaller than the viewport the scrollbars are at 0
-    // and this resolves to the whole (small) frame, which is correct.
-    const QSize viewport = m_previewScroll->viewport()->size();
-    const QPoint offset(m_previewScroll->horizontalScrollBar()->value(),
-                        m_previewScroll->verticalScrollBar()->value());
-    const QRect region(QPoint(qFloor(offset.x() / m_zoom), qFloor(offset.y() / m_zoom)),
-                       QSize(qCeil(viewport.width() / m_zoom), qCeil(viewport.height() / m_zoom)));
+    // The view carries the frame at that zoom, so both its scroll offset and
+    // its size divide by it to land in the engine's 1:1 space. When the
+    // zoomed frame is smaller than the viewport the offset is 0 and this
+    // resolves to the whole (small) frame, which is correct.
+    const QSize viewport = m_preview->size();
+    const QPoint offset = m_preview->scrollOffset();
+    const QRect region(QPoint(qFloor(offset.x() / zoom), qFloor(offset.y() / zoom)),
+                       QSize(qCeil(viewport.width() / zoom), qCeil(viewport.height() / zoom)));
     return region.intersected(QRect(QPoint(0, 0), m_previewFullSize));
+}
+
+QSize RawDevelopWindow::frameSize() const
+{
+    // Zoom percentages are relative to the document's actual resolution (the
+    // layer's current develop), not to the viewport-budget-capped preview
+    // buffer: sizing off the latter would make "100%" show a fraction of
+    // true size on a typical multi-megapixel RAW.
+    if (!m_beforeImage.isNull())
+        return m_beforeImage.size();
+    if (!m_previewFullSize.isEmpty())
+        return m_previewFullSize;
+    return m_previewImage.size();
+}
+
+double RawDevelopWindow::effectiveZoom() const
+{
+    if (!m_fitToWindow)
+        return m_zoom;
+    const QSize frame = frameSize();
+    if (!m_preview || frame.isEmpty())
+        return m_zoom;
+    const QSize available = (m_preview->size() - QSize(2 * kFitMargin, 2 * kFitMargin))
+        .expandedTo(QSize(1, 1));
+    const QSize fitted = frame.scaled(available, Qt::KeepAspectRatio);
+    // No lower clamp: a frame too large to fit even at the minimum zoom must
+    // still report what it is actually showing, or the composed tile and the
+    // viewport would disagree about where the frame is.
+    return std::min(double(fitted.width()) / frame.width(), kMaxZoom);
+}
+
+void RawDevelopWindow::setZoom(double zoom)
+{
+    m_fitToWindow = false;
+    m_zoom = std::clamp(zoom, kMinZoom, kMaxZoom);
+    updateZoomControls();
+    updateDisplayedImage();
+    maybeRequestDetail();
+    refreshPreviewStatus();
+}
+
+void RawDevelopWindow::setFitToWindow()
+{
+    m_fitToWindow = true;
+    updateZoomControls();
+    updateDisplayedImage();
+    maybeRequestDetail();
+    refreshPreviewStatus();
+}
+
+void RawDevelopWindow::zoomStep(int direction)
+{
+    const double current = effectiveZoom();
+    if (direction > 0) {
+        for (const double stop : kZoomStops) {
+            if (stop > current + 0.001) {
+                setZoom(stop);
+                return;
+            }
+        }
+        setZoom(kMaxZoom);
+        return;
+    }
+    for (auto it = std::rbegin(kZoomStops); it != std::rend(kZoomStops); ++it) {
+        if (*it < current - 0.001) {
+            setZoom(*it);
+            return;
+        }
+    }
+    setZoom(kMinZoom);
+}
+
+void RawDevelopWindow::updateZoomControls()
+{
+    if (!m_zoomBox)
+        return;
+    // The readout is the zoom actually on screen, Fit included — the two
+    // used to disagree, with Fit reported as its own "zoom level".
+    m_zoomBox->setZoom(static_cast<float>(effectiveZoom()));
+    const QSignalBlocker fitBlocker(m_fitButton);
+    const QSignalBlocker hundredBlocker(m_hundredButton);
+    m_fitButton->setChecked(m_fitToWindow);
+    m_hundredButton->setChecked(!m_fitToWindow && std::abs(m_zoom - 1.0) < 0.001);
+}
+
+rawpreview::State RawDevelopWindow::previewState() const
+{
+    rawpreview::State state;
+    state.engineAvailable = RawEngine::isAvailable() && m_rawData.source != nullptr;
+    state.processing = (m_previewWatcher && m_previewWatcher->isRunning())
+        || m_previewPending
+        || (m_previewDebounce && m_previewDebounce->isActive());
+    state.applying = m_applyInProgress;
+    state.showingBefore = m_showBefore && !m_splitView;
+    state.zoom = effectiveZoom();
+    state.detailSliceVisible = !m_detailImage.isNull() && !m_detailRect.isEmpty();
+    state.activeStages = rawpreview::activeStages(m_params);
+    state.errorMessage = m_previewError;
+    return state;
+}
+
+void RawDevelopWindow::refreshPreviewStatus()
+{
+    if (!m_statusLabel || !m_preview)
+        return;
+
+    const rawpreview::State state = previewState();
+    m_statusLabel->setText(rawpreview::statusText(state));
+    m_previewProgress->setVisible(rawpreview::status(state) == rawpreview::Status::Processing);
+
+    const rawpreview::Notice alert = rawpreview::notice(state);
+    const bool visible = !alert.isEmpty();
+    m_noticeIcon->setVisible(visible);
+    m_noticeLabel->setVisible(visible);
+    m_noticeAction->setVisible(visible && alert.offerFullZoom);
+    if (visible) {
+        m_noticeIcon->setPixmap(noticeBadge(alert.severity));
+        m_noticeLabel->setText(alert.message);
+        m_noticeLabel->setToolTip(alert.message);
+        // A condition the user just created — by enabling a 1:1-only stage,
+        // or by zooming away from it — also gets a short-lived copy over the
+        // image. The status bar keeps it for as long as it holds.
+        if (alert.message != m_lastNotice)
+            m_preview->showNotice(alert.message, noticeAccent(alert.severity));
+    } else {
+        m_preview->clearNotice();
+    }
+    m_lastNotice = visible ? alert.message : QString();
 }
 
 void RawDevelopWindow::maybeRequestDetail()
@@ -1113,8 +1536,8 @@ void RawDevelopWindow::maybeRequestDetail()
 void RawDevelopWindow::requestPreview()
 {
     if (!m_previewDebounce) return;
-    m_previewStatus->setText(tr("Updating RAW preview…"));
     m_previewDebounce->start();
+    refreshPreviewStatus();
 }
 
 void RawDevelopWindow::startPreview()
@@ -1126,7 +1549,8 @@ void RawDevelopWindow::startPreview()
         m_previewDebounce->stop();
 
     if (!RawEngine::isAvailable() || !m_rawData.source) {
-        m_previewStatus->setText(tr("RAW preview is unavailable in this build."));
+        m_previewPending = false;
+        refreshPreviewStatus();
         return;
     }
     if (m_previewWatcher->isRunning()) {
@@ -1136,7 +1560,9 @@ void RawDevelopWindow::startPreview()
     if (m_previewSourcePath.isEmpty() && m_rawData.mode == RawStorageMode::Linked)
         m_previewSourcePath = m_rawData.source->path;
     if (m_previewSourcePath.isEmpty() && m_rawData.mode != RawStorageMode::Embedded) {
-        m_previewStatus->setText(tr("Could not prepare the RAW source for preview."));
+        m_previewPending = false;
+        m_previewError = tr("Could not prepare the RAW source for preview.");
+        refreshPreviewStatus();
         return;
     }
     const RawDevelopParams params = m_params;
@@ -1146,13 +1572,14 @@ void RawDevelopWindow::startPreview()
     const std::shared_ptr<const RawSource> source = m_rawData.source;
     const quint64 generation = m_previewGeneration;
     const RawPreviewUpdate previewUpdates = m_pendingPreviewUpdates;
-    const QSize viewportSize = m_previewScroll ? m_previewScroll->viewport()->size() : QSize();
-    const qreal pixelRatio = m_previewScroll ? m_previewScroll->devicePixelRatioF() : 1.0;
+    const QSize viewportSize = m_preview ? m_preview->size() : QSize();
+    const qreal pixelRatio = m_preview ? m_preview->devicePixelRatioF() : 1.0;
     const int viewportEdge = qCeil(std::max(viewportSize.width(), viewportSize.height()) * pixelRatio);
     const int previewMaxEdge = std::clamp(viewportEdge, kPreviewMinEdge, kPreviewMaxEdge);
     const QRect detailRequest = detailRegionRequest();
     m_previewPending = false;
     m_pendingPreviewUpdates = RawPreviewUpdate::None;
+    refreshPreviewStatus();
     m_previewWatcher->setFuture(QtConcurrent::run(m_previewPool,
         [this, params, existingSourcePath, source, generation, previewMaxEdge, previewUpdates,
          detailRequest]() {
@@ -1232,17 +1659,21 @@ void RawDevelopWindow::previewFinished()
         m_detailImage = result.detailImage;
         m_detailRect = result.detailRect;
         m_detailRequested = result.detailRequested;
+        m_previewError.clear();
         updatePreviewImage(result.image);
-        m_previewStatus->setText(m_detailImage.isNull()
-            ? tr("Preview uses interactive quality.")
-            : tr("Visible region rendered 1:1 — sharpening, noise reduction, texture and defringe included."));
     } else if (result.generation == m_previewGeneration && !result.errorMessage.isEmpty()) {
-        m_previewStatus->setText(result.errorMessage);
+        m_previewError = result.errorMessage;
     }
     if (m_previewPending || result.generation != m_previewGeneration) {
-        m_previewPending = false;
+        // Left set, not cleared, so the status line keeps reporting a render
+        // in flight across the hand-off; startPreview() clears it when it
+        // actually launches the next one.
+        m_previewPending = true;
         QTimer::singleShot(0, this, &RawDevelopWindow::startPreview);
     }
+    // After the pending-render bookkeeping, so "Processing" stays up while a
+    // superseded result is being replaced rather than blinking to Ready.
+    refreshPreviewStatus();
 }
 
 void RawDevelopWindow::updatePreviewImage(const QImage& image)
@@ -1255,53 +1686,112 @@ void RawDevelopWindow::updatePreviewImage(const QImage& image)
 
 void RawDevelopWindow::updateDisplayedImage()
 {
-    if (!m_imageLabel || !m_previewScroll) return;
-    QImage display = m_showBefore ? m_beforeImage : m_previewImage;
-    if (display.isNull()) return;
-    markClipping(display, m_clipShadows, m_clipHighlights);
-    QSize target = display.size();
-    if (m_fitToWindow) {
-        const QSize available = m_previewScroll->viewport()->size() - QSize(20, 20);
-        target = display.size().scaled(available.expandedTo(QSize(1, 1)), Qt::KeepAspectRatio);
-    } else {
-        // Zoom percentages are relative to the document's actual resolution
-        // (m_beforeImage — the layer's full develop), not display.size():
-        // the interactive "After" preview is capped to the viewport-derived
-        // kPreviewMinEdge..kPreviewMaxEdge budget for speed, so sizing off it
-        // would make "100%" show a fraction of true size on a typical
-        // multi-megapixel RAW.
-        target = (QSizeF(m_beforeImage.size()) * m_zoom).toSize();
-    }
+    if (!m_preview) return;
+    const QImage after = m_previewImage;
+    const QImage before = m_beforeImage;
+    const bool showBeforeOnly = m_showBefore && !m_splitView;
+    const QImage primary = showBeforeOnly ? before : after;
+    if (primary.isNull()) return;
+
+    const QSize frame = frameSize();
+    if (frame.isEmpty()) return;
+    const QSize content = (QSizeF(frame) * effectiveZoom()).toSize().expandedTo(QSize(1, 1));
+    // The view re-anchors its pan around the viewport centre when the frame
+    // size changes, so it has to learn the new size before it is asked where
+    // the viewport now sits.
+    m_preview->setContentSize(content);
+
+    // Only the visible part of the frame is composed, plus a margin so a pan
+    // drag does not immediately expose unpainted pasteboard. Scaling the whole
+    // frame instead would allocate gigabytes at the top of the zoom range.
+    QRect tileRect(m_preview->scrollOffset(), m_preview->size());
+    tileRect.adjust(-m_preview->width() / 4, -m_preview->height() / 4,
+                    m_preview->width() / 4, m_preview->height() / 4);
+    tileRect = tileRect.intersected(QRect(QPoint(0, 0), content));
+    if (tileRect.isEmpty()) return;
+
     // Wherever the engine produced a 1:1 slice it replaces the upscaled fast
     // preview underneath: same frame, but carrying the four stages the scaled
-    // pipeline drops.
-    const bool drawSlice = !m_showBefore && !m_detailImage.isNull()
-        && !m_detailRect.isEmpty() && !m_previewFullSize.isEmpty();
-    // The slice covers the whole viewport, so the only upscaled pixels that
-    // ever reach the screen are the ones a pan briefly uncovers before the
-    // next slice lands. Smooth-scaling the rest of a multi-megapixel frame
-    // for that — on every pan step, now that panning re-renders — is pure
-    // cost, so the covered case gets the cheap filter instead.
-    QImage scaled = display.scaled(target, Qt::KeepAspectRatio,
-                                   drawSlice ? Qt::FastTransformation : Qt::SmoothTransformation);
-    if (drawSlice) {
-        QImage slice = m_detailImage;
-        markClipping(slice, m_clipShadows, m_clipHighlights);
-        // Scaled against the engine's own frame size rather than m_zoom, so
-        // the slice stays put if the two ever disagree.
-        const double sx = double(scaled.width()) / m_previewFullSize.width();
-        const double sy = double(scaled.height()) / m_previewFullSize.height();
-        if (scaled.format() != QImage::Format_ARGB32_Premultiplied)
-            scaled = scaled.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        QPainter painter(&scaled);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        painter.drawImage(QRectF(m_detailRect.x() * sx, m_detailRect.y() * sy,
-                                 m_detailRect.width() * sx, m_detailRect.height() * sy),
-                          slice);
+    // pipeline drops. The before frame never carries one — it is the layer as
+    // it already stands.
+    const bool drawSlice = !m_detailImage.isNull() && !m_detailRect.isEmpty()
+        && !m_previewFullSize.isEmpty();
+
+    // Both halves of a split are composed against the same content rectangle,
+    // so they stay pixel-aligned even though their sources differ in size.
+    auto composeTile = [&](const QImage& source, bool withSlice) -> QPixmap {
+        if (source.isNull())
+            return {};
+        const double fx = source.width() / double(content.width());
+        const double fy = source.height() / double(content.height());
+        // Aligned outwards so no wanted pixel is dropped, then clamped: at
+        // the frame edge the crop covers slightly less than the tile, which
+        // is why the destination below is derived from the *clamped* rect
+        // rather than assumed to be the whole tile.
+        const QRect sourceRect = QRectF(tileRect.x() * fx, tileRect.y() * fy,
+                                        tileRect.width() * fx, tileRect.height() * fy)
+            .toAlignedRect().intersected(QRect(QPoint(0, 0), source.size()));
+        if (sourceRect.isEmpty())
+            return {};
+        QImage crop = source.copy(sourceRect);
+        markClipping(crop, m_clipShadows, m_clipHighlights);
+
+        const QRect destRect(qRound(sourceRect.x() / fx) - tileRect.x(),
+                             qRound(sourceRect.y() / fy) - tileRect.y(),
+                             qRound(sourceRect.width() / fx),
+                             qRound(sourceRect.height() / fy));
+        // The slice covers the whole viewport, so the only upscaled pixels
+        // that ever reach the screen are the ones a pan briefly uncovers
+        // before the next slice lands; that case gets the cheap filter.
+        QImage scaled = crop.scaled(destRect.size().expandedTo(QSize(1, 1)),
+                                    Qt::IgnoreAspectRatio,
+                                    withSlice ? Qt::FastTransformation : Qt::SmoothTransformation);
+        if (!withSlice && destRect == QRect(QPoint(0, 0), tileRect.size()))
+            return QPixmap::fromImage(scaled);
+
+        QImage tile(tileRect.size(), QImage::Format_ARGB32_Premultiplied);
+        tile.fill(Qt::transparent);
+        QPainter painter(&tile);
+        painter.drawImage(destRect.topLeft(), scaled);
+        if (withSlice) {
+            QImage slice = m_detailImage;
+            markClipping(slice, m_clipShadows, m_clipHighlights);
+            // Placed against the engine's own frame size rather than the
+            // zoom, so the slice stays put if the two ever disagree.
+            const double sx = content.width() / double(m_previewFullSize.width());
+            const double sy = content.height() / double(m_previewFullSize.height());
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.drawImage(QRectF(m_detailRect.x() * sx - tileRect.x(),
+                                     m_detailRect.y() * sy - tileRect.y(),
+                                     m_detailRect.width() * sx, m_detailRect.height() * sy),
+                              slice);
+        }
+        painter.end();
+        return QPixmap::fromImage(tile);
+    };
+
+    const QPixmap tile = composeTile(primary, drawSlice && !showBeforeOnly);
+    // The comparison half is only composed while the split is on, and only
+    // when the view moved: the before frame itself never changes, so a
+    // slider drag must not pay for a second full-resolution scale per render.
+    if (m_splitView) {
+        const bool cached = !m_splitTile.isNull() && m_splitTileContent == content
+            && m_splitTileRect == tileRect
+            && m_splitTileClipShadows == m_clipShadows
+            && m_splitTileClipHighlights == m_clipHighlights;
+        if (!cached) {
+            m_splitTile = composeTile(before, false);
+            m_splitTileContent = content;
+            m_splitTileRect = tileRect;
+            m_splitTileClipShadows = m_clipShadows;
+            m_splitTileClipHighlights = m_clipHighlights;
+        }
+    } else if (!m_splitTile.isNull()) {
+        m_splitTile = QPixmap();
     }
-    const QPixmap pixmap = QPixmap::fromImage(scaled);
-    m_imageLabel->setPixmap(pixmap);
-    m_imageLabel->setFixedSize(pixmap.size());
+    m_tileRect = tileRect;
+    m_tileContent = content;
+    m_preview->setTile(tileRect.topLeft(), tile, m_splitTile);
 }
 
 void RawDevelopWindow::updateHistogram(const QImage& image)
@@ -1368,7 +1858,8 @@ void RawDevelopWindow::applyPreset(int index)
     } else {
         RawDevelopParams loaded;
         if (!RawDevelopParams::loadPP3File(key.toStdString(), loaded)) {
-            m_previewStatus->setText(tr("Could not load preset %1.").arg(QFileInfo(key).fileName()));
+            m_previewError = tr("Could not load preset %1.").arg(QFileInfo(key).fileName());
+            refreshPreviewStatus();
             return;
         }
         m_params = std::move(loaded);
@@ -1475,30 +1966,29 @@ void RawDevelopWindow::setApplyInProgress(bool busy)
     m_applyInProgress = busy;
     if (centralWidget())
         centralWidget()->setEnabled(!busy);
-    if (busy) {
-        m_previewStatus->setText(tr("Applying full-quality RAW development…"));
-    }
+    if (busy)
+        m_previewError.clear();
+    refreshPreviewStatus();
 }
 
 void RawDevelopWindow::developFinished(bool ok, const QString& errorMessage)
 {
+    if (!ok)
+        m_previewError = errorMessage.isEmpty() ? tr("RAW development failed.") : errorMessage;
     setApplyInProgress(false);
-    if (ok) {
+    if (ok)
         close();
-    } else {
-        m_previewStatus->setText(errorMessage.isEmpty() ? tr("RAW development failed.") : errorMessage);
-    }
 }
 
 void RawDevelopWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
+    // Recomposing and re-requesting the 1:1 slice is driven by the view's own
+    // resize (RawPreviewView::scrolled); only the readout is this window's
+    // business, and only while Fit derives the zoom from the viewport.
     if (m_fitToWindow) {
-        updateDisplayedImage();
-    } else {
-        // A bigger viewport shows more of the frame, so the slice has to grow
-        // with it even though the zoomed label itself did not change size.
-        maybeRequestDetail();
+        updateZoomControls();
+        refreshPreviewStatus();
     }
 }
 

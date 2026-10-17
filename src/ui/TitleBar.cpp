@@ -3,12 +3,22 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
+#include <QGuiApplication>
 #include <QLabel>
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QWindow>
+
+bool TitleBar::isSupportedPlatform()
+{
+    const QString platform = QGuiApplication::platformName();
+    if (platform == QLatin1String("cocoa"))     return false;
+    if (platform == QLatin1String("wayland"))   return false;
+    if (platform == QLatin1String("offscreen")) return false;
+    return true;
+}
 
 TitleBar::TitleBar(QWidget* parent)
     : QWidget(parent)
@@ -61,6 +71,21 @@ TitleBar::TitleBar(QWidget* parent)
         auto* t = ThemeManager::instance()->current();
         setStyleSheet(t->titleBarStyleSheet());
     });
+}
+
+void TitleBar::setTitleText(const QString& text)
+{
+    if (!m_titleLabel) {
+        m_titleLabel = new QLabel(this);
+        m_titleLabel->setObjectName(QStringLiteral("titleBarTitle"));
+        // The label ignores mouse events, so pressing it falls through to the
+        // bar itself and still drags the window.
+        m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        // Same slot the menu bar would occupy, with the same stretch, so the
+        // window controls stay flush right.
+        m_layout->insertWidget(1, m_titleLabel, 1);
+    }
+    m_titleLabel->setText(text);
 }
 
 void TitleBar::setMenuBar(QWidget* menuBar)
