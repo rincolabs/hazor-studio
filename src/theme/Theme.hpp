@@ -98,6 +98,8 @@ public:
 
     // ── Canvas (OpenGL clear color) ──
     QColor canvasBackground = QColor("#111315");
+    // Dot pattern painted over the pasteboard area around the canvas.
+    QColor canvasDotColor = QColor("#1f2123");
 
     // ── Component-based theme (populated by subclasses) ──
     QtTheme m_componentTheme;

@@ -651,6 +651,44 @@ void GPUViewport::initShaders()
     }
     m_displayU.scene = m_displayProg->uniformLocation("uScene");
     m_displayU.lut   = m_displayProg->uniformLocation("uLut");
+
+    // ── Pasteboard dot pattern program ──
+    // Fullscreen pass drawn right after the clear, before canvas decorations
+    // and the canvas quad — so it only ends up visible in the pasteboard area
+    // around the canvas, where nothing else overdraws it. The grid is
+    // computed straight from gl_FragCoord so it stays a fixed screen-space
+    // size independent of document pan/zoom, like the dotted mat in other
+    // image editors.
+    m_dotProg = new QOpenGLShaderProgram();
+    const QByteArray dotVSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            layout(location = 0) in vec2 pos;
+            void main() { gl_Position = vec4(pos, 0.0, 1.0); }
+        )");
+    const QByteArray dotFSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            out vec4 fragColor;
+            uniform vec4 uBgColor;
+            uniform vec4 uDotColor;
+            uniform float uSpacing;
+            uniform float uRadius;
+            void main() {
+                vec2 cell = mod(gl_FragCoord.xy, uSpacing) - uSpacing * 0.5;
+                float d = length(cell);
+                float dot = 1.0 - smoothstep(uRadius - 0.75, uRadius + 0.75, d);
+                fragColor = mix(uBgColor, uDotColor, dot);
+            }
+        )");
+    m_dotProg->bindAttributeLocation("pos", 0);
+    if (!m_dotProg->addShaderFromSourceCode(QOpenGLShader::Vertex, dotVSrc) ||
+        !m_dotProg->addShaderFromSourceCode(QOpenGLShader::Fragment, dotFSrc) ||
+        !m_dotProg->link()) {
+        qWarning("Dot pattern shader failed: %s", qPrintable(m_dotProg->log()));
+    }
+    m_dotU.bgColor      = m_dotProg->uniformLocation("uBgColor");
+    m_dotU.dotColor     = m_dotProg->uniformLocation("uDotColor");
+    m_dotU.spacing      = m_dotProg->uniformLocation("uSpacing");
+    m_dotU.radius       = m_dotProg->uniformLocation("uRadius");
 }
 
 void GPUViewport::collectUniforms()

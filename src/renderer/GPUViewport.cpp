@@ -138,6 +138,7 @@ GPUViewport::~GPUViewport()
     if (m_grayProg)     delete m_grayProg;
     if (m_adjustProg)   delete m_adjustProg;
     if (m_displayProg)  delete m_displayProg;
+    if (m_dotProg)      delete m_dotProg;
     if (m_curveLutTex)   glDeleteTextures(1, &m_curveLutTex);
     if (m_displayLutTex) glDeleteTextures(1, &m_displayLutTex);
     if (m_sceneTex)      glDeleteTextures(1, &m_sceneTex);
@@ -1184,6 +1185,26 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
     }
 }
 
+// ── Pasteboard dot pattern ──────────────────────────────────────
+
+void GPUViewport::renderPasteboardDots()
+{
+    if (!m_dotProg || !m_dotProg->isLinked()) return;
+
+    auto* t = ThemeManager::instance()->current();
+    const QColor bg = t->canvasBackground;
+    const QColor dot = t->canvasDotColor;
+
+    m_dotProg->bind();
+    m_dotProg->setUniformValue(m_dotU.bgColor, bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
+    m_dotProg->setUniformValue(m_dotU.dotColor, dot.redF(), dot.greenF(), dot.blueF(), 1.0f);
+    m_dotProg->setUniformValue(m_dotU.spacing, 20.0f);
+    m_dotProg->setUniformValue(m_dotU.radius, 1.4f);
+    m_vao.bind();
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    m_dotProg->release();
+}
+
 // ── Canvas decorations ─────────────────────────────────────────
 
 void GPUViewport::renderCanvasDecorations(const RenderParams& p,
@@ -1743,6 +1764,7 @@ void GPUViewport::render(const RenderParams& p)
     const QColor canvasBg = t->canvasBackground;
     glClearColor(canvasBg.redF(), canvasBg.greenF(), canvasBg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    renderPasteboardDots();
 
     if (!p.doc || !m_mainProg || !m_mainProg->isLinked()) return;
 
