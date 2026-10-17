@@ -40,6 +40,34 @@ constexpr RawPreviewUpdate& operator|=(RawPreviewUpdate& lhs, RawPreviewUpdate r
     return lhs;
 }
 
+// A 1:1 slice of the image, rendered through the engine's *detail* pipeline
+// (dcrop.cc) rather than the scaled preview one. It is the only path that
+// applies sharpening, noise reduction, texture (micro-contrast) and
+// defringe: ImProcCoordinator never runs those four at any scale — they
+// live in the detail pipeline behind a `skip == 1` guard — which is what
+// rtengine.h's own PreviewImageListener contract means by "if the scale of
+// the preview image is >1, no sharpening, no denoising ... is applied".
+//
+// Requesting a region costs one full-quality demosaic: the engine keys its
+// `highDetailNeeded` flag off any registered region with skip 1, so those
+// stages simply cannot be seen on the fast demosaic. The result is latched
+// for as long as a region stays requested, and dropping the region puts the
+// next render back on the fast path — so ask for one only while something
+// that needs it is actually on screen.
+struct RawDetailRegion {
+    // Rectangle in full-resolution output coordinates — the space
+    // RawGeometry::fullWidth/fullHeight describe, not the preview buffer's.
+    // renderPreview() treats it as in/out: it pins a negative origin, lets
+    // the engine clamp the far edges, and writes back the rectangle the
+    // engine actually delivered.
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+
+    bool isEmpty() const { return width <= 0 || height <= 0; }
+};
+
 class RawProgressListener {
 public:
     virtual ~RawProgressListener() = default;
@@ -74,8 +102,10 @@ public:
 
     // Interactive-quality render, scaled so neither dimension exceeds
     // maxEdge. Backed by StagedImageProcessor, which skips sharpening,
-    // denoising and uses faster transform algorithms above 1:1 scale (see
-    // rtengine.h's own PreviewImageListener docs) — expected, not a defect.
+    // denoising, texture and defringe and uses faster transform algorithms
+    // above 1:1 scale (see rtengine.h's own PreviewImageListener docs) —
+    // expected, not a defect. Pass a detailRegion to get those four stages
+    // for one 1:1 slice of the frame.
     // Always RawPixelFormat::RGB8 (see RawImageBuffer.hpp). cancelToken is
     // only checked before starting; once rtengine's background update thread
     // is running there is no way to interrupt it, only to wait for it.
@@ -83,10 +113,20 @@ public:
     // starting or if the engine isn't available. When resolvedParams is
     // provided, it receives the processor's effective parameters after the
     // render, including an image-specific auto-matched tone curve.
+    //
+    // detailRegion/detailOut are how the stages the scaled preview skips
+    // become visible; see RawDetailRegion. They ride along with this call
+    // instead of having one of their own because a region is rendered by the
+    // same engine update (and reads the curves and white balance that update
+    // is what computes), so asking separately would run the pipeline twice.
+    // detailOut is RawPixelFormat::RGB8 like the return value, and is left
+    // empty when the engine delivered nothing for the region.
     RawImageBuffer renderPreview(int maxEdge, const RawDevelopParams& params,
                                  RawPreviewUpdate updates = RawPreviewUpdate::Full,
                                  RawCancelToken cancelToken = nullptr,
-                                 RawDevelopParams* resolvedParams = nullptr);
+                                 RawDevelopParams* resolvedParams = nullptr,
+                                 RawDetailRegion* detailRegion = nullptr,
+                                 RawImageBuffer* detailOut = nullptr);
 
     // Full-quality, full-resolution render via ProcessingJob::create() +
     // rtengine::processImage(). Always RawPixelFormat::RGBFloat. Same

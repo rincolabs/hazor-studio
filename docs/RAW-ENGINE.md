@@ -57,7 +57,10 @@ per-user RAW data directory, e.g. for user-dropped DCP profiles).
   white balance, light, color, effects, curves, HSV color mixer, color grading,
   detail, and optics. These preserve rtengine's own units and PP3 fields.
 - `RawSession::renderPreview(maxEdge, params)` — interactive-quality RGB8
-  render, scaled to fit `maxEdge`.
+  render, scaled to fit `maxEdge`. Its optional `RawDetailRegion` adds a 1:1
+  slice rendered through the engine's detail pipeline — the only way to see
+  sharpening, noise reduction, texture and defringe (see "The 1:1 detail
+  region" below).
 - `RawSession::renderFull(params)` — full-resolution float render
   (`[0, 65535]`, output ICC profile applied, not truncated to 8 bits — that
   truncation is the RAW Layer's job at a single named point, not the
@@ -162,6 +165,38 @@ operation that calls
 `ImageController::rerevealRawLayer()`. That final render is full quality,
 asynchronous, and creates the existing `RawDevelopCommand` for undo/redo.
 
+### The 1:1 detail region
+
+Four controls — **Sharpening**, **Noise Reduction**, **Texture** and
+**Defringe** — cannot be shown by the scaled preview at all. They are not
+merely lower quality there: `ImProcCoordinator` never calls `sharpening()`,
+`MLmicrocontrast()` or `defringe()`, and gates `RGB_denoise()` behind
+`scale == 1`. All four live in the engine's *detail* pipeline (`dcrop.cc`),
+behind its own `if (skip == 1)` guard. `rtengine.h`'s `PreviewImageListener`
+contract states this outright: above 1:1, "no sharpening, no denoising ... is
+applied".
+
+So `RawSession::renderPreview()` takes an optional `RawDetailRegion`: a
+rectangle, in full-resolution output coordinates, that the engine renders at
+1:1 through that detail pipeline and hands back alongside the scaled preview.
+It rides along with the preview call rather than having one of its own for two
+reasons — a region is refreshed by the same engine update (the coordinator
+walks its registered regions just before it fires `imageReady()`), and the
+detail pipeline reads the tone curves, LUTs and resolved white balance that
+this very update is what computes.
+
+`RawDevelopWindow` asks for a region only when both conditions hold: the zoom
+is at 100% or above, *and* at least one of the four stages is enabled. That
+pairing is deliberate, because a registered region is not free — the
+coordinator keys `highDetailNeeded` off any region with skip 1, which pins
+the whole preview to the full-quality demosaic. There is no way to have one
+without the other, so the cost is only incurred while something that needs it
+is on screen; the fit view, and 100% with all four off, stay on the fast
+demosaic. The slice covers the visible viewport and is painted over the
+upscaled preview, so what the user sees at 100% is entirely 1:1 pixels.
+Panning, zooming and resizing re-request it through the same debounce as a
+parameter change.
+
 Because the window is independent, the layer it edits can be reordered,
 inserted ahead of, or deleted while it is open — so a flat index cannot
 identify it. `RawDevelopWindow` therefore carries none: `MainWindow` keys the
@@ -186,6 +221,8 @@ inventing a conversion: **Whites** drives Highlight Compression (recovery),
 **Blacks** drives RawTherapee Black Level, **Texture** drives Sharpen
 Microcontrast, **Clarity** drives Local Contrast, and color-grading wheels
 compose RawTherapee Color Toning's Split Color (`Splitco`) RGB mixer values.
+Sharpening, Noise Reduction, Texture and Defringe are wired, but only the
+detail pipeline renders them — see "The 1:1 detail region" above.
 Grain, Vignette **Midpoint**, Color Grading **Balance**, an Adobe-style
 parametric-region curve, Camera Raw Masking, and white-balance eyedropper
 sampling do not have compatible operations in the currently embedded API, so

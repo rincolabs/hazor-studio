@@ -153,6 +153,85 @@ private:
     bool m_ready = false;
 };
 
+// Bridges the engine's DetailedCropListener to the same synchronous
+// renderPreview() call. Unlike PreviewWaiter there is nothing to wait for:
+// the coordinator refreshes every registered region inside the update it is
+// already running, just before it fires imageReady() (its "process crop, if
+// needed" loop), so by the time PreviewWaiter::waitForReady() returns the
+// region for that update has already been delivered here.
+//
+// Both images handed to setDetailedCrop() are deleted by the engine as soon
+// as the callback returns, so the pixels must be copied out, not retained.
+class DetailWaiter : public rtengine::DetailedCropListener {
+public:
+    void setRegion(const RawDetailRegion& region)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_region = region;
+    }
+
+    // The engine asks its listener to place the window at the start of every
+    // region update and uses the answer in preference to whatever
+    // setWindow() was given (Crop::update()), so this — not setWindow() — is
+    // what actually positions the region.
+    void getWindow(int& cx, int& cy, int& cw, int& ch, int& skip) override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        cx = m_region.x;
+        cy = m_region.y;
+        cw = m_region.width;
+        ch = m_region.height;
+        // Any other value and the engine skips the very stages this region
+        // exists to show (dcrop.cc's `if (skip == 1)` guard).
+        skip = 1;
+    }
+
+    void setDetailedCrop(rtengine::IImage8* img, rtengine::IImage8* /*imgtrue*/,
+                         const rtengine::procparams::ColorManagementParams& /*cmp*/,
+                         const rtengine::procparams::CropParams& /*cp*/,
+                         const rtengine::procparams::CropGuideParams& /*guide*/,
+                         int cx, int cy, int /*cw*/, int /*ch*/, int /*skip*/) override
+    {
+        if (!img) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        MyMutex::MyLock imageLock(img->getMutex());
+        // cw/ch are what was *asked* for; the engine delivers less wherever
+        // the region ran into the frame edge, so the image is the authority
+        // on the size and only the origin comes from the callback.
+        m_delivered = RawDetailRegion{cx, cy, img->getWidth(), img->getHeight()};
+        m_buffer = RawImageBuffer{};
+        m_buffer.width = img->getWidth();
+        m_buffer.height = img->getHeight();
+        m_buffer.format = RawPixelFormat::RGB8;
+        const unsigned char* data = img->getData();
+        m_buffer.pixelsU8.assign(data, data + std::size_t(m_buffer.width) * m_buffer.height * 3);
+        m_buffer.linear = false;
+    }
+
+    // Hands over the last delivery and clears it, so a later update that
+    // produced nothing for the region cannot pass off a stale slice as fresh.
+    bool take(RawImageBuffer& buffer, RawDetailRegion& region)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_buffer.isEmpty()) {
+            return false;
+        }
+        buffer = std::move(m_buffer);
+        region = m_delivered;
+        m_buffer = RawImageBuffer{};
+        return true;
+    }
+
+private:
+    std::mutex m_mutex;
+    RawDetailRegion m_region;
+    RawDetailRegion m_delivered;
+    RawImageBuffer m_buffer;
+};
+
 class ProgressAdapter : public rtengine::ProgressListener {
 public:
     explicit ProgressAdapter(RawProgressListener* target) : m_target(target) {}
@@ -185,8 +264,22 @@ struct RawSession::Impl {
     std::unique_ptr<PreviewWaiter> previewWaiter;
     rtengine::StagedImageProcessor* sip = nullptr;
 
+    // Created the first time a RawDetailRegion is asked for and dropped as
+    // soon as one isn't: while it exists the whole preview is pinned to the
+    // full-quality demosaic (see RawDetailRegion), which is a cost only
+    // worth paying while a 1:1 slice is actually being looked at.
+    std::unique_ptr<DetailWaiter> detailWaiter;
+    rtengine::DetailedCrop* detailCrop = nullptr;
+
     ~Impl()
     {
+        // The region keeps a raw pointer to the coordinator and unregisters
+        // itself from it when destroyed, so it has to go while the SIP is
+        // still alive. DetailedCrop's destructor is virtual; its own
+        // destroy() only releases buffers and would leave it registered.
+        delete detailCrop;
+        detailCrop = nullptr;
+
         // StagedImageProcessor::destroy() calls previewWaiter->delImage() via
         // freeAll() and decreaseRef()s initialImage once (matching the
         // increaseRef() done when the SIP was created below) — must run
@@ -230,7 +323,8 @@ const RawMetadata& RawSession::metadata() const { return m_impl->metadata; }
 
 RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& params,
                                          RawPreviewUpdate updates, RawCancelToken cancelToken,
-                                         RawDevelopParams* resolvedParams)
+                                         RawDevelopParams* resolvedParams,
+                                         RawDetailRegion* detailRegion, RawImageBuffer* detailOut)
 {
     if (maxEdge <= 0 || (cancelToken && cancelToken->load())) {
         return {};
@@ -260,6 +354,34 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
         : 1;
     sip->setPreviewScale(scale);
 
+    // A region is registered for exactly as long as one is asked for. Its
+    // mere existence pins the preview to the full-quality demosaic, so the
+    // common case — nothing on screen that needs the detail stages — has to
+    // leave the coordinator with no region at all, not an idle one.
+    const bool wantsDetail = detailRegion && detailOut && !detailRegion->isEmpty();
+    bool detailRegistered = false;
+    if (wantsDetail && !m_impl->detailCrop) {
+        m_impl->detailWaiter = std::make_unique<DetailWaiter>();
+        m_impl->detailCrop = sip->createCrop(nullptr, /*isDetailWindow=*/true);
+        m_impl->detailCrop->setListener(m_impl->detailWaiter.get());
+        detailRegistered = true;
+    } else if (!wantsDetail && m_impl->detailCrop) {
+        delete m_impl->detailCrop;
+        m_impl->detailCrop = nullptr;
+        m_impl->detailWaiter.reset();
+    }
+
+    if (wantsDetail) {
+        RawDetailRegion requested = *detailRegion;
+        // The engine clamps the far edges itself and reports how much it
+        // could deliver, but it reports back the *unclamped* origin, so a
+        // negative one would leave that rectangle disagreeing with the
+        // pixels it describes. Pin it here instead.
+        requested.x = std::max(0, requested.x);
+        requested.y = std::max(0, requested.y);
+        m_impl->detailWaiter->setRegion(requested);
+    }
+
     m_impl->previewWaiter->resetReady();
 
     rtengine::procparams::ProcParams* next = sip->beginUpdateParams();
@@ -279,6 +401,15 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
             refreshAction |= mapper->getAction(rtengine::EvSHHighlights);
         if (hasUpdate(updates, RawPreviewUpdate::Color))
             refreshAction |= mapper->getAction(rtengine::EvSaturation);
+    }
+    if (detailRegistered) {
+        // The coordinator decides whether this update needs the full-quality
+        // demosaic by scanning registered regions for one with skip 1 — and
+        // a region only learns its skip when it is first refreshed, which
+        // happens later in this very update. Without this the first 1:1
+        // slice would come back off a fast demosaic and only the next render
+        // would be right.
+        refreshAction |= M_HIGHQUAL;
     }
     sip->endUpdateParams(refreshAction);
 
@@ -308,6 +439,21 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
     buffer.linear = false;
     buffer.outputIccProfile = params.impl().procParams.icm.outputProfile;
     buffer.geometry = geometryFromParams(params.impl().procParams, sip->getFullWidth(), sip->getFullHeight());
+
+    if (wantsDetail) {
+        RawDetailRegion delivered;
+        RawImageBuffer detail;
+        if (m_impl->detailWaiter->take(detail, delivered)) {
+            detail.outputIccProfile = buffer.outputIccProfile;
+            // Same frame as the preview — only the slice of it differs.
+            detail.geometry = buffer.geometry;
+            *detailOut = std::move(detail);
+            *detailRegion = delivered;
+        } else {
+            *detailRegion = RawDetailRegion{};
+        }
+    }
+
     return buffer;
 }
 
@@ -381,7 +527,8 @@ const RawMetadata& RawSession::metadata() const
 }
 
 RawImageBuffer RawSession::renderPreview(int, const RawDevelopParams&, RawPreviewUpdate,
-                                         RawCancelToken, RawDevelopParams*) { return {}; }
+                                         RawCancelToken, RawDevelopParams*,
+                                         RawDetailRegion*, RawImageBuffer*) { return {}; }
 RawImageBuffer RawSession::renderFull(const RawDevelopParams&, RawProgressListener*, RawCancelToken) { return {}; }
 
 #endif

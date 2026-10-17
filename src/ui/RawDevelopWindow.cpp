@@ -49,6 +49,29 @@
 
 namespace {
 
+// Paints the clipping indicators in place. Shared because the 1:1 detail
+// slice is a second image that has to carry the same markers as the preview
+// it is drawn over, or toggling them would appear to skip the viewport.
+void markClipping(QImage& image, bool shadows, bool highlights)
+{
+    if (!shadows && !highlights) {
+        return;
+    }
+    if (image.format() != QImage::Format_RGBA8888) {
+        image = image.convertToFormat(QImage::Format_RGBA8888);
+    }
+    for (int y = 0; y < image.height(); ++y) {
+        uchar* row = image.scanLine(y);
+        for (int x = 0; x < image.width(); ++x) {
+            uchar* px = row + x * 4;
+            const int lo = std::min({px[0], px[1], px[2]});
+            const int hi = std::max({px[0], px[1], px[2]});
+            if (shadows && lo <= 3) { px[0] = 30; px[1] = 105; px[2] = 255; }
+            if (highlights && hi >= 252) { px[0] = 255; px[1] = 55; px[2] = 35; }
+        }
+    }
+}
+
 constexpr int kPreviewDebounceMs = 80;
 constexpr int kPreviewMinEdge = 768;
 constexpr int kPreviewMaxEdge = 1600;
@@ -483,13 +506,20 @@ void RawDevelopWindow::buildUi()
         m_fitToWindow = zoom <= 0.0;
         if (!m_fitToWindow) m_zoom = zoom;
         updateDisplayedImage();
+        maybeRequestDetail();
     });
     connect(fitButton, &QToolButton::clicked, this, [this]() {
-        m_fitToWindow = true; m_zoomCombo->setCurrentIndex(0); updateDisplayedImage();
+        m_fitToWindow = true; m_zoomCombo->setCurrentIndex(0); updateDisplayedImage(); maybeRequestDetail();
     });
     connect(hundredButton, &QToolButton::clicked, this, [this]() {
-        m_fitToWindow = false; m_zoom = 1.0; m_zoomCombo->setCurrentIndex(3); updateDisplayedImage();
+        m_fitToWindow = false; m_zoom = 1.0; m_zoomCombo->setCurrentIndex(3); updateDisplayedImage(); maybeRequestDetail();
     });
+    // Panning moves which part of the frame the 1:1 slice has to cover. The
+    // preview debounce is what keeps a drag from queueing a render per pixel.
+    connect(m_previewScroll->horizontalScrollBar(), &QScrollBar::valueChanged,
+            this, &RawDevelopWindow::maybeRequestDetail);
+    connect(m_previewScroll->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, &RawDevelopWindow::maybeRequestDetail);
     connect(m_beforeAfterButton, &QToolButton::toggled, this, [this](bool before) {
         m_showBefore = before;
         m_beforeAfterButton->setText(before ? tr("After") : tr("Before"));
@@ -775,7 +805,7 @@ QWidget* RawDevelopWindow::buildEffectsPanel()
         connect(check, &QCheckBox::toggled, this, [this, setter](bool on) { if (!m_syncing) { setter(on); applyParamsChanged(); } });
         return check;
     };
-    auto* textureEnabled = addEnable(tr("Texture"), tr("Engine mapping: Sharpen Microcontrast. Rendered in the full-quality result because the fast preview skips sharpening stages."), m_params.effects().textureEnabled,
+    auto* textureEnabled = addEnable(tr("Texture"), tr("Engine mapping: Sharpen Microcontrast. Like Sharpening it exists only in the engine's 1:1 pipeline — set the zoom to 100% to see it."), m_params.effects().textureEnabled,
         [this](bool on) { auto s = m_params.effects(); s.textureEnabled = on; m_params.setEffects(s); });
     m_syncControls.push_back([this, textureEnabled]() { textureEnabled->setChecked(m_params.effects().textureEnabled); });
     addParamRow(layout, tr("Texture amount"), 0, 100, 20, 0, tr("Sharpen Microcontrast amount."),
@@ -930,7 +960,7 @@ QWidget* RawDevelopWindow::buildDetailPanel()
         [this] { return m_params.detail().sharpeningRadius; }, [this](double value) { auto d = m_params.detail(); d.sharpeningRadius = value; m_params.setDetail(d); });
     addParamRow(layout, tr("Detail"), 0, 200, 20, 0, tr("Engine mapping: sharpening contrast; it is not Adobe Detail."),
         [this] { return m_params.detail().sharpeningDetail; }, [this](double value) { auto d = m_params.detail(); d.sharpeningDetail = value; m_params.setDetail(d); });
-    auto* limitations = new QLabel(tr("Sharpening and Noise Reduction are rendered in the full-quality result; the fast preview skips these 1:1 stages. Masking is unavailable: the engine's edge-only control is not equivalent to Camera Raw Masking. Its luminance denoiser has no compatible Luminance Contrast, Color Detail, or Smoothness controls."), panel);
+    auto* limitations = new QLabel(tr("Sharpening and Noise Reduction exist only in the engine's 1:1 pipeline. Set the zoom to 100% and the visible region is re-rendered with them; the fit view cannot show them at all. Masking is unavailable: the engine's edge-only control is not equivalent to Camera Raw Masking. Its luminance denoiser has no compatible Luminance Contrast, Color Detail, or Smoothness controls."), panel);
     limitations->setWordWrap(true); limitations->setContentsMargins(8, 3, 8, 3); layout->addWidget(limitations);
     auto* denoise = new AppCheckBox(tr("Noise Reduction"), panel); denoise->setContentsMargins(8, 5, 6, 2); layout->addWidget(denoise);
     connect(denoise, &QCheckBox::toggled, this, [this](bool on) { if (!m_syncing) { auto d = m_params.detail(); d.denoiseEnabled = on; m_params.setDetail(d); applyParamsChanged(); } });
@@ -981,6 +1011,10 @@ QWidget* RawDevelopWindow::buildOpticsPanel()
         [this] { return m_params.optics().defringeRadius; }, [this](double value) { auto o = m_params.optics(); o.defringeRadius = value; m_params.setOptics(o); });
     addParamRow(layout, tr("Defringe Threshold"), 0, 100, 13, 0, tr("Defringe threshold."),
         [this] { return m_params.optics().defringeThreshold; }, [this](double value) { auto o = m_params.optics(); o.defringeThreshold = qRound(value); m_params.setOptics(o); });
+    auto* defringeNote = new QLabel(tr("Defringe is a 1:1-only stage like Sharpening: set the zoom to 100% to see it on the visible region. Everything above it is rendered in the fit preview."), panel);
+    defringeNote->setWordWrap(true); defringeNote->setContentsMargins(8, 4, 8, 2);
+    defringeNote->setStyleSheet(QStringLiteral("color: %1;").arg(ThemeManager::instance()->current()->colorTextSecondary.name()));
+    layout->addWidget(defringeNote);
     return panel;
 }
 
@@ -1011,6 +1045,68 @@ void RawDevelopWindow::applyParamsChanged(RawPreviewUpdate update)
         m_beforeAfterButton->setChecked(false);
         m_beforeAfterButton->setText(tr("Before"));
     }
+    requestPreview();
+}
+
+bool RawDevelopWindow::detailStagesActive() const
+{
+    const auto detail = m_params.detail();
+    return detail.sharpeningEnabled || detail.denoiseEnabled
+        || m_params.effects().textureEnabled || m_params.optics().defringeEnabled;
+}
+
+QRect RawDevelopWindow::detailRegionRequest() const
+{
+    // Below 1:1 a slice would have to be shrunk to be shown, which is both
+    // ruinous — it is a full-resolution render of everything on screen — and
+    // misleading about what the stages actually do. And with none of the
+    // four enabled the slice would hold nothing the fast preview doesn't
+    // already show, so it would not be worth the full-quality demosaic it
+    // forces on the whole preview (see RawDetailRegion).
+    if (m_fitToWindow || m_zoom < 1.0 || !detailStagesActive()) {
+        return {};
+    }
+    if (!m_previewScroll || m_previewFullSize.isEmpty()) {
+        return {};
+    }
+
+    // The label carries the frame at m_zoom, so both the scroll offset and
+    // the viewport size divide by it to land in the engine's 1:1 space. When
+    // the zoomed frame is smaller than the viewport the scrollbars are at 0
+    // and this resolves to the whole (small) frame, which is correct.
+    const QSize viewport = m_previewScroll->viewport()->size();
+    const QPoint offset(m_previewScroll->horizontalScrollBar()->value(),
+                        m_previewScroll->verticalScrollBar()->value());
+    const QRect region(QPoint(qFloor(offset.x() / m_zoom), qFloor(offset.y() / m_zoom)),
+                       QSize(qCeil(viewport.width() / m_zoom), qCeil(viewport.height() / m_zoom)));
+    return region.intersected(QRect(QPoint(0, 0), m_previewFullSize));
+}
+
+void RawDevelopWindow::maybeRequestDetail()
+{
+    const QRect wanted = detailRegionRequest();
+    // The generation counter is what previewFinished() uses to decide a
+    // render is still wanted, so it has to move even though no parameter
+    // did — otherwise the render this schedules would be thrown away.
+    if (wanted.isEmpty()) {
+        if (m_detailImage.isNull() && m_detailRect.isEmpty()) {
+            return;
+        }
+        // Dropping the slice is also what unregisters the region on the
+        // engine side, which is what puts the preview back on the cheap
+        // demosaic — so it needs a render, not just a repaint.
+        m_detailImage = QImage();
+        m_detailRect = QRect();
+        m_detailRequested = QRect();
+        ++m_previewGeneration;
+        updateDisplayedImage();
+        requestPreview();
+        return;
+    }
+    if (wanted == m_detailRequested && !m_detailImage.isNull()) {
+        return;
+    }
+    ++m_previewGeneration;
     requestPreview();
 }
 
@@ -1054,10 +1150,12 @@ void RawDevelopWindow::startPreview()
     const qreal pixelRatio = m_previewScroll ? m_previewScroll->devicePixelRatioF() : 1.0;
     const int viewportEdge = qCeil(std::max(viewportSize.width(), viewportSize.height()) * pixelRatio);
     const int previewMaxEdge = std::clamp(viewportEdge, kPreviewMinEdge, kPreviewMaxEdge);
+    const QRect detailRequest = detailRegionRequest();
     m_previewPending = false;
     m_pendingPreviewUpdates = RawPreviewUpdate::None;
     m_previewWatcher->setFuture(QtConcurrent::run(m_previewPool,
-        [this, params, existingSourcePath, source, generation, previewMaxEdge, previewUpdates]() {
+        [this, params, existingSourcePath, source, generation, previewMaxEdge, previewUpdates,
+         detailRequest]() {
         PreviewResult result;
         result.generation = generation;
         QString sourcePath = existingSourcePath;
@@ -1084,13 +1182,27 @@ void RawDevelopWindow::startPreview()
         // an auto-exposure or Auto-Matched Curve result when one is active.
         result.hasResolvedToneCurve = params.needsResolvedToneCurve();
         result.hasResolvedParams = true;
+        RawDetailRegion detailRegion{detailRequest.x(), detailRequest.y(),
+                                     detailRequest.width(), detailRequest.height()};
+        RawImageBuffer detailBuffer;
         const RawImageBuffer buffer = m_previewSession->renderPreview(
-            previewMaxEdge, params, previewUpdates, nullptr, &result.resolvedParams);
+            previewMaxEdge, params, previewUpdates, nullptr, &result.resolvedParams,
+            &detailRegion, &detailBuffer);
         if (buffer.isEmpty()) {
             result.errorMessage = QObject::tr("RAW preview render failed.");
             return result;
         }
         result.image = RawDevelopService::convertToRgba8888(buffer, false);
+        result.fullSize = QSize(buffer.geometry.fullWidth, buffer.geometry.fullHeight);
+        // renderPreview() reports back the rectangle it could actually
+        // deliver, which is narrower than the request wherever the region
+        // ran into the frame edge.
+        if (!detailBuffer.isEmpty()) {
+            result.detailImage = RawDevelopService::convertToRgba8888(detailBuffer, false);
+            result.detailRect = QRect(detailRegion.x, detailRegion.y,
+                                      detailRegion.width, detailRegion.height);
+            result.detailRequested = detailRequest;
+        }
         return result;
     }));
 }
@@ -1114,8 +1226,16 @@ void RawDevelopWindow::previewFinished()
             if (changed)
                 syncControlsFromParams();
         }
+        if (!result.fullSize.isEmpty()) {
+            m_previewFullSize = result.fullSize;
+        }
+        m_detailImage = result.detailImage;
+        m_detailRect = result.detailRect;
+        m_detailRequested = result.detailRequested;
         updatePreviewImage(result.image);
-        m_previewStatus->setText(tr("Preview uses interactive quality."));
+        m_previewStatus->setText(m_detailImage.isNull()
+            ? tr("Preview uses interactive quality.")
+            : tr("Visible region rendered 1:1 — sharpening, noise reduction, texture and defringe included."));
     } else if (result.generation == m_previewGeneration && !result.errorMessage.isEmpty()) {
         m_previewStatus->setText(result.errorMessage);
     }
@@ -1138,19 +1258,7 @@ void RawDevelopWindow::updateDisplayedImage()
     if (!m_imageLabel || !m_previewScroll) return;
     QImage display = m_showBefore ? m_beforeImage : m_previewImage;
     if (display.isNull()) return;
-    if (m_clipShadows || m_clipHighlights) {
-        display = display.convertToFormat(QImage::Format_RGBA8888);
-        for (int y = 0; y < display.height(); ++y) {
-            uchar* row = display.scanLine(y);
-            for (int x = 0; x < display.width(); ++x) {
-                uchar* px = row + x * 4;
-                const int lo = std::min({px[0], px[1], px[2]});
-                const int hi = std::max({px[0], px[1], px[2]});
-                if (m_clipShadows && lo <= 3) { px[0] = 30; px[1] = 105; px[2] = 255; }
-                if (m_clipHighlights && hi >= 252) { px[0] = 255; px[1] = 55; px[2] = 35; }
-            }
-        }
-    }
+    markClipping(display, m_clipShadows, m_clipHighlights);
     QSize target = display.size();
     if (m_fitToWindow) {
         const QSize available = m_previewScroll->viewport()->size() - QSize(20, 20);
@@ -1164,7 +1272,34 @@ void RawDevelopWindow::updateDisplayedImage()
         // multi-megapixel RAW.
         target = (QSizeF(m_beforeImage.size()) * m_zoom).toSize();
     }
-    const QPixmap pixmap = QPixmap::fromImage(display.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    // Wherever the engine produced a 1:1 slice it replaces the upscaled fast
+    // preview underneath: same frame, but carrying the four stages the scaled
+    // pipeline drops.
+    const bool drawSlice = !m_showBefore && !m_detailImage.isNull()
+        && !m_detailRect.isEmpty() && !m_previewFullSize.isEmpty();
+    // The slice covers the whole viewport, so the only upscaled pixels that
+    // ever reach the screen are the ones a pan briefly uncovers before the
+    // next slice lands. Smooth-scaling the rest of a multi-megapixel frame
+    // for that — on every pan step, now that panning re-renders — is pure
+    // cost, so the covered case gets the cheap filter instead.
+    QImage scaled = display.scaled(target, Qt::KeepAspectRatio,
+                                   drawSlice ? Qt::FastTransformation : Qt::SmoothTransformation);
+    if (drawSlice) {
+        QImage slice = m_detailImage;
+        markClipping(slice, m_clipShadows, m_clipHighlights);
+        // Scaled against the engine's own frame size rather than m_zoom, so
+        // the slice stays put if the two ever disagree.
+        const double sx = double(scaled.width()) / m_previewFullSize.width();
+        const double sy = double(scaled.height()) / m_previewFullSize.height();
+        if (scaled.format() != QImage::Format_ARGB32_Premultiplied)
+            scaled = scaled.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&scaled);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.drawImage(QRectF(m_detailRect.x() * sx, m_detailRect.y() * sy,
+                                 m_detailRect.width() * sx, m_detailRect.height() * sy),
+                          slice);
+    }
+    const QPixmap pixmap = QPixmap::fromImage(scaled);
     m_imageLabel->setPixmap(pixmap);
     m_imageLabel->setFixedSize(pixmap.size());
 }
@@ -1358,7 +1493,13 @@ void RawDevelopWindow::developFinished(bool ok, const QString& errorMessage)
 void RawDevelopWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
-    if (m_fitToWindow) updateDisplayedImage();
+    if (m_fitToWindow) {
+        updateDisplayedImage();
+    } else {
+        // A bigger viewport shows more of the frame, so the slice has to grow
+        // with it even though the zoomed label itself did not change size.
+        maybeRequestDetail();
+    }
 }
 
 void RawDevelopWindow::closeEvent(QCloseEvent* event)

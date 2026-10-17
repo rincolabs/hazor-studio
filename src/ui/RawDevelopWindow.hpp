@@ -3,6 +3,8 @@
 #include <QFutureWatcher>
 #include <QImage>
 #include <QMainWindow>
+#include <QRect>
+#include <QSize>
 #include <QString>
 #include <array>
 #include <functional>
@@ -69,6 +71,20 @@ private:
         RawDevelopParams resolvedParams;
         bool hasResolvedParams = false;
         bool hasResolvedToneCurve = false;
+        // The 1:1 slice the engine's detail pipeline produced, and where it
+        // sits in full-resolution coordinates. Null/empty unless this render
+        // asked for one — see detailRegionRequest().
+        QImage detailImage;
+        QRect detailRect;
+        // What was asked for, before the engine clamped it at the frame
+        // edge. Kept separate from detailRect because comparing the wanted
+        // region against the *delivered* one would re-request forever
+        // wherever the two legitimately differ.
+        QRect detailRequested;
+        // The engine's own 1:1 frame size for this render. All the region
+        // and zoom arithmetic lives in that space, never in the (budget-
+        // capped) preview buffer's.
+        QSize fullSize;
     };
 
     void buildUi();
@@ -95,6 +111,17 @@ private:
                     bool initiallyOpen = false);
     void syncControlsFromParams();
     void applyParamsChanged(RawPreviewUpdate update = RawPreviewUpdate::Full);
+    // True when the PP3 has one of the four stages that exist only in the
+    // engine's 1:1 pipeline turned on: sharpening, noise reduction, texture
+    // (micro-contrast) or defringe.
+    bool detailStagesActive() const;
+    // The visible part of the frame, in full-resolution coordinates, when a
+    // 1:1 slice is worth rendering; empty otherwise. Empty is the cheap
+    // answer: a region forces the full-quality demosaic on the whole preview.
+    QRect detailRegionRequest() const;
+    // Re-renders when the wanted region moved (zoom, scroll, resize) without
+    // any parameter having changed.
+    void maybeRequestDetail();
     void requestPreview();
     void startPreview();
     void previewFinished();
@@ -114,6 +141,10 @@ private:
     RawDevelopParams m_params;
     QImage m_beforeImage;
     QImage m_previewImage;
+    QImage m_detailImage;
+    QRect m_detailRect;
+    QRect m_detailRequested;
+    QSize m_previewFullSize;
     QString m_previewSourcePath;
     bool m_ownsPreviewSourcePath = false;
     bool m_showBefore = false;
