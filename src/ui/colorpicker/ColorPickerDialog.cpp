@@ -23,6 +23,9 @@ ColorPickerDialog::ColorPickerDialog(const QColor& initialColor,
         ? tr("Foreground Color") : tr("Background Color");
     setWindowTitle(tr("Color Picker (%1)").arg(modeText));
     setMinimumSize(560, 400);
+    // Matches the filter dialogs (execToolDialog): Qt::Tool gives this dialog a
+    // movable title bar instead of the fixed one plain Qt::Dialog gets here.
+    setWindowFlags(windowFlags() | Qt::Tool);
 
     auto* t = ThemeManager::instance()->current();
 
