@@ -151,8 +151,10 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
         {"rasterize_layer", "Rasterize the active layer (convert text/shape/RAW to pixels)", "Layer", {}},
         {"raw_develop", "Adjust a RAW Layer's develop settings (white balance, exposure) "
             "and re-reveal it from the original file. Only unspecified params keep their "
-            "current value. white_balance_method: 'Camera', 'Auto' or 'Custom'. Runs "
-            "asynchronously off the UI thread.", "Layer",
+            "current value. white_balance_method must be one of the engine's own names: "
+            "'Camera' (as shot), 'autitcgreen' or 'autold' (automatic), 'Custom', or a "
+            "preset such as 'Daylight', 'Cloudy', 'Shade', 'Tungsten'. Any other string "
+            "silently behaves like 'Custom'. Runs asynchronously off the UI thread.", "Layer",
             {{"index", "int", -1, 100, -1},
              {"white_balance_temperature", "int", 2000, 12000, 6504},
              {"white_balance_green", "float", 0.1, 5.0, 1.0},

@@ -94,18 +94,12 @@ private:
         // on release(), delete it) — see materializeEmbedded().
         QString openedTempPath;
         RawDevelopResult result;
-        // Full-precision buffer (RGBFloat, [0, 65535]) RawSession::renderFull()
-        // produced, retained for a future higher-depth export path per
-        // Fase 4.2 — never written into Layer::cpuImage, never truncated
-        // again, just cached alongside the session.
-        RawImageBuffer fullBuffer;
     };
 
     struct Entry {
         ~Entry();
         std::unique_ptr<RawSession> session;
         QString tempPath; // Embedded mode only — deleted by ~Entry().
-        RawImageBuffer lastFullBuffer;
         QFutureWatcher<std::shared_ptr<Task>> watcher;
         bool dispatched = false;
     };

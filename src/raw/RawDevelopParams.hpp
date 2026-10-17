@@ -27,7 +27,18 @@ public:
     };
 
     struct WhiteBalance {
-        std::string method = "Camera";     // "Camera", "Auto", "Custom", ...
+        // Must be one of WBParams::getWbEntries()' own names, which is the
+        // only set the engine's method cascade and ColorTemp::spectMap
+        // recognize: "Camera" (as shot), "autitcgreen" / "autold" (the two
+        // automatic algorithms), "Custom", or an exact preset name such as
+        // "Daylight", "Tungsten", "Fluo F2", "Flash 5500K". Anything else is
+        // not rejected — it silently falls through to the generic
+        // temperature+green path, i.e. behaves like "Custom".
+        std::string method = "Camera";
+        // Ignored by the engine unless `method` is "Custom" or an
+        // unrecognized name; "Camera" and the automatic/preset methods derive
+        // their own values and write the result back here (see
+        // adoptResolvedWhiteBalance()).
         int temperatureKelvin = 6504;
         double green = 1.0;                // WBParams::green (tint multiplier)
     };
@@ -103,14 +114,24 @@ public:
         std::array<double, 3> shadows{};
         std::array<double, 3> midtones{};
         std::array<double, 3> highlights{};
-        int blending = 50;               // colorToning.strength, 0..100
-        int balance = 0;                 // colorToning.balance, -100..100
+        int strength = 50;               // colorToning.strength, 0..100
+        // colorToning.balance. Retained so an existing PP3 round-trips, but
+        // inert for these wheels: setColorGrading() selects the "Splitco"
+        // method, and ColorToningParams::mixerToCurve() — the only consumer of
+        // the low/mid/high RGB values — never reads `balance`. It is the
+        // RGBSliders/Splitlr/Lab methods that use it.
+        int balance = 0;
     };
 
     struct ColorMixer {
         bool enabled = false;
-        // Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta.  Each
-        // value is encoded in the corresponding rtengine FlatCurve.
+        // Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta — in that
+        // order, each encoded as a control point of the corresponding
+        // rtengine FlatCurve, placed on that band's own hue
+        // (0/30/60/120/180/240/280/320°). An arbitrary FlatCurve cannot be
+        // represented by eight bands: it is read at the point nearest each
+        // band's hue, and writing any band back re-encodes the whole curve at
+        // those eight positions.
         std::array<double, 8> hue{};
         std::array<double, 8> saturation{};
         std::array<double, 8> luminance{};
@@ -161,6 +182,13 @@ public:
 
     WhiteBalance whiteBalance() const;
     void setWhiteBalance(const WhiteBalance& wb);
+    // The temperature/green WBParams::getWbEntries() records for a preset
+    // method ("Daylight", "Tungsten", "Fluo F2", ...), so a UI can show what
+    // the preset corresponds to instead of leaving a stale number on its
+    // sliders. False when `method` is not a fixed-temperature preset entry
+    // ("Camera", the automatic methods, "Custom", or an unknown name), or
+    // when the engine isn't compiled in.
+    static bool presetWhiteBalance(const std::string& method, WhiteBalance& out);
 
     Exposure exposure() const;
     void setExposure(const Exposure& exposure);
@@ -185,8 +213,18 @@ public:
     // editor and come back as identity rather than being reinterpreted.
     std::vector<CurvePoint> curve(CurveChannel channel) const;
     void setCurve(CurveChannel channel, const std::vector<CurvePoint>& points);
-    bool needsAutoMatchedToneCurveResolution() const;
-    void adoptResolvedToneCurve(const RawDevelopParams& resolved);
+    // True while the engine still has to resolve part of the tone curve group
+    // for this image (auto-exposure, or a not-yet-generated Auto-Matched
+    // Curve). Pass RawSession::renderPreview() a `resolvedParams` and feed it
+    // to adoptResolvedToneCurve() so the UI shows the engine's own values.
+    bool needsResolvedToneCurve() const;
+    // Both return true only when something actually changed, so a caller can
+    // skip re-syncing its controls on every preview once the values settle.
+    bool adoptResolvedToneCurve(const RawDevelopParams& resolved);
+    // Takes only the temperature/green the engine resolved for the render,
+    // never the method. Meaningful for every method, including "Camera",
+    // where those two ProcParams fields are otherwise unused placeholders.
+    bool adoptResolvedWhiteBalance(const RawDevelopParams& resolved);
 
     struct Impl;
     Impl& impl() { return *m_impl; }

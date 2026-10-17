@@ -36,7 +36,10 @@ in this build, rather than mis-handling it as a regular image.
 
 `RawEngine::isAvailable()` additionally requires a successful
 `RawEngine::initialize(resourceDir, userDir)` call — wired into `main()`
-(Fase 5), once, before the main window is created. `resourceDir`/`userDir`
+(Fase 5), once, before the main window is created, and matched by a
+`RawEngine::shutdown()` after the last document is gone.
+
+`resourceDir`/`userDir`
 are `AppPaths::rawEngineResourceDir()` (`3rdparty/rawengine/rtdata/` —
 `iccprofiles/`, `profiles/`, `dcpprofiles/`, `camconst.json`,
 `cammatrices.json`, `dcraw.json`) and `AppPaths::rawUserDir()` (Hazor's own
@@ -58,7 +61,17 @@ per-user RAW data directory, e.g. for user-dropped DCP profiles).
 - `RawSession::renderFull(params)` — full-resolution float render
   (`[0, 65535]`, output ICC profile applied, not truncated to 8 bits — that
   truncation is the RAW Layer's job at a single named point, not the
-  engine's).
+  engine's). Nothing retains the float buffer past that conversion: at three
+  floats per pixel a 24 MP frame is ~280 MB, not worth holding per layer for
+  a higher-depth consumer that does not exist yet.
+- `renderPreview()`'s optional `resolvedParams` hands back the processor's
+  effective `ProcParams` after the render. That is the only way to read what
+  the engine *decided*: `ImProcCoordinator` writes the temperature/green it
+  used back into `WBParams` for every method, and `getAutoExp()` /
+  `getAutoMatchedToneCurve()` likewise fill in `ToneCurveParams`.
+  `RawDevelopParams::adoptResolvedWhiteBalance()` /
+  `adoptResolvedToneCurve()` take those values and report whether anything
+  moved, so a UI can stop re-syncing once they settle.
 
 See the doc comments in [`src/raw/`](../src/raw/) for exact contracts,
 including the two deliberate limitations every render call shares: no
@@ -100,9 +113,14 @@ Develop** window (`LayerItemDelegate::rawThumbDoubleClicked` →
 
 `raw_develop` (tool catalog / MCP / agent surface) adjusts a RAW Layer's
 white balance and exposure and re-reveals it via
-`ImageController::rerevealRawLayer()`; `rasterize_layer` already covered RAW
-layers from Fase 4 onward (`ImageController::rasterizeNode()`), so it did not
-need a separate tool.
+`ImageController::rerevealRawLayer()`. Its `white_balance_method` — like
+every other white-balance entry point — must be one of
+`WBParams::getWbEntries()`' own names; the engine does not reject an unknown
+string, it quietly falls through to the generic temperature+green path, so a
+made-up name looks applied while changing nothing.
+
+`rasterize_layer` already covered RAW layers from Fase 4 onward
+(`ImageController::rasterizeNode()`), so it did not need a separate tool.
 
 ## Hazor Develop
 
@@ -124,7 +142,16 @@ such as the Pop profiles do not appear linear or change interpolation mode.
 Image-specific Auto-Matched Curve presets are read back from the staged
 processor after their first preview and synchronized into the curve editor;
 manual editing therefore starts from the generated curve rather than an
-identity placeholder.
+identity placeholder. Auto-exposure results come back the same way, so the
+Light sliders show the exposure/contrast/black/recovery values the engine
+computed instead of the zeroes the profile carried in. Both read-backs stop
+re-syncing the panel once the engine's values settle, so they cannot reset a
+control mid-edit.
+The Temperature and Tint sliders are fed the white balance the engine
+*resolved*, not the two PP3 fields: under **As Shot** and the automatic
+methods the engine derives its own multipliers and ignores those fields, so
+showing `ProcParams`' hand-wired 6504 K would both misreport the shot and
+make the first Temperature drag jump the image to generic daylight.
 The interactive image is rendered through one persistent `RawSession` on a
 dedicated serial worker with debounce. The decoded RAW and rtengine's staged
 preview caches therefore survive between slider changes; the preview edge is
@@ -135,9 +162,21 @@ operation that calls
 `ImageController::rerevealRawLayer()`. That final render is full quality,
 asynchronous, and creates the existing `RawDevelopCommand` for undo/redo.
 
+Because the window is independent, the layer it edits can be reordered,
+inserted ahead of, or deleted while it is open — so a flat index cannot
+identify it. `RawDevelopWindow` therefore carries none: `MainWindow` keys the
+window on the layer's `LayerTreeNode`, re-resolves the live index at Apply
+time, and `ImageController::rawLayerDevelopFinished` carries the same node so
+the completion reaches the right window. `MainWindow` also keeps one window
+per node, raising an already-open one instead of starting a second
+`RawSession` on the same file.
+
 Bundled RawTherapee `.pp3` profiles and user presets saved in `QSettings` are
-listed separately from camera input DCP/ICC profiles. A custom DCP/ICC is
-selected only through the Camera Profile control, never as a processing preset.
+listed separately from camera input DCP/ICC profiles. The bundled list is
+recursive: most of `rtdata/profiles` lives in subdirectories (`Pop/`,
+`Pixel Shift/`, `Non-raw/`), and the path relative to `profiles/` is the
+display name. A custom DCP/ICC is selected only through the Camera Profile
+control, never as a processing preset.
 
 ### Camera Raw terminology versus engine operations
 
@@ -146,10 +185,33 @@ has a real PP3 operation. The UI calls out the non-equivalences instead of
 inventing a conversion: **Whites** drives Highlight Compression (recovery),
 **Blacks** drives RawTherapee Black Level, **Texture** drives Sharpen
 Microcontrast, **Clarity** drives Local Contrast, and color-grading wheels
-compose RawTherapee Color Toning's RGB slider values. Grain, an Adobe-style
+compose RawTherapee Color Toning's Split Color (`Splitco`) RGB mixer values.
+Grain, Vignette **Midpoint**, Color Grading **Balance**, an Adobe-style
 parametric-region curve, Camera Raw Masking, and white-balance eyedropper
 sampling do not have compatible operations in the currently embedded API, so
 they are explicitly unavailable rather than connected to an arbitrary effect.
+Balance in particular *looks* available — `ColorToningParams` has the field —
+but `mixerToCurve()`, the only consumer of the low/mid/high RGB values, never
+reads it; it belongs to the two-colour `RGBSliders`/`Splitlr`/`Lab` modes.
+
+The Color Mixer's eight bands are control points on the HSV Equalizer's hue
+axis, placed on the hues they are named after (0/30/60/120/180/240/280/320°),
+not on eight equal slices of the circle — `rgbProc()` normalizes hue before
+sampling the curve, so a point only affects the hue it sits on. Magenta stops
+at 320° rather than reaching 1.0 because `FlatCurve` is periodic and
+replicates the first point at `x + 1.0`, where it would collide with Red's
+own wrap-around copy. An eight-band UI still cannot represent an arbitrary
+curve: a profile authored in RawTherapee's own HSV Equalizer is read at the
+closest control point per band, and editing any band re-encodes the curve at
+those eight positions.
+
+Every white-balance preset is an exact `WBParams::getWbEntries()` name, which
+is why the combo reads "Fluorescent (F2)" and "Flash (5500 K)": the engine
+carries spectral data per illuminant (`ColorTemp::spectMap`), with no generic
+"Fluorescent" or "Flash" entry, and a name it does not know is not rejected —
+it degrades silently to the generic temperature path. The two automatic
+methods are likewise named for what they are, `autitcgreen` (temperature
+correlation, what **Auto** uses) and `autold` (RGB grey).
 
 Several sliders are one-directional strength controls in RawTherapee, unlike
 their bipolar Camera Raw counterparts, so their default sits at the left edge

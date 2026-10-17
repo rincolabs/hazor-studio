@@ -4880,11 +4880,11 @@ void ImageController::onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopR
     m_pendingRawDevelops.erase(it);
 
     if (!result.ok) {
-        emit rawLayerDevelopFinished(pending.flatIndex, false, result.errorMessage);
+        emit rawLayerDevelopFinished(node, pending.flatIndex, false, result.errorMessage);
         return;
     }
     if (!m_doc) {
-        emit rawLayerDevelopFinished(pending.flatIndex, false, tr("The document is no longer open."));
+        emit rawLayerDevelopFinished(node, pending.flatIndex, false, tr("The document is no longer open."));
         return;
     }
 
@@ -4894,7 +4894,7 @@ void ImageController::onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopR
     const auto flatIt = std::find(flat.begin(), flat.end(), node);
     if (flatIt == flat.end() || node->type != LayerTreeNode::Type::Layer
         || !node->layer || !node->layer->rawData) {
-        emit rawLayerDevelopFinished(pending.flatIndex, false,
+        emit rawLayerDevelopFinished(node, pending.flatIndex, false,
             tr("The layer is no longer available."));
         return;
     }
@@ -4974,7 +4974,7 @@ void ImageController::onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopR
     emit layerChanged(flatIndex);
     emit imageChanged();
 
-    emit rawLayerDevelopFinished(flatIndex, true, warning);
+    emit rawLayerDevelopFinished(node, flatIndex, true, warning);
 }
 
 void ImageController::mergeVisibleLayers()

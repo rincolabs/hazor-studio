@@ -6,6 +6,8 @@
 
 #include <cstdio>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <random>
 #include <sstream>
@@ -80,6 +82,40 @@ bool readFileToString(const std::string& path, std::string& out)
 
 constexpr double kFlatControlPoints = 1.0;
 
+// The HSV Equalizer's curves are indexed by normalized hue: improcfun.cc's
+// rgbProc() does `h /= 6.f` before hCurve->getVal(h), so a control point only
+// affects the hue it actually sits on. Camera Raw's eight bands are specific
+// hues (0/30/60/120/180/240/280/320 degrees), not eight equal slices of the
+// circle, so these positions — not i/7 — are what makes the labelled band and
+// the affected colour the same thing.
+//
+// Magenta deliberately stops at 320/360 instead of reaching 1.0: FlatCurve is
+// periodic and replicates the first control point at x[0] + 1.0
+// (flatcurves.cc), so a point at exactly 1.0 would collide with the Red band's
+// own wrap-around copy and the two would fight over the same position.
+constexpr std::array<double, 8> kMixerBandHues{
+    0.0,          // Red       0°
+    1.0 / 12.0,   // Orange   30°
+    1.0 / 6.0,    // Yellow   60°
+    1.0 / 3.0,    // Green   120°
+    0.5,          // Aqua    180°
+    2.0 / 3.0,    // Blue    240°
+    7.0 / 9.0,    // Purple  280°
+    8.0 / 9.0,    // Magenta 320°
+};
+
+// Shortest distance between two normalized hues, the hue circle's wrap
+// included — so a control point at 0.98 is near the Red band (0.0), not far
+// from it.
+double hueDistance(double a, double b)
+{
+    // Clamped first: these x values come from a PP3 and are only *expected*
+    // to be in [0, 1]. Without the clamp an out-of-range point would make
+    // 1 - delta negative and win every comparison.
+    const double delta = std::abs(std::clamp(a, 0.0, 1.0) - std::clamp(b, 0.0, 1.0));
+    return std::min(delta, 1.0 - delta);
+}
+
 int editableDiagonalCurveKind(int kind)
 {
     return kind == DCT_Spline || kind == DCT_NURBS || kind == DCT_CatumullRom
@@ -130,6 +166,12 @@ std::vector<double> encodeDiagonalCurve(std::vector<RawDevelopParams::CurvePoint
     return curve;
 }
 
+// Reads each band from the control point closest to that band's own hue, not
+// from the point at the matching *index*: a curve written by RawTherapee's own
+// HSV Equalizer has however many points the user placed, at arbitrary hues, so
+// indexing would report them under the wrong band names. Known lossiness: an
+// eight-band UI cannot represent an arbitrary curve, so re-encoding one after
+// an edit snaps it to kMixerBandHues (see setColorMixer()).
 std::array<double, 8> decodeMixerCurve(const std::vector<double>& curve)
 {
     std::array<double, 8> values{};
@@ -139,9 +181,17 @@ std::array<double, 8> decodeMixerCurve(const std::vector<double>& curve)
     const std::size_t count = (curve.size() - 1) / 4;
     if (!count)
         return values;
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        const std::size_t index = std::min(i, count - 1);
-        values[i] = std::clamp((curve[1 + index * 4 + 1] - 0.5) * 200.0, -100.0, 100.0);
+    for (std::size_t band = 0; band < values.size(); ++band) {
+        std::size_t nearest = 0;
+        double nearestDistance = 2.0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const double distance = hueDistance(curve[1 + i * 4], kMixerBandHues[band]);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = i;
+            }
+        }
+        values[band] = std::clamp((curve[1 + nearest * 4 + 1] - 0.5) * 200.0, -100.0, 100.0);
     }
     return values;
 }
@@ -152,7 +202,7 @@ std::vector<double> encodeMixerCurve(const std::array<double, 8>& values)
     curve.reserve(1 + values.size() * 4);
     curve.push_back(kFlatControlPoints);
     for (std::size_t i = 0; i < values.size(); ++i) {
-        curve.push_back(static_cast<double>(i) / (values.size() - 1));
+        curve.push_back(kMixerBandHues[i]);
         curve.push_back(std::clamp(0.5 + values[i] / 200.0, 0.0, 1.0));
         curve.push_back(0.0);
         curve.push_back(0.0);
@@ -279,6 +329,26 @@ void RawDevelopParams::setWhiteBalance(const WhiteBalance& wb)
     target.method = wb.method;
     target.temperature = wb.temperatureKelvin;
     target.green = wb.green;
+}
+
+bool RawDevelopParams::presetWhiteBalance(const std::string& method, WhiteBalance& out)
+{
+    // The temperatures live in the engine's own table; they are not
+    // duplicated here. Entries with no fixed temperature ("Camera", the two
+    // automatic methods, "Custom") have nothing to report.
+    for (const auto& entry : rtengine::procparams::WBParams::getWbEntries()) {
+        if (entry.ppLabel != method) {
+            continue;
+        }
+        if (entry.temperature <= 0) {
+            return false;
+        }
+        out.method = method;
+        out.temperatureKelvin = entry.temperature;
+        out.green = entry.green;
+        return true;
+    }
+    return false;
 }
 
 RawDevelopParams::Exposure RawDevelopParams::exposure() const
@@ -438,7 +508,10 @@ void RawDevelopParams::setColorGrading(const ColorGrading& grading)
 {
     auto& toning = m_impl->procParams.colorToning;
     toning.enabled = grading.enabled;
-    toning.method = "RGBSliders";
+    // Splitco is the engine mode that consumes the independent low/mid/high
+    // RGB mixer values below. RGBSliders instead consumes the separate
+    // two-colour shadowsColSat/hlColSat controls and ignores these wheels.
+    toning.method = "Splitco";
     toning.redlow = std::clamp(grading.shadows[0], -100.0, 100.0);
     toning.greenlow = std::clamp(grading.shadows[1], -100.0, 100.0);
     toning.bluelow = std::clamp(grading.shadows[2], -100.0, 100.0);
@@ -448,7 +521,7 @@ void RawDevelopParams::setColorGrading(const ColorGrading& grading)
     toning.redhigh = std::clamp(grading.highlights[0], -100.0, 100.0);
     toning.greenhigh = std::clamp(grading.highlights[1], -100.0, 100.0);
     toning.bluehigh = std::clamp(grading.highlights[2], -100.0, 100.0);
-    toning.strength = std::clamp(grading.blending, 0, 100);
+    toning.strength = std::clamp(grading.strength, 0, 100);
     toning.balance = std::clamp(grading.balance, -100, 100);
 }
 
@@ -512,15 +585,42 @@ void RawDevelopParams::setCurve(CurveChannel channel, const std::vector<CurvePoi
     }
 }
 
-bool RawDevelopParams::needsAutoMatchedToneCurveResolution() const
+bool RawDevelopParams::needsResolvedToneCurve() const
 {
     const auto& tone = m_impl->procParams.toneCurve;
-    return tone.histmatching && !tone.fromHistMatching;
+    // Two engine-side resolutions land in the same struct: histogram matching
+    // generates `curve` on the first render, and auto-exposure recomputes
+    // expcomp/contrast/black/hlcompr on every render (ImProcCoordinator's
+    // M_AUTOEXP block). Either way the sliders have to show what the engine
+    // decided, not the placeholder the profile carried in.
+    return tone.autoexp || (tone.histmatching && !tone.fromHistMatching);
 }
 
-void RawDevelopParams::adoptResolvedToneCurve(const RawDevelopParams& resolved)
+bool RawDevelopParams::adoptResolvedToneCurve(const RawDevelopParams& resolved)
 {
+    if (m_impl->procParams.toneCurve == resolved.m_impl->procParams.toneCurve)
+        return false;
     m_impl->procParams.toneCurve = resolved.m_impl->procParams.toneCurve;
+    return true;
+}
+
+bool RawDevelopParams::adoptResolvedWhiteBalance(const RawDevelopParams& resolved)
+{
+    auto& wb = m_impl->procParams.wb;
+    const auto& source = resolved.m_impl->procParams.wb;
+    // ImProcCoordinator writes the temperature/green it actually used back
+    // into ProcParams on every render (improccoordinator.cc, right after the
+    // method cascade), whatever the method was. That is the only way to learn
+    // the shot's own white balance: with method "Camera" the engine takes
+    // ImageSource::getWB() and ignores these two fields entirely, so leaving
+    // ProcParams' hand-wired 6504 K on the sliders would both misreport the
+    // shot and make the first Temperature drag jump the image.  Only the two
+    // resolved values are adopted — never `method`, which stays the user's.
+    if (wb.temperature == source.temperature && wb.green == source.green)
+        return false;
+    wb.temperature = source.temperature;
+    wb.green = source.green;
+    return true;
 }
 
 #else // !HAVE_RAWENGINE
@@ -553,6 +653,7 @@ std::string RawDevelopParams::customInputProfile() const { return std::string();
 
 RawDevelopParams::WhiteBalance RawDevelopParams::whiteBalance() const { return {}; }
 void RawDevelopParams::setWhiteBalance(const WhiteBalance&) {}
+bool RawDevelopParams::presetWhiteBalance(const std::string&, WhiteBalance&) { return false; }
 RawDevelopParams::Exposure RawDevelopParams::exposure() const { return {}; }
 void RawDevelopParams::setExposure(const Exposure&) {}
 RawDevelopParams::Light RawDevelopParams::light() const { return {}; }
@@ -571,7 +672,8 @@ RawDevelopParams::ColorMixer RawDevelopParams::colorMixer() const { return {}; }
 void RawDevelopParams::setColorMixer(const ColorMixer&) {}
 std::vector<RawDevelopParams::CurvePoint> RawDevelopParams::curve(CurveChannel) const { return {}; }
 void RawDevelopParams::setCurve(CurveChannel, const std::vector<CurvePoint>&) {}
-bool RawDevelopParams::needsAutoMatchedToneCurveResolution() const { return false; }
-void RawDevelopParams::adoptResolvedToneCurve(const RawDevelopParams&) {}
+bool RawDevelopParams::needsResolvedToneCurve() const { return false; }
+bool RawDevelopParams::adoptResolvedToneCurve(const RawDevelopParams&) { return false; }
+bool RawDevelopParams::adoptResolvedWhiteBalance(const RawDevelopParams&) { return false; }
 
 #endif

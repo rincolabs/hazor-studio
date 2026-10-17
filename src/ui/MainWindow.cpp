@@ -3635,26 +3635,75 @@ void MainWindow::openHazorDevelop(int flatIndex)
         return;
 
     m_ctrl->setActiveNode(flatIndex);
-    auto* develop = new RawDevelopWindow(flatIndex, *node->layer->rawData,
-                                         node->layer->cpuImage, this);
-    ImageController* controller = m_ctrl;
+
+    // One window per layer: a second double-click on the same thumbnail must
+    // raise the one already open, not start a second RawSession on the same
+    // file whose Apply would race the first one's.
+    if (auto existing = m_developWindows.constFind(node); existing != m_developWindows.constEnd()) {
+        (*existing)->show();
+        (*existing)->raise();
+        (*existing)->activateWindow();
+        return;
+    }
+
+    auto* develop = new RawDevelopWindow(*node->layer->rawData, node->layer->cpuImage, this);
+    m_developWindows.insert(node, develop);
+    connect(develop, &QObject::destroyed, this, [this, node]() { m_developWindows.remove(node); });
+
+    // QPointer, not a raw one: this window outlives nothing it owns, but the
+    // document's tab can be closed from under it while it is open, and Apply
+    // would then reach a destroyed controller.
+    QPointer<ImageController> controller = m_ctrl;
+    // `node` is the layer's identity for the whole exchange. Hazor Develop is
+    // an independent window, so the user can reorder, insert or delete layers
+    // in the main window while it is open: a flat index captured here would
+    // silently re-reveal a *different* layer, and the completion filter below
+    // would never match the index ImageController re-resolves.
     connect(develop, &RawDevelopWindow::applyRequested, develop,
-            [this, develop, controller](int targetIndex, const RawDevelopParams& params) {
-        if (!controller->rerevealRawLayer(targetIndex, params)) {
+            [develop, controller, node](const RawDevelopParams& params) {
+        // Resolved against the controller's own document, not the active
+        // tab's: Hazor Develop keeps working while the user is looking at
+        // another document.
+        const int liveIndex = controller ? flatIndexOfNodeIn(controller->document(), node) : -1;
+        if (liveIndex < 0) {
+            AppMessageDialog::warning(develop, tr("Hazor Develop"),
+                tr("This RAW layer is no longer in its document."));
+            return;
+        }
+        if (!controller->rerevealRawLayer(liveIndex, params)) {
             AppMessageDialog::warning(develop, tr("Hazor Develop"),
                 tr("Could not start RAW development. The layer may be locked or already processing."));
             return;
         }
         develop->setApplyInProgress(true);
     });
-    connect(controller, &ImageController::rawLayerDevelopFinished, develop,
-            [develop, flatIndex](int completedIndex, bool ok, const QString& errorMessage) {
-        if (completedIndex == flatIndex)
-            develop->developFinished(ok, errorMessage);
+    connect(m_ctrl, &ImageController::rawLayerDevelopFinished, develop,
+            [this, develop, node](LayerTreeNode* completed, int, bool ok, const QString& message) {
+        if (completed != node)
+            return;
+        develop->developFinished(ok, message);
+        // A successful re-reveal closes the window, which would swallow the
+        // non-fatal reframe warning with it. Show it on the main window
+        // instead, and only once the close has been processed — developFinished()
+        // deletes `develop`, whose own slot we are still inside.
+        if (ok && !message.isEmpty()) {
+            QTimer::singleShot(0, this, [this, message]() {
+                AppMessageDialog::warning(this, tr("Hazor Develop"), message);
+            });
+        }
     });
     develop->show();
     develop->raise();
     develop->activateWindow();
+}
+
+int MainWindow::flatIndexOfNodeIn(const Document* doc, const LayerTreeNode* node)
+{
+    if (!doc || !node)
+        return -1;
+    const auto flat = doc->flatten();
+    const auto it = std::find(flat.begin(), flat.end(), node);
+    return it == flat.end() ? -1 : static_cast<int>(it - flat.begin());
 }
 
 void MainWindow::showProgress(const QString& title, const QString& message, bool cancelable)

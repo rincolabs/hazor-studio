@@ -62,10 +62,13 @@ QString RawDevelopService::materializeEmbedded(const RawSource& source)
 
 // The single named point where a RawImageBuffer's 16-bit/float pixels become
 // the compositor's 8-bit Format_RGBA8888 (Fase 4.2). `buffer` is never
-// mutated or truncated upstream of this call — see RawDevelopService::Task::
-// fullBuffer, which keeps the un-truncated buffer around for a future
-// higher-depth path. Dithering is a simple per-pixel random offset: good
-// enough to break up banding in flat skies, not a contouring-free guarantee.
+// mutated or truncated upstream of this call, so a future higher-depth path
+// can render once and branch here instead of re-reading the file. Nothing
+// retains the float buffer past this conversion on purpose: at 3 floats per
+// pixel a 24 MP RAW is ~280 MB, which is not worth holding per layer for a
+// consumer that does not exist yet. Dithering is a simple per-pixel random
+// offset: good enough to break up banding in flat skies, not a
+// contouring-free guarantee.
 QImage RawDevelopService::convertToRgba8888(const RawImageBuffer& buffer, bool dither)
 {
     if (buffer.isEmpty())
@@ -167,7 +170,6 @@ bool RawDevelopService::requestDevelop(LayerTreeNode* node,
                 return task;
             }
 
-            task->fullBuffer = buffer;
             task->result.ok = true;
             task->result.image = RawDevelopService::convertToRgba8888(buffer, /*dither=*/false);
             task->result.developedSize = QSize(buffer.width, buffer.height);
@@ -199,9 +201,6 @@ void RawDevelopService::onFinished(LayerTreeNode* node)
         e.session = std::move(task->openedSession);
         e.tempPath = task->openedTempPath;
     }
-    if (task->result.ok)
-        e.lastFullBuffer = std::move(task->fullBuffer);
-
     emit developFinished(node, task->result);
 }
 

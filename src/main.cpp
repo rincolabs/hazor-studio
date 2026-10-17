@@ -243,6 +243,11 @@ int main(int argc, char* argv[])
 
     int ret = app.exec();
     window.reset();
+    // After window.reset(): RawDevelopService's cached RawSessions (and the
+    // rtengine InitialImage/StagedImageProcessor behind them) are owned by
+    // the documents' ImageControllers, and rtengine::cleanup() tears down the
+    // caches those sessions read from.
+    RawEngine::shutdown();
     AsyncJobSystem::destroy();
     return ret;
 }

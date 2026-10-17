@@ -19,6 +19,7 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -127,10 +128,13 @@ protected:
         const QPointF center = circle.center();
         const double radius = std::min(circle.width(), circle.height()) / 2.0;
 
+        // The interaction uses red at twelve o'clock and increases hue
+        // clockwise. Qt's pie angles start at three o'clock and increase in
+        // the opposite direction, so translate both origin and direction.
         for (int degrees = 0; degrees < 360; ++degrees) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(QColor::fromHsv(degrees, 255, 255));
-            painter.drawPie(circle, degrees * 16, 2 * 16);
+            painter.drawPie(circle, (90 - degrees) * 16, -2 * 16);
         }
         QRadialGradient fade(center, radius);
         fade.setColorAt(0.0, QColor(255, 255, 255, 255));
@@ -142,12 +146,26 @@ protected:
         painter.setBrush(Qt::NoBrush);
         painter.drawEllipse(circle);
 
-        QColor color;
-        color.setRgbF(std::clamp((m_values[0] + 100.0) / 200.0, 0.0, 1.0),
-                      std::clamp((m_values[1] + 100.0) / 200.0, 0.0, 1.0),
-                      std::clamp((m_values[2] + 100.0) / 200.0, 0.0, 1.0));
-        float hue = 0.0f, saturation = 0.0f, value = 0.0f;
-        color.getHsvF(&hue, &saturation, &value);
+        const auto [minimum, maximum] = std::minmax_element(m_values.begin(), m_values.end());
+        const double range = *maximum - *minimum;
+        double hue = 0.0;
+        const double saturation = std::clamp(range / 200.0, 0.0, 1.0);
+        if (range > 0.001) {
+            QColor color;
+            color.setRgbF((m_values[0] - *minimum) / range,
+                          (m_values[1] - *minimum) / range,
+                          (m_values[2] - *minimum) / range);
+            // getHsvF() bails out without writing anything if *any* of its
+            // three out-parameters is null, so saturation/value have to be
+            // taken even though only the hue is wanted here.
+            float colorHue = 0.0f;
+            float unusedSaturation = 0.0f;
+            float unusedValue = 0.0f;
+            color.getHsvF(&colorHue, &unusedSaturation, &unusedValue);
+            // Hue is -1 for an achromatic colour, which the `range` guard
+            // above already excludes; clamp anyway rather than wrap to 1.0.
+            hue = colorHue < 0.0f ? 0.0 : colorHue;
+        }
         constexpr double kPi = 3.14159265358979323846;
         const double angle = hue * 2.0 * kPi - kPi / 2.0;
         const QPointF handle = center + QPointF(std::cos(angle), std::sin(angle)) * (saturation * radius);
@@ -173,10 +191,13 @@ private:
         constexpr double kPi = 3.14159265358979323846;
         double hue = std::atan2(delta.y(), delta.x()) / (2.0 * kPi) + 0.25;
         if (hue < 0.0) hue += 1.0;
-        QColor color = QColor::fromHsvF(hue, distance, 1.0);
-        m_values = {color.redF() * 200.0 - 100.0,
-                    color.greenF() * 200.0 - 100.0,
-                    color.blueF() * 200.0 - 100.0};
+        const QColor color = QColor::fromHsvF(hue, 1.0, 1.0);
+        // Color Toning's RGB mixer is neutral at 0/0/0. Scale a fully
+        // saturated signed RGB direction by the distance from the centre;
+        // mapping HSV white to +100/+100/+100 would make the centre non-neutral.
+        m_values = {distance * (color.redF() * 2.0 - 1.0) * 100.0,
+                    distance * (color.greenF() * 2.0 - 1.0) * 100.0,
+                    distance * (color.blueF() * 2.0 - 1.0) * 100.0};
         update();
         if (changed) changed();
     }
@@ -193,10 +214,9 @@ QString shutterText(double seconds)
 
 } // namespace
 
-RawDevelopWindow::RawDevelopWindow(int flatIndex, const RawLayerData& rawData,
+RawDevelopWindow::RawDevelopWindow(const RawLayerData& rawData,
                                    const QImage& currentImage, QWidget* parent)
     : QMainWindow(parent)
-    , m_flatIndex(flatIndex)
     , m_rawData(rawData)
     , m_params(rawData.state.pp3.isEmpty()
         ? RawDevelopParams::cameraDefaults()
@@ -484,7 +504,12 @@ void RawDevelopWindow::buildUi()
     });
     connect(autoButton, &QToolButton::clicked, this, [this]() {
         auto light = m_params.light(); light.autoExposure = true; m_params.setLight(light);
-        auto wb = m_params.whiteBalance(); wb.method = "Auto"; m_params.setWhiteBalance(wb);
+        // "autitcgreen" is the engine's temperature-correlation auto white
+        // balance. There is no method literally called "Auto": a string the
+        // method cascade does not know silently degrades to the generic
+        // temperature path, i.e. it would pin the shot to whatever Kelvin
+        // value the sliders happened to carry.
+        auto wb = m_params.whiteBalance(); wb.method = "autitcgreen"; m_params.setWhiteBalance(wb);
         syncControlsFromParams();
         applyParamsChanged(RawPreviewUpdate::Exposure | RawPreviewUpdate::WhiteBalance);
     });
@@ -508,7 +533,7 @@ void RawDevelopWindow::buildUi()
     connect(resetAllButton, &QPushButton::clicked, this, &RawDevelopWindow::resetAll);
     connect(cancelButton, &QPushButton::clicked, this, &QWidget::close);
     connect(m_applyButton, &QToolButton::clicked, this, [this]() {
-        if (!m_applyInProgress) emit applyRequested(m_flatIndex, m_params);
+        if (!m_applyInProgress) emit applyRequested(m_params);
     });
 
     applyTheme();
@@ -630,11 +655,21 @@ QWidget* RawDevelopWindow::buildColorPanel()
     wbRow->setContentsMargins(8, 1, 8, 3);
     wbRow->addWidget(new QLabel(tr("White balance"), panel));
     m_whiteBalanceCombo = new QComboBox(panel);
+    // Every value here has to be one of WBParams::getWbEntries()' own names:
+    // the engine recognizes nothing else. An unknown string is not rejected,
+    // it just falls through to the generic temperature+green path, which
+    // makes a preset look applied while changing nothing — which is why
+    // "Fluorescent" and "Flash" name the specific illuminants the engine
+    // actually carries spectral data for (ColorTemp::spectMap) instead of the
+    // generic Camera Raw labels.
     const QList<QPair<QString, QString>> methods = {
-        {tr("As Shot"), QStringLiteral("Camera")}, {tr("Auto"), QStringLiteral("Auto")},
+        {tr("As Shot"), QStringLiteral("Camera")},
+        {tr("Auto"), QStringLiteral("autitcgreen")},
+        {tr("Auto (RGB grey)"), QStringLiteral("autold")},
         {tr("Daylight"), QStringLiteral("Daylight")}, {tr("Cloudy"), QStringLiteral("Cloudy")},
         {tr("Shade"), QStringLiteral("Shade")}, {tr("Tungsten"), QStringLiteral("Tungsten")},
-        {tr("Fluorescent"), QStringLiteral("Fluorescent")}, {tr("Flash"), QStringLiteral("Flash")},
+        {tr("Fluorescent (F2)"), QStringLiteral("Fluo F2")},
+        {tr("Flash (5500 K)"), QStringLiteral("Flash 5500K")},
         {tr("Custom"), QStringLiteral("Custom")}
     };
     for (const auto& method : methods) m_whiteBalanceCombo->addItem(method.first, method.second);
@@ -646,6 +681,13 @@ QWidget* RawDevelopWindow::buildColorPanel()
     wbRow->addWidget(eyeDropper);
     layout->addLayout(wbRow);
 
+    // Reads and writes through m_params, which previewFinished() keeps topped
+    // up with the temperature/green the engine actually resolved for the
+    // render (adoptResolvedWhiteBalance). Under "As Shot" and the automatic
+    // methods those two PP3 fields are unused placeholders, so without that
+    // read-back this slider would show ProcParams' hand-wired 6504 K and the
+    // first drag would jump the image from the shot's own white balance to
+    // generic daylight.
     m_temperatureSlider = addParamRow(layout, tr("Temperature"), 1500, 60000, 6504, 0,
         tr("White-balance color temperature, in Kelvin."),
         [this] { return m_params.whiteBalance().temperatureKelvin; }, [this](double value) {
@@ -654,10 +696,15 @@ QWidget* RawDevelopWindow::buildColorPanel()
             m_whiteBalanceCombo->setCurrentIndex(m_whiteBalanceCombo->findData(QStringLiteral("Custom")));
         }, RawPreviewUpdate::WhiteBalance);
     const auto* theme = ThemeManager::instance()->current();
+    // Stop positions are fractions of the engine's own 1500..60000 K range,
+    // so the neutral stop has to sit where daylight actually falls on this
+    // track — (6504 - 1500) / 58500 — not at an eyeballed middle. The upper
+    // half of the range is the engine's underwater/extreme-temperature tail;
+    // it stays warm rather than getting its own stops.
     m_temperatureSlider->setStops({
         {0.0, theme->colorAccentPressed},
-        {0.42, theme->colorTextSecondary},
-        {0.72, theme->colorWarning},
+        {0.086, theme->colorTextSecondary},
+        {0.22, theme->colorWarning},
         {1.0, theme->colorDanger}
     });
     // The engine's own Green/Tint adjuster spans the same 0.02..100 range on
@@ -674,7 +721,21 @@ QWidget* RawDevelopWindow::buildColorPanel()
         }, RawPreviewUpdate::WhiteBalance, /*logarithmic=*/true);
     connect(m_whiteBalanceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_syncing) return;
-        auto wb = m_params.whiteBalance(); wb.method = m_whiteBalanceCombo->itemData(index).toString().toStdString(); m_params.setWhiteBalance(wb); applyParamsChanged(RawPreviewUpdate::WhiteBalance);
+        auto wb = m_params.whiteBalance();
+        wb.method = m_whiteBalanceCombo->itemData(index).toString().toStdString();
+        // A fixed-temperature preset drives the engine from its own spectral
+        // data and ignores these two fields, so they have to be moved onto
+        // the preset's own values — otherwise the sliders would keep
+        // displaying the previous method's numbers, and the next Temperature
+        // drag (which switches to "Custom") would jump the image to them.
+        RawDevelopParams::WhiteBalance preset;
+        if (RawDevelopParams::presetWhiteBalance(wb.method, preset)) {
+            wb.temperatureKelvin = preset.temperatureKelvin;
+            wb.green = preset.green;
+        }
+        m_params.setWhiteBalance(wb);
+        syncControlsFromParams();
+        applyParamsChanged(RawPreviewUpdate::WhiteBalance);
     });
     m_syncControls.push_back([this]() {
         const auto wb = m_params.whiteBalance();
@@ -695,7 +756,10 @@ QWidget* RawDevelopWindow::buildColorPanel()
     });
     auto* saturation = addParamRow(layout, tr("Saturation"), -100, 100, 0, 0, tr("Tone curve saturation."),
         [this] { return m_params.color().saturation; }, [this](double value) { auto s = m_params.color(); s.saturation = qRound(value); m_params.setColor(s); }, RawPreviewUpdate::Color);
-    saturation->setStops(ColorStops::hueSpectrum());
+    // Grey -> saturated, the same composition HueSaturationAdjustmentWidget
+    // gives its own Saturation slider. A full hue spectrum would read as a
+    // Hue control.
+    saturation->setStops(ColorStops::saturation(0));
     return panel;
 }
 
@@ -711,7 +775,7 @@ QWidget* RawDevelopWindow::buildEffectsPanel()
         connect(check, &QCheckBox::toggled, this, [this, setter](bool on) { if (!m_syncing) { setter(on); applyParamsChanged(); } });
         return check;
     };
-    auto* textureEnabled = addEnable(tr("Texture"), tr("Engine mapping: Sharpen Microcontrast."), m_params.effects().textureEnabled,
+    auto* textureEnabled = addEnable(tr("Texture"), tr("Engine mapping: Sharpen Microcontrast. Rendered in the full-quality result because the fast preview skips sharpening stages."), m_params.effects().textureEnabled,
         [this](bool on) { auto s = m_params.effects(); s.textureEnabled = on; m_params.setEffects(s); });
     m_syncControls.push_back([this, textureEnabled]() { textureEnabled->setChecked(m_params.effects().textureEnabled); });
     addParamRow(layout, tr("Texture amount"), 0, 100, 20, 0, tr("Sharpen Microcontrast amount."),
@@ -735,7 +799,7 @@ QWidget* RawDevelopWindow::buildEffectsPanel()
         [this] { return m_params.effects().vignetteFeather; }, [this](double value) { auto s = m_params.effects(); s.vignetteFeather = qRound(value); m_params.setEffects(s); });
     addParamRow(layout, tr("Roundness"), 0, 100, 50, 0, tr("Post-crop Vignette roundness."),
         [this] { return m_params.effects().vignetteRoundness; }, [this](double value) { auto s = m_params.effects(); s.vignetteRoundness = qRound(value); m_params.setEffects(s); });
-    auto* grain = new QLabel(tr("Grain is unavailable: the embedded engine has no equivalent non-destructive grain operation."), panel);
+    auto* grain = new QLabel(tr("Vignette Midpoint is unavailable: the engine's Post-Crop Vignette is shaped by Feather and Roundness only. Grain is unavailable too — the embedded engine has no equivalent non-destructive grain operation."), panel);
     grain->setWordWrap(true); grain->setContentsMargins(8, 5, 8, 2); grain->setStyleSheet(QStringLiteral("color: %1;").arg(ThemeManager::instance()->current()->colorTextSecondary.name()));
     layout->addWidget(grain);
     return panel;
@@ -783,12 +847,14 @@ QWidget* RawDevelopWindow::buildColorMixerPanel()
             auto* row = addParamRow(pageLayout, bands[band], -100, 100, 0, 0,
                 tr("HSV Equalizer %1 band.").arg(tabNames[channel]),
                 [this, channel, band] { const auto m = m_params.colorMixer(); return channel == 0 ? m.hue[band] : channel == 1 ? m.saturation[band] : m.luminance[band]; },
-                [this, channel, band](double value) {
+                [this, enable, channel, band](double value) {
                     auto m = m_params.colorMixer();
                     if (channel == 0) m.hue[band] = value;
                     else if (channel == 1) m.saturation[band] = value;
                     else m.luminance[band] = value;
                     m.enabled = true; m_params.setColorMixer(m);
+                    const QSignalBlocker blocker(enable);
+                    enable->setChecked(true);
                 });
             row->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(bandColors[band].name()));
             m_mixerRows[channel][band] = row;
@@ -816,13 +882,17 @@ QWidget* RawDevelopWindow::buildColorGradingPanel()
         column->addWidget(wheel, 0, Qt::AlignCenter);
         auto* label = new QLabel(labels[i], panel); label->setAlignment(Qt::AlignCenter); column->addWidget(label);
         wheels->addLayout(column);
-        wheel->changed = [this, wheel, i]() {
+        wheel->changed = [this, enable, wheel, i]() {
             if (m_syncing) return;
             auto grading = m_params.colorGrading();
             if (i == 0) grading.shadows = wheel->values();
             else if (i == 1) grading.midtones = wheel->values();
             else grading.highlights = wheel->values();
-            grading.enabled = true; m_params.setColorGrading(grading); applyParamsChanged();
+            grading.enabled = true;
+            m_params.setColorGrading(grading);
+            const QSignalBlocker blocker(enable);
+            enable->setChecked(true);
+            applyParamsChanged();
         };
         m_syncControls.push_back([this, wheel, i]() {
             const auto g = m_params.colorGrading();
@@ -830,10 +900,19 @@ QWidget* RawDevelopWindow::buildColorGradingPanel()
         });
     }
     layout->addLayout(wheels);
-    addParamRow(layout, tr("Blending"), 0, 100, 50, 0, tr("Engine mapping: Color Toning strength."),
-        [this] { return m_params.colorGrading().blending; }, [this](double value) { auto g = m_params.colorGrading(); g.blending = qRound(value); m_params.setColorGrading(g); });
-    addParamRow(layout, tr("Balance"), -100, 100, 0, 0, tr("Color Toning balance."),
-        [this] { return m_params.colorGrading().balance; }, [this](double value) { auto g = m_params.colorGrading(); g.balance = qRound(value); m_params.setColorGrading(g); });
+    auto* gradingNote = new QLabel(tr("Engine mapping: Color Toning in Split Color mode. Balance has no effect there — it belongs to the engine's two-colour toning modes — so it is not offered. Enabling this panel replaces any other Color Toning mode a loaded profile carried."), panel);
+    gradingNote->setWordWrap(true);
+    gradingNote->setStyleSheet(QStringLiteral("color: %1;").arg(ThemeManager::instance()->current()->colorTextSecondary.name()));
+    layout->addWidget(gradingNote);
+    addParamRow(layout, tr("Strength"), 0, 100, 50, 0, tr("Color Toning strength."),
+        [this] { return m_params.colorGrading().strength; }, [this, enable](double value) {
+            auto grading = m_params.colorGrading();
+            grading.strength = qRound(value);
+            grading.enabled = true;
+            m_params.setColorGrading(grading);
+            const QSignalBlocker blocker(enable);
+            enable->setChecked(true);
+        });
     return panel;
 }
 
@@ -851,7 +930,7 @@ QWidget* RawDevelopWindow::buildDetailPanel()
         [this] { return m_params.detail().sharpeningRadius; }, [this](double value) { auto d = m_params.detail(); d.sharpeningRadius = value; m_params.setDetail(d); });
     addParamRow(layout, tr("Detail"), 0, 200, 20, 0, tr("Engine mapping: sharpening contrast; it is not Adobe Detail."),
         [this] { return m_params.detail().sharpeningDetail; }, [this](double value) { auto d = m_params.detail(); d.sharpeningDetail = value; m_params.setDetail(d); });
-    auto* limitations = new QLabel(tr("Masking is unavailable: the engine's edge-only control is not equivalent to Camera Raw Masking. Its luminance denoiser has no compatible Luminance Contrast, Color Detail, or Smoothness controls."), panel);
+    auto* limitations = new QLabel(tr("Sharpening and Noise Reduction are rendered in the full-quality result; the fast preview skips these 1:1 stages. Masking is unavailable: the engine's edge-only control is not equivalent to Camera Raw Masking. Its luminance denoiser has no compatible Luminance Contrast, Color Detail, or Smoothness controls."), panel);
     limitations->setWordWrap(true); limitations->setContentsMargins(8, 3, 8, 3); layout->addWidget(limitations);
     auto* denoise = new AppCheckBox(tr("Noise Reduction"), panel); denoise->setContentsMargins(8, 5, 6, 2); layout->addWidget(denoise);
     connect(denoise, &QCheckBox::toggled, this, [this](bool on) { if (!m_syncing) { auto d = m_params.detail(); d.denoiseEnabled = on; m_params.setDetail(d); applyParamsChanged(); } });
@@ -999,11 +1078,14 @@ void RawDevelopWindow::startPreview()
                 return result;
             }
         }
-        result.hasResolvedToneCurve = params.needsAutoMatchedToneCurveResolution();
-        RawDevelopParams* resolvedParams = result.hasResolvedToneCurve
-            ? &result.resolvedParams : nullptr;
+        // Always ask for the resolved parameters: getParams() is a struct
+        // copy, and the engine writes back values the UI has no other way to
+        // learn — the white balance it actually used for every method, plus
+        // an auto-exposure or Auto-Matched Curve result when one is active.
+        result.hasResolvedToneCurve = params.needsResolvedToneCurve();
+        result.hasResolvedParams = true;
         const RawImageBuffer buffer = m_previewSession->renderPreview(
-            previewMaxEdge, params, previewUpdates, nullptr, resolvedParams);
+            previewMaxEdge, params, previewUpdates, nullptr, &result.resolvedParams);
         if (buffer.isEmpty()) {
             result.errorMessage = QObject::tr("RAW preview render failed.");
             return result;
@@ -1021,9 +1103,16 @@ void RawDevelopWindow::previewFinished()
         m_ownsPreviewSourcePath = result.ownsSourcePath;
     }
     if (result.generation == m_previewGeneration && !result.image.isNull()) {
-        if (result.hasResolvedToneCurve) {
-            m_params.adoptResolvedToneCurve(result.resolvedParams);
-            syncControlsFromParams();
+        if (result.hasResolvedParams) {
+            // Both adopters report whether anything actually moved, so the
+            // controls are only re-synced until the engine's values settle —
+            // re-syncing on every preview would reset the curve editor out
+            // from under an in-progress edit.
+            bool changed = m_params.adoptResolvedWhiteBalance(result.resolvedParams);
+            if (result.hasResolvedToneCurve)
+                changed = m_params.adoptResolvedToneCurve(result.resolvedParams) || changed;
+            if (changed)
+                syncControlsFromParams();
         }
         updatePreviewImage(result.image);
         m_previewStatus->setText(tr("Preview uses interactive quality."));
@@ -1069,9 +1158,10 @@ void RawDevelopWindow::updateDisplayedImage()
     } else {
         // Zoom percentages are relative to the document's actual resolution
         // (m_beforeImage — the layer's full develop), not display.size():
-        // the interactive "After" preview is capped to renderPreview()'s
-        // 2048px maxEdge for speed, so sizing off it would make "100%" show
-        // roughly a third of true size on a typical multi-megapixel RAW.
+        // the interactive "After" preview is capped to the viewport-derived
+        // kPreviewMinEdge..kPreviewMaxEdge budget for speed, so sizing off it
+        // would make "100%" show a fraction of true size on a typical
+        // multi-megapixel RAW.
         target = (QSizeF(m_beforeImage.size()) * m_zoom).toSize();
     }
     const QPixmap pixmap = QPixmap::fromImage(display.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -1105,9 +1195,23 @@ void RawDevelopWindow::reloadPresets()
     QSignalBlocker blocker(m_presetCombo);
     m_presetCombo->clear();
     m_presetCombo->addItem(tr("Camera Default"), QStringLiteral("default"));
+    // Recursive on purpose: most of the bundled profiles live in
+    // subdirectories of rtdata/profiles (Pop/, Pixel Shift/, Non-raw/), so a
+    // flat listing would hide the majority of them. The relative path doubles
+    // as the display name, which keeps "Pop 1" and a same-named user file
+    // distinguishable.
     const QDir bundled(QDir(AppPaths::rawEngineResourceDir()).filePath(QStringLiteral("profiles")));
-    for (const QString& file : bundled.entryList({QStringLiteral("*.pp3"), QStringLiteral("*.PP3")}, QDir::Files))
-        m_presetCombo->addItem(file, bundled.filePath(file));
+    QStringList bundledPaths;
+    QDirIterator it(bundled.absolutePath(), {QStringLiteral("*.pp3"), QStringLiteral("*.PP3")},
+                    QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+        bundledPaths << it.next();
+    bundledPaths.sort(Qt::CaseInsensitive);
+    for (const QString& path : bundledPaths) {
+        QString name = bundled.relativeFilePath(path);
+        name.chop(4); // ".pp3"
+        m_presetCombo->addItem(name.replace(QLatin1Char('/'), QStringLiteral(" / ")), path);
+    }
     QSettings settings;
     settings.beginGroup(QStringLiteral("rawDevelop/presets"));
     for (const QString& name : settings.childKeys())

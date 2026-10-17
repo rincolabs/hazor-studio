@@ -286,7 +286,7 @@ public:
     // Fase 4.8) and, on success, pushes a RawDevelopCommand so the result is
     // undoable. No-op (returns false) when flatIndex isn't a RAW layer, the
     // layer is pixel-locked, or a re-reveal for it is already in flight —
-    // callers retry once rawLayerDevelopFinished() fires for this index.
+    // callers retry once rawLayerDevelopFinished() fires for that layer.
     bool rerevealRawLayer(int flatIndex, const RawDevelopParams& params);
     bool isLayerEmpty(int flatIndex) const;
     void flushGpuChanges();
@@ -391,10 +391,18 @@ signals:
     void maskOverlayChanged();
     void guidesChanged();
     void operationBlocked(const QString& reason);
-    // RawDevelopService finished re-revealing flatIndex's RAW layer (see
+    // RawDevelopService finished re-revealing `node`'s RAW layer (see
     // rerevealRawLayer()). `ok` false means the render failed or the layer
-    // was gone by the time it finished; errorMessage is empty on success.
-    void rawLayerDevelopFinished(int flatIndex, bool ok, QString errorMessage);
+    // was gone by the time it finished; `message` carries the reason then,
+    // and on success is either empty or the non-fatal reframe warning below.
+    //
+    // `node` identifies the layer and is only ever meant to be *compared*,
+    // never dereferenced: Hazor Develop is an independent window, so the
+    // layer can be reordered (or deleted) between dispatch and completion,
+    // which is exactly why a flat index cannot identify it. `flatIndex` is
+    // the layer's index at completion time, or the dispatch-time index when
+    // the layer could no longer be resolved.
+    void rawLayerDevelopFinished(LayerTreeNode* node, int flatIndex, bool ok, QString message);
     void progressOperationStarted(uint64_t jobId, const QString& message, bool cancelable);
     void progressOperationMessageChanged(uint64_t jobId, const QString& message);
     void progressOperationProgressChanged(uint64_t jobId, int progress);

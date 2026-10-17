@@ -35,7 +35,11 @@ namespace curves { struct CurvesData; }
 class RawDevelopWindow : public QMainWindow {
     Q_OBJECT
 public:
-    RawDevelopWindow(int flatIndex, const RawLayerData& rawData,
+    // Deliberately carries no flat index: this window is independent, so the
+    // layer it edits can be reordered or deleted while it is open. Resolving
+    // the target is the owner's job (MainWindow::openHazorDevelop), keyed by
+    // the layer's node.
+    RawDevelopWindow(const RawLayerData& rawData,
                      const QImage& currentImage, QWidget* parent = nullptr);
     ~RawDevelopWindow() override;
 
@@ -43,7 +47,7 @@ public:
     void developFinished(bool ok, const QString& errorMessage);
 
 signals:
-    void applyRequested(int flatIndex, RawDevelopParams params);
+    void applyRequested(RawDevelopParams params);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -59,7 +63,11 @@ private:
         // which reuses the path already cached on m_previewSourcePath.
         QString sourcePath;
         bool ownsSourcePath = false;
+        // The processor's effective parameters after the render. Carries the
+        // white balance the engine resolved for *every* method, and (when
+        // hasResolvedToneCurve) an auto-exposure / Auto-Matched Curve result.
         RawDevelopParams resolvedParams;
+        bool hasResolvedParams = false;
         bool hasResolvedToneCurve = false;
     };
 
@@ -102,7 +110,6 @@ private:
     curves::CurvesData curveDataFromParams() const;
     void setCurvesFromEditor();
 
-    int m_flatIndex = -1;
     RawLayerData m_rawData;
     RawDevelopParams m_params;
     QImage m_beforeImage;

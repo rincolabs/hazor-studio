@@ -10,6 +10,7 @@ class QMenu;
 #include <cstdint>
 #include <functional>
 #include <QPointer>
+#include <QHash>
 #include "core/Document.hpp"
 #include "controller/ImageController.hpp"
 #include "tools/ToolCatalog.hpp"
@@ -23,6 +24,7 @@ class QDragLeaveEvent;
 class QDropEvent;
 
 class CanvasView;
+class RawDevelopWindow;
 class LayerPanel;
 class PropertiesPanel;
 class HistogramPanel;
@@ -370,11 +372,16 @@ private:
     // non-destructively re-revealable instead of a flattened import.
     void openRawFileAsNewTab(const QString& path);
     // Opens the independent Hazor Develop window for the RAW Layer at
-    // `flatIndex`. Shared by every place a RAW Layer can come into being:
+    // `flatIndex`, or raises the one already open for it. Shared by every
+    // place a RAW Layer can come into being:
     // LayerPanel::rawEditRequested (double-click), openRawFileAsNewTab(), and
     // the drag-and-drop paths that land a RAW file via
     // ImageController::importExternalImages()'s outRawLayerFlatIndices.
     void openHazorDevelop(int flatIndex);
+    // Current flat index of `node` in `doc`, or -1 if it is no longer there.
+    // Needed because a non-modal window (Hazor Develop) outlives the index it
+    // was opened with, and may be applied while another tab is active.
+    static int flatIndexOfNodeIn(const Document* doc, const LayerTreeNode* node);
     CanvasView* activeCanvas() const;
     Document* activeDocument() const;
     ImageController* activeController() const;
@@ -382,6 +389,11 @@ private:
     QTabWidget* m_tabWidget = nullptr;
     std::vector<DocumentTab> m_tabs;
     int m_activeTabIndex = -1;
+
+    // Open Hazor Develop windows, keyed by the RAW layer's node. Entries are
+    // removed by each window's own destroyed() signal, so a key is only ever
+    // compared against a live node, never dereferenced.
+    QHash<const LayerTreeNode*, RawDevelopWindow*> m_developWindows;
 
     Document* m_doc = nullptr;
     CanvasView* m_canvas = nullptr;
