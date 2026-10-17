@@ -73,6 +73,11 @@ public:
     // conversion instead of duplicating it.
     static QImage convertToRgba8888(const RawImageBuffer& buffer, bool dither);
 
+    // Materializes an embedded source once for consumers that need a session
+    // of their own (Hazor Develop's interactive preview). The caller owns the
+    // returned temporary path and must remove it after its session is gone.
+    static QString materializeEmbedded(const RawSource& source);
+
 signals:
     // Always emitted on the UI thread, exactly once per requestDevelop()
     // that returned true.
@@ -104,14 +109,6 @@ private:
         QFutureWatcher<std::shared_ptr<Task>> watcher;
         bool dispatched = false;
     };
-
-    // Embedded mode only: writes `source.bytes` to a process-unique temp
-    // file (extension taken from source.path, so format sniffing by
-    // extension still works) the first time this node's layer is
-    // developed, so RawSession::open() has a real path to decode from.
-    // Called from the worker task, synchronously, with no signal/slot
-    // connections on the QFile it uses — safe off the UI thread.
-    static QString materializeEmbedded(const RawSource& source);
 
     Entry& entryFor(LayerTreeNode* node);
     void onFinished(LayerTreeNode* node);

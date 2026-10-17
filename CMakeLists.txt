@@ -717,6 +717,8 @@ add_executable(Hazor WIN32
     src/ui/gradient/GradientEditorDialog.hpp
     src/ui/ExportImageDialog.cpp
     src/ui/ExportImageDialog.hpp
+    src/ui/RawDevelopWindow.cpp
+    src/ui/RawDevelopWindow.hpp
     src/ui/NewDocumentDialog.cpp
     src/ui/NewDocumentDialog.hpp
     src/ui/RefineEdgeDialog.cpp
@@ -829,6 +831,13 @@ target_link_libraries(Hazor PRIVATE
 if(UNIX AND NOT APPLE)
     target_link_libraries(Hazor PRIVATE dl)
     target_link_options(Hazor PRIVATE -rdynamic)
+
+    # `-rdynamic` keeps Hazor's own symbols available to the Linux crash
+    # reporter, but it must not expose the symbols pulled in from RawEngine's
+    # pinned static dependencies.  In particular, GdkPixbuf's PNG loader can
+    # otherwise bind to RawEngine's static libpng instead of its matching
+    # system libpng, which corrupts memory when the native QFileDialog opens.
+    target_link_options(Hazor PRIVATE -Wl,--exclude-libs,ALL)
 endif()
 
 if(WIN32)

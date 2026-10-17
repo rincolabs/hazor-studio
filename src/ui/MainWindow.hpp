@@ -369,6 +369,12 @@ private:
     // new tab whose single layer carries RawLayerData (Fase 5), so it stays
     // non-destructively re-revealable instead of a flattened import.
     void openRawFileAsNewTab(const QString& path);
+    // Opens the independent Hazor Develop window for the RAW Layer at
+    // `flatIndex`. Shared by every place a RAW Layer can come into being:
+    // LayerPanel::rawEditRequested (double-click), openRawFileAsNewTab(), and
+    // the drag-and-drop paths that land a RAW file via
+    // ImageController::importExternalImages()'s outRawLayerFlatIndices.
+    void openHazorDevelop(int flatIndex);
     CanvasView* activeCanvas() const;
     Document* activeDocument() const;
     ImageController* activeController() const;

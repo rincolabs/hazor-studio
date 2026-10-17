@@ -50,8 +50,9 @@ per-user RAW data directory, e.g. for user-dropped DCP profiles).
   file, RAII. `RawSession::metadata()` for camera/exposure/orientation info.
 - `RawDevelopParams` — an opaque, copyable PP3 develop profile:
   `cameraDefaults()`, `fromPP3String()`/`toPP3String()`,
-  `loadPP3File()`/`savePP3File()`, plus typed accessor groups (input profile,
-  white balance, exposure — more added as callers need them).
+  `loadPP3File()`/`savePP3File()`, plus typed groups for camera input profile,
+  white balance, light, color, effects, curves, HSV color mixer, color grading,
+  detail, and optics. These preserve rtengine's own units and PP3 fields.
 - `RawSession::renderPreview(maxEdge, params)` — interactive-quality RGB8
   render, scaled to fit `maxEdge`.
 - `RawSession::renderFull(params)` — full-resolution float render
@@ -93,10 +94,9 @@ it opens the file and renders camera defaults off the UI thread, then
 creates a new tab whose single layer carries a `RawLayerData` (Linked mode —
 see "RAW Layer" below) instead of a flattened import. The layer shows a
 dedicated thumbnail icon in the Layers panel (same mechanism as a Text
-layer's), and its thumbnail's double-click hook
-(`LayerItemDelegate::rawThumbDoubleClicked` →
-`LayerPanel::rawEditRequested`) is wired through but not yet connected to
-anything — the Camera Raw dialog that will consume it is a later phase.
+layer's). Double-clicking that thumbnail opens the independent **Hazor
+Develop** window (`LayerItemDelegate::rawThumbDoubleClicked` →
+`LayerPanel::rawEditRequested` → `RawDevelopWindow`).
 
 `raw_develop` (tool catalog / MCP / agent surface) adjusts a RAW Layer's
 white balance and exposure and re-reveals it via
@@ -104,7 +104,35 @@ white balance and exposure and re-reveals it via
 layers from Fase 4 onward (`ImageController::rasterizeNode()`), so it did not
 need a separate tool.
 
-## Not yet done
+## Hazor Develop
 
-Camera Raw UI (dialog, live preview with sliders, before/after) is the
-remaining later phase — see `tmp/feat-raw-therapee-plan.md`.
+Hazor Develop keeps its PP3 working copy outside the document until **Apply**.
+Its RGB histogram, camera metadata, profile selector, presets, collapsible
+panels, zoom/pan, Before/After, and clipping overlays are all local UI state.
+The interactive image is rendered through `RawSession::renderPreview()` on a
+worker with debounce; Apply is the only operation that calls
+`ImageController::rerevealRawLayer()`. That final render is full quality,
+asynchronous, and creates the existing `RawDevelopCommand` for undo/redo.
+
+Bundled RawTherapee `.pp3` profiles and user presets saved in `QSettings` are
+listed separately from camera input DCP/ICC profiles. A custom DCP/ICC is
+selected only through the Camera Profile control, never as a processing preset.
+
+### Camera Raw terminology versus engine operations
+
+The layout follows Camera Raw, but controls are wired only where RawTherapee
+has a real PP3 operation. The UI calls out the non-equivalences instead of
+inventing a conversion: **Whites** drives Highlight Compression (recovery),
+**Blacks** drives RawTherapee Black Level, **Texture** drives Sharpen
+Microcontrast, **Clarity** drives Local Contrast, and color-grading wheels
+compose RawTherapee Color Toning's RGB slider values. Grain, an Adobe-style
+parametric-region curve, Camera Raw Masking, and white-balance eyedropper
+sampling do not have compatible operations in the currently embedded API, so
+they are explicitly unavailable rather than connected to an arbitrary effect.
+
+Several sliders are one-directional strength controls in RawTherapee, unlike
+their bipolar Camera Raw counterparts, so their default sits at the left edge
+rather than a centered zero — this mirrors RawTherapee's own tool panels
+exactly (e.g. Shadows/Highlights' `highlights`/`shadows`, 0..100) and is not a
+layout bug. **Exposure** (-5..12 EV) and **Blacks** (-16384..32768) use
+RawTherapee's own asymmetric ranges verbatim for the same reason.

@@ -330,7 +330,12 @@ public:
     // transform themselves).
     bool commitTextEdit(int flatIndex, const TextLayerData& before,
                         const QTransform& beforeTransform = QTransform());
-    bool importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc);
+    // RAW paths (RawEngine::isSupportedExtension()) get a non-destructive RAW
+    // Layer instead of a flattened import, same as the dedicated RAW open
+    // path. outRawLayerFlatIndices, when given, collects the final flat
+    // index of each one so the caller can open Hazor Develop for it.
+    bool importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc,
+                              QList<int>* outRawLayerFlatIndices = nullptr);
     bool importImage(const QImage& img, const QString& name);
 
     void createShapeLayer(const ShapeData& data);

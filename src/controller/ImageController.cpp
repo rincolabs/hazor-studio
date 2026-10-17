@@ -28,6 +28,9 @@
 #include "ai/upscale/UpscaleService.hpp"
 #include "raw/RawDevelopService.hpp"
 #include "raw/RawDevelopParams.hpp"
+#include "raw/RawEngine.hpp"
+#include "raw/RawSession.hpp"
+#include "raw/RawLayerData.hpp"
 
 #include <QImage>
 #include <QPainter>
@@ -5784,7 +5787,8 @@ static void publishClipboardToSystem(const QImage& raster, const QString& token)
     sys->setMimeData(mime); // clipboard takes ownership of mime
 }
 
-bool ImageController::importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc)
+bool ImageController::importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc,
+                                            QList<int>* outRawLayerFlatIndices)
 {
     if (!m_doc || paths.isEmpty()) return false;
 
@@ -5817,23 +5821,55 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
     int importedCount = 0;
     for (int i = 0; i < paths.size(); ++i) {
         const QString path = paths[i];
+        const bool isRaw = RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(path).suffix()).toStdString());
 
-        ImageLoadResult loaded = imageCodecRegistry().readImage(path);
-        if (!loaded.ok)
-            continue;
-        if (loaded.image.width > 20000 || loaded.image.height > 20000)
-            continue;
+        QImage img;
+        std::shared_ptr<RawLayerData> rawData;
 
-        OpenColorPolicyContext colorContext =
-            ColorManagementService::instance().defaultOpenContext(path);
-        colorContext.workingSpace = m_doc->colorProfile().isValid()
-            ? m_doc->colorProfile()
-            : ColorProfile::sRgb();
-        colorContext.mismatchPolicy = ProfileMismatchPolicy::ConvertToWorkingSpace;
-        const ColorManagedOpenResult colorManaged =
-            ColorManagementService::instance().prepareImageForOpen(loaded.image, colorContext);
+        if (isRaw) {
+            // Same non-destructive RAW Layer the dedicated RAW open path
+            // builds (MainWindow::openRawFileAsNewTab), not the generic
+            // flatten-on-import codec path below.
+            if (!RawEngine::isAvailable()) continue;
+            std::string errorMessage;
+            std::unique_ptr<RawSession> session = RawEngine::openFile(path.toStdString(), &errorMessage);
+            if (!session) continue;
 
-        QImage img = convertDocumentImageToQImage(colorManaged.image).convertToFormat(QImage::Format_RGBA8888);
+            RawDevelopParams params = RawDevelopParams::cameraDefaults();
+            const RawImageBuffer buffer = session->renderFull(params);
+            if (buffer.isEmpty()) continue;
+
+            img = RawDevelopService::convertToRgba8888(buffer, /*dither=*/false);
+            if (img.isNull()) continue;
+
+            auto source = std::make_shared<RawSource>();
+            source->path = path;
+            source->meta = session->metadata();
+            rawData = std::make_shared<RawLayerData>();
+            rawData->source = std::move(source);
+            rawData->state.pp3 = QString::fromStdString(params.toPP3String());
+            rawData->state.developedSize = QSize(buffer.width, buffer.height);
+            rawData->state.geometry = buffer.geometry;
+            rawData->mode = RawStorageMode::Linked;
+        } else {
+            ImageLoadResult loaded = imageCodecRegistry().readImage(path);
+            if (!loaded.ok)
+                continue;
+            if (loaded.image.width > 20000 || loaded.image.height > 20000)
+                continue;
+
+            OpenColorPolicyContext colorContext =
+                ColorManagementService::instance().defaultOpenContext(path);
+            colorContext.workingSpace = m_doc->colorProfile().isValid()
+                ? m_doc->colorProfile()
+                : ColorProfile::sRgb();
+            colorContext.mismatchPolicy = ProfileMismatchPolicy::ConvertToWorkingSpace;
+            const ColorManagedOpenResult colorManaged =
+                ColorManagementService::instance().prepareImageForOpen(loaded.image, colorContext);
+
+            img = convertDocumentImageToQImage(colorManaged.image).convertToFormat(QImage::Format_RGBA8888);
+        }
         if (img.isNull()) continue;
 
         auto node = std::make_unique<LayerTreeNode>();
@@ -5843,6 +5879,7 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
         node->layer->name = node->name;
         node->layer->cpuImage = img;
         node->layer->owner = node.get();
+        node->layer->rawData = std::move(rawData);
         node->visible = true;
         node->opacity = 1.0f;
         node->blendMode = BlendMode::Normal;
@@ -5858,6 +5895,9 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
             cx, cy, 1.0);
         node->layer->resetTransform = node->transform;
         node->layer->hasResetTransform = true;
+
+        if (node->layer->rawData && outRawLayerFlatIndices)
+            outRawLayerFlatIndices->push_back(insertAt);
 
         auto snapshot = node->clone(true);
         comp->add(std::make_unique<AddLayerCommand>(m_doc, insertAt, std::move(snapshot), tr("Import Image")));

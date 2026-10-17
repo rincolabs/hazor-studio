@@ -5,6 +5,7 @@
 #ifdef HAVE_RAWENGINE
 
 #include <cstdio>
+#include <algorithm>
 #include <filesystem>
 #include <random>
 #include <sstream>
@@ -74,6 +75,73 @@ bool readFileToString(const std::string& path, std::string& out)
         out = std::move(content);
     }
     return ok;
+}
+
+constexpr double kDiagonalSpline = 1.0;
+constexpr double kFlatControlPoints = 1.0;
+
+std::vector<RawDevelopParams::CurvePoint> decodeDiagonalCurve(const std::vector<double>& curve)
+{
+    std::vector<RawDevelopParams::CurvePoint> points;
+    if (curve.size() >= 5 && static_cast<int>(curve.front()) == static_cast<int>(kDiagonalSpline)) {
+        for (std::size_t i = 1; i + 1 < curve.size(); i += 2)
+            points.push_back({std::clamp(curve[i], 0.0, 1.0), std::clamp(curve[i + 1], 0.0, 1.0)});
+    }
+    if (points.size() < 2)
+        return {{0.0, 0.0}, {1.0, 1.0}};
+    return points;
+}
+
+std::vector<double> encodeDiagonalCurve(std::vector<RawDevelopParams::CurvePoint> points)
+{
+    for (auto& point : points) {
+        point.x = std::clamp(point.x, 0.0, 1.0);
+        point.y = std::clamp(point.y, 0.0, 1.0);
+    }
+    std::sort(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.x < b.x; });
+    if (points.empty() || points.front().x > 0.0)
+        points.insert(points.begin(), {0.0, 0.0});
+    if (points.back().x < 1.0)
+        points.push_back({1.0, 1.0});
+
+    std::vector<double> curve;
+    curve.reserve(1 + points.size() * 2);
+    curve.push_back(kDiagonalSpline);
+    for (const auto& point : points) {
+        curve.push_back(point.x);
+        curve.push_back(point.y);
+    }
+    return curve;
+}
+
+std::array<double, 8> decodeMixerCurve(const std::vector<double>& curve)
+{
+    std::array<double, 8> values{};
+    if (curve.size() < 5 || static_cast<int>(curve.front()) != static_cast<int>(kFlatControlPoints))
+        return values;
+
+    const std::size_t count = (curve.size() - 1) / 4;
+    if (!count)
+        return values;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const std::size_t index = std::min(i, count - 1);
+        values[i] = std::clamp((curve[1 + index * 4 + 1] - 0.5) * 200.0, -100.0, 100.0);
+    }
+    return values;
+}
+
+std::vector<double> encodeMixerCurve(const std::array<double, 8>& values)
+{
+    std::vector<double> curve;
+    curve.reserve(1 + values.size() * 4);
+    curve.push_back(kFlatControlPoints);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        curve.push_back(static_cast<double>(i) / (values.size() - 1));
+        curve.push_back(std::clamp(0.5 + values[i] / 200.0, 0.0, 1.0));
+        curve.push_back(0.0);
+        curve.push_back(0.0);
+    }
+    return curve;
 }
 
 } // namespace
@@ -213,6 +281,201 @@ void RawDevelopParams::setExposure(const Exposure& exposure)
     target.expcomp = exposure.compensationEv;
 }
 
+RawDevelopParams::Light RawDevelopParams::light() const
+{
+    const auto& tone = m_impl->procParams.toneCurve;
+    const auto& sh = m_impl->procParams.sh;
+    return {
+        tone.autoexp, tone.expcomp, tone.contrast, sh.highlights, sh.shadows,
+        tone.hlcompr, tone.black
+    };
+}
+
+void RawDevelopParams::setLight(const Light& light)
+{
+    auto& tone = m_impl->procParams.toneCurve;
+    auto& sh = m_impl->procParams.sh;
+    tone.autoexp = light.autoExposure;
+    tone.expcomp = std::clamp(light.exposureEv, -5.0, 12.0);
+    tone.contrast = std::clamp(light.contrast, -100, 100);
+    sh.highlights = std::clamp(light.highlights, 0, 100);
+    sh.shadows = std::clamp(light.shadows, 0, 100);
+    sh.enabled = sh.highlights != 0 || sh.shadows != 0;
+    tone.hlcompr = std::clamp(light.whiteRecovery, 0, 500);
+    tone.black = std::clamp(light.blackPoint, -16384, 32768);
+}
+
+RawDevelopParams::Color RawDevelopParams::color() const
+{
+    return {m_impl->procParams.blackwhite.enabled, m_impl->procParams.vibrance.pastels,
+            m_impl->procParams.toneCurve.saturation};
+}
+
+void RawDevelopParams::setColor(const Color& color)
+{
+    m_impl->procParams.blackwhite.enabled = color.blackAndWhite;
+    auto& vibrance = m_impl->procParams.vibrance;
+    vibrance.pastels = std::clamp(color.vibrance, -100, 100);
+    vibrance.enabled = vibrance.pastels != 0;
+    m_impl->procParams.toneCurve.saturation = std::clamp(color.saturation, -100, 100);
+}
+
+RawDevelopParams::Effects RawDevelopParams::effects() const
+{
+    const auto& micro = m_impl->procParams.sharpenMicro;
+    const auto& contrast = m_impl->procParams.localContrast;
+    const auto& dehaze = m_impl->procParams.dehaze;
+    const auto& vignette = m_impl->procParams.pcvignette;
+    return {micro.enabled, micro.amount, contrast.enabled, contrast.amount,
+            dehaze.enabled, dehaze.strength, vignette.enabled, vignette.strength,
+            vignette.feather, vignette.roundness};
+}
+
+void RawDevelopParams::setEffects(const Effects& effects)
+{
+    auto& micro = m_impl->procParams.sharpenMicro;
+    micro.enabled = effects.textureEnabled;
+    micro.amount = std::clamp(effects.texture, 0.0, 100.0);
+
+    auto& contrast = m_impl->procParams.localContrast;
+    contrast.enabled = effects.clarityEnabled;
+    contrast.amount = std::clamp(effects.clarity, 0.0, 1.0);
+
+    auto& dehaze = m_impl->procParams.dehaze;
+    dehaze.enabled = effects.dehazeEnabled;
+    dehaze.strength = std::clamp(effects.dehaze, 0, 100);
+
+    auto& vignette = m_impl->procParams.pcvignette;
+    vignette.enabled = effects.vignetteEnabled;
+    vignette.strength = std::clamp(effects.vignetteAmount, -6.0, 6.0);
+    vignette.feather = std::clamp(effects.vignetteFeather, 0, 100);
+    vignette.roundness = std::clamp(effects.vignetteRoundness, 0, 100);
+}
+
+RawDevelopParams::Detail RawDevelopParams::detail() const
+{
+    const auto& sharpening = m_impl->procParams.sharpening;
+    const auto& denoise = m_impl->procParams.dirpyrDenoise;
+    return {sharpening.enabled, sharpening.amount, sharpening.radius, sharpening.contrast,
+            denoise.enabled, denoise.luma, denoise.Ldetail, denoise.chroma};
+}
+
+void RawDevelopParams::setDetail(const Detail& detail)
+{
+    auto& sharpening = m_impl->procParams.sharpening;
+    sharpening.enabled = detail.sharpeningEnabled;
+    sharpening.amount = std::clamp(detail.sharpeningAmount, 1, 1000);
+    sharpening.radius = std::clamp(detail.sharpeningRadius, 0.3, 3.0);
+    sharpening.contrast = std::clamp(detail.sharpeningDetail, 0.0, 200.0);
+
+    auto& denoise = m_impl->procParams.dirpyrDenoise;
+    denoise.enabled = detail.denoiseEnabled;
+    denoise.perform = detail.denoiseEnabled;
+    denoise.luma = std::clamp(detail.luminanceNoise, 0.0, 100.0);
+    denoise.Ldetail = std::clamp(detail.luminanceDetail, 0.0, 100.0);
+    denoise.chroma = std::clamp(detail.colorNoise, 0.0, 100.0);
+}
+
+RawDevelopParams::Optics RawDevelopParams::optics() const
+{
+    const auto& lens = m_impl->procParams.lensProf;
+    const auto& distortion = m_impl->procParams.distortion;
+    const auto& vignette = m_impl->procParams.vignetting;
+    const auto& ca = m_impl->procParams.cacorrection;
+    const auto& defringe = m_impl->procParams.defringe;
+    return {lens.lcMode == rtengine::procparams::LensProfParams::LcMode::LENSFUNAUTOMATCH,
+            lens.useDist, lens.useVign, lens.useCA, distortion.amount, vignette.amount,
+            ca.red, ca.blue, defringe.enabled, defringe.radius, defringe.threshold};
+}
+
+void RawDevelopParams::setOptics(const Optics& optics)
+{
+    auto& lens = m_impl->procParams.lensProf;
+    lens.lcMode = optics.automaticLensProfile
+        ? rtengine::procparams::LensProfParams::LcMode::LENSFUNAUTOMATCH
+        : rtengine::procparams::LensProfParams::LcMode::NONE;
+    lens.useDist = optics.correctDistortion;
+    lens.useVign = optics.correctVignetting;
+    lens.useCA = optics.correctChromaticAberration;
+
+    m_impl->procParams.distortion.amount = std::clamp(optics.distortion, -0.5, 0.5);
+    m_impl->procParams.vignetting.amount = std::clamp(optics.lensVignetting, -100, 100);
+    m_impl->procParams.cacorrection.red = std::clamp(optics.redChromaticAberration, -0.005, 0.005);
+    m_impl->procParams.cacorrection.blue = std::clamp(optics.blueChromaticAberration, -0.005, 0.005);
+    auto& defringe = m_impl->procParams.defringe;
+    defringe.enabled = optics.defringeEnabled;
+    defringe.radius = std::clamp(optics.defringeRadius, 0.5, 5.0);
+    defringe.threshold = std::clamp(optics.defringeThreshold, 0, 100);
+}
+
+RawDevelopParams::ColorGrading RawDevelopParams::colorGrading() const
+{
+    const auto& toning = m_impl->procParams.colorToning;
+    return {toning.enabled,
+            {toning.redlow, toning.greenlow, toning.bluelow},
+            {toning.redmed, toning.greenmed, toning.bluemed},
+            {toning.redhigh, toning.greenhigh, toning.bluehigh},
+            toning.strength, toning.balance};
+}
+
+void RawDevelopParams::setColorGrading(const ColorGrading& grading)
+{
+    auto& toning = m_impl->procParams.colorToning;
+    toning.enabled = grading.enabled;
+    toning.method = "RGBSliders";
+    toning.redlow = std::clamp(grading.shadows[0], -100.0, 100.0);
+    toning.greenlow = std::clamp(grading.shadows[1], -100.0, 100.0);
+    toning.bluelow = std::clamp(grading.shadows[2], -100.0, 100.0);
+    toning.redmed = std::clamp(grading.midtones[0], -100.0, 100.0);
+    toning.greenmed = std::clamp(grading.midtones[1], -100.0, 100.0);
+    toning.bluemed = std::clamp(grading.midtones[2], -100.0, 100.0);
+    toning.redhigh = std::clamp(grading.highlights[0], -100.0, 100.0);
+    toning.greenhigh = std::clamp(grading.highlights[1], -100.0, 100.0);
+    toning.bluehigh = std::clamp(grading.highlights[2], -100.0, 100.0);
+    toning.strength = std::clamp(grading.blending, 0, 100);
+    toning.balance = std::clamp(grading.balance, -100, 100);
+}
+
+RawDevelopParams::ColorMixer RawDevelopParams::colorMixer() const
+{
+    const auto& mixer = m_impl->procParams.hsvequalizer;
+    return {mixer.enabled, decodeMixerCurve(mixer.hcurve), decodeMixerCurve(mixer.scurve),
+            decodeMixerCurve(mixer.vcurve)};
+}
+
+void RawDevelopParams::setColorMixer(const ColorMixer& mixer)
+{
+    auto& target = m_impl->procParams.hsvequalizer;
+    target.enabled = mixer.enabled;
+    target.hcurve = encodeMixerCurve(mixer.hue);
+    target.scurve = encodeMixerCurve(mixer.saturation);
+    target.vcurve = encodeMixerCurve(mixer.luminance);
+}
+
+std::vector<RawDevelopParams::CurvePoint> RawDevelopParams::curve(CurveChannel channel) const
+{
+    const auto& params = m_impl->procParams;
+    switch (channel) {
+    case CurveChannel::RGB: return decodeDiagonalCurve(params.toneCurve.curve);
+    case CurveChannel::Red: return decodeDiagonalCurve(params.rgbCurves.rcurve);
+    case CurveChannel::Green: return decodeDiagonalCurve(params.rgbCurves.gcurve);
+    case CurveChannel::Blue: return decodeDiagonalCurve(params.rgbCurves.bcurve);
+    }
+    return {};
+}
+
+void RawDevelopParams::setCurve(CurveChannel channel, const std::vector<CurvePoint>& points)
+{
+    auto& params = m_impl->procParams;
+    const auto encoded = encodeDiagonalCurve(points);
+    switch (channel) {
+    case CurveChannel::RGB: params.toneCurve.curve = encoded; break;
+    case CurveChannel::Red: params.rgbCurves.rcurve = encoded; params.rgbCurves.enabled = true; break;
+    case CurveChannel::Green: params.rgbCurves.gcurve = encoded; params.rgbCurves.enabled = true; break;
+    case CurveChannel::Blue: params.rgbCurves.bcurve = encoded; params.rgbCurves.enabled = true; break;
+    }
+}
+
 #else // !HAVE_RAWENGINE
 
 // Inert stand-in so RawDevelopParams compiles (and anything that merely
@@ -245,5 +508,21 @@ RawDevelopParams::WhiteBalance RawDevelopParams::whiteBalance() const { return {
 void RawDevelopParams::setWhiteBalance(const WhiteBalance&) {}
 RawDevelopParams::Exposure RawDevelopParams::exposure() const { return {}; }
 void RawDevelopParams::setExposure(const Exposure&) {}
+RawDevelopParams::Light RawDevelopParams::light() const { return {}; }
+void RawDevelopParams::setLight(const Light&) {}
+RawDevelopParams::Color RawDevelopParams::color() const { return {}; }
+void RawDevelopParams::setColor(const Color&) {}
+RawDevelopParams::Effects RawDevelopParams::effects() const { return {}; }
+void RawDevelopParams::setEffects(const Effects&) {}
+RawDevelopParams::Detail RawDevelopParams::detail() const { return {}; }
+void RawDevelopParams::setDetail(const Detail&) {}
+RawDevelopParams::Optics RawDevelopParams::optics() const { return {}; }
+void RawDevelopParams::setOptics(const Optics&) {}
+RawDevelopParams::ColorGrading RawDevelopParams::colorGrading() const { return {}; }
+void RawDevelopParams::setColorGrading(const ColorGrading&) {}
+RawDevelopParams::ColorMixer RawDevelopParams::colorMixer() const { return {}; }
+void RawDevelopParams::setColorMixer(const ColorMixer&) {}
+std::vector<RawDevelopParams::CurvePoint> RawDevelopParams::curve(CurveChannel) const { return {}; }
+void RawDevelopParams::setCurve(CurveChannel, const std::vector<CurvePoint>&) {}
 
 #endif

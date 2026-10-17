@@ -38,8 +38,8 @@ public:
                                          const QPoint& pos);
 
     // Same mechanism as handleSolidColorThumbDoubleClick(), for a RAW Layer's
-    // thumbnail instead. Emits rawThumbDoubleClicked; the Camera Raw dialog
-    // that would consume it is a later phase (see LayerPanel::rawEditRequested).
+    // thumbnail instead. Emits rawThumbDoubleClicked, which opens Hazor
+    // Develop through LayerPanel::rawEditRequested.
     int handleRawThumbDoubleClick(const QStyleOptionViewItem& option,
                                   const QModelIndex& index,
                                   const QPoint& pos);

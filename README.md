@@ -31,7 +31,8 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   RawTherapee's `rtengine`, vendored and built directly into Hazor — no
   external process) opens CR2, CR3, NEF, ARW, RAF, DNG, ORF, RW2, PEF, SRW
   and more as a non-destructive RAW Layer: the original file is never
-  modified and the develop profile stays re-editable.
+  modified and the develop profile stays re-editable in the dedicated Hazor
+  Develop window.
 - **Selections** — Rectangular, elliptical, lasso, magic wand, quick select, and
   magnetic lasso, with feather/grow/shrink refinement, saved alpha channels, and
   quick mask.

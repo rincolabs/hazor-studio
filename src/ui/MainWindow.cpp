@@ -33,6 +33,7 @@
 #include "ui/TitleBar.hpp"
 #include "ui/NewDocumentDialog.hpp"
 #include "ui/ExportImageDialog.hpp"
+#include "ui/RawDevelopWindow.hpp"
 #include "ui/AgentConfigWidget.hpp"
 #include "ui/AiUpscaleDialog.hpp"
 #include "ui/FillLayerDialog.hpp"
@@ -1764,6 +1765,8 @@ MainWindow::MainWindow(QWidget* parent)
             m_propsPanel->openSolidColorPicker();
         }
     });
+    connect(m_layerPanel, &LayerPanel::rawEditRequested,
+            this, [this](int flatIndex) { openHazorDevelop(flatIndex); });
 
     connect(m_toolBar, &ToolOptionsBar::aiOpenSettingsRequested, this, &MainWindow::onOpenAiSettings);
     connect(m_toolBar, &ToolOptionsBar::brushSizeChanged, this, &MainWindow::onBrushSizeChanged);
@@ -2538,6 +2541,15 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
 {
     if (paths.isEmpty()) return false;
 
+    // A RAW file gets its own non-destructive RAW Layer and opens straight
+    // into Hazor Develop, same as File > Open — not the generic
+    // flatten-on-import codec path below.
+    if (RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(paths.front()).suffix()).toStdString())) {
+        openRawFileAsNewTab(paths.front());
+        return true;
+    }
+
     const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
     std::optional<ColorManagedOpenResult> colorManaged;
     if (loaded.ok) {
@@ -2570,7 +2582,8 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
 
     // New, empty document: there is no prior pan/zoom state to place the drop
     // relative to, so every imported path lands centered (dropCanvasNdc = origin).
-    if (m_ctrl && !m_ctrl->importExternalImages(paths, QPointF(0.0, 0.0))) {
+    QList<int> rawLayerFlatIndices;
+    if (m_ctrl && !m_ctrl->importExternalImages(paths, QPointF(0.0, 0.0), &rawLayerFlatIndices)) {
         AppMessageDialog::warning(this, tr("Import Image"),
             tr("No supported image could be imported from the dropped files."));
     }
@@ -2581,6 +2594,8 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
     updateStatusFromDocument();
     if (colorManaged && !colorManaged->warningMessage.isEmpty())
         showViewportStatusMessage(colorManaged->warningMessage, 7000);
+    for (int flatIndex : rawLayerFlatIndices)
+        openHazorDevelop(flatIndex);
     return true;
 }
 
@@ -2825,7 +2840,8 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
         }
 
         const QPointF ndc = canvas->screenToCanvasNdc(screenPos);
-        if (!m_ctrl->importExternalImages(paths, ndc)) {
+        QList<int> rawLayerFlatIndices;
+        if (!m_ctrl->importExternalImages(paths, ndc, &rawLayerFlatIndices)) {
             AppMessageDialog::warning(this, tr("Import Image"),
                 tr("No supported image could be imported from the dropped files."));
             return;
@@ -2833,6 +2849,8 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
         refreshLayerPanel();
         refreshPropertiesPanel();
         updateLayerMenuState();
+        for (int flatIndex : rawLayerFlatIndices)
+            openHazorDevelop(flatIndex);
     });
 
     connect(ctrlPtr, &ImageController::imageChanged, canvas, [canvas]() {
@@ -3579,6 +3597,9 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         refreshPropertiesPanel();
         updateLayerMenuState();
         updateDirtyUi();
+        // Opening a RAW file always means developing it, so go straight to
+        // Hazor Develop instead of waiting for a thumbnail double-click.
+        if (m_ctrl) openHazorDevelop(0);
     });
     watcher->setFuture(QtConcurrent::run([path]() {
         RawOpenResult result;
@@ -3604,6 +3625,36 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         result.geometry = buffer.geometry;
         return result;
     }));
+}
+
+void MainWindow::openHazorDevelop(int flatIndex)
+{
+    if (!m_ctrl || !m_doc) return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer || !node->layer->rawData)
+        return;
+
+    m_ctrl->setActiveNode(flatIndex);
+    auto* develop = new RawDevelopWindow(flatIndex, *node->layer->rawData,
+                                         node->layer->cpuImage, this);
+    ImageController* controller = m_ctrl;
+    connect(develop, &RawDevelopWindow::applyRequested, develop,
+            [this, develop, controller](int targetIndex, const RawDevelopParams& params) {
+        if (!controller->rerevealRawLayer(targetIndex, params)) {
+            AppMessageDialog::warning(develop, tr("Hazor Develop"),
+                tr("Could not start RAW development. The layer may be locked or already processing."));
+            return;
+        }
+        develop->setApplyInProgress(true);
+    });
+    connect(controller, &ImageController::rawLayerDevelopFinished, develop,
+            [develop, flatIndex](int completedIndex, bool ok, const QString& errorMessage) {
+        if (completedIndex == flatIndex)
+            develop->developFinished(ok, errorMessage);
+    });
+    develop->show();
+    develop->raise();
+    develop->activateWindow();
 }
 
 void MainWindow::showProgress(const QString& title, const QString& message, bool cancelable)
