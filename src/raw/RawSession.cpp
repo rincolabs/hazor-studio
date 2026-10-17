@@ -16,6 +16,11 @@
 
 namespace {
 
+bool hasUpdate(RawPreviewUpdate updates, RawPreviewUpdate flag)
+{
+    return (static_cast<unsigned int>(updates) & static_cast<unsigned int>(flag)) != 0;
+}
+
 std::string lowercaseExtension(const std::string& path)
 {
     const auto dot = path.find_last_of('.');
@@ -223,13 +228,15 @@ RawSession::~RawSession() = default;
 const std::string& RawSession::filePath() const { return m_impl->path; }
 const RawMetadata& RawSession::metadata() const { return m_impl->metadata; }
 
-RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& params, RawCancelToken cancelToken)
+RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& params,
+                                         RawPreviewUpdate updates, RawCancelToken cancelToken)
 {
     if (maxEdge <= 0 || (cancelToken && cancelToken->load())) {
         return {};
     }
 
-    if (!m_impl->sip) {
+    const bool firstPreview = !m_impl->sip;
+    if (firstPreview) {
         // The SIP's destructor (~Impl) decreaseRef()s this once; balance it
         // here rather than relying on ProcessingJob's own increase/decrease
         // pairing, which is scoped to a single renderFull() call instead.
@@ -256,15 +263,23 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
 
     rtengine::procparams::ProcParams* next = sip->beginUpdateParams();
     *next = params.impl().procParams;
-    // Not EvProfileChanged: that maps to the `ALL` refresh bitmask
-    // (refreshmap.h), which deliberately excludes M_MONITOR — the bit
-    // ImProcCoordinator::updatePreviewImage() gates calling
-    // imageListener->imageReady() on (improccoordinator.cc). Without it the
-    // PreviewImageListener callback our PreviewWaiter blocks on never fires
-    // and waitForReady() hangs forever. `FIRST` is `ALL | M_MONITOR` — a
-    // full recompute that always notifies the listener, appropriate for a
-    // one-shot synchronous call like this (not a live/differential GUI edit).
-    sip->endUpdateParams(FIRST);
+    int refreshAction = FIRST;
+    if (!firstPreview && updates != RawPreviewUpdate::Full) {
+        // Use the same dependency masks as RawTherapee's GUI and explicitly
+        // include M_MONITOR so PreviewImageListener is notified. This is what
+        // lets exposure/color edits reuse demosaic and other upstream stages.
+        refreshAction = M_MONITOR;
+        auto* mapper = rtengine::RefreshMapper::getInstance();
+        if (hasUpdate(updates, RawPreviewUpdate::Exposure))
+            refreshAction |= mapper->getAction(rtengine::EvExpComp);
+        if (hasUpdate(updates, RawPreviewUpdate::WhiteBalance))
+            refreshAction |= mapper->getAction(rtengine::EvWBTemp);
+        if (hasUpdate(updates, RawPreviewUpdate::ShadowsHighlights))
+            refreshAction |= mapper->getAction(rtengine::EvSHHighlights);
+        if (hasUpdate(updates, RawPreviewUpdate::Color))
+            refreshAction |= mapper->getAction(rtengine::EvSaturation);
+    }
+    sip->endUpdateParams(refreshAction);
 
     if (!m_impl->previewWaiter->waitForReady()) {
         return {};
@@ -359,7 +374,7 @@ const RawMetadata& RawSession::metadata() const
     return empty;
 }
 
-RawImageBuffer RawSession::renderPreview(int, const RawDevelopParams&, RawCancelToken) { return {}; }
+RawImageBuffer RawSession::renderPreview(int, const RawDevelopParams&, RawPreviewUpdate, RawCancelToken) { return {}; }
 RawImageBuffer RawSession::renderFull(const RawDevelopParams&, RawProgressListener*, RawCancelToken) { return {}; }
 
 #endif

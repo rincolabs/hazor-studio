@@ -16,6 +16,30 @@
 // (Fase 4) is what actually moves these calls off the UI thread.
 using RawCancelToken = std::shared_ptr<std::atomic_bool>;
 
+// Coarse invalidation groups for interactive preview updates. They map to
+// rtengine's own refresh actions inside RawSession.cpp, keeping rtengine types
+// out of Hazor's public API while allowing its staged processor to reuse work.
+enum class RawPreviewUpdate : unsigned int {
+    None = 0,
+    Exposure = 1u << 0,
+    WhiteBalance = 1u << 1,
+    ShadowsHighlights = 1u << 2,
+    Color = 1u << 3,
+    Full = 0xffffffffu,
+};
+
+constexpr RawPreviewUpdate operator|(RawPreviewUpdate lhs, RawPreviewUpdate rhs)
+{
+    return static_cast<RawPreviewUpdate>(
+        static_cast<unsigned int>(lhs) | static_cast<unsigned int>(rhs));
+}
+
+constexpr RawPreviewUpdate& operator|=(RawPreviewUpdate& lhs, RawPreviewUpdate rhs)
+{
+    lhs = lhs | rhs;
+    return lhs;
+}
+
 class RawProgressListener {
 public:
     virtual ~RawProgressListener() = default;
@@ -57,7 +81,9 @@ public:
     // is running there is no way to interrupt it, only to wait for it.
     // Returns an empty RawImageBuffer (isEmpty()) if cancelled before
     // starting or if the engine isn't available.
-    RawImageBuffer renderPreview(int maxEdge, const RawDevelopParams& params, RawCancelToken cancelToken = nullptr);
+    RawImageBuffer renderPreview(int maxEdge, const RawDevelopParams& params,
+                                 RawPreviewUpdate updates = RawPreviewUpdate::Full,
+                                 RawCancelToken cancelToken = nullptr);
 
     // Full-quality, full-resolution render via ProcessingJob::create() +
     // rtengine::processImage(). Always RawPixelFormat::RGBFloat. Same

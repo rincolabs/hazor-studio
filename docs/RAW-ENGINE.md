@@ -107,10 +107,16 @@ need a separate tool.
 ## Hazor Develop
 
 Hazor Develop keeps its PP3 working copy outside the document until **Apply**.
-Its RGB histogram, camera metadata, profile selector, presets, collapsible
-panels, zoom/pan, Before/After, and clipping overlays are all local UI state.
-The interactive image is rendered through `RawSession::renderPreview()` on a
-worker with debounce; Apply is the only operation that calls
+Its RGB histogram is rebuilt independently through `HistogramCacheManager`;
+camera metadata, profile selector, presets, collapsible panels, zoom/pan,
+Before/After, and clipping overlays are all local UI state.
+The interactive image is rendered through one persistent `RawSession` on a
+dedicated serial worker with debounce. The decoded RAW and rtengine's staged
+preview caches therefore survive between slider changes; the preview edge is
+bounded by the visible viewport instead of always rendering a fixed oversized
+buffer. Light and Color edits also use rtengine's matching refresh masks, so
+they do not rerun demosaic and unrelated upstream stages. Apply is the only
+operation that calls
 `ImageController::rerevealRawLayer()`. That final render is full quality,
 asynchronous, and creates the existing `RawDevelopCommand` for undo/redo.
 

@@ -2,6 +2,7 @@
 
 #include "core/AppPaths.hpp"
 #include "ui/AppCheckBox.hpp"
+#include "histogram/HistogramCacheManager.hpp"
 #include "histogram/HistogramGenerator.hpp"
 #include "raw/RawDevelopService.hpp"
 #include "raw/RawEngine.hpp"
@@ -37,6 +38,7 @@
 #include <QSignalBlocker>
 #include <QRadialGradient>
 #include <QTabWidget>
+#include <QThreadPool>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -45,6 +47,10 @@
 #include <cmath>
 
 namespace {
+
+constexpr int kPreviewDebounceMs = 80;
+constexpr int kPreviewMinEdge = 768;
+constexpr int kPreviewMaxEdge = 1600;
 
 class DevelopSection final : public QWidget {
 public:
@@ -203,6 +209,14 @@ RawDevelopWindow::RawDevelopWindow(int flatIndex, const RawLayerData& rawData,
     setWindowTitle(tr("Hazor Develop"));
     resize(1480, 920);
     setMinimumSize(980, 620);
+
+    // RawSession and its StagedImageProcessor are serialized on one persistent
+    // worker. Keeping the thread alive also keeps the decoded RAW and rtengine
+    // caches warm across slider changes.
+    m_previewPool = new QThreadPool(this);
+    m_previewPool->setMaxThreadCount(1);
+    m_previewPool->setExpiryTimeout(-1);
+
     buildUi();
     connect(ThemeManager::instance(), &ThemeManager::themeChanged,
             this, &RawDevelopWindow::applyTheme);
@@ -216,6 +230,9 @@ RawDevelopWindow::~RawDevelopWindow()
 {
     if (m_previewWatcher && m_previewWatcher->isRunning())
         m_previewWatcher->waitForFinished();
+    if (m_previewPool)
+        m_previewPool->waitForDone();
+    m_previewSession.reset();
     if (m_ownsPreviewSourcePath && !m_previewSourcePath.isEmpty())
         QFile::remove(m_previewSourcePath);
 }
@@ -304,6 +321,16 @@ void RawDevelopWindow::buildUi()
     m_histogram->setHasDocument(true);
     m_histogram->setChannel(HistogramChannel::Colors);
     sideLayout->addWidget(m_histogram);
+
+    m_histogramCache = new HistogramCacheManager(this);
+    connect(m_histogramCache, &HistogramCacheManager::ready, this, [this]() {
+        if (!m_histogram)
+            return;
+        m_histogram->setData(m_histogramCache->data());
+        m_histogram->setStale(false);
+    });
+    connect(m_histogramCache, &HistogramCacheManager::computingChanged,
+            m_histogram, &HistogramWidget::setStale);
 
     m_metadataLabel = new QLabel(side);
     m_metadataLabel->setWordWrap(true);
@@ -423,6 +450,7 @@ void RawDevelopWindow::buildUi()
 
     m_previewDebounce = new QTimer(this);
     m_previewDebounce->setSingleShot(true);
+    m_previewDebounce->setInterval(kPreviewDebounceMs);
     m_previewWatcher = new QFutureWatcher<PreviewResult>(this);
     connect(m_previewDebounce, &QTimer::timeout, this, &RawDevelopWindow::startPreview);
     connect(m_previewWatcher, &QFutureWatcher<PreviewResult>::finished,
@@ -443,7 +471,7 @@ void RawDevelopWindow::buildUi()
         m_showBefore = before;
         m_beforeAfterButton->setText(before ? tr("After") : tr("Before"));
         updateDisplayedImage();
-        updateHistogram(before ? m_beforeImage : m_previewImage, false);
+        updateHistogram(before ? m_beforeImage : m_previewImage);
     });
     connect(m_shadowClipButton, &QToolButton::toggled, this, [this](bool on) {
         m_clipShadows = on; updateDisplayedImage();
@@ -454,11 +482,12 @@ void RawDevelopWindow::buildUi()
     connect(autoButton, &QToolButton::clicked, this, [this]() {
         auto light = m_params.light(); light.autoExposure = true; m_params.setLight(light);
         auto wb = m_params.whiteBalance(); wb.method = "Auto"; m_params.setWhiteBalance(wb);
-        syncControlsFromParams(); applyParamsChanged();
+        syncControlsFromParams();
+        applyParamsChanged(RawPreviewUpdate::Exposure | RawPreviewUpdate::WhiteBalance);
     });
     connect(m_blackWhiteCheck, &QCheckBox::toggled, this, [this](bool enabled) {
         if (m_syncing) return;
-        auto color = m_params.color(); color.blackAndWhite = enabled; m_params.setColor(color); applyParamsChanged();
+        auto color = m_params.color(); color.blackAndWhite = enabled; m_params.setColor(color); applyParamsChanged(RawPreviewUpdate::Color);
     });
     connect(m_profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_syncing) return;
@@ -535,15 +564,16 @@ RawDevelopSlider* RawDevelopWindow::addParamRow(QVBoxLayout* layout, const QStri
                                         int decimals, const QString& toolTip,
                                         const std::function<double()>& currentValue,
                                         const std::function<void(double)>& setValue,
+                                        RawPreviewUpdate previewUpdate,
                                         bool logarithmic, bool centerZeroLog, double logBase)
 {
     auto* row = new RawDevelopSlider(label, min, max, defaultValue, decimals,
                                      logarithmic, centerZeroLog, logBase);
     row->setToolTip(toolTip);
     layout->addWidget(row);
-    connect(row, &RawDevelopSlider::valueChanged, this, [this, setValue](double value) {
+    connect(row, &RawDevelopSlider::valueChanged, this, [this, setValue, previewUpdate](double value) {
         if (m_syncing) return;
-        setValue(value); applyParamsChanged();
+        setValue(value); applyParamsChanged(previewUpdate);
     });
     m_syncControls.push_back([row, currentValue]() { row->setValue(currentValue()); });
     return row;
@@ -572,18 +602,18 @@ QWidget* RawDevelopWindow::buildLightPanel()
     // centering (RawDevelopSlider's centerZeroLog), not just the range.
     addParamRow(layout, tr("Exposure"), -5, 12, 0, 2, tr("Exposure compensation, in EV."),
         [this] { return m_params.light().exposureEv; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.exposureEv = value; m_params.setLight(s); },
-        /*logarithmic=*/false, /*centerZeroLog=*/true, /*logBase=*/2.0);
+        RawPreviewUpdate::Exposure, /*logarithmic=*/false, /*centerZeroLog=*/true, /*logBase=*/2.0);
     addParamRow(layout, tr("Contrast"), -100, 100, 0, 0, tr("Tone curve contrast."),
-        [this] { return m_params.light().contrast; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.contrast = qRound(value); m_params.setLight(s); });
+        [this] { return m_params.light().contrast; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.contrast = qRound(value); m_params.setLight(s); }, RawPreviewUpdate::Exposure);
     addParamRow(layout, tr("Highlights"), 0, 100, 0, 0, tr("Highlight recovery strength."),
-        [this] { return m_params.light().highlights; }, [this](double value) { auto s = m_params.light(); s.highlights = qRound(value); m_params.setLight(s); });
+        [this] { return m_params.light().highlights; }, [this](double value) { auto s = m_params.light(); s.highlights = qRound(value); m_params.setLight(s); }, RawPreviewUpdate::ShadowsHighlights);
     addParamRow(layout, tr("Shadows"), 0, 100, 0, 0, tr("Shadow recovery strength."),
-        [this] { return m_params.light().shadows; }, [this](double value) { auto s = m_params.light(); s.shadows = qRound(value); m_params.setLight(s); });
+        [this] { return m_params.light().shadows; }, [this](double value) { auto s = m_params.light(); s.shadows = qRound(value); m_params.setLight(s); }, RawPreviewUpdate::ShadowsHighlights);
     addParamRow(layout, tr("Whites"), 0, 500, 0, 0, tr("Engine mapping: Highlight Compression. Positive values recover, rather than raise, white detail."),
-        [this] { return m_params.light().whiteRecovery; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.whiteRecovery = qRound(value); m_params.setLight(s); });
+        [this] { return m_params.light().whiteRecovery; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.whiteRecovery = qRound(value); m_params.setLight(s); }, RawPreviewUpdate::Exposure);
     addParamRow(layout, tr("Blacks"), -16384, 32768, 0, 0, tr("Engine mapping: Black Level; this is not Adobe's normalized Blacks control."),
         [this] { return m_params.light().blackPoint; }, [this](double value) { auto s = m_params.light(); s.autoExposure = false; s.blackPoint = qRound(value); m_params.setLight(s); },
-        /*logarithmic=*/false, /*centerZeroLog=*/true, /*logBase=*/10.0);
+        RawPreviewUpdate::Exposure, /*logarithmic=*/false, /*centerZeroLog=*/true, /*logBase=*/10.0);
     return panel;
 }
 
@@ -619,7 +649,7 @@ QWidget* RawDevelopWindow::buildColorPanel()
             auto wb = m_params.whiteBalance(); wb.method = "Custom"; wb.temperatureKelvin = qRound(value); m_params.setWhiteBalance(wb);
             QSignalBlocker blocker(m_whiteBalanceCombo);
             m_whiteBalanceCombo->setCurrentIndex(m_whiteBalanceCombo->findData(QStringLiteral("Custom")));
-        });
+        }, RawPreviewUpdate::WhiteBalance);
     const auto* theme = ThemeManager::instance()->current();
     m_temperatureSlider->setStops({
         {0.0, theme->colorAccentPressed},
@@ -638,10 +668,10 @@ QWidget* RawDevelopWindow::buildColorPanel()
             auto wb = m_params.whiteBalance(); wb.method = "Custom"; wb.green = value; m_params.setWhiteBalance(wb);
             QSignalBlocker blocker(m_whiteBalanceCombo);
             m_whiteBalanceCombo->setCurrentIndex(m_whiteBalanceCombo->findData(QStringLiteral("Custom")));
-        }, /*logarithmic=*/true);
+        }, RawPreviewUpdate::WhiteBalance, /*logarithmic=*/true);
     connect(m_whiteBalanceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_syncing) return;
-        auto wb = m_params.whiteBalance(); wb.method = m_whiteBalanceCombo->itemData(index).toString().toStdString(); m_params.setWhiteBalance(wb); applyParamsChanged();
+        auto wb = m_params.whiteBalance(); wb.method = m_whiteBalanceCombo->itemData(index).toString().toStdString(); m_params.setWhiteBalance(wb); applyParamsChanged(RawPreviewUpdate::WhiteBalance);
     });
     m_syncControls.push_back([this]() {
         const auto wb = m_params.whiteBalance();
@@ -654,14 +684,14 @@ QWidget* RawDevelopWindow::buildColorPanel()
         {1.0, theme->colorAccentHover}
     });
     auto* vibrance = addParamRow(layout, tr("Vibrance"), -100, 100, 0, 0, tr("Vibrance (protects already-saturated colors)."),
-        [this] { return m_params.color().vibrance; }, [this](double value) { auto s = m_params.color(); s.vibrance = qRound(value); m_params.setColor(s); });
+        [this] { return m_params.color().vibrance; }, [this](double value) { auto s = m_params.color(); s.vibrance = qRound(value); m_params.setColor(s); }, RawPreviewUpdate::Color);
     vibrance->setStops({
         {0.0, theme->colorAccentPressed},
         {0.5, theme->colorTextDisabled},
         {1.0, theme->colorDanger}
     });
     auto* saturation = addParamRow(layout, tr("Saturation"), -100, 100, 0, 0, tr("Tone curve saturation."),
-        [this] { return m_params.color().saturation; }, [this](double value) { auto s = m_params.color(); s.saturation = qRound(value); m_params.setColor(s); });
+        [this] { return m_params.color().saturation; }, [this](double value) { auto s = m_params.color(); s.saturation = qRound(value); m_params.setColor(s); }, RawPreviewUpdate::Color);
     saturation->setStops(ColorStops::hueSpectrum());
     return panel;
 }
@@ -893,9 +923,10 @@ void RawDevelopWindow::syncControlsFromParams()
     updateProfileSummary();
 }
 
-void RawDevelopWindow::applyParamsChanged()
+void RawDevelopWindow::applyParamsChanged(RawPreviewUpdate update)
 {
     ++m_previewGeneration;
+    m_pendingPreviewUpdates |= update;
     m_showBefore = false;
     if (m_beforeAfterButton) {
         QSignalBlocker blocker(m_beforeAfterButton);
@@ -909,11 +940,17 @@ void RawDevelopWindow::requestPreview()
 {
     if (!m_previewDebounce) return;
     m_previewStatus->setText(tr("Updating RAW preview…"));
-    m_previewDebounce->start(180);
+    m_previewDebounce->start();
 }
 
 void RawDevelopWindow::startPreview()
 {
+    // startPreview() can also be scheduled directly when an obsolete render
+    // finishes before the debounce expires. Cancel that timer so it cannot
+    // enqueue a redundant third render for the same generation.
+    if (m_previewDebounce)
+        m_previewDebounce->stop();
+
     if (!RawEngine::isAvailable() || !m_rawData.source) {
         m_previewStatus->setText(tr("RAW preview is unavailable in this build."));
         return;
@@ -934,8 +971,15 @@ void RawDevelopWindow::startPreview()
     // the first time, inside the worker below — never on the UI thread.
     const std::shared_ptr<const RawSource> source = m_rawData.source;
     const quint64 generation = m_previewGeneration;
+    const RawPreviewUpdate previewUpdates = m_pendingPreviewUpdates;
+    const QSize viewportSize = m_previewScroll ? m_previewScroll->viewport()->size() : QSize();
+    const qreal pixelRatio = m_previewScroll ? m_previewScroll->devicePixelRatioF() : 1.0;
+    const int viewportEdge = qCeil(std::max(viewportSize.width(), viewportSize.height()) * pixelRatio);
+    const int previewMaxEdge = std::clamp(viewportEdge, kPreviewMinEdge, kPreviewMaxEdge);
     m_previewPending = false;
-    m_previewWatcher->setFuture(QtConcurrent::run([params, existingSourcePath, source, generation]() {
+    m_pendingPreviewUpdates = RawPreviewUpdate::None;
+    m_previewWatcher->setFuture(QtConcurrent::run(m_previewPool,
+        [this, params, existingSourcePath, source, generation, previewMaxEdge, previewUpdates]() {
         PreviewResult result;
         result.generation = generation;
         QString sourcePath = existingSourcePath;
@@ -948,13 +992,16 @@ void RawDevelopWindow::startPreview()
             return result;
         }
         result.sourcePath = sourcePath;
-        std::string error;
-        auto session = RawEngine::openFile(sourcePath.toStdString(), &error);
-        if (!session) {
-            result.errorMessage = QString::fromStdString(error);
-            return result;
+        if (!m_previewSession) {
+            std::string error;
+            m_previewSession = RawEngine::openFile(sourcePath.toStdString(), &error);
+            if (!m_previewSession) {
+                result.errorMessage = QString::fromStdString(error);
+                return result;
+            }
         }
-        const RawImageBuffer buffer = session->renderPreview(2048, params);
+        const RawImageBuffer buffer = m_previewSession->renderPreview(
+            previewMaxEdge, params, previewUpdates);
         if (buffer.isEmpty()) {
             result.errorMessage = QObject::tr("RAW preview render failed.");
             return result;
@@ -1026,13 +1073,24 @@ void RawDevelopWindow::updateDisplayedImage()
     m_imageLabel->setFixedSize(pixmap.size());
 }
 
-void RawDevelopWindow::updateHistogram(const QImage& image, bool stale)
+void RawDevelopWindow::updateHistogram(const QImage& image)
 {
-    if (image.isNull() || !m_histogram) return;
+    if (image.isNull() || !m_histogram || !m_histogramCache)
+        return;
+
     HistogramGenerator::Options options;
+    options.source = HistogramSource::EntireImage;
     options.autoDownsample = true;
-    m_histogram->setData(HistogramGenerator::generate(image, nullptr, options));
-    m_histogram->setStale(stale);
+    options.maxSampledPixels = 500'000;
+
+    HistogramKey key;
+    key.generation = ++m_histogramGeneration;
+    key.source = HistogramSource::EntireImage;
+
+    // HistogramCacheManager owns the worker and keeps the last bins visible
+    // while this detached image is processed. The monotonically increasing
+    // key prevents a slower, superseded preview from replacing newer data.
+    m_histogramCache->request(image, QImage(), key, options);
 }
 
 void RawDevelopWindow::reloadPresets()

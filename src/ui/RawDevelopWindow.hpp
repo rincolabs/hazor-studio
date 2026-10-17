@@ -6,20 +6,24 @@
 #include <QString>
 #include <array>
 #include <functional>
+#include <memory>
 
 #include "raw/RawDevelopParams.hpp"
 #include "raw/RawLayerData.hpp"
+#include "raw/RawSession.hpp"
 
 class QComboBox;
 class QLabel;
 class QScrollArea;
 class QToolButton;
+class QThreadPool;
 class QTimer;
 class QWidget;
 class QResizeEvent;
 class QCloseEvent;
 
 class AppCheckBox;
+class HistogramCacheManager;
 class HistogramWidget;
 class CurveGraphWidget;
 class RawDevelopSlider;
@@ -72,19 +76,20 @@ private:
                            int decimals, const QString& toolTip,
                            const std::function<double()>& currentValue,
                            const std::function<void(double)>& setValue,
+                           RawPreviewUpdate previewUpdate = RawPreviewUpdate::Full,
                            bool logarithmic = false,
                            bool centerZeroLog = false, double logBase = 2.0);
     void addSection(class QVBoxLayout* layout, const QString& title,
                     QWidget* contents, const std::function<void()>& reset,
                     bool initiallyOpen = false);
     void syncControlsFromParams();
-    void applyParamsChanged();
+    void applyParamsChanged(RawPreviewUpdate update = RawPreviewUpdate::Full);
     void requestPreview();
     void startPreview();
     void previewFinished();
     void updatePreviewImage(const QImage& image);
     void updateDisplayedImage();
-    void updateHistogram(const QImage& image, bool stale = false);
+    void updateHistogram(const QImage& image);
     void reloadPresets();
     void applyPreset(int index);
     void savePreset();
@@ -110,9 +115,14 @@ private:
     bool m_applyInProgress = false;
     bool m_previewPending = false;
     quint64 m_previewGeneration = 0;
+    RawPreviewUpdate m_pendingPreviewUpdates = RawPreviewUpdate::Full;
+    quint64 m_histogramGeneration = 0;
 
     QFutureWatcher<PreviewResult>* m_previewWatcher = nullptr;
+    QThreadPool* m_previewPool = nullptr;
     QTimer* m_previewDebounce = nullptr;
+    std::unique_ptr<RawSession> m_previewSession;
+    HistogramCacheManager* m_histogramCache = nullptr;
 
     QLabel* m_imageLabel = nullptr;
     QScrollArea* m_previewScroll = nullptr;
