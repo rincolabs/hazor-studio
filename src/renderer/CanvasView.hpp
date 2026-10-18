@@ -434,10 +434,11 @@ private:
     // QMouseEvent from the pen's PointerInputEvent and feed it to our own mouse
     // handlers, so every tool (Hand, Move, Select, Crop, ...) reacts to the pen.
     void dispatchSynthesizedMouse(const PointerInputEvent& ev, QEvent::Type type);
-    // Single-Layer-Mode adjustment masks are baked on the CPU, so a live mask
-    // dab on the GPU FBO isn't visible until synced back. Called after each dab
-    // (requires the GL context current) to preview the effect in real time.
-    void previewAdjustmentMaskEdit(Layer* layer);
+    // Layer styles, filters and Single-Layer-Mode adjustments bake the mask into
+    // a CPU image, so a live mask dab on the GPU FBO isn't visible until synced
+    // back. Called after each dab (requires the GL context current) to preview
+    // the masked result in real time.
+    void previewBakedMaskEdit(Layer* layer);
     bool isBrushBasedTool() const;
     float clampedBrushSize(float size) const;
     float clampedBrushHardness(float hardness) const;

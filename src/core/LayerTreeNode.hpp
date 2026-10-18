@@ -103,12 +103,25 @@ public:
         return false;
     }
 
+    // True when at least one entry of `effects` actually changes pixels.
+    // `!effects.empty()` is NOT the same question: the Layer Styles dialog
+    // commits every style it knows about and keeps the unchecked ones (so their
+    // params survive a re-enable), so the vector stays non-empty forever once
+    // the dialog has been accepted once. Reading emptiness as "has effects"
+    // therefore pinned the layer to the baked effected pipeline with every
+    // style turned off — which, among other things, killed the live mask dab
+    // preview for good (see previewBakedMaskEdit).
+    bool hasEnabledEffects() const {
+        return std::any_of(effects.begin(), effects.end(),
+                           [](const LayerEffect& e) { return e.enabled; });
+    }
+
     // True when this layer's render must go through computeEffectedImage():
     // layer effects and/or Single-Layer-Mode adjustments are baked into one
     // image (mask included). The GPU then draws effectedTexture and the
     // compositors skip their separate mask pass.
     bool usesEffectedPipeline() const {
-        return !effects.empty() || hasVisibleAdjustmentChildren();
+        return hasEnabledEffects() || hasVisibleAdjustmentChildren();
     }
 
     // True when this Layer node's Single-Layer-Mode (clipped) adjustments are
@@ -337,7 +350,7 @@ public:
 
         if (!usesEffectedPipeline())
             return clampToMax(baseRenderImage());
-        if (!effects.empty())
+        if (hasEnabledEffects())
             return clampToMax(computeEffectedImage());
 
         QImage source = maskedBaseImage();

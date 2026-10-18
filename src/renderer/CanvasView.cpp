@@ -7398,7 +7398,7 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
         m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, layer,
                                selTex, selW, selH, selImage);
     }
-    previewAdjustmentMaskEdit(layer);
+    previewBakedMaskEdit(layer);
     doneCurrent();
 
     m_brushDrawing = true;
@@ -7432,19 +7432,25 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     update();
 }
 
-void CanvasView::previewAdjustmentMaskEdit(Layer* layer)
+void CanvasView::previewBakedMaskEdit(Layer* layer)
 {
     // A mask painted on the GPU FBO is invisible until synced back whenever the
     // mask is baked into a CPU "effected" image rather than sampled live by the
-    // GPU mask uniform. Two such cases involve adjustment layers:
+    // GPU mask uniform. Three such cases:
     //   1. Editing a Single-Layer-Mode adjustment's own mask — baked into the
     //      parent layer's effected image. (Normal-Mode/stack adjustments sample
     //      the GPU mask directly and are already live.)
     //   2. Editing the mask of a layer that *hosts* Single-Layer-Mode
     //      adjustments — that layer renders through its effected image, so its
     //      own mask is baked too.
-    // In both cases sync GPU→CPU + invalidate the bake each dab so the effect
-    // previews in real time.
+    //   3. Editing the mask of a layer carrying layer styles or filters: it
+    //      renders from effectedTexture/styledBaseTexture, both of which bake
+    //      the mask in (computeStyledBaseImage starts from maskedBaseImage).
+    //      Without this the dab only appeared when the stroke ended, which is
+    //      when endBrushStroke() does the same sync.
+    // In every case sync GPU→CPU + invalidate the bake each dab so the result
+    // previews in real time. The re-bake itself stays off the UI thread
+    // (StyleBakePool), exactly like a pixel dab on a styled layer.
     if (!m_editingMask || !m_controller || !layer || layer->maskImage.isNull())
         return;
     auto* node = m_doc ? m_doc->activeNode() : nullptr;
@@ -7457,8 +7463,8 @@ void CanvasView::previewAdjustmentMaskEdit(Layer* layer)
         maskIsBaked = node->parent
                    && node->parent->type == LayerTreeNode::Type::Layer;
     } else if (node->type == LayerTreeNode::Type::Layer) {
-        // Case 2: layer hosting Single-Layer-Mode adjustments.
-        maskIsBaked = node->hasVisibleAdjustmentChildren();
+        // Cases 2 and 3 — both are exactly "this layer bakes its own mask".
+        maskIsBaked = node->usesEffectedPipeline();
     }
     if (!maskIsBaked)
         return;
@@ -7514,7 +7520,7 @@ void CanvasView::continueBrushStroke(const BrushInputState& input,
         m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, layer,
                                selTex, selW, selH, selImage);
     }
-    previewAdjustmentMaskEdit(layer);
+    previewBakedMaskEdit(layer);
 
     update();
 }

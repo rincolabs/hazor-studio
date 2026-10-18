@@ -456,7 +456,9 @@ void LayerCompositor::renderNodes(
         if ((node->layer->maskTextureOutdated || node->layer->maskTextureId == 0)
             && !node->layer->maskImage.isNull()) {
             gpu->uploadMaskTexture(node->layer.get());
-            if (!node->effects.empty())
+            // The mask is part of the styled/effected bake, so a CPU-side mask
+            // change must rebuild it — not just re-upload the mask texture.
+            if (node->usesEffectedPipeline())
                 node->invalidateEffects();
         }
 
@@ -1007,7 +1009,7 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
     // drawAdjustmentPass, mirroring computeEffectedImage (styled base → clipped
     // adjustments). The styled base is uploaded once per style/pixel change, so
     // the drag itself does no CPU bake and no re-upload.
-    if (!node->effects.empty() && node->styledBaseTexture) {
+    if (node->hasEnabledEffects() && node->styledBaseTexture) {
         // Bounds of the uploaded bake (styledBaseTextureBounds), not of the
         // current params — see the effectedTextureBounds() note in
         // renderNodes(): the *ImageBounds() variant would re-run the style

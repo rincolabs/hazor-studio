@@ -1577,7 +1577,7 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
         // still running on a worker, so upload the interim bake if there is one
         // (the GPU applies the clipped adjustments over whatever styled base it
         // gets) and otherwise keep showing the previous styledBaseTexture.
-        if (node->clippedAdjustmentsOnGpu() && !node->effects.empty()
+        if (node->clippedAdjustmentsOnGpu() && node->hasEnabledEffects()
             && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)) {
             StyleBakePool::InterimBake interim;
             if (m_styleBakes.ensureFresh(node, node->styledBaseTexture != 0,
@@ -1949,7 +1949,7 @@ void GPUViewport::render(const RenderParams& p)
         // style/pixel/mask change (NOT on adjustment param drags), so this fires
         // once after such a change and never per drag frame — the drag itself
         // reuses the texture and runs entirely through drawAdjustmentPass.
-        if (node->clippedAdjustmentsOnGpu() && !node->effects.empty()
+        if (node->clippedAdjustmentsOnGpu() && node->hasEnabledEffects()
             && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)
             && !m_styleBakes.isBuilding(node)) {
             needsLayerSync = true;
