@@ -689,6 +689,59 @@ void GPUViewport::initShaders()
     m_dotU.dotColor     = m_dotProg->uniformLocation("uDotColor");
     m_dotU.spacing      = m_dotProg->uniformLocation("uSpacing");
     m_dotU.radius       = m_dotProg->uniformLocation("uRadius");
+
+    // ── Canvas drop-shadow program ──
+    // Fullscreen pass, like the dot pattern above: the falloff is evaluated
+    // analytically from gl_FragCoord against the canvas's on-screen rect, so
+    // it is correct and symmetric on all four edges (and their corners)
+    // without needing separate geometry per side. The math is the exact
+    // closed-form 2D Gaussian blur of an axis-aligned rectangle, which
+    // separates into the product of two independent 1D blurred edges —
+    // erf() is the blurred step function for one edge pair.
+    m_shadowProg = new QOpenGLShaderProgram();
+    const QByteArray shadowVSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            layout(location = 0) in vec2 pos;
+            void main() { gl_Position = vec4(pos, 0.0, 1.0); }
+        )");
+    const QByteArray shadowFSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            out vec4 fragColor;
+            uniform vec2 uRectCenter;
+            uniform vec2 uRectHalfSize;
+            uniform float uSigma;
+            uniform vec4 uColor;
+            // Abramowitz-Stegun rational approximation of erf(), accurate to
+            // ~1e-4 — plenty for a soft-shadow falloff.
+            float erfApprox(float x) {
+                float s = sign(x);
+                float a = abs(x);
+                float y = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+                float y2 = y * y;
+                return s - s / (y2 * y2);
+            }
+            // Gaussian (sigma) blur of a 1D box of half-size `halfSize`, sampled at t.
+            float blurredEdge(float t, float halfSize, float sigma) {
+                float inv = 0.70710678 / max(sigma, 1e-3);
+                return 0.5 * (erfApprox((t + halfSize) * inv) - erfApprox((t - halfSize) * inv));
+            }
+            void main() {
+                vec2 p = gl_FragCoord.xy - uRectCenter;
+                float a = blurredEdge(p.x, uRectHalfSize.x, uSigma)
+                        * blurredEdge(p.y, uRectHalfSize.y, uSigma);
+                fragColor = vec4(uColor.rgb, uColor.a * a);
+            }
+        )");
+    m_shadowProg->bindAttributeLocation("pos", 0);
+    if (!m_shadowProg->addShaderFromSourceCode(QOpenGLShader::Vertex, shadowVSrc) ||
+        !m_shadowProg->addShaderFromSourceCode(QOpenGLShader::Fragment, shadowFSrc) ||
+        !m_shadowProg->link()) {
+        qWarning("Canvas shadow shader failed: %s", qPrintable(m_shadowProg->log()));
+    }
+    m_shadowU.rectCenter   = m_shadowProg->uniformLocation("uRectCenter");
+    m_shadowU.rectHalfSize = m_shadowProg->uniformLocation("uRectHalfSize");
+    m_shadowU.sigma        = m_shadowProg->uniformLocation("uSigma");
+    m_shadowU.color        = m_shadowProg->uniformLocation("uColor");
 }
 
 void GPUViewport::collectUniforms()

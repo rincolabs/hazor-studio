@@ -139,6 +139,7 @@ GPUViewport::~GPUViewport()
     if (m_adjustProg)   delete m_adjustProg;
     if (m_displayProg)  delete m_displayProg;
     if (m_dotProg)      delete m_dotProg;
+    if (m_shadowProg)   delete m_shadowProg;
     if (m_curveLutTex)   glDeleteTextures(1, &m_curveLutTex);
     if (m_displayLutTex) glDeleteTextures(1, &m_displayLutTex);
     if (m_sceneTex)      glDeleteTextures(1, &m_sceneTex);
@@ -1218,17 +1219,69 @@ void GPUViewport::renderCanvasDecorations(const RenderParams& p,
     QMatrix4x4 sm = vm;
     sm.scale(hx, hy);
 
-    // Shadow
-    m_solidProg->bind();
-    m_solidProg->setUniformValue(m_solidU.transform, sm);
-    QMatrix4x4 shadowMvp = sm;
-    shadowMvp.translate(0.006f, -0.006f);
-    m_solidProg->setUniformValue(m_solidU.transform, shadowMvp);
-    m_solidProg->setUniformValue(m_solidU.color, 0.0f, 0.0f, 0.0f, 0.3f);
-    m_vao.bind();
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendEquation(GL_FUNC_ADD);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // Shadow — two soft passes (a tight "contact" shadow where the canvas
+    // meets the pasteboard, plus a wider, fainter "ambient" one), both
+    // evaluated as an analytic Gaussian blur of the canvas's screen-space
+    // rect rather than drawn as an offset copy of the canvas quad. The old
+    // approach drew one hard-edged quad the exact size of the canvas,
+    // nudged diagonally by a few pixels: the canvas (drawn on top right
+    // afterwards) then fully covered the two edges the offset moved *toward*
+    // (top/left), leaving a visible sliver only on the other two. Deriving
+    // the falloff from distance-to-rect instead means all four edges — and
+    // their corners — fall off identically and smoothly by construction, so
+    // there is no per-edge special-casing to get wrong.
+    if (m_shadowProg && m_shadowProg->isLinked()) {
+        QVector4D corners[4] = {
+            vm * QVector4D(-hx, -hy, 0, 1),
+            vm * QVector4D( hx, -hy, 0, 1),
+            vm * QVector4D(-hx,  hy, 0, 1),
+            vm * QVector4D( hx,  hy, 0, 1),
+        };
+        float leftNdc = 1e9f, rightNdc = -1e9f;
+        float bottomNdc = 1e9f, topNdc = -1e9f;
+        for (auto& c : corners) {
+            float nx = c.x() / c.w();
+            float ny = c.y() / c.w();
+            leftNdc   = std::min(leftNdc, nx);
+            rightNdc  = std::max(rightNdc, nx);
+            bottomNdc = std::min(bottomNdc, ny);
+            topNdc    = std::max(topNdc, ny);
+        }
+        // Device pixels (gl_FragCoord space), matching GL_VIEWPORT rather
+        // than RenderParams::viewportW/H (logical pixels) — the two differ
+        // under a HiDPI device-pixel ratio.
+        GLint vp[4];
+        glGetIntegerv(GL_VIEWPORT, vp);
+        const float leftPx   = (leftNdc   + 1.0f) * 0.5f * vp[2] + vp[0];
+        const float rightPx  = (rightNdc  + 1.0f) * 0.5f * vp[2] + vp[0];
+        const float bottomPx = (bottomNdc + 1.0f) * 0.5f * vp[3] + vp[1];
+        const float topPx    = (topNdc    + 1.0f) * 0.5f * vp[3] + vp[1];
+        const QVector2D rectCenter((leftPx + rightPx) * 0.5f, (bottomPx + topPx) * 0.5f);
+        const QVector2D rectHalfSize((rightPx - leftPx) * 0.5f, (topPx - bottomPx) * 0.5f);
+        const float dpr = p.viewportW > 0
+            ? static_cast<float>(vp[2]) / static_cast<float>(p.viewportW) : 1.0f;
+
+        m_shadowProg->bind();
+        m_vao.bind();
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendEquation(GL_FUNC_ADD);
+        m_shadowProg->setUniformValue(m_shadowU.rectHalfSize, rectHalfSize);
+
+        // Ambient: wide, very soft, barely offset — the diffuse falloff a
+        // raised document casts over the whole pasteboard.
+        m_shadowProg->setUniformValue(m_shadowU.rectCenter,
+            rectCenter + QVector2D(0.0f, -6.0f * dpr));
+        m_shadowProg->setUniformValue(m_shadowU.sigma, 22.0f * dpr);
+        m_shadowProg->setUniformValue(m_shadowU.color, 0.0f, 0.0f, 0.0f, 0.20f);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        // Contact: tight and a touch more opaque, anchoring the edge itself.
+        m_shadowProg->setUniformValue(m_shadowU.rectCenter,
+            rectCenter + QVector2D(0.0f, -2.0f * dpr));
+        m_shadowProg->setUniformValue(m_shadowU.sigma, 6.0f * dpr);
+        m_shadowProg->setUniformValue(m_shadowU.color, 0.0f, 0.0f, 0.0f, 0.28f);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
 
     // Checkerboard: compact, screen-space squares like professional editors.
     if (m_checkerTexture) {

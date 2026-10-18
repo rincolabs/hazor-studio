@@ -209,7 +209,7 @@ public:
     void refreshShapeLayerSprites(Document* doc, const RenderParams& p);
 
 private:
-    // ── Shader programs (9) ──
+    // ── Shader programs (10) ──
     QOpenGLShaderProgram* m_mainProg      = nullptr;
     QOpenGLShaderProgram* m_solidProg     = nullptr;
     QOpenGLShaderProgram* m_blendProg     = nullptr;
@@ -219,6 +219,7 @@ private:
     QOpenGLShaderProgram* m_adjustProg    = nullptr;
     QOpenGLShaderProgram* m_displayProg   = nullptr; // final display-CM pass (3D LUT)
     QOpenGLShaderProgram* m_dotProg       = nullptr; // pasteboard dot pattern
+    QOpenGLShaderProgram* m_shadowProg    = nullptr; // canvas drop shadow (contact + ambient)
 
     // ── VAO / VBO (3 sets) ──
     QOpenGLVertexArrayObject m_vao, m_canvasVao, m_fboVao;
@@ -406,6 +407,11 @@ private:
     struct {
         GLint bgColor = -1, dotColor = -1, spacing = -1, radius = -1;
     } m_dotU;
+
+    // ── Uniform layout: canvas shadow program ──
+    struct {
+        GLint rectCenter = -1, rectHalfSize = -1, sigma = -1, color = -1;
+    } m_shadowU;
 
     // 256×1 RGBA8 LUT texture for the "curves" adjustment (per-channel combined
     // LUTs). Lazily created, re-uploaded each adjustment pass that needs it.
