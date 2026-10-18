@@ -22,6 +22,13 @@ void Document::loadChannelToSelection(int index, SelectMode mode)
 
     // A channel saved before a document resize would otherwise load as a
     // misaligned top-left block — rescale it to the current canvas.
+    //
+    // This is a stopgap, not the intended behaviour: channels are document-space
+    // masks that nothing re-frames when the canvas changes (see the KNOWN GAP in
+    // ImageController's reframeDocumentSpaceState). Stretching is only right for
+    // an image resize; after a crop or a canvas resize the channel should be
+    // sliced/padded instead, and it is this fallback that distorts it. Drop the
+    // rescale once the channels feature re-frames them at the source.
     if (chMask.size() != selection.image().size())
         chMask = chMask.scaled(selection.width(), selection.height(),
                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation);

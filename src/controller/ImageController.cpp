@@ -4038,6 +4038,124 @@ bool ImageController::resizeImageAsync(const ImageResizeOptions& options)
         [options](Document& doc) { return applyResizeImageState(&doc, options); });
 }
 
+// Extracts the slice of a document-space mask that survives a canvas re-frame,
+// re-based to origin (0, 0) on the new canvas. `srcRect` is the old-document
+// rectangle that becomes the new canvas, so its size IS the new canvas size: a
+// crop passes its crop rect, a canvas resize passes the negated anchor offset.
+// Pixels the old mask never covered read 255 — the same "no mask here means
+// apply fully" rule the compositors and the adjust shader use outside maskImage.
+static QImage reframeDocSpaceMask(const QImage& maskIn, const QPoint& origin,
+                                  const QRect& srcRect)
+{
+    const QImage mask = maskIn.format() == QImage::Format_Grayscale8
+        ? maskIn
+        : maskIn.convertToFormat(QImage::Format_Grayscale8);
+
+    QImage out(srcRect.size(), QImage::Format_Grayscale8);
+    out.fill(255);
+    for (int y = 0; y < srcRect.height(); ++y) {
+        const int my = srcRect.y() + y - origin.y();
+        if (my < 0 || my >= mask.height())
+            continue;
+        const uchar* in = mask.constScanLine(my);
+        uchar* dst = out.scanLine(y);
+        for (int x = 0; x < srcRect.width(); ++x) {
+            const int mx = srcRect.x() + x - origin.x();
+            if (mx >= 0 && mx < mask.width())
+                dst[x] = in[mx];
+        }
+    }
+    return out;
+}
+
+// Moves every piece of document-space state onto a new canvas frame. Shared by
+// crop and canvas resize: both leave the layer pixels alone and only re-frame
+// the canvas around them. `docRemap` maps old document NDC to new document NDC;
+// `srcRect` expresses the same move in old-document pixels (see
+// reframeDocSpaceMask).
+//
+// Root transforms are POST-multiplied. A node's own transform already maps its
+// pixels into the OLD canvas, and QTransform is row-vector — the leftmost factor
+// applies first, which is why LayerTreeNode::accumulatedTransform walks
+// leaf-to-root as `xf * n->transform` — so the re-frame has to be the last
+// factor. Pre-multiplying it instead displaced and rescaled every layer that
+// carried a transform of its own (anything moved, scaled or rotated, or pasted
+// across documents) while untransformed layers still looked right, because for
+// those the two orders happen to coincide. Note the contrast with the
+// layer-local corrections in expandLayer/ensureWritableRect, which remap the
+// layer's own grown image and therefore DO pre-multiply.
+//
+// Stack (Normal-Mode) adjustments are skipped on purpose: both compositors
+// sample their mask in document space and ignore the node transform entirely
+// (DocumentCompositor::applyAdjustmentNode, LayerCompositor's canvas quad), so
+// for them the re-frame belongs on the mask — and parking it on the transform
+// only desyncs mask painting, which does read accumulatedTransform(). Clipped
+// (Single Layer Mode) adjustments hold their mask in the parent layer's pixel
+// space, which a canvas re-frame never touches.
+//
+// KNOWN GAP — saved alpha channels (`doc->channels`) are document-space masks
+// and are deliberately NOT re-framed here. They would belong in this function
+// (crop: take the `srcRect` slice; grow: pad with 0 = unselected), but the
+// channels feature is still partial — nothing re-frames, resamples or even
+// resizes them today — so fixing only this half would leave the data model
+// inconsistent with the rest of the channels surface.
+// Document::loadChannelToSelection absorbs the mismatch in the meantime by
+// stretching a stale channel onto the current canvas, which is wrong after a
+// crop (it distorts instead of cropping) but neither crashes nor loads as a
+// misaligned top-left block.
+// Re-frame them here as part of completing the channels feature.
+static void reframeDocumentSpaceState(Document* doc, const QTransform& docRemap,
+                                      const QRect& srcRect)
+{
+    for (auto& root : doc->roots) {
+        auto* node = root.get();
+        if (!node || node->type == LayerTreeNode::Type::Adjustment)
+            continue;
+        node->transform = node->transform * docRemap;
+        // Keep "Reset transform" aiming at the layer's home position in the NEW
+        // frame instead of snapping it back into the old one.
+        if (node->layer && node->layer->hasResetTransform)
+            node->layer->resetTransform = node->layer->resetTransform * docRemap;
+    }
+
+    for (auto* node : doc->flatten()) {
+        if (!node || node->type != LayerTreeNode::Type::Adjustment || !node->layer)
+            continue;
+        if (node->parent && node->parent->type == LayerTreeNode::Type::Layer)
+            continue;  // clipped — mask lives in the parent layer's pixel space
+        auto* layer = node->layer.get();
+        if (!layer->maskImage.isNull()) {
+            layer->maskImage = reframeDocSpaceMask(layer->maskImage,
+                                                   layer->maskOrigin, srcRect);
+            if (!layer->maskRawImage.isNull()) {
+                // The unfeathered source shares maskImage's geometry and origin.
+                layer->maskRawImage = reframeDocSpaceMask(layer->maskRawImage,
+                                                          layer->maskOrigin, srcRect);
+            }
+            layer->maskOrigin = QPoint(0, 0);
+            layer->maskThumbDirty = true;
+            layer->maskTextureOutdated = true;
+        }
+        // The transparent placeholder is what defines the document coordinate
+        // space the mask tools work in (see addAdjustmentLayer), so it has to
+        // follow the canvas.
+        layer->cpuImage = QImage(srcRect.size(), QImage::Format_RGBA8888);
+        layer->cpuImage.fill(Qt::transparent);
+    }
+
+    auto guides = doc->guideManager.guides();
+    for (auto& guide : guides) {
+        if (guide.orientation == GuideOrientation::Vertical) {
+            guide.position = std::clamp<qreal>(guide.position - srcRect.x(),
+                                               0.0, std::max(0, srcRect.width()));
+        } else {
+            guide.position = std::clamp<qreal>(guide.position - srcRect.y(),
+                                               0.0, std::max(0, srcRect.height()));
+        }
+    }
+    doc->guideManager.setGuides(std::move(guides));
+}
+
 static bool applyResizeCanvasState(Document* doc, const CanvasResizeOptions& options)
 {
     if (!doc || !options.targetSize.isValid() || options.targetSize.isEmpty())
@@ -4051,26 +4169,14 @@ static bool applyResizeCanvasState(Document* doc, const CanvasResizeOptions& opt
     const QTransform adjust = oldDocToNewDocNoScale(oldSize, newSize,
                                                      offset.x(), offset.y());
 
-    for (auto& root : doc->roots) {
-        if (root)
-            root->transform = adjust * root->transform;
-    }
+    // srcRect: the old-document rectangle that becomes the new canvas. The
+    // anchor offset places the old canvas inside the new one, so old-document
+    // (-offset) is what lands on new-document (0, 0).
+    reframeDocumentSpaceState(doc, adjust, QRect(-offset, newSize));
 
     doc->size = newSize;
     doc->selection.image() = translateMaskToCanvas(doc->selection.image(), newSize, offset);
     doc->selection.resize(newSize.width(), newSize.height());
-
-    auto guides = doc->guideManager.guides();
-    for (auto& guide : guides) {
-        if (guide.orientation == GuideOrientation::Vertical) {
-            guide.position = std::clamp<qreal>(
-                guide.position + offset.x(), 0.0, std::max(0, newSize.width()));
-        } else {
-            guide.position = std::clamp<qreal>(
-                guide.position + offset.y(), 0.0, std::max(0, newSize.height()));
-        }
-    }
-    doc->guideManager.setGuides(std::move(guides));
 
     if (options.fillExtension
         && options.extensionColor.alpha() > 0
@@ -4166,14 +4272,6 @@ static bool applyCropDocumentState(Document* doc, const QRect& cropRect)
     const double docW = static_cast<double>(doc->size.width());
     const double docH = static_cast<double>(doc->size.height());
 
-    std::vector<int> rootFlatIndices;
-    auto flat = doc->flatten();
-    for (int fi = 0; fi < static_cast<int>(flat.size()); ++fi) {
-        auto* node = flat[fi];
-        if (node && !node->parent)
-            rootFlatIndices.push_back(fi);
-    }
-
     const double sx = docW / static_cast<double>(cropW);
     const double sy = docH / static_cast<double>(cropH);
     const double tx = (docW - 2.0 * cropX - cropW) / static_cast<double>(cropW);
@@ -4183,11 +4281,7 @@ static bool applyCropDocumentState(Document* doc, const QRect& cropRect)
         0.0, sy, 0.0,
         tx, ty, 1.0);
 
-    for (int flatIndex : rootFlatIndices) {
-        auto* node = doc->nodeAt(flatIndex);
-        if (node)
-            node->transform = oldDocToNewDoc * node->transform;
-    }
+    reframeDocumentSpaceState(doc, oldDocToNewDoc, crop);
 
     doc->size = QSize(cropW, cropH);
     doc->selection.resize(cropW, cropH);
