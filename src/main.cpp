@@ -10,6 +10,8 @@
 #include <QImageReader>
 #include <QFileOpenEvent>
 #include <QEvent>
+#include <QFont>
+#include <QFontDatabase>
 #include <memory>
 #include "ui/MainWindow.hpp"
 #include "ui/SplashScreen.hpp"
@@ -46,6 +48,23 @@ public:
         }
     }
 };
+
+// Embeds Inter (Regular/Medium/SemiBold/Bold) from Qt resources so the UI
+// typography doesn't depend on the font being installed on the host OS.
+// Theme::fontFamily names this same family; see src/theme/Theme.hpp.
+static void registerInterFonts()
+{
+    static const char* kWeights[] = {
+        ":/fonts/Inter-Regular.ttf",
+        ":/fonts/Inter-Medium.ttf",
+        ":/fonts/Inter-SemiBold.ttf",
+        ":/fonts/Inter-Bold.ttf",
+    };
+    for (const char* path : kWeights) {
+        if (QFontDatabase::addApplicationFont(QString::fromLatin1(path)) == -1)
+            qWarning() << "Failed to load embedded font" << path;
+    }
+}
 
 static bool isSupportedBrushImportFile(const QString& filePath)
 {
@@ -117,6 +136,10 @@ int main(int argc, char* argv[])
 {
     CrashHandler::install();
     QApplication app(argc, argv);
+
+    registerInterFonts();
+    QApplication::setFont(QFont(QStringLiteral("Inter")));
+
     // Force the Fusion base style on every platform so the app looks identical
     // regardless of the host desktop (Windows native, KDE Breeze, GTK, …). Fusion
     // is compiled into QtWidgets, so it is always available. The proxy only

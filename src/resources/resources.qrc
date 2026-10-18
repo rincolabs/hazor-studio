@@ -1,5 +1,9 @@
 <RCC>
     <qresource prefix="/">
+        <file>fonts/Inter-Regular.ttf</file>
+        <file>fonts/Inter-Medium.ttf</file>
+        <file>fonts/Inter-SemiBold.ttf</file>
+        <file>fonts/Inter-Bold.ttf</file>
         <file>icons/move.png</file>
         <file>icons/skew.png</file>
         <file>icons/brush.png</file>
