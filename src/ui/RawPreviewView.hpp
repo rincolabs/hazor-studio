@@ -7,8 +7,6 @@
 #include <QString>
 #include <QWidget>
 
-class QTimer;
-
 // The Hazor Develop viewport: the dotted pasteboard, the composed frame, the
 // Before/After split and drag panning, in one widget.
 //
@@ -47,9 +45,10 @@ public:
 
     void setPlaceholderText(const QString& text);
 
-    // Transient notice in the top-left corner. Never takes the mouse, and
-    // disappears on its own; the status bar keeps the lasting copy.
-    void showNotice(const QString& text, const QColor& accent, int milliseconds = 4000);
+    // Notice card in the top-left corner. Never takes the mouse; stays up for
+    // as long as the caller keeps calling showNotice() and disappears only
+    // once clearNotice() is called, matching the status bar's own lifetime.
+    void showNotice(const QString& text, const QColor& accent);
     void clearNotice();
 
 signals:
@@ -97,5 +96,4 @@ private:
 
     QString m_noticeText;
     QColor m_noticeAccent;
-    QTimer* m_noticeTimer = nullptr;
 };

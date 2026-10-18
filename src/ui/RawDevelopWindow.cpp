@@ -41,6 +41,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -358,6 +359,13 @@ RawDevelopWindow::RawDevelopWindow(const RawLayerData& rawData,
     setWindowTitle(tr("Hazor Develop"));
     resize(1480, 920);
     setMinimumSize(980, 620);
+    // Independent top-level window: Qt never centers it on its parent on its
+    // own, so without this it lands wherever the window manager defaults to
+    // (typically the screen's top-left corner).
+    const QRect anchor = parent ? parent->frameGeometry()
+        : (screen() ? screen()->availableGeometry() : QRect());
+    if (!anchor.isEmpty())
+        move(anchor.center() - QPoint(width() / 2, height() / 2));
     buildTitleBar();
 
     // RawSession and its StagedImageProcessor are serialized on one persistent
@@ -1494,9 +1502,8 @@ void RawDevelopWindow::refreshPreviewStatus()
         m_noticeIcon->setPixmap(noticeBadge(alert.severity));
         m_noticeLabel->setText(alert.message);
         m_noticeLabel->setToolTip(alert.message);
-        // A condition the user just created — by enabling a 1:1-only stage,
-        // or by zooming away from it — also gets a short-lived copy over the
-        // image. The status bar keeps it for as long as it holds.
+        // Mirrored over the image for as long as the status bar shows it;
+        // re-setting on every unchanged call would just repaint for nothing.
         if (alert.message != m_lastNotice)
             m_preview->showNotice(alert.message, noticeAccent(alert.severity));
     } else {
@@ -1579,7 +1586,6 @@ void RawDevelopWindow::startPreview()
     const QRect detailRequest = detailRegionRequest();
     m_previewPending = false;
     m_pendingPreviewUpdates = RawPreviewUpdate::None;
-    refreshPreviewStatus();
     m_previewWatcher->setFuture(QtConcurrent::run(m_previewPool,
         [this, params, existingSourcePath, source, generation, previewMaxEdge, previewUpdates,
          detailRequest]() {
@@ -1632,6 +1638,11 @@ void RawDevelopWindow::startPreview()
         }
         return result;
     }));
+    // Only now does m_previewWatcher->isRunning() actually report the render
+    // that just started; refreshing before setFuture() reads the watcher's
+    // stale (not-running) state and hides the progress bar for the render's
+    // whole duration instead of showing it.
+    refreshPreviewStatus();
 }
 
 void RawDevelopWindow::previewFinished()

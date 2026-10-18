@@ -184,8 +184,8 @@ private:
     quint64 m_histogramGeneration = 0;
     // Latest engine/source failure, cleared by the next successful render.
     QString m_previewError;
-    // What the status bar last reported, so the transient viewport overlay
-    // only fires when the condition itself changes.
+    // What the status bar last reported, so the viewport overlay only
+    // repaints when the condition itself changes.
     QString m_lastNotice;
     // The split view's comparison half. The before frame never changes, so
     // the cache spares a full-resolution crop-and-scale on every render.

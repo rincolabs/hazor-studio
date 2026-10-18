@@ -9,7 +9,6 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QResizeEvent>
-#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -33,10 +32,6 @@ RawPreviewView::RawPreviewView(QWidget* parent)
     setMinimumSize(240, 180);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
-
-    m_noticeTimer = new QTimer(this);
-    m_noticeTimer->setSingleShot(true);
-    connect(m_noticeTimer, &QTimer::timeout, this, &RawPreviewView::clearNotice);
 
     rebuildDotTile();
     connect(ThemeManager::instance(), &ThemeManager::themeChanged, this, [this]() {
@@ -123,11 +118,10 @@ void RawPreviewView::setPlaceholderText(const QString& text)
     update();
 }
 
-void RawPreviewView::showNotice(const QString& text, const QColor& accent, int milliseconds)
+void RawPreviewView::showNotice(const QString& text, const QColor& accent)
 {
     m_noticeText = text;
     m_noticeAccent = accent;
-    m_noticeTimer->start(milliseconds);
     update();
 }
 
@@ -136,7 +130,6 @@ void RawPreviewView::clearNotice()
     if (m_noticeText.isEmpty())
         return;
     m_noticeText.clear();
-    m_noticeTimer->stop();
     update();
 }
 
