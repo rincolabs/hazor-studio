@@ -1353,10 +1353,10 @@ MainWindow::MainWindow(QWidget* parent)
         });
     }
 
-    // Minimum width: 25% of screen, applied to each group's anchor dock. The
+    // Minimum width: 12.5% of screen, applied to each group's anchor dock. The
     // actual default arrangement is applied once via resetDockLayout() at the end
     // of construction (shared with Window → Reset Panel Layout).
-    int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 6;
+    int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 8;
     m_histogramDock->setMinimumWidth(minW);
     m_layersDock->setMinimumWidth(minW);
 
@@ -5180,6 +5180,13 @@ void MainWindow::resetDockLayout()
     tabifyDockWidget(m_layersDock, m_agentDock);
 
     resizeDocks({m_histogramDock, m_layersDock}, {3, 7}, Qt::Vertical);
+
+    // Force the right column's default width down to its minimum; otherwise
+    // Qt's dock layout sizes it from the panels' sizeHint(), which ignores
+    // setMinimumWidth() above and renders wider than intended.
+    const int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 8;
+    resizeDocks({m_layersDock}, {minW}, Qt::Horizontal);
+
     m_propsDock->raise(); // default active tab per group
     m_layersDock->raise();
     m_histogramDock->hide();
