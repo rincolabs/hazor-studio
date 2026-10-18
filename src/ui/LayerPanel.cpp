@@ -777,9 +777,12 @@ void LayerPanel::refresh()
         item->setData(0, Qt::UserRole + 2, node->collapsed ? 1 : 0);
 
         // Groups and layers hosting Single-Layer-Mode adjustments are
-        // expandable in the tree.
+        // expandable in the tree. Use hasAdjustmentChildren() (not the
+        // visible-only variant) so a hidden nested adjustment keeps its
+        // parent row expandable instead of stranding it as an unreachable
+        // child.
         if (node->type == LayerTreeNode::Type::Group
-            || node->hasVisibleAdjustmentChildren())
+            || node->hasAdjustmentChildren())
             item->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
 
         item->setText(0, node->name.isEmpty()
@@ -796,7 +799,7 @@ void LayerPanel::refresh()
 
     for (auto it = itemMap.begin(); it != itemMap.end(); ++it) {
         const bool expandable = it.key()->type == LayerTreeNode::Type::Group
-            || it.key()->hasVisibleAdjustmentChildren();
+            || it.key()->hasAdjustmentChildren();
         if (expandable && !it.key()->collapsed)
             it.value()->setExpanded(true);
     }

@@ -128,7 +128,7 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
     // Expand/collapse arrow for a layer that hosts Single-Layer-Mode
     // adjustment children (groups draw their own arrow below).
     if (node->type == LayerTreeNode::Type::Layer
-        && node->hasVisibleAdjustmentChildren()) {
+        && node->hasAdjustmentChildren()) {
         QRect arrowR(x, r.center().y() - kArrowSize / 2, kArrowSize, kArrowSize);
         painter->setPen(th->colorTextPrimary);
         QFont arrowFont = painter->font();
@@ -459,7 +459,7 @@ bool LayerItemDelegate::editorEvent(QEvent* event, QAbstractItemModel* model,
         auto* node = nodeFromIndex(index);
         // Layer hosting adjustment children: toggle expand via its arrow.
         if (node && node->type == LayerTreeNode::Type::Layer
-            && node->hasVisibleAdjustmentChildren()) {
+            && node->hasAdjustmentChildren()) {
             QRect ar = expandRect(option, index);
             if (ar.contains(mouseEvent->pos())) {
                 node->collapsed = !node->collapsed;
@@ -676,7 +676,7 @@ int LayerItemDelegate::layerExpandArrowSpace(const QModelIndex& index) const
 {
     auto* node = nodeFromIndex(index);
     if (node && node->type == LayerTreeNode::Type::Layer
-        && node->hasVisibleAdjustmentChildren())
+        && node->hasAdjustmentChildren())
         return kArrowSize + kGap;
     return 0;
 }

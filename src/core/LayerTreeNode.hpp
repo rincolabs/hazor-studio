@@ -91,6 +91,20 @@ public:
         return false;
     }
 
+    // UI-only: true when this Layer node has Single-Layer-Mode adjustment
+    // children regardless of their own visibility toggle. The layer panel
+    // uses this (not hasVisibleAdjustmentChildren()) to decide whether the
+    // row still gets an expand arrow, so hiding a nested adjustment doesn't
+    // strand it as an unreachable child with no way to expand back to it.
+    bool hasAdjustmentChildren() const {
+        if (type != Type::Layer) return false;
+        for (const auto& c : children) {
+            if (c && c->isAdjustmentLayer())
+                return true;
+        }
+        return false;
+    }
+
     // Normal Mode inside a group: a visible adjustment in the group's direct
     // child list forces isolated compositing so the adjustment only affects
     // the group's own content (nested groups isolate themselves).
