@@ -26,6 +26,10 @@ static constexpr int kTextThumbIconSize = 24;
 // Corner badge over a Smart Object's thumbnail. Smaller than the type glyphs
 // above because it sits ON the thumbnail instead of replacing it.
 static constexpr int kSmartObjectBadgeSize = 13;
+// The badge glyph is white, so it dissolves into light thumbnails. It is drawn
+// on a dark themed plate, with padding so the glyph never touches the plate's
+// edge.
+static constexpr int kSmartObjectBadgePadding = 2;
 static constexpr int kEyeSize = 20;
 static constexpr int kLockIconSize = 20;
 static constexpr int kLockBtnSize = 24;
@@ -262,9 +266,22 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
                 static QPixmap embeddedPix(":/icons/smart-object.png");
                 static QPixmap linkedPix(":/icons/smart-object-linked.png");
                 const int badge = kSmartObjectBadgeSize;
-                const QRect badgeRect(thumbRect.right() - badge - 1,
-                                      thumbRect.bottom() - badge - 1, badge, badge);
+                const int plate = badge + kSmartObjectBadgePadding * 2;
+                const QRect plateRect(thumbRect.right() - plate - 1,
+                                      thumbRect.bottom() - plate - 1, plate, plate);
+                const QRect badgeRect = plateRect.adjusted(kSmartObjectBadgePadding,
+                                                           kSmartObjectBadgePadding,
+                                                           -kSmartObjectBadgePadding,
+                                                           -kSmartObjectBadgePadding);
                 painter->save();
+                QColor plateColor = th->colorBackgroundPrimary;
+                plateColor.setAlpha(225);
+                painter->setRenderHint(QPainter::Antialiasing, true);
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(plateColor);
+                painter->drawRoundedRect(plateRect, th->radiusSM, th->radiusSM);
+                painter->setBrush(Qt::NoBrush);
+                painter->setRenderHint(QPainter::Antialiasing, false);
                 // A broken link is tinted with the theme's warning colour so
                 // "this Smart Object can no longer reach its document" is
                 // visible without opening the Properties panel. The pixels
