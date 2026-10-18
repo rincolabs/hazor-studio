@@ -469,7 +469,7 @@ is then all that is left, so the instance keeps displaying it, is marked
 `linkBroken`, cannot be edited, and regenerates the moment the link resolves
 again. That is a fallback for a reference that cannot be resolved — not a second
 source of truth. It is also the only reason the render is persisted in the
-`.hzs` at all. See [SMART-OBJECTS.md](SMART-OBJECTS.md).
+`.hazor` at all. See [SMART-OBJECTS.md](SMART-OBJECTS.md).
 
 ---
 

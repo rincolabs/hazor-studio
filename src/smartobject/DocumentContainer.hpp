@@ -12,7 +12,7 @@ class Document;
 class LayerTreeNode;
 
 // ─────────────────────────────────────────────────────────────────────────
-// DocumentContainer — every document that lives in one .hzs file.
+// DocumentContainer — every document that lives in one .hazor file.
 //
 // One container per physical file (enforced by ContainerRegistry, which is the
 // only owner of containers). Storage is FLAT: a hash from docId to document,
@@ -20,12 +20,12 @@ class LayerTreeNode;
 // instances inside the documents, so a document referenced by three instances
 // at three different depths is still stored exactly once.
 //
-//   Project.hzs
+//   Project.hazor
 //   └── DocumentContainer
 //       ├── rootId   = "a1b2…"
 //       └── documents
 //           ├── a1b2…  (root)       → SmartObject(embedded) → c3d4…
-//           ├── c3d4…               → SmartObject(linked)   → Other.hzs
+//           ├── c3d4…               → SmartObject(linked)   → Other.hazor
 //           └── e5f6…               (shared by 3 instances)
 //
 // Lifetime is by refcount (shared_ptr): an embedded document outlives both the
@@ -40,7 +40,7 @@ class LayerTreeNode;
 // of sync fails silently.
 //
 // Reachability lives here for references *within* one file. The cross-file case
-// (A.hzs → B.hzs → A.hzs) is ContainerRegistry's, not this class's: a Linked
+// (A.hazor → B.hazor → A.hazor) is ContainerRegistry's, not this class's: a Linked
 // reference is a path, and only the registry knows which path maps to which
 // container.
 // ─────────────────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ public:
     bool canReference(const SmartObjectDocId& from, const SmartObjectDocId& to) const;
 
     // Documents the root can reach, root included. This — not the hash's key
-    // set — is the set that gets persisted, which is what stops a .hzs from
+    // set — is the set that gets persisted, which is what stops a .hazor from
     // accumulating documents no instance references any more.
     std::vector<SmartObjectDocId> reachableFromRoot() const;
 
@@ -110,7 +110,7 @@ public:
     // (docId, working document) for every open session, in no particular order.
     std::vector<std::pair<SmartObjectDocId, std::shared_ptr<Document>>> editSessions() const;
 
-    // The .hzs this container was loaded from / last saved to. Base for the
+    // The .hazor this container was loaded from / last saved to. Base for the
     // relative paths of Linked references. Empty for an unsaved container.
     const QString& path() const { return m_path; }
     void setPath(const QString& path) { m_path = path; }

@@ -87,7 +87,7 @@ public:
     using InstancePayloadCommand::InstancePayloadCommand;
 };
 
-// Embedded → Linked. The external .hzs was already written and registered
+// Embedded → Linked. The external .hazor was already written and registered
 // before this command was pushed; the swap is the undoable part.
 //
 // `retained` holds the subgraph the conversion orphaned. Keeping a

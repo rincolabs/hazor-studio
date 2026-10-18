@@ -159,7 +159,7 @@ std::shared_ptr<Document> ImageController::resolveSmartObjectDocument(
 
     // Linked: always through the registry, never by loading a second copy. If
     // the target is already open in a tab, THAT container is the one we resolve
-    // to — so editing B.hzs in its own tab invalidates the instances in A.hzs
+    // to — so editing B.hazor in its own tab invalidates the instances in A.hazor
     // through the same generation mechanism, with no file round-trip and no
     // chance of two divergent Documents for one file.
     const QString absolute = smartobject::resolveLinkPath(m_container->path(), data.linkedPath);
@@ -680,7 +680,7 @@ int ImageController::placeLinkedDocument(const QString& path)
     }
     // The cross-FILE cycle check, which DocumentContainer cannot answer: a
     // Linked reference names a path, and only the registry knows which path is
-    // which container. A.hzs → B.hzs → A.hzs is caught here.
+    // which container. A.hazor → B.hazor → A.hazor is caught here.
     if (ContainerRegistry::instance().wouldCreateCycle(
             m_container->path(), m_docId, path, source->rootId())) {
         emit operationBlocked(tr("That would make the project reference itself."));
@@ -861,7 +861,7 @@ bool ImageController::convertSmartObjectToLinked(int flatIndex, const QString& p
     if (path.isEmpty())
         return false;
 
-    // Write the external .hzs FIRST: if the export fails there is nothing to
+    // Write the external .hazor FIRST: if the export fails there is nothing to
     // undo, and the document stays exactly as it was.
     QString error;
     if (!smartobject::exportDocumentSubgraph(*m_container, before->docId, path, &error)) {

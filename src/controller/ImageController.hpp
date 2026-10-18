@@ -90,7 +90,7 @@ public:
     CommandHistory& history() { return m_history; }
 
     // ── Smart Objects ────────────────────────────────────────────────────
-    // The .hzs this controller's document belongs to, and which document of it
+    // The .hazor this controller's document belongs to, and which document of it
     // this controller edits. Needed to resolve a Smart Object's docId; the
     // container is shared (never owned) so the controller cannot outlive-dangle
     // on it.
@@ -139,7 +139,7 @@ public:
     // a single instance in their place, as one undo step. Returns the
     // instance's flat index, or -1.
     int convertToSmartObject(const std::vector<int>& flatIndices);
-    // Places another .hzs as a Smart Object. Embedded imports a private copy of
+    // Places another .hazor as a Smart Object. Embedded imports a private copy of
     // its documents into this container; Linked keeps referencing the file.
     int placeEmbeddedDocument(const QString& path);
     int placeLinkedDocument(const QString& path);

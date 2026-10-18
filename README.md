@@ -28,10 +28,11 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   Any layer or group can also be exported on its own (Export Layer/Group As...),
   trimmed to its rendered bounds or kept at the document's canvas size.
 - **Smart Objects** — a layer that displays another document and keeps it
-  editable forever. Convert any selection into one, or place an existing `.hzs`
-  either *embedded* (stored inside your project) or *linked* (kept in its own
-  file and shared across projects). Double-click its thumbnail to edit the
-  contents in a tab with the full editor and its own undo history; every
+  editable forever. Convert any selection into one, or place an existing
+  `.hazor` (or legacy `.hzs`) project either *embedded* (stored inside your
+  project) or *linked* (kept in its own file and shared across projects).
+  Double-click its thumbnail to edit the contents in a tab with the full
+  editor and its own undo history; every
   instance updates when you are done. Instances can be reused freely — each one
   keeps its own transform, mask, opacity, blend mode and layer styles while
   sharing a single copy of the content. Smart Objects nest, and Rasterize Layer
@@ -86,7 +87,7 @@ Build instructions, dependencies, and CMake options are documented separately:
 
 - **[docs/BUILD.md](docs/BUILD.md)** — building from source, dependencies, and CMake options
 - **[docs/MCP.md](docs/MCP.md)** — the embedded MCP server (port 8085) for driving the editor from external agents like Claude Code
-- **[docs/SMART-OBJECTS.md](docs/SMART-OBJECTS.md)** — the Smart Object data model, embedded vs linked storage, and the `.hzs` version 3 format
+- **[docs/SMART-OBJECTS.md](docs/SMART-OBJECTS.md)** — the Smart Object data model, embedded vs linked storage, and the `.hazor` version 3 format
 
 ## License
 

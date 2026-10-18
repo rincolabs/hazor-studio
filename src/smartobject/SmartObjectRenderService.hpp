@@ -60,7 +60,7 @@ struct SmartObjectRenderResult {
     double sourceDpi = 300.0;
     // Does committing this result make the documents it lands in unsaved?
     // True for a render caused by an edit: the cached render is part of the
-    // .hzs, so changing it changes the file. False for the validation pass
+    // .hazor, so changing it changes the file. False for the validation pass
     // after a load, which regenerates what was already on disk — marking a
     // project modified just for opening it would be a lie.
     bool marksDirty = true;

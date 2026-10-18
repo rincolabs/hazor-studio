@@ -260,9 +260,9 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
         // report back to an automation caller.
         {"smart_object_create", "Convert the layer at `index` (or the selection) into a Smart Object", "Layer",
             {{"index", "int", -1, 100, -1}}},
-        {"smart_object_place_embedded", "Place a .hzs project as an embedded Smart Object layer", "Layer",
+        {"smart_object_place_embedded", "Place a .hazor (or legacy .hzs) project as an embedded Smart Object layer", "Layer",
             {{"path", "string", 0, 0, 0}}},
-        {"smart_object_place_linked", "Place a .hzs project as a linked Smart Object layer", "Layer",
+        {"smart_object_place_linked", "Place a .hazor (or legacy .hzs) project as a linked Smart Object layer", "Layer",
             {{"path", "string", 0, 0, 0}}},
         {"smart_object_via_copy", "Duplicate a Smart Object with an independent copy of its document", "Layer",
             {{"index", "int", -1, 100, -1}}},

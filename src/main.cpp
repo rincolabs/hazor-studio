@@ -79,7 +79,10 @@ static bool isSupportedBrushImportFile(const QString& filePath)
 
 static bool isHazorProjectFile(const QString& filePath)
 {
-    return filePath.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+    // .hzs is the old extension, kept readable for backward compatibility;
+    // .hazor is the only one anything now writes.
+    return (filePath.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+            || filePath.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
         && QFileInfo(filePath).isFile();
 }
 
@@ -169,7 +172,7 @@ int main(int argc, char* argv[])
     QApplication::setApplicationVersion(QStringLiteral(HAZOR_VERSION_STRING));
 
     // File paths handed to us by the OS (extension association / "Open With").
-    // *.hzs projects open as new tabs; supported brush files open the import
+    // *.hazor projects open as new tabs; supported brush files open the import
     // dialog. On macOS these instead arrive via QFileOpenEvent, handled below.
     QStringList initialBrushImportFiles;
     QStringList initialProjectFiles;
@@ -217,7 +220,7 @@ int main(int argc, char* argv[])
                          [&window, initialBrushImportFiles, initialProjectFiles, fileOpenFilter]() {
             window->showMaximized();
 
-            // Merge any *.hzs paths that arrived via QFileOpenEvent (macOS) before
+            // Merge any *.hazor paths that arrived via QFileOpenEvent (macOS) before
             // the window existed with those parsed from argv (Windows/Linux).
             QStringList projectFiles = initialProjectFiles;
             projectFiles += fileOpenFilter->takePending();

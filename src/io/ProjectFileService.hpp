@@ -44,7 +44,7 @@ public:
     // Multi-document form. Writes the container's root document plus every
     // embedded document REACHABLE FROM THE ROOT — documents orphaned by an
     // edit are kept alive in memory by the undo history but deliberately not
-    // persisted, which is what stops a .hzs from accumulating dead subgraphs.
+    // persisted, which is what stops a .hazor from accumulating dead subgraphs.
     // Updates nothing on the container; the caller owns setPath().
     static bool saveContainer(const DocumentContainer& container,
                               const QString& path, QString* error = nullptr);

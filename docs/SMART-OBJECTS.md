@@ -20,12 +20,12 @@ model, storage and file format.
 ## The model in one picture
 
 ```
-Project.hzs
+Project.hazor
 └── DocumentContainer                    one per physical file, app-wide
     ├── rootId   = "a1b2…"
     └── documents (docId → Document)     flat storage, no nesting
         ├── a1b2…  (root)       → SmartObject(embedded) → c3d4…
-        ├── c3d4…               → SmartObject(linked)   → Other.hzs
+        ├── c3d4…               → SmartObject(linked)   → Other.hazor
         └── e5f6…               (shared by 3 instances)
 ```
 
@@ -52,8 +52,8 @@ copy can mutate the other's view of it.
 
 | | Embedded | Linked |
 |---|---|---|
-| Where the document lives | this `.hzs`, in its `DocumentContainer` | another `.hzs` |
-| Payload field | `docId` | `linkedPath` (relative to this `.hzs` when possible) + the target's root `docId` |
+| Where the document lives | this `.hazor`, in its `DocumentContainer` | another `.hazor` |
+| Payload field | `docId` | `linkedPath` (relative to this `.hazor` when possible) + the target's root `docId` |
 | Can go stale | no — editing it invalidates its instances at once | yes — the file can change behind Hazor's back |
 | Refresh | automatic | **Layer ▸ Smart Object ▸ Update Modified Content** |
 | Travels with the project | yes | no |
@@ -69,19 +69,19 @@ bug it avoids. Two `Document`s for one file means diverging state and two save
 paths racing for the same bytes. With one registry:
 
 - one container per file ⇒ one dirty flag, one save path;
-- editing `B.hzs` in its own tab invalidates the instances in `A.hzs` through the
+- editing `B.hazor` in its own tab invalidates the instances in `A.hazor` through the
   ordinary generation mechanism — a feature, not a workaround;
-- *Edit Contents* on a Linked instance opens `B.hzs` as a normal tab, or
+- *Edit Contents* on a Linked instance opens `B.hazor` as a normal tab, or
   reactivates it when it is already open;
-- closing `B.hzs`'s tab does not discard the container while a link still holds
+- closing `B.hazor`'s tab does not discard the container while a link still holds
   it (refcount);
 - cycle detection works over `(canonical path, docId)` pairs, so the cross-file
-  case `A.hzs → B.hzs → A.hzs` is caught. `DocumentContainer::canReference()`
+  case `A.hazor → B.hazor → A.hazor` is caught. `DocumentContainer::canReference()`
   only covers the in-file half.
 
 ### Unresolvable links
 
-The instance's render is persisted in the `.hzs`, so a broken link still
+The instance's render is persisted in the `.hazor`, so a broken link still
 displays. The payload is marked `linkBroken`, the Layers panel shows a tinted
 badge, and *Relink…* is offered. This is exactly the policy the RAW loader
 already documents for a missing embedded blob: the layer still loads and renders
@@ -162,7 +162,9 @@ lost.
 
 ## File format — version 3
 
-`.hzs`, magic `HZS1`, `manifest["format"] = "UPS_PROJECT"`.
+`.hazor`, magic `HZS1`, `manifest["format"] = "UPS_PROJECT"`. The older `.hzs`
+extension is still accepted everywhere a project is opened — only Save/Save As
+and "Convert to Linked" write `.hazor`.
 
 | Version | Adds |
 |---|---|
@@ -193,7 +195,7 @@ the JSON, so the loader needs no prefix of its own.
 
 | Guarantee | Status |
 |---|---|
-| This build opens `.hzs` v1 and v2 | **Yes** |
+| This build opens `.hazor` v1 and v2 | **Yes** |
 | A document without Smart Objects keeps the older format | **Yes** |
 | An older build opens a v3 file | **No** — it fails at the header check with *"Unsupported project version."* |
 
@@ -293,11 +295,11 @@ disk.
 
 | Tab | `Ctrl+S` |
 |---|---|
-| Main document | writes the `.hzs` — root document, every reachable embedded document, and the cached renders |
+| Main document | writes the `.hazor` — root document, every reachable embedded document, and the cached renders |
 | **Embedded** contents | **commits in memory only.** Copies the working copy into the embedded document, pushes it through to every instance of it (including nested ones), marks the main document unsaved, and **does not touch the disk** |
 | **Linked** contents | writes that *external* file, because the tab is that project's own tab. Projects that link to it then re-render and become unsaved themselves — their files are **not** written |
 
-The embedded case is the one worth stating plainly: writing the whole `.hzs`
+The embedded case is the one worth stating plainly: writing the whole `.hazor`
 from a content tab would also flush unrelated edits the user made in the main
 document and had not chosen to save yet. Embedded content reaches the disk when
 the project itself is saved, and only then.
@@ -322,14 +324,14 @@ out the edits on screen would be the wrong file.
 
 **Closing a content tab discards the uncommitted working copy**, so it prompts —
 with *Commit* (not *Save*: nothing is written), *Discard* and *Cancel*. Anything
-already committed stays in the project, which is where the `.hzs` will pick it
+already committed stays in the project, which is where the `.hazor` will pick it
 up. Closing the *main* document asks for each of its content tabs first, then
 for the project itself, so a commit confirmed in the first prompt is still
 offered a save in the second.
 
 ### When a document becomes unsaved
 
-A Smart Object render is part of the `.hzs` — it is what an unresolvable link
+A Smart Object render is part of the `.hazor` — it is what an unresolvable link
 falls back to — so a render that changes makes the document holding it differ
 from its file. Every render commit therefore marks the owning project unsaved,
 with exactly one exception: the pass that runs right after a load, which

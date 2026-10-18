@@ -191,10 +191,13 @@ static int shapeToolTypeForPreset(const QString& presetId)
 
 static bool isSupportedDropImagePath(const QString& path)
 {
-    // .hzs isn't an image codec format — it's the project container, opened
+    // .hazor isn't an image codec format — it's the project container, opened
     // via loadProjectAsNewTab() — so it must be special-cased here or a
-    // dragged project is silently rejected before the drop even fires.
+    // dragged project is silently rejected before the drop even fires. .hzs
+    // is the old extension, still readable, so a dragged legacy project
+    // isn't rejected either.
     return imageCodecRegistry().findReader(path) != nullptr
+        || path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
         || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive);
 }
 
@@ -2638,10 +2641,12 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
 {
     if (paths.isEmpty()) return false;
 
-    // A dropped .hzs opens through the same project path as File > Open —
-    // there is no "insert into canvas" or flatten-on-import interpretation
-    // for a whole project, so it is dispatched before anything else below.
-    if (paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
+    // A dropped .hazor (or legacy .hzs) opens through the same project path
+    // as File > Open — there is no "insert into canvas" or flatten-on-import
+    // interpretation for a whole project, so it is dispatched before anything
+    // else below.
+    if (paths.front().endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+        || paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
         if (!loadProjectAsNewTab(paths.front())) {
             AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
             return false;
@@ -2983,7 +2988,8 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
         // A project file always opens as its own document — skip the
         // Insert-into-Canvas/Open-Image question below, which only makes
         // sense for a plain image.
-        if (paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
+        if (paths.front().endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+            || paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
             openDroppedImagesAsNewDocument(paths);
             return;
         }
@@ -3617,12 +3623,13 @@ void MainWindow::onNewFile()
 
 void MainWindow::onOpenFile()
 {
-    // Build a single combined filter: all image formats + project files (*.hzs)
+    // Build a single combined filter: all image formats + project files
+    // (*.hazor, plus the old *.hzs extension, still readable)
     QString combinedFilter = imageCodecRegistry().openFileFilter()
         .section(QStringLiteral(";;"), 0, 0);
     const int parenClose = combinedFilter.lastIndexOf(QLatin1Char(')'));
     if (parenClose != -1)
-        combinedFilter.insert(parenClose, QStringLiteral(" *.hzs *.HZS"));
+        combinedFilter.insert(parenClose, QStringLiteral(" *.hazor *.HAZOR *.hzs *.HZS"));
 
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open Project or Image"), {}, combinedFilter);
@@ -3633,7 +3640,7 @@ void MainWindow::onOpenFile()
 
 void MainWindow::openPathAsNewTab(const QString& path)
 {
-    if (path.endsWith(".hzs", Qt::CaseInsensitive)) {
+    if (path.endsWith(".hazor", Qt::CaseInsensitive) || path.endsWith(".hzs", Qt::CaseInsensitive)) {
         if (!loadProjectAsNewTab(path)) {
             AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
         }
@@ -4098,7 +4105,7 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
     // the tab's isolated working copy into the embedded Smart Object, updates
     // every instance and marks the project as needing a save. Saving the
     // contents and writing the project are two different acts. Writing the
-    // whole .hzs here would also flush unrelated edits the user made in the
+    // whole .hazor here would also flush unrelated edits the user made in the
     // main document and had not chosen to save yet.
     if (m_tabs[index].container
         && m_tabs[index].docId != m_tabs[index].container->rootId()) {
@@ -4113,7 +4120,7 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
             return false;
     }
 
-    // Save is a CONTAINER operation, not a document one: a .hzs holds the root
+    // Save is a CONTAINER operation, not a document one: a .hazor holds the root
     // document plus every embedded Smart Object document, and one file has one
     // save path. The path/dirty bookkeeping belongs to the root tab — the tab
     // that owns the file name.
@@ -4125,18 +4132,18 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
     const bool choosingNewPath = saveAs || path.isEmpty();
     if (choosingNewPath) {
         QString suggested = tab.name;
-        if (!suggested.endsWith(".hzs", Qt::CaseInsensitive))
-            suggested += ".hzs";
+        if (!suggested.endsWith(".hazor", Qt::CaseInsensitive))
+            suggested += ".hazor";
         path = QFileDialog::getSaveFileName(
             this, tr("Save Project As"), suggested,
-            tr("Hazor Studio (*.hzs)"));
+            tr("Hazor Studio (*.hazor)"));
         if (path.isEmpty())
             return false;
-        if (!path.endsWith(".hzs", Qt::CaseInsensitive))
-            path += ".hzs";
+        if (!path.endsWith(".hazor", Qt::CaseInsensitive))
+            path += ".hazor";
     }
 
-    // Linked Smart Object paths are stored relative to the .hzs that holds
+    // Linked Smart Object paths are stored relative to the .hazor that holds
     // them, so writing the project somewhere else has to rewrite them BEFORE
     // the save — otherwise the file goes out with links resolved against a
     // location it no longer has. Not an undo step: it preserves the exact same
@@ -4201,7 +4208,7 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
 
     // A project that other open projects LINK to just changed on disk. Their
     // instances have to re-render, and each of them is then unsaved in its own
-    // right: the cached render is part of a .hzs, so a dependent's file no
+    // right: the cached render is part of a .hazor, so a dependent's file no
     // longer matches what is in memory. Their files are deliberately NOT
     // written — only the project the user asked to save was.
     scheduleSmartObjectRefresh();
@@ -4218,7 +4225,7 @@ bool MainWindow::commitEmbeddedContent(int index)
 
     // Nothing to commit is not a failure, and it must not mark the project
     // unsaved: Ctrl+S on an untouched content tab would otherwise make the
-    // whole .hzs look edited for no reason.
+    // whole .hazor look edited for no reason.
     if (!tab.isDirty) {
         showViewportStatusMessage(tr("Smart Object contents are already up to date."), 2000);
         return true;
@@ -4240,7 +4247,7 @@ bool MainWindow::commitEmbeddedContent(int index)
     }
 
     tab.isDirty = false;                    // the content is committed
-    markContainerRootDirty(container);      // the .hzs is not written yet
+    markContainerRootDirty(container);      // the .hazor is not written yet
     updateDirtyUi();
     showViewportStatusMessage(
         tr("Smart Object contents updated. Save the project to write them to disk."),
@@ -4359,7 +4366,7 @@ void MainWindow::updateDirtyUi()
 bool MainWindow::loadProjectAsNewTab(const QString& path)
 {
     // Through the registry, never ProjectFileService directly: one container per
-    // physical file for the whole application. Opening a .hzs that a Linked
+    // physical file for the whole application. Opening a .hazor that a Linked
     // Smart Object already pulled in adopts that same container instead of
     // building a second Document for the same bytes (see ContainerRegistry.hpp).
     QString error;
@@ -4425,7 +4432,8 @@ int MainWindow::openProjectFiles(const QStringList& files)
 {
     int opened = 0;
     for (const QString& path : files) {
-        if (!path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
+        if (!path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+            && !path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
             continue;
         if (!QFileInfo(path).isFile()) {
             AppMessageDialog::warning(this, tr("Open Project"),
@@ -6934,8 +6942,8 @@ void MainWindow::flushSmartObjectRefresh()
 {
     // Every open project is rechecked, not just the one that reported a change.
     // Two cases need it and neither names a document:
-    //   • a Linked Smart Object in A.hzs watching B.hzs, when the user edits
-    //     (or saves) B.hzs in its own tab — A's container never hears about it;
+    //   • a Linked Smart Object in A.hazor watching B.hazor, when the user edits
+    //     (or saves) B.hazor in its own tab — A's container never hears about it;
     //   • undo/redo of Replace Contents, which swaps the document stored under
     //     a docId without any particular document "changing".
     // The pass is O(nodes) with no file I/O and only dispatches genuinely stale
@@ -6969,7 +6977,7 @@ void MainWindow::onSmartObjectRenderCommitted(
     }
     // The render that just landed IS part of the file (it is what an
     // unresolvable link falls back to), so a document whose instances changed
-    // no longer matches its .hzs. `marksDirty` is false only for the pass that
+    // no longer matches its .hazor. `marksDirty` is false only for the pass that
     // regenerates renders already stored on disk, right after a load —
     // flagging a project as edited just for opening it would be wrong.
     if (marksDirty && !affectedDocuments.isEmpty())
@@ -7032,7 +7040,7 @@ void MainWindow::editSmartObjectContents(int flatIndex)
 
     auto& tab = createTabForDocument(content->name, container, data->docId);
     // The content tab has no file of its own — Ctrl+S commits into the
-    // container, and only saving the project writes the .hzs (saveProjectForTab).
+    // container, and only saving the project writes the .hazor (saveProjectForTab).
     tab.currentProjectPath.clear();
     tab.sourcePath.clear();
     tab.isDirty = false;
@@ -7072,7 +7080,7 @@ void MainWindow::placeSmartObject(bool linked)
     const QString path = QFileDialog::getOpenFileName(
         this,
         linked ? tr("Place Linked") : tr("Place Embedded"),
-        QString(), tr("Hazor Studio (*.hzs)"));
+        QString(), tr("Hazor Studio (*.hazor *.hzs)"));
     if (path.isEmpty())
         return;
 
@@ -7145,7 +7153,7 @@ void MainWindow::replaceActiveSmartObjectContents()
     if (!m_ctrl->smartObjectDataAt(flatIndex))
         return;
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Replace Contents"), QString(), tr("Hazor Studio (*.hzs)"));
+        this, tr("Replace Contents"), QString(), tr("Hazor Studio (*.hazor *.hzs)"));
     if (path.isEmpty())
         return;
     if (!m_ctrl->replaceSmartObjectContents(flatIndex, path))
@@ -7162,7 +7170,7 @@ void MainWindow::relinkActiveSmartObject()
     if (!m_ctrl->smartObjectDataAt(flatIndex))
         return;
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Relink Smart Object"), QString(), tr("Hazor Studio (*.hzs)"));
+        this, tr("Relink Smart Object"), QString(), tr("Hazor Studio (*.hazor *.hzs)"));
     if (path.isEmpty())
         return;
     if (!m_ctrl->relinkSmartObject(flatIndex, path))
@@ -7194,14 +7202,14 @@ void MainWindow::convertActiveSmartObjectStorage(bool toLinked)
         // needs a path from the user before anything is changed.
         QString suggested = m_doc->nodeAt(flatIndex) ? m_doc->nodeAt(flatIndex)->name
                                                      : tr("Smart Object");
-        if (!suggested.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
-            suggested += QStringLiteral(".hzs");
+        if (!suggested.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive))
+            suggested += QStringLiteral(".hazor");
         QString path = QFileDialog::getSaveFileName(
-            this, tr("Convert to Linked"), suggested, tr("Hazor Studio (*.hzs)"));
+            this, tr("Convert to Linked"), suggested, tr("Hazor Studio (*.hazor)"));
         if (path.isEmpty())
             return;
-        if (!path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
-            path += QStringLiteral(".hzs");
+        if (!path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive))
+            path += QStringLiteral(".hazor");
         ok = m_ctrl->convertSmartObjectToLinked(flatIndex, path);
     } else {
         ok = m_ctrl->convertSmartObjectToEmbedded(flatIndex);

@@ -8,7 +8,7 @@
 // How the document a Smart Object Layer displays is stored.
 enum class SmartObjectStorageMode {
     Embedded,   // the document lives in this file's own DocumentContainer
-    Linked,     // the document is the root of another .hzs file
+    Linked,     // the document is the root of another .hazor file
 };
 
 // Stable identity of a document inside a DocumentContainer (a QUuid without
@@ -74,7 +74,7 @@ struct SmartObjectState {
 struct SmartObjectData {
     SmartObjectStorageMode mode = SmartObjectStorageMode::Embedded;
     SmartObjectDocId docId;     // key in the owning DocumentContainer
-    // Linked only: the path as persisted (relative to the container's .hzs when
+    // Linked only: the path as persisted (relative to the container's .hazor when
     // possible, so moving a project folder keeps the links intact).
     QString linkedPath;
     SmartObjectState state;

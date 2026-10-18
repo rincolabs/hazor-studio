@@ -82,7 +82,8 @@ public:
     bool isCustomShapeIconPreloadFinished() const { return m_customShapeIconPreloadFinished; }
     void openBrushImportDialog(const QStringList& files = {});
 
-    // Open one or more Hazor project files (*.hzs) as new tabs. Used when the OS
+    // Open one or more Hazor project files (*.hazor, or legacy *.hzs) as new
+    // tabs. Used when the OS
     // launches the app with file arguments (extension association) or via a
     // QFileOpenEvent (macOS "Open With"). Returns the number of files opened.
     int openProjectFiles(const QStringList& files);
@@ -278,10 +279,10 @@ private:
         // plain image) — empty for untitled/new documents. Used by Open Recent
         // to detect an already-open file and activate its tab instead of
         // reopening it. Distinct from currentProjectPath, which only tracks the
-        // .hzs Save/Save As target.
+        // .hazor Save/Save As target.
         QString sourcePath;
         bool isDirty = false;
-        // The .hzs this tab's document belongs to. Owned by ContainerRegistry;
+        // The .hazor this tab's document belongs to. Owned by ContainerRegistry;
         // the tab only borrows a reference, which is what keeps the container
         // (and every embedded document in it) alive while any of its tabs is
         // open — and keeps it alive after they all close, if a Linked
@@ -400,7 +401,7 @@ private:
                                       const std::shared_ptr<DocumentContainer>& container,
                                       const SmartObjectDocId& docId);
     // Shared tail of onOpenFile() and Open Recent: dispatches `path` to the
-    // project (.hzs), RAW or plain-image open flow by extension. Centralizing
+    // project (.hazor), RAW or plain-image open flow by extension. Centralizing
     // this means both entry points register successful opens with
     // RecentFilesManager the same way and never grow a parallel open path.
     void openPathAsNewTab(const QString& path);
@@ -447,7 +448,7 @@ private:
 
     // Ctrl+S on an embedded Smart Object's tab: commits the content (refreshes
     // every instance of it) and marks the project unsaved, WITHOUT writing the
-    // .hzs. Embedded content reaches the disk when the project itself is saved
+    // .hazor. Embedded content reaches the disk when the project itself is saved
     // — see saveProjectForTab().
     bool commitEmbeddedContent(int index);
     // Marks a container's root tab unsaved whichever tab is active. Used when a
@@ -458,7 +459,7 @@ private:
     // ── Smart Objects ───────────────────────────────────────────────────
     // Opens (or reactivates) the tab that edits the Smart Object at
     // `flatIndex`. Embedded content becomes a tab over the container's own
-    // document; a Linked one opens its .hzs as an ordinary project tab. Mirrors
+    // document; a Linked one opens its .hazor as an ordinary project tab. Mirrors
     // openHazorDevelop()'s wiring — identity by node, not by flat index.
     void editSmartObjectContents(int flatIndex);
     void convertSelectionToSmartObject();

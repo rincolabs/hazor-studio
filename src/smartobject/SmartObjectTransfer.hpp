@@ -27,7 +27,7 @@ SmartObjectDocId importDocumentsInto(DocumentContainer& dst,
                                      const DocumentContainer& src,
                                      const SmartObjectDocId& docId);
 
-// The inverse: writes a new .hzs at `path` whose ROOT is a copy of `docId`,
+// The inverse: writes a new .hazor at `path` whose ROOT is a copy of `docId`,
 // plus its transitive embedded dependencies. Linked references are rebased onto
 // the new file's directory. Does not touch `src`.
 bool exportDocumentSubgraph(const DocumentContainer& src,
@@ -59,12 +59,12 @@ std::vector<SmartObjectDocId> embeddedSubgraphOf(const DocumentContainer& contai
 // Rewrites every Linked reference in `container` so its stored path is relative
 // to `newContainerPath` instead of the container's current path. Call it right
 // before a Save As writes the project somewhere else: the stored paths are
-// relative to the .hzs that holds them, so moving the file without this leaves
+// relative to the .hazor that holds them, so moving the file without this leaves
 // every link pointing at the wrong place. Embedded references are untouched —
 // they have no path. No-op when the location is unchanged.
 void rebaseLinkedPaths(DocumentContainer& container, const QString& newContainerPath);
 
-// `targetPath` expressed relative to the .hzs at `containerPath`, so moving a
+// `targetPath` expressed relative to the .hazor at `containerPath`, so moving a
 // whole project folder keeps its links intact. Falls back to the absolute path
 // when the two are on different roots (different drive on Windows) or when
 // `containerPath` is still empty (unsaved project).

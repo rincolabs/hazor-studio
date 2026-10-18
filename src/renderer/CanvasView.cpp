@@ -1159,10 +1159,12 @@ CanvasView::CanvasView(Document* doc, ImageController* controller, QWidget* pare
 
 static bool isSupportedDropImagePath(const QString& path)
 {
-    // .hzs isn't an image codec format — it's the project container, opened
+    // .hazor isn't an image codec format — it's the project container, opened
     // via MainWindow::loadProjectAsNewTab() — so it must be special-cased
     // here or a dragged project is silently rejected before the drop fires.
+    // .hzs is the old extension, still readable, so it's accepted too.
     return imageCodecRegistry().findReader(path) != nullptr
+        || path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
         || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive);
 }
 

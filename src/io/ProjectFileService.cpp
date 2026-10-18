@@ -1055,7 +1055,7 @@ bool documentHasSmartObject(const std::vector<std::unique_ptr<LayerTreeNode>>& n
 //
 // Everything above serializes *nodes*; these two serialize a whole Document
 // and nothing else (no manifest, no header, no file). That reentrancy is the
-// whole point: a .hzs container holds the root document plus N embedded ones
+// whole point: a .hazor container holds the root document plus N embedded ones
 // (Smart Objects), and each is written/read by the same pair.
 //
 // `nextId` is shared across every document in one save pass, and `blobPrefix`
