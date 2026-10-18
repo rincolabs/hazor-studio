@@ -149,8 +149,11 @@ PropertiesPanel::PropertiesPanel(QWidget* parent)
     connect(ThemeManager::instance(), &ThemeManager::themeChanged,
             this, &PropertiesPanel::applyWrapperSurface);
 
+    auto* t = ThemeManager::instance()->current();
     auto* contentLay = new QVBoxLayout(content);
-    contentLay->setContentsMargins(0, 0, 0, 0);
+    // Symmetric gutter on top of each section's own inset, so controls never
+    // sit flush against the viewport edge or the vertical scrollbar.
+    contentLay->setContentsMargins(t->spaceXS, 0, t->spaceXS, 0);
 
     // The adjustment editors live alongside the default layer view; only one
     // view is visible at a time (showCurvesEditor / showColorBalanceEditor /
@@ -426,8 +429,13 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_canvasHInput = hInput;
         m_canvasXInput = xInput;
         m_canvasYInput = yInput;
-        for (auto* input : { m_canvasWInput, m_canvasHInput, m_canvasXInput, m_canvasYInput })
-            input->setFixedWidth(100);
+        // Explicit minimum overrides minimumSizeHint (which is sized for the
+        // widest possible value) so the grid can compress in a narrow dock
+        // instead of overflowing behind the vertical scrollbar.
+        for (auto* input : { m_canvasWInput, m_canvasHInput, m_canvasXInput, m_canvasYInput }) {
+            input->setMaximumWidth(100);
+            input->setMinimumWidth(52);
+        }
 
         m_canvasLinkButton = makeIconButton(QStringLiteral("constrain-proportions"),
                                             tr("Link width and height (constrain proportions)"),
@@ -466,9 +474,11 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_resolutionInput = new ScrubbableValueInput(QString(), 1.0, 10000.0, 300.0,
                                                      tr(" px/in"), 1.0, canvasSection);
         m_resolutionInput->setDecimals(0);
+        m_resolutionInput->setMinimumWidth(72);
         m_resolutionUnitCombo = new AppComboBox(canvasSection);
         m_resolutionUnitCombo->addItem(tr("Pixels/Inch"));
         m_resolutionUnitCombo->addItem(tr("Pixels/Centimeter"));
+        m_resolutionUnitCombo->setMinimumWidth(64);
         form->addWidget(secondaryLabel(tr("Resolution"), canvasSection), 0, 0);
         form->addWidget(m_resolutionInput, 0, 1, Qt::AlignLeft);
         form->addWidget(m_resolutionUnitCombo, 0, 2, Qt::AlignLeft);
@@ -478,6 +488,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_modeCombo->addItem(tr("CMYK Color"), QStringLiteral("CMYK Color"));
         m_modeCombo->addItem(tr("Grayscale"), QStringLiteral("Grayscale"));
         m_modeCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_modeCombo->setMinimumWidth(64);
         form->addWidget(secondaryLabel(tr("Mode"), canvasSection), 1, 0);
         form->addWidget(m_modeCombo, 1, 1, 1, 2);
 
@@ -485,6 +496,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_depthCombo->addItem(tr("8 Bits/Channel"), 8);
         m_depthCombo->addItem(tr("16 Bits/Channel"), 16);
         m_depthCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_depthCombo->setMinimumWidth(64);
         form->addWidget(secondaryLabel(tr("Depth"), canvasSection), 2, 0);
         form->addWidget(m_depthCombo, 2, 1, 1, 2);
 
@@ -572,6 +584,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         unitRow->setHorizontalSpacing(t->spaceSM);
         unitRow->setColumnStretch(1, 1);
         m_unitCombo = new AppComboBox(rulersSection);
+        m_unitCombo->setMinimumWidth(64);
         // Order matches the RulerUnit enum (Pixels, Percent, Inches, Centimeters,
         // Millimeters) so the combo index maps directly onto the enum value.
         m_unitCombo->addItem(tr("Pixels"));

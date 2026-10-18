@@ -78,7 +78,6 @@ TransformFieldsWidget::TransformFieldsWidget(TransformFieldsMode mode, QWidget* 
         grid->setContentsMargins(0, 0, 0, 0);
         grid->setHorizontalSpacing(t->spaceSM);
         grid->setVerticalSpacing(t->spaceXS);
-        grid->setSizeConstraint(QLayout::SetFixedSize);
         grid->addWidget(m_linkButton, 0, 0, 2, 1);
         grid->addWidget(makeTransformLabel(tr("W:"), this), 0, 1);
         grid->addWidget(m_wInput, 0, 2, Qt::AlignLeft);
@@ -92,12 +91,11 @@ TransformFieldsWidget::TransformFieldsWidget(TransformFieldsMode mode, QWidget* 
         grid->addWidget(m_rotInput, 2, 2, 1, 3, Qt::AlignLeft);
         for (auto* input : { m_wInput, m_hInput, m_xInput, m_yInput }) {
             input->setMaximumWidth(100);
-            input->setMinimumWidth(100);
+            input->setMinimumWidth(52);
         }
         m_rotInput->setMaximumWidth(100);
-        m_rotInput->setMinimumWidth(100);
-        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        setFixedSize(sizeHint());
+        m_rotInput->setMinimumWidth(52);
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     }
 
     connect(m_wInput, &QDoubleSpinBox::editingFinished, this, [this]() {
