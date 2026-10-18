@@ -125,6 +125,44 @@ made-up name looks applied while changing nothing.
 `rasterize_layer` already covered RAW layers from Fase 4 onward
 (`ImageController::rasterizeNode()`), so it did not need a separate tool.
 
+### Painting on a RAW Layer
+
+A RAW Layer has no directly editable pixels (`Layer::
+hasDirectlyEditablePixels()`), so every paint/retouch tool would otherwise be
+refused with "This operation requires a rasterized layer." Instead the user is
+offered an editable raster copy.
+
+`CanvasView::ensureRasterCopyForRawTarget()` is the single place that rule
+lives. The paint tools reach it through the three funnels they already share —
+`ensurePaintTargetLayer()` (Fill Bucket, Gradient, Brush),
+`beginBrushStroke()` (Brush/Eraser, mouse and pen) and
+`beginCloneStampStroke()` (Clone Stamp, Healing) — so no individual tool
+carries a RAW check of its own. A RAW layer whose pixels are locked is *not*
+offered a copy: the lock is the real reason, and `checkDestructiveOp()` is what
+reports it. Mask painting is never gated — a layer mask is ordinary 8-bit
+pixels, not the derived develop result.
+
+Accepting runs `ImageController::rasterCopyRawLayer()`: the RAW layer's
+`cpuImage` — which already *is* the full-resolution develop result, not a
+preview — becomes a new Pixel Layer inserted directly above, carrying the
+transform, mask, opacity, blend mode, layer styles and clipped adjustments that
+made the original look the way it did, so hiding the RAW node leaves the
+composite unchanged. The RAW node keeps its `RawLayerData`/`RawSource` intact
+and stays re-developable; the copy is a one-way snapshot (there is no sync back
+from a later re-reveal). Hiding the RAW node and inserting the copy land as one
+history entry, `[NodePropertyCommand, DuplicateLayerCommand]` in that order so
+the flat indices they store stay valid on both undo and redo. A re-reveal in
+flight refuses the copy rather than snapshotting the previous develop.
+
+The gate returns false for a RAW layer whether the user accepted or cancelled,
+so the operation that triggered it is abandoned in both cases and nothing is
+painted. That is not a shortcut: the prompt is modal and takes a click of its
+own, so the canvas button that opened it is released onto the dialog, and a
+stroke armed afterwards would be left painting with no button held. Aborting
+the whole press is also what keeps the Brush — the one tool that reaches two of
+the three funnels — from prompting twice. The copy is the selected layer, so
+the next press paints on it with the same tool.
+
 ## Hazor Develop
 
 Hazor Develop keeps its PP3 working copy outside the document until **Apply**.

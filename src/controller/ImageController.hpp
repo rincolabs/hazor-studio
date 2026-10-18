@@ -288,6 +288,14 @@ public:
     // layer is pixel-locked, or a re-reveal for it is already in flight —
     // callers retry once rawLayerDevelopFinished() fires for that layer.
     bool rerevealRawLayer(int flatIndex, const RawDevelopParams& params);
+    // Creates the editable pixel copy a paint tool needs when the user aims it
+    // at a RAW Layer: the layer's already-developed pixels become a new Pixel
+    // Layer inserted directly above the RAW node, the RAW node is hidden with
+    // its RawLayerData/RawSource untouched (Hazor Develop keeps working on it),
+    // and the copy becomes the active/selected layer. Returns the copy's flat
+    // index, or -1 when nothing was created (not a RAW layer, pixel-locked, or
+    // a re-reveal is in flight — the last two report via operationBlocked()).
+    int rasterCopyRawLayer(int flatIndex);
     bool isLayerEmpty(int flatIndex) const;
     void flushGpuChanges();
 

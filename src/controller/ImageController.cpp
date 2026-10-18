@@ -4784,6 +4784,124 @@ void ImageController::rasterizeNode(int flatIndex)
     if (m_doc) ++m_doc->compositionGeneration;
 }
 
+// Creates the editable pixel copy a paint tool needs when the user aims it at a
+// RAW Layer (the "Rasterize RAW Layer?" offer in CanvasView::
+// ensureRasterCopyForRawTarget). A RAW layer's cpuImage already *is* the
+// full-resolution Hazor Develop result — RawDevelopService renders the real
+// reveal into it, the canvas never holds a reduced-quality preview — so the
+// copy is that image, not a re-render and not a screen grab.
+//
+// The copy is a one-way snapshot by design: a later re-reveal of the RAW layer
+// does not touch its pixels. Everything that made the RAW layer *look* the way
+// it did travels with the copy (transform, mask, opacity, blend mode, layer
+// styles, clipped Single-Layer-Mode adjustments) so hiding the original leaves
+// the composite unchanged.
+//
+// Both steps land as ONE history entry, pushed in the order [hide RAW, insert
+// copy] so the flat indices each command stores stay valid in both directions:
+// on redo the RAW is still at `flatIndex` when it is hidden and only then does
+// the insert push it down; on undo the copy is removed first, which puts the
+// RAW back at `flatIndex` before its visibility is restored.
+int ImageController::rasterCopyRawLayer(int flatIndex)
+{
+    if (!m_doc) return -1;
+    auto* srcNode = m_doc->nodeAt(flatIndex);
+    if (!srcNode || srcNode->type != LayerTreeNode::Type::Layer
+        || !srcNode->layer || !srcNode->layer->rawData)
+        return -1;
+    if (srcNode->isPixelEditingLocked()) {
+        emit operationBlocked(tr("This layer is locked and cannot be rasterized."));
+        return -1;
+    }
+    // A re-reveal in flight overwrites cpuImage the moment it lands, so the copy
+    // would silently hold the *previous* develop. Make the user wait rather than
+    // hand them pixels that don't match what Hazor Develop just applied.
+    if (m_rawDevelopService->isBusy(srcNode)) {
+        emit operationBlocked(tr("Wait for the RAW development to finish."));
+        return -1;
+    }
+
+    Layer* src = srcNode->layer.get();
+    QImage pixels = flushLayerToCpuImage(src);
+    if (pixels.isNull()) return -1;
+    if (pixels.format() != QImage::Format_RGBA8888)
+        pixels = pixels.convertToFormat(QImage::Format_RGBA8888);
+
+    auto copyNode = std::make_unique<LayerTreeNode>();
+    copyNode->type = LayerTreeNode::Type::Layer;
+    copyNode->name = tr("%1 (Raster)").arg(srcNode->name);
+    copyNode->opacity = srcNode->opacity;
+    copyNode->visible = true;
+    copyNode->blendMode = srcNode->blendMode;
+    copyNode->groupBlendMode = srcNode->groupBlendMode;
+    // Deliberately NOT inherited: the copy exists to be painted on, and a
+    // Lock Transparent / Lock Position carried over from the RAW original would
+    // block the very stroke that asked for it.
+    copyNode->lockFlags = LockNone;
+    copyNode->clipped = srcNode->clipped;
+    copyNode->transform = srcNode->transform;
+    copyNode->effects = srcNode->effects;
+    copyNode->invalidateEffects();
+
+    copyNode->layer = std::make_shared<Layer>();
+    Layer* dst = copyNode->layer.get();
+    dst->name = copyNode->name;
+    dst->cpuImage = std::move(pixels);
+    dst->textureOutdated = true;
+    dst->owner = copyNode.get();
+    dst->resetTransform = copyNode->transform;
+    dst->hasResetTransform = true;
+    if (!src->maskImage.isNull()) {
+        dst->maskImage = src->maskImage.copy();
+        if (!src->maskRawImage.isNull())
+            dst->maskRawImage = src->maskRawImage.copy();
+        dst->maskOrigin = src->maskOrigin;
+        dst->maskThumbDirty = true;
+    }
+    dst->maskVisible = src->maskVisible;
+    dst->maskDensity = src->maskDensity;
+    dst->maskFeather = src->maskFeather;
+
+    for (const auto& child : srcNode->children) {
+        if (!child) continue;
+        auto childClone = child->clone();
+        childClone->parent = copyNode.get();
+        copyNode->children.push_back(std::move(childClone));
+    }
+
+    // Mutate first, record after (CommandHistory's contract: pushed commands are
+    // never re-executed). That order also lets the insert fail cleanly without
+    // leaving a half-written history entry behind.
+    const bool rawWasVisible = srcNode->visible;
+    srcNode->visible = false;
+
+    auto redoClone = copyNode->clone();
+    const int newFlat = m_doc->insertNodeAt(flatIndex, std::move(copyNode));
+    if (newFlat < 0) {
+        srcNode->visible = rawWasVisible;
+        return -1;
+    }
+    m_doc->activeFlatIndex = newFlat;
+    m_doc->selectedFlatIndices = {newFlat};
+
+    m_history.beginMacro(tr("Rasterize RAW Layer"));
+    m_history.push(std::make_unique<NodePropertyCommand>(
+        m_doc, flatIndex,
+        srcNode->opacity, srcNode->opacity,
+        rawWasVisible, false,
+        srcNode->blendMode, srcNode->blendMode,
+        tr("Hide RAW Layer")));
+    m_history.push(std::make_unique<DuplicateLayerCommand>(
+        m_doc, newFlat, std::move(redoClone), tr("Raster Copy")));
+    m_history.endMacro();
+
+    ++m_doc->compositionGeneration;
+    emit layerChanged(newFlat);
+    emit activeLayerChanged(newFlat);
+    emit imageChanged();
+    return newFlat;
+}
+
 // Resamples a layer mask from one layer-pixel space into another, given the
 // affine `m` reframeTransform() derived between a RAW Layer's old and new
 // develop geometry (Fase 4.4). Returns the remapped mask; *outOrigin

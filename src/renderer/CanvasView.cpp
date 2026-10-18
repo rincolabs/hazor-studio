@@ -27,6 +27,7 @@
 #include "RulerGuideOverlay.hpp"
 #include "transform/SnapEngine.hpp"
 #include "ui/ShortcutManager.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ai/tool/AiObjectSelectionController.hpp"
 #include "ai/tool/AiRemoveObjectController.hpp"
 #include "io/ImageCodec.hpp"
@@ -1855,11 +1856,13 @@ bool CanvasView::ensurePaintTargetLayer(const QString& undoName)
     if (m_freeTransformActive || m_distortActive)
         return false;
 
-    // A layer (pixel/text/shape) or adjustment is already selected: don't
+    // A layer (pixel/text/shape/RAW) or adjustment is already selected: don't
     // auto-create. The tool's own gate (checkDestructiveOp / lock checks /
-    // rasterization rules) decides whether the action proceeds or is blocked.
+    // rasterization rules) decides whether the action proceeds or is blocked —
+    // except for a RAW Layer, which gets the raster-copy offer instead and ends
+    // the gesture either way.
     if (m_doc->activeLayer())
-        return true;
+        return ensureRasterCopyForRawTarget();
 
     // Nothing editable is selected (empty document, deselected, or a group is
     // active): create a fresh transparent, document-sized pixel layer above the
@@ -1868,6 +1871,50 @@ bool CanvasView::ensurePaintTargetLayer(const QString& undoName)
     m_controller->history().beginMacro(undoName);
     m_controller->newLayer();   // transparent, doc-sized, selected; pushes AddLayer
     return true;
+}
+
+bool CanvasView::ensureRasterCopyForRawTarget()
+{
+    if (!m_doc || !m_controller)
+        return true;
+    // A RAW layer's MASK is ordinary 8-bit pixels of its own — painting it is
+    // legal and has nothing to do with the derived develop result.
+    if (m_editingMask)
+        return true;
+
+    auto* node = m_doc->activeNode();
+    auto* layer = m_doc->activeLayer();
+    if (!node || !layer || !layer->isRawLayer())
+        return true;
+    // A locked RAW layer is never offered a copy: Lock Image Pixels / Lock All
+    // is the real reason the edit cannot happen, and the tool's own gate
+    // (ImageController::checkDestructiveOp) is what says so.
+    if (node->isPixelEditingLocked())
+        return true;
+
+    // Cancel changes nothing at all: no layer, no visibility, no selection.
+    if (promptRasterizeRawLayer())
+        m_controller->rasterCopyRawLayer(m_doc->activeFlatIndex);
+    return false;
+}
+
+bool CanvasView::promptRasterizeRawLayer()
+{
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Cancel"),              QMessageBox::RejectRole },
+        { tr("Create Raster Copy"),  QMessageBox::AcceptRole },
+    };
+    const int picked = AppMessageDialog::choice(
+        window(),
+        tr("Rasterize RAW Layer?"),
+        tr("Painting requires a raster layer. Hazor will create an editable "
+           "pixel copy while preserving the original RAW layer."),
+        AppMessageDialog::Icon::Question,
+        buttons,
+        /*defaultIndex=*/1,
+        tr("Changes made to the RAW development will not automatically update "
+           "the raster copy."));
+    return picked == 1;
 }
 
 QImage CanvasView::cloneSourceSnapshot() const
@@ -5098,8 +5145,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 update();
                 return;
             }
-            if (!canPaintActiveRasterLayer())
-                return;
+            // No canPaintActiveRasterLayer() pre-check here: it rejects a RAW
+            // layer, which would swallow the click before the RAW gate inside
+            // beginCloneStampStroke could offer the raster copy. That function
+            // runs the same check itself, right after the gate.
             auto* cloneLayer = m_doc->activeLayer();
             if (!cloneLayer) { m_brushDrawing = false; return; }
             BrushInputState input;
@@ -6706,7 +6755,10 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
             if (!m_cloneSourceDefined) {
                 m_cloneNeedsSourceFeedback = true;
                 update();
-            } else if (canPaintActiveRasterLayer()) {
+            } else {
+                // beginCloneStampStroke runs the RAW gate and then
+                // canPaintActiveRasterLayer() itself — pre-checking the latter
+                // here would hide a RAW layer's raster-copy offer.
                 beginCloneStampStroke(input, ev.widgetPos, ev.canvasPos);
             }
         } else {
@@ -7122,6 +7174,14 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         update();
         return;
     }
+    // RAW gate (Clone Stamp + Healing, mouse and pen alike). Runs before
+    // canPaintActiveRasterLayer() — which rejects a RAW layer — so the user gets
+    // the raster-copy offer instead of a silently ignored click, and before
+    // cloneSourceSnapshot() below so the sample sees the final layer stack.
+    if (!ensureRasterCopyForRawTarget()) {
+        m_brushDrawing = false;
+        return;
+    }
     auto* layer = m_doc->activeLayer();
     if (!layer || !canPaintActiveRasterLayer()) {
         m_brushDrawing = false;
@@ -7242,6 +7302,12 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     if (!layer) return;
 
     m_brushUsingRasterTiles = false;
+    // RAW gate (Eraser, and any Brush press that reaches here without having
+    // gone through ensurePaintTargetLayer; a no-op for a mask stroke).
+    if (!ensureRasterCopyForRawTarget()) {
+        m_brushDrawing = false;
+        return;
+    }
     // Lock gate (evaluated once, at the call site). Mask painting only honours
     // Lock All; image painting honours Lock Image Pixels / Lock All (and rejects
     // Text/Shape) — both routed through the controller's central guards so the

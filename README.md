@@ -37,6 +37,11 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   draggable split view, shadow and highlight clipping overlays, and a status
   line that reports what the engine is actually showing — including when a
   stage such as sharpening or noise reduction can only be judged at 100%.
+  Aiming a paint or retouch tool (Brush, Eraser, Clone Stamp, Healing, Fill
+  Bucket, Gradient) at a RAW Layer offers to create an editable raster copy of
+  the current develop result directly above it; the original RAW Layer is kept,
+  hidden and still re-developable, and the copy becomes the selected layer so
+  the same tool paints on it from the next stroke on.
 - **Selections** — Rectangular, elliptical, lasso, magic wand, quick select, and
   magnetic lasso, with feather/grow/shrink refinement, saved alpha channels, and
   quick mask.

@@ -463,9 +463,34 @@ private:
     // as the paint action (close it with m_controller->history().endMacro()).
     // Returns false when the action must be aborted (no document, a blocking mode
     // such as crop/transform/text-edit, etc.). When a layer is already selected
-    // it returns true without creating anything — each tool's own locks /
-    // rasterization rules then decide whether the action proceeds.
+    // it creates nothing — each tool's own locks / rasterization rules then
+    // decide whether the action proceeds — except that a selected RAW Layer
+    // first runs the raster-copy gate below, which is the one case that can
+    // return false without the canvas being in a blocking mode (the user
+    // cancelled the offer).
     bool ensurePaintTargetLayer(const QString& undoName);
+
+    // THE place where "this layer's pixels cannot be painted because it is a RAW
+    // Layer" is decided, for every tool that writes straight into the active
+    // layer (Brush, Eraser, Clone Stamp, Healing, Fill Bucket, Gradient). The
+    // three funnels those tools share call it — ensurePaintTargetLayer(),
+    // beginBrushStroke() and beginCloneStampStroke() — so no individual tool
+    // carries the rule.
+    //
+    // Returns true to carry on (not a RAW layer). Returns false when the
+    // operation must be abandoned: either the user took the editable raster copy
+    // (see ImageController::rasterCopyRawLayer — it is now the selected layer,
+    // ready for the next press) or cancelled, which changes nothing at all.
+    // Nothing is painted either way: the prompt is modal and takes a click of
+    // its own, so the button the user pressed on the canvas is released onto
+    // the DIALOG and the gesture is over by the time this returns. Aborting the
+    // whole press is also what keeps the Brush — the one tool that reaches two
+    // of the three funnels — from prompting twice.
+    bool ensureRasterCopyForRawTarget();
+
+    // The "Rasterize RAW Layer?" confirmation. Returns true for "Create Raster
+    // Copy". Separate from the gate so the gate reads as policy, not as UI.
+    bool promptRasterizeRawLayer();
 
     // The Clone Stamp tool (in either Clone or Healing sub-mode) shares one set
     // of source/stroke code paths; this gates them.
@@ -721,6 +746,11 @@ private:
     QRectF m_resizeStartDocBounds;
 
     bool m_brushDrawing = false;
+    // Latched once the prompt has run for the CURRENT pointer gesture, cleared
+    // by the next press. The gate is reached twice per press for the Brush
+    // (ensurePaintTargetLayer, then beginBrushStroke) and by then the active
+    // layer is the raster copy, not a RAW layer — without this latch the second
+    // call would answer Proceed and arm a stroke whose button is long gone.
     QPointF m_brushScreenLastPos;
     QPointF m_lastBrushImagePos;
     QImage m_brushBeforeImage;
