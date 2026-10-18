@@ -44,6 +44,13 @@ public:
                                   const QModelIndex& index,
                                   const QPoint& pos);
 
+    // Same mechanism again, for a Smart Object's thumbnail. Emits
+    // smartObjectThumbDoubleClicked, which opens the referenced document in a
+    // tab through LayerPanel::smartObjectEditRequested.
+    int handleSmartObjectThumbDoubleClick(const QStyleOptionViewItem& option,
+                                          const QModelIndex& index,
+                                          const QPoint& pos);
+
 signals:
     void visibilityToggled(int flatIndex);
     void visibilitySoloRequested(int flatIndex);   // Alt+Click eye → solo/isolate
@@ -54,6 +61,8 @@ signals:
     void solidColorThumbDoubleClicked(int flatIndex);
     // Double-click on a RAW Layer's thumbnail → (future) open Camera Raw.
     void rawThumbDoubleClicked(int flatIndex);
+    // Double-click on a Smart Object's thumbnail → edit its contents.
+    void smartObjectThumbDoubleClicked(int flatIndex);
 
 private:
     LayerTreeNode* nodeFromIndex(const QModelIndex& index) const;

@@ -1880,6 +1880,14 @@ void ImageController::duplicateNode(int flatIndex)
             dup->layer->textData = std::make_shared<TextLayerData>(*srcNode->layer->textData);
         if (srcNode->layer->shapeData)
             dup->layer->shapeData = std::make_shared<ShapeData>(*srcNode->layer->shapeData);
+        // A duplicated Smart Object is a second INSTANCE of the same content —
+        // the payload is shared, not copied, so both layers keep pointing at
+        // one document, which is what Duplicate Layer means for a Smart
+        // Object. Without this the copy silently degraded into a plain
+        // raster layer holding
+        // the rendered pixels. "New Smart Object via Copy" is the command for
+        // the other intent, an independent copy of the document.
+        dup->layer->smartObjectData = srcNode->layer->smartObjectData;
         if (!srcNode->layer->maskImage.isNull()) {
             dup->layer->maskImage = srcNode->layer->maskImage.copy();
             if (!srcNode->layer->maskRawImage.isNull())
@@ -4721,7 +4729,9 @@ void ImageController::rasterizeNode(int flatIndex)
     if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
         return;
     auto* layer = node->layer.get();
-    if (!layer->textData && !layer->shapeData && !layer->rawData) return;
+    if (!layer->textData && !layer->shapeData && !layer->rawData
+        && !layer->smartObjectData)
+        return;
     if (node->isPixelEditingLocked()) {
         emit operationBlocked(tr("This layer is locked and cannot be rasterized."));
         return;
@@ -4731,6 +4741,27 @@ void ImageController::rasterizeNode(int flatIndex)
     QTransform beforeXf = node->transform;
     auto beforeText = layer->textData;
     auto beforeShape = layer->shapeData;
+
+    // Smart Object: drop the reference, keep the cached render as plain pixels.
+    // No re-render — the cpuImage already IS the referenced document's
+    // composite, and the referenced document itself is untouched (it stays in
+    // the container, available to other instances and to Undo).
+    if (layer->smartObjectData) {
+        auto beforeSmart = layer->smartObjectData;
+        layer->smartObjectData.reset();
+        markLayerDirty(layer);
+        m_history.push(std::make_unique<RasterizeCommand>(
+            m_doc, flatIndex,
+            std::move(beforeImg), beforeXf,
+            std::move(beforeText), std::move(beforeShape), layer->rawData,
+            std::move(beforeSmart),
+            layer->cpuImage.copy(), node->transform,
+            tr("Rasterize Layer")));
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        if (m_doc) ++m_doc->compositionGeneration;
+        return;
+    }
 
     // RAW Layer: discard the develop payload, keep the already-rendered
     // pixels as-is (Fase 4.7) — no re-render, just drop the re-edit path.
@@ -4744,6 +4775,7 @@ void ImageController::rasterizeNode(int flatIndex)
             m_doc, flatIndex,
             std::move(beforeImg), beforeXf,
             std::move(beforeText), std::move(beforeShape), std::move(beforeRaw),
+            nullptr,
             layer->cpuImage.copy(), node->transform,
             tr("Rasterize Layer")));
         emit layerChanged(flatIndex);
@@ -4786,7 +4818,7 @@ void ImageController::rasterizeNode(int flatIndex)
     m_history.push(std::make_unique<RasterizeCommand>(
         m_doc, flatIndex,
         std::move(beforeImg), beforeXf,
-        std::move(beforeText), std::move(beforeShape), nullptr,
+        std::move(beforeText), std::move(beforeShape), nullptr, nullptr,
         layer->cpuImage.copy(), node->transform,
         tr("Rasterize Layer")));
 
@@ -5903,7 +5935,7 @@ bool ImageController::hasClipboard() const
 // system clipboard still corresponds to the internal rich data. When another
 // app later takes the clipboard, the marker disappears and paste() ignores the
 // stale internal cache — copying inside the app never permanently shadows the
-// system clipboard (GIMP/Photoshop behaviour).
+// system clipboard (the behaviour every other image editor has).
 static void publishClipboardToSystem(const QImage& raster, const QString& token)
 {
     auto* sys = QGuiApplication::clipboard();

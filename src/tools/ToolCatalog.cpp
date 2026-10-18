@@ -148,7 +148,7 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
         {"merge_down", "Merge the active layer into the layer directly below it", "Layer", {}},
         {"merge_layers", "Merge all visible layers (alias of merge_visible)", "Layer", {}},
         {"flatten_image", "Flatten the whole document into a single layer", "Layer", {}},
-        {"rasterize_layer", "Rasterize the active layer (convert text/shape/RAW to pixels)", "Layer", {}},
+        {"rasterize_layer", "Rasterize the active layer (convert text/shape/RAW/Smart Object to pixels)", "Layer", {}},
         {"raw_develop", "Adjust a RAW Layer's develop settings (white balance, exposure) "
             "and re-reveal it from the original file. Only unspecified params keep their "
             "current value. white_balance_method must be one of the engine's own names: "
@@ -253,6 +253,24 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
         {"mask_paste", "Paste copied mask onto active layer", "Layer",
             {{"index", "int", -1, 100, -1}}},
         {"mask_clear", "Reset layer mask to all-white (reveal all)", "Layer",
+            {{"index", "int", -1, 100, -1}}},
+
+        // Smart Objects. "Edit Contents" is deliberately absent: it opens a tab
+        // rather than performing a document operation, so it has nothing to
+        // report back to an automation caller.
+        {"smart_object_create", "Convert the layer at `index` (or the selection) into a Smart Object", "Layer",
+            {{"index", "int", -1, 100, -1}}},
+        {"smart_object_place_embedded", "Place a .hzs project as an embedded Smart Object layer", "Layer",
+            {{"path", "string", 0, 0, 0}}},
+        {"smart_object_place_linked", "Place a .hzs project as a linked Smart Object layer", "Layer",
+            {{"path", "string", 0, 0, 0}}},
+        {"smart_object_via_copy", "Duplicate a Smart Object with an independent copy of its document", "Layer",
+            {{"index", "int", -1, 100, -1}}},
+        {"smart_object_replace", "Replace the content every instance of this Smart Object displays", "Layer",
+            {{"index", "int", -1, 100, -1}, {"path", "string", 0, 0, 0}}},
+        {"smart_object_update", "Re-read a linked Smart Object's file and re-render it", "Layer",
+            {{"index", "int", -1, 100, -1}}},
+        {"smart_object_rasterize", "Drop a Smart Object's reference, keeping its rendered pixels", "Layer",
             {{"index", "int", -1, 100, -1}}},
 
         {"create_text", "Create a new text layer", "Text",

@@ -187,6 +187,25 @@ small and static, so the full list is always returned in one response.
 `Selection`, `Filter`, `Paint`, `Adjust`, `Transform`, `Document`, `Text`,
 `Viewport`, `AI`) — purely informational grouping, not part of core MCP.
 
+#### Smart Object tools (category `Layer`)
+
+| Tool | Arguments | Effect |
+|---|---|---|
+| `smart_object_create` | `index` (default: the selection) | Converts the layer(s) into a Smart Object: the content moves into a new document inside the project and one instance takes its place |
+| `smart_object_place_embedded` | `path` | Places a `.hzs` as an **embedded** Smart Object — its documents are copied into this project |
+| `smart_object_place_linked` | `path` | Places a `.hzs` as a **linked** Smart Object — it keeps referencing that file |
+| `smart_object_via_copy` | `index` (default: active) | Duplicates the instance with an **independent** copy of its document. Contrast with an ordinary duplicate, which gives a second instance of the *same* document |
+| `smart_object_replace` | `index` (default: active), `path` | Replaces the content every instance of that document shows. On a linked instance it re-points the link |
+| `smart_object_update` | `index` (default: active) | Re-reads a linked Smart Object's file and re-renders it. Hazor has no file watcher, so this is the explicit refresh |
+| `smart_object_rasterize` | `index` (default: active) | Drops the reference, keeping the rendered pixels. The referenced document is untouched |
+
+"Edit Contents" has no tool: it opens a tab rather than performing a document
+operation, so there is nothing to report back. Note that `smart_object_update`
+and the render it triggers are **asynchronous** — the call returns once the
+render is scheduled, and the result lands on the canvas when it completes.
+
+See [SMART-OBJECTS.md](SMART-OBJECTS.md) for the model behind these.
+
 ### `tools/call`
 
 ```bash

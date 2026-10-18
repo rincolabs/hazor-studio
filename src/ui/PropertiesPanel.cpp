@@ -195,6 +195,48 @@ PropertiesPanel::PropertiesPanel(QWidget* parent)
     buildTransformInterface(lay);
 
     // ── Layer Mask section ──
+    // ── Smart Object ──────────────────────────────────────────────
+    // Hidden unless the active layer is one. Read-only facts plus the three
+    // operations that make sense from here; creation and storage conversion
+    // live in Layer ▸ Smart Object, where they apply to a selection.
+    m_smartObjectSection = new CollapsibleSection(tr("Smart Object"), m_layerSection);
+    m_smartObjectSection->setVisible(false);
+    {
+        auto* soLay = m_smartObjectSection->body();
+        auto addRow = [&](const QString& title) -> QLabel* {
+            auto* row = new QHBoxLayout();
+            row->addWidget(new QLabel(title, m_smartObjectSection));
+            auto* value = new QLabel(QString(), m_smartObjectSection);
+            value->setWordWrap(true);
+            value->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            row->addWidget(value, 1);
+            soLay->addLayout(row);
+            return value;
+        };
+        m_smartObjectNameLabel = addRow(tr("Document:"));
+        m_smartObjectModeLabel = addRow(tr("Storage:"));
+        m_smartObjectPathLabel = addRow(tr("File:"));
+        m_smartObjectSizeLabel = addRow(tr("Source:"));
+        m_smartObjectInstancesLabel = addRow(tr("Instances:"));
+
+        m_smartObjectEditButton = new QPushButton(tr("Edit Contents"), m_smartObjectSection);
+        soLay->addWidget(m_smartObjectEditButton);
+        connect(m_smartObjectEditButton, &QPushButton::clicked,
+                this, &PropertiesPanel::smartObjectEditRequested);
+
+        m_smartObjectUpdateButton =
+            new QPushButton(tr("Update Modified Content"), m_smartObjectSection);
+        soLay->addWidget(m_smartObjectUpdateButton);
+        connect(m_smartObjectUpdateButton, &QPushButton::clicked,
+                this, &PropertiesPanel::smartObjectUpdateRequested);
+
+        m_smartObjectRelinkButton = new QPushButton(tr("Relink..."), m_smartObjectSection);
+        soLay->addWidget(m_smartObjectRelinkButton);
+        connect(m_smartObjectRelinkButton, &QPushButton::clicked,
+                this, &PropertiesPanel::smartObjectRelinkRequested);
+    }
+    lay->addWidget(m_smartObjectSection);
+
     m_maskSection = new CollapsibleSection(tr("Layer Mask"), m_layerSection);
     m_maskSection->setVisible(false);
     auto* maskLay = m_maskSection->body();
@@ -686,6 +728,36 @@ void PropertiesPanel::openSolidColorPicker()
         m_solidColorEditor->openColorPicker();
 }
 
+void PropertiesPanel::setSmartObjectInfo(const SmartObjectInfo& info)
+{
+    if (!m_smartObjectSection)
+        return;
+    m_smartObjectSection->setVisible(info.valid);
+    if (!info.valid)
+        return;
+
+    m_smartObjectNameLabel->setText(info.documentName);
+    QString storage = info.linked ? tr("Linked") : tr("Embedded");
+    if (info.linkBroken)
+        storage += tr(" — file not found");
+    m_smartObjectModeLabel->setText(storage);
+
+    // The file row is meaningless for embedded content, which has no file of
+    // its own — it lives in the project.
+    m_smartObjectPathLabel->setText(info.linked ? info.path : tr("—"));
+    m_smartObjectSizeLabel->setText(
+        tr("%1 × %2 px at %3 DPI")
+            .arg(info.sourceSize.width())
+            .arg(info.sourceSize.height())
+            .arg(info.sourceDpi, 0, 'f', 0));
+    m_smartObjectInstancesLabel->setText(QString::number(info.instanceCount));
+
+    // Update/Relink are Linked-only: embedded content is never out of date and
+    // has nothing to re-point at.
+    m_smartObjectUpdateButton->setEnabled(info.linked);
+    m_smartObjectRelinkButton->setEnabled(info.linked);
+}
+
 void PropertiesPanel::showLayerProperties()
 {
     if (m_curvesEditor->isVisible())
@@ -851,4 +923,5 @@ void PropertiesPanel::clear()
     showLayerProperties();
     setLayerTransformInfo(LayerKind::None, 0, 0, 0, 0, 0, false);
     setMaskInfo(false, 1.0f, 0.0f);
+    setSmartObjectInfo(SmartObjectInfo{});
 }

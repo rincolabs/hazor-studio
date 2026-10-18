@@ -20,6 +20,7 @@ struct ShapeData;
 struct DistortData;
 struct GradientFillData;
 struct RawLayerData;
+struct SmartObjectData;
 class LayerTreeNode;
 
 enum class BlendMode {
@@ -92,11 +93,15 @@ public:
     bool isDistortLayer() const { return distortData != nullptr; }
     bool isGradientFillLayer() const { return gradientFillData != nullptr; }
     bool isRawLayer() const { return rawData != nullptr; }
+    bool isSmartObjectLayer() const { return smartObjectData != nullptr; }
 
     // True for layer types whose cpuImage can be edited directly (brush,
     // eraser, fill, clone, filters, clear). False for the non-destructive
-    // content models (text, shape, RAW) whose rendered pixels are derived
-    // and must go through their own re-edit path or Rasterize instead.
+    // content models (text, shape, RAW, Smart Object) whose rendered pixels
+    // are derived and must go through their own re-edit path or Rasterize
+    // instead. For a Smart Object this gate is also what makes sharing one
+    // QImage across every instance of a render key safe: nothing writes to it,
+    // so nothing detaches the buffer (see SmartObjectData.hpp).
     // Distort layers stay true: a direct edit on one is handled by dropping
     // distortData, not by blocking the edit (see ImageController::
     // checkDestructiveOp). Centralizes what used to be a handful of ad hoc
@@ -104,7 +109,8 @@ public:
     // adding RAW didn't mean patching each one by hand — see
     // LayerTreeNode::canEditPixels().
     bool hasDirectlyEditablePixels() const {
-        return !isTextLayer() && !isShapeLayer() && !isRawLayer();
+        return !isTextLayer() && !isShapeLayer() && !isRawLayer()
+            && !isSmartObjectLayer();
     }
 
     // Single predicate for "render this shape layer through its viewport-adaptive
@@ -129,6 +135,12 @@ public:
     // When present, cpuImage holds the rendered (8-bit) develop result; the
     // RAW file is never modified and the develop profile stays re-editable.
     std::shared_ptr<RawLayerData> rawData;
+    // Non-destructive Smart Object metadata (which document this layer
+    // displays). When present, cpuImage holds that document's rendered
+    // composite — a regenerable CACHE, never the source of truth. Held as
+    // shared_ptr<const ...> on purpose; see SmartObjectData.hpp for why the
+    // payload carries a docId and never a Document*.
+    std::shared_ptr<const SmartObjectData> smartObjectData;
 
     // Transform snapshot used by "Reset Transform" to restore the layer's
     // initial placement/scale when the layer was created/imported/pasted.

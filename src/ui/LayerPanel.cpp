@@ -7,6 +7,7 @@
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
+#include "smartobject/SmartObjectData.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
@@ -500,6 +501,58 @@ LayerPanel::LayerPanel(QWidget* parent)
                 }
             }
 
+            // ── Smart Objects ──────────────────────────────────────
+            // Only what applies to THIS layer: a common layer offers Convert
+            // and nothing else; Relink never shows up on embedded content.
+            // Each entry just reports the command — MainWindow runs the very
+            // same operation the Layer ▸ Smart Objects menu runs.
+            if (m_controller) {
+                auto* soNode = m_controller->document()
+                    ? m_controller->document()->nodeAt(idx) : nullptr;
+                const auto soData = (soNode && soNode->type == LayerTreeNode::Type::Layer)
+                    ? m_controller->smartObjectDataAt(idx) : nullptr;
+                const bool convertible = soNode
+                    && soNode->type != LayerTreeNode::Type::Effect
+                    && !soNode->isFullyLocked();
+                const bool pixelsLocked = soNode && soNode->isPixelEditingLocked();
+
+                auto add = [&](const QString& text, LayerSmartObjectCommand command,
+                               bool enabled = true) {
+                    auto* action = menu.addAction(text, [this, idx, command]() {
+                        emit smartObjectCommandRequested(idx, command);
+                    });
+                    action->setEnabled(enabled);
+                };
+
+                if (!soData) {
+                    if (convertible) {
+                        menu.addSeparator();
+                        add(tr("Convert to Smart Object"), LayerSmartObjectCommand::Convert);
+                    }
+                } else {
+                    const bool isLinked =
+                        soData->mode == SmartObjectStorageMode::Linked;
+                    menu.addSeparator();
+                    add(tr("Edit Contents"), LayerSmartObjectCommand::EditContents);
+                    add(tr("New Smart Object via Copy"), LayerSmartObjectCommand::ViaCopy);
+                    add(tr("Replace Contents..."), LayerSmartObjectCommand::ReplaceContents,
+                        !pixelsLocked);
+                    if (isLinked) {
+                        add(tr("Relink to File..."), LayerSmartObjectCommand::RelinkToFile,
+                            !pixelsLocked);
+                        add(tr("Update Modified Content"),
+                            LayerSmartObjectCommand::UpdateModified);
+                        add(tr("Embed Linked"), LayerSmartObjectCommand::EmbedLinked,
+                            !pixelsLocked);
+                    } else {
+                        add(tr("Convert to Linked..."),
+                            LayerSmartObjectCommand::ConvertToLinked, !pixelsLocked);
+                    }
+                    add(tr("Rasterize Layer"), LayerSmartObjectCommand::Rasterize,
+                        !pixelsLocked);
+                }
+            }
+
             // ── Layer Style (effects) ──
             auto* node = m_controller ? m_controller->document()->nodeAt(idx) : nullptr;
             const bool hasEffects = node && !node->effects.empty();
@@ -641,6 +694,8 @@ void LayerPanel::setController(ImageController* ctrl)
             this, &LayerPanel::solidColorEditRequested);
     connect(m_delegate, &LayerItemDelegate::rawThumbDoubleClicked,
             this, &LayerPanel::rawEditRequested);
+    connect(m_delegate, &LayerItemDelegate::smartObjectThumbDoubleClicked,
+            this, &LayerPanel::smartObjectEditRequested);
 
     connect(m_delegate, &LayerItemDelegate::maskToggled,
             this, [this](int flatIndex, Qt::KeyboardModifiers mods) {
@@ -1216,6 +1271,12 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
         // Color case above: this filter runs before the view/delegate's own
         // in-place-rename double-click handling.
         if (delegate->handleRawThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
+            return true;
+
+        // Double-click on a Smart Object's thumbnail opens its contents
+        // (emits smartObjectThumbDoubleClicked → smartObjectEditRequested).
+        // Same reason this is handled here as the two cases above.
+        if (delegate->handleSmartObjectThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
             return true;
 
         if (!delegate->labelRect(option, index).contains(mouseEvent->pos()))

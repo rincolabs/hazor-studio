@@ -9,6 +9,7 @@
 #include "core/ShapeTypes.hpp"
 #include "text/TextTypes.hpp"
 #include "text/TextRenderer.hpp"
+#include "smartobject/SmartObjectData.hpp"
 #include <QImage>
 #include <QPoint>
 #include <QTransform>
@@ -795,6 +796,7 @@ public:
                      std::shared_ptr<TextLayerData> beforeTextData,
                      std::shared_ptr<ShapeData> beforeShapeData,
                      std::shared_ptr<RawLayerData> beforeRawData,
+                     std::shared_ptr<const SmartObjectData> beforeSmartObjectData,
                      QImage afterImage, QTransform afterTransform,
                      QString commandName)
         : m_doc(doc)
@@ -804,14 +806,18 @@ public:
         , m_beforeTextData(std::move(beforeTextData))
         , m_beforeShapeData(std::move(beforeShapeData))
         , m_beforeRawData(std::move(beforeRawData))
+        , m_beforeSmartObjectData(std::move(beforeSmartObjectData))
         , m_afterImage(std::move(afterImage))
         , m_afterTransform(afterTransform)
         , m_name(std::move(commandName))
     {}
 
-    void execute() override { apply(m_afterImage, m_afterTransform, nullptr, nullptr, nullptr); }
+    void execute() override {
+        apply(m_afterImage, m_afterTransform, nullptr, nullptr, nullptr, nullptr);
+    }
     void undo() override {
-        apply(m_beforeImage, m_beforeTransform, m_beforeTextData, m_beforeShapeData, m_beforeRawData);
+        apply(m_beforeImage, m_beforeTransform, m_beforeTextData, m_beforeShapeData,
+              m_beforeRawData, m_beforeSmartObjectData);
     }
     QString name() const override { return m_name; }
 
@@ -819,7 +825,8 @@ private:
     void apply(const QImage& img, const QTransform& t,
                std::shared_ptr<TextLayerData> textData,
                std::shared_ptr<ShapeData> shapeData,
-               std::shared_ptr<RawLayerData> rawData) {
+               std::shared_ptr<RawLayerData> rawData,
+               std::shared_ptr<const SmartObjectData> smartObjectData) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
             return;
@@ -828,6 +835,12 @@ private:
         node->layer->textData = textData;
         node->layer->shapeData = shapeData;
         node->layer->rawData = rawData;
+        // Re-attaching the payload is all an undo needs: the referenced
+        // document was never touched by the rasterize (it still lives in the
+        // container), and the pixels restored above are the render it had.
+        // Going stale against a document edited in the meantime is handled by
+        // the ordinary obsolescence check, not here.
+        node->layer->smartObjectData = std::move(smartObjectData);
         node->layer->textureOutdated = true;
         node->invalidateEffects();
     }
@@ -839,6 +852,7 @@ private:
     std::shared_ptr<TextLayerData> m_beforeTextData;
     std::shared_ptr<ShapeData> m_beforeShapeData;
     std::shared_ptr<RawLayerData> m_beforeRawData;
+    std::shared_ptr<const SmartObjectData> m_beforeSmartObjectData;
     QImage m_afterImage;
     QTransform m_afterTransform;
     QString m_name;

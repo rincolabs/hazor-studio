@@ -5,11 +5,13 @@
 #include <QPointF>
 #include <QColor>
 #include <QSize>
+#include <QHash>
 #include <QStringList>
 #include <memory>
 #include <string>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <atomic>
 #include "core/Document.hpp"
@@ -25,11 +27,13 @@
 #include "ai/AiRemoveTypes.hpp"
 #include "ai/upscale/UpscaleTypes.hpp"
 #include "raw/RawLayerData.hpp"
+#include "smartobject/SmartObjectRenderService.hpp"
 
 namespace cv { class Mat; }
 namespace nlohmann { class json; }
 class ImageGenProvider;
 class UpscaleService;
+class DocumentContainer;
 class RawDevelopService;
 class RawDevelopParams;
 class LayerTreeNode;
@@ -84,6 +88,81 @@ public:
     void setDocument(Document* doc);
     Document* document() const { return m_doc; }
     CommandHistory& history() { return m_history; }
+
+    // ── Smart Objects ────────────────────────────────────────────────────
+    // The .hzs this controller's document belongs to, and which document of it
+    // this controller edits. Needed to resolve a Smart Object's docId; the
+    // container is shared (never owned) so the controller cannot outlive-dangle
+    // on it.
+    void setDocumentContainer(std::shared_ptr<DocumentContainer> container,
+                              const SmartObjectDocId& docId);
+    DocumentContainer* documentContainer() const { return m_container.get(); }
+    const std::shared_ptr<DocumentContainer>& documentContainerPtr() const { return m_container; }
+    const SmartObjectDocId& documentId() const { return m_docId; }
+
+    // Re-renders every STALE instance of `docId` anywhere in the container,
+    // then — once each render commits — chains to the documents those instances
+    // live in. The cascade is chained BY COMMIT, not merely ordered at
+    // enqueue time: if the outer document rendered concurrently with the inner
+    // one, its snapshot would still hold the inner instance's old pixels and it
+    // would bake stale content. Both outcomes of that race are bad (re-render
+    // thrash with a visible flash, or a permanently stale instance), so the
+    // next level is only scheduled after the previous one has committed.
+    // `force` re-renders even instances that look up to date — used when the
+    // user explicitly commits content and expects to see it propagate now.
+    void refreshSmartObjectInstances(const SmartObjectDocId& docId, bool force = false);
+    // Every document in the container. `afterLoad` marks the pass as "this is
+    // regenerating what is already on disk", so its commits do not flag any
+    // document as unsaved.
+    void refreshAllSmartObjectInstances(bool afterLoad = false);
+
+    // Commits the isolated working copy a content tab has been editing into the
+    // document it stands for, and pushes it through to every instance at once.
+    // This — not an edit in the content tab — is the moment the project's
+    // content actually changes; the caller is what marks the project unsaved.
+    // False when `docId` has no open edit session, or no stored document.
+    bool commitSmartObjectEditSession(const SmartObjectDocId& docId);
+
+    // The payload of the instance at `flatIndex`, or null when that layer is
+    // not a Smart Object. Returned as shared_ptr<const ...>: callers read it,
+    // they never mutate through it (see SmartObjectData.hpp).
+    std::shared_ptr<const SmartObjectData> smartObjectDataAt(int flatIndex) const;
+    SmartObjectDocId smartObjectDocIdAt(int flatIndex) const;
+    // How many instances in the whole container display the same document as
+    // the instance at `flatIndex` (for the Properties page). 0 when not a
+    // Smart Object.
+    int smartObjectInstanceCountAt(int flatIndex) const;
+    // Resolved absolute path of a Linked instance, empty otherwise.
+    QString smartObjectLinkedPathAt(int flatIndex) const;
+
+    // Moves the selected nodes into a NEW document in the container and leaves
+    // a single instance in their place, as one undo step. Returns the
+    // instance's flat index, or -1.
+    int convertToSmartObject(const std::vector<int>& flatIndices);
+    // Places another .hzs as a Smart Object. Embedded imports a private copy of
+    // its documents into this container; Linked keeps referencing the file.
+    int placeEmbeddedDocument(const QString& path);
+    int placeLinkedDocument(const QString& path);
+
+    // Duplicates the instance with an INDEPENDENT copy of its document (fresh
+    // docId), as opposed to Ctrl+J, which shares the same document. A Linked
+    // instance's copy comes back Embedded: a private copy is the only form of
+    // "independent" when the content lives in someone else's file.
+    int newSmartObjectViaCopy(int flatIndex);
+    // Replaces the content every instance of this document shows. On a Linked
+    // instance it is a relink; on an Embedded one the stored document is
+    // swapped under the same docId, so all instances follow at once.
+    bool replaceSmartObjectContents(int flatIndex, const QString& path);
+    // Re-points a Linked instance at another file.
+    bool relinkSmartObject(int flatIndex, const QString& path);
+    // "Update Modified Content": re-reads a Linked file and re-renders. There
+    // is no file watcher anywhere in Hazor, so this is the explicit refresh.
+    bool updateSmartObjectContent(int flatIndex);
+    // Storage conversion. These move documents between containers and change
+    // what gets persisted — they are not payload swaps, which is why they are
+    // three operations and not one flag.
+    bool convertSmartObjectToLinked(int flatIndex, const QString& path);
+    bool convertSmartObjectToEmbedded(int flatIndex);
 
     Layer* activeLayer() const;
     int activeLayerIndex() const { return m_doc ? m_doc->activeFlatIndex : -1; }
@@ -411,6 +490,25 @@ signals:
     // the layer's index at completion time, or the dispatch-time index when
     // the layer could no longer be resolved.
     void rawLayerDevelopFinished(LayerTreeNode* node, int flatIndex, bool ok, QString message);
+    // A Smart Object render landed and every live instance of `docId` in the
+    // container was updated. Carries NO command and NO history entry (see
+    // docs/SMART-OBJECTS.md): updating a regenerable cache is not a
+    // destructive edit, and recording it would fight the invalidation check
+    // that triggers it — an undo would restore old pixels, the staleness test
+    // would immediately see them and re-render, undoing the undo.
+    // `affectedDocuments` are the container documents whose instances changed,
+    // so other tabs can repaint.
+    // `marksDirty` is false only for the pass that regenerates renders already
+    // stored on disk (right after a load); true whenever the render changed
+    // because something was edited, in which case the documents it landed in
+    // now differ from their files.
+    void smartObjectRenderCommitted(SmartObjectDocId docId,
+                                    QStringList affectedDocuments,
+                                    bool marksDirty);
+    // A Linked instance's reference became resolvable, or stopped being so.
+    // Panel badge only — not a pixel change and not a history step: the cached
+    // render is precisely what stays on screen when a link breaks.
+    void smartObjectLinkStateChanged(int flatIndex, bool broken);
     void progressOperationStarted(uint64_t jobId, const QString& message, bool cancelable);
     void progressOperationMessageChanged(uint64_t jobId, const QString& message);
     void progressOperationProgressChanged(uint64_t jobId, int progress);
@@ -471,6 +569,57 @@ private:
         int flatIndex = -1;
     };
     std::unordered_map<const LayerTreeNode*, PendingRawDevelop> m_pendingRawDevelops;
+
+    // ── Smart Object rendering ──
+    void onSmartObjectRenderFinished(SmartObjectRenderResult result);
+    // Which instances a dispatch should consider.
+    using SmartObjectInstanceFilter =
+        std::function<bool(const Document& host, LayerTreeNode*, const SmartObjectData&)>;
+    // Groups the matching STALE instances by render key and dispatches one job
+    // per key — not one per instance (see SmartObjectRenderKey). Also refreshes
+    // each visited instance's link state. `openLinked` allows loading a Linked
+    // target that is not open yet; false keeps the pass I/O-free.
+    // Returns the number of jobs dispatched.
+    int dispatchSmartObjectRenders(const SmartObjectInstanceFilter& filter,
+                                   bool force, bool openLinked, bool marksDirty);
+    void requestSmartObjectRenders(const SmartObjectDocId& docId,
+                                   bool force, bool marksDirty);
+    bool renderLinkedSmartObject(const LayerTreeNode* node, bool force);
+    // Embedded → a document of this container; Linked → the target file's
+    // document via ContainerRegistry, never a second copy of it.
+    std::shared_ptr<Document> resolveSmartObjectDocument(const SmartObjectData& data,
+                                                         bool openIfNeeded) const;
+    // Cheap existence test, no file read: tells "gone" apart from "not loaded".
+    bool smartObjectReferenceExists(const SmartObjectData& data) const;
+    void markSmartObjectLinkBroken(LayerTreeNode* node, bool broken);
+    // Every document whose instances a dispatch or a commit has to visit: the
+    // container's stored documents PLUS the uncommitted working copy of each
+    // open edit session. The working copies are in because a nested Smart
+    // Object inside one still has to re-render when its own content is
+    // committed — and out of everything persistence-related, because they are
+    // not part of the file (see DocumentContainer::beginEditSession).
+    std::vector<std::pair<SmartObjectDocId, std::shared_ptr<Document>>>
+        smartObjectHosts() const;
+    static SmartObjectRenderKey smartObjectRenderKey(const SmartObjectData& data,
+                                                     const Document& host);
+    std::unique_ptr<LayerTreeNode> makeSmartObjectNode(const SmartObjectDocId& docId,
+                                                       SmartObjectStorageMode mode,
+                                                       const QString& linkedPath,
+                                                       const Document& source,
+                                                       const QString& name);
+    int insertSmartObjectInstance(const SmartObjectDocId& docId,
+                                  SmartObjectStorageMode mode,
+                                  const QString& linkedPath,
+                                  const QString& name,
+                                  const QString& commandName);
+    SmartObjectRenderService* ensureSmartObjectRenderService();
+
+    std::unique_ptr<SmartObjectRenderService> m_smartObjectRenderService;
+    std::shared_ptr<DocumentContainer> m_container;
+    SmartObjectDocId m_docId;
+    // Newest jobGeneration already committed per key, so a result built from a
+    // state the document has already moved past is dropped instead of shown.
+    QHash<SmartObjectRenderKey, std::uint64_t> m_committedSmartObjectGenerations;
 
     Document* m_doc = nullptr;
     CommandHistory m_history;

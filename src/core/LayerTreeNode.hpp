@@ -672,6 +672,12 @@ public:
                 // RawGeometry + the revision counter) while sharing the
                 // immutable RawSource — see RawLayerData.hpp.
                 node->layer->rawData = std::make_shared<RawLayerData>(*layer->rawData);
+            // Shares the same immutable payload instead of copying it: both
+            // instances genuinely reference the same document, mode and render
+            // generation, and because the value is const neither can mutate the
+            // other's view of it. What distinguishes two instances (transform,
+            // opacity, blend, mask, effects) lives on the node and the Layer.
+            node->layer->smartObjectData = layer->smartObjectData;
         }
 
         for (auto& child : children) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QSize>
+#include <QString>
 #include <QWidget>
 
 class QLabel;
@@ -65,6 +67,22 @@ public:
     // Reflects the current ruler visibility + unit without emitting signals.
     void setRulerGuideState(bool rulersVisible, int unit);
 
+    // ── Smart Object section ──
+    // What the panel shows about a Smart Object instance. The panel displays
+    // and forwards; resolving the reference and running the operations is
+    // ImageController's job.
+    struct SmartObjectInfo {
+        bool valid = false;         // false hides the whole section
+        QString documentName;
+        bool linked = false;
+        bool linkBroken = false;
+        QString path;               // Linked only: resolved absolute path
+        QSize sourceSize;
+        double sourceDpi = 300.0;
+        int instanceCount = 0;      // how many layers display this content
+    };
+    void setSmartObjectInfo(const SmartObjectInfo& info);
+
     void setMaskInfo(bool hasMask, float density, float feather);
     // Reflects the per-document rubylith overlay state without emitting signals.
     void setMaskOverlayState(bool visible, float opacity);
@@ -117,6 +135,11 @@ signals:
     void removeBackgroundRequested();
     void selectSubjectRequested();
     void aiUpscaleRequested();
+
+    // ── Smart Object section ──
+    void smartObjectEditRequested();
+    void smartObjectUpdateRequested();
+    void smartObjectRelinkRequested();
 
     // ── Document / Canvas page (all shortcuts to existing document logic) ──
     // A canvas dimension was committed. `field` is TransformField::FieldWidth or
@@ -172,6 +195,16 @@ private:
     QPushButton* m_aiUpscaleButton = nullptr;
 
     // ── Layer Mask section ──
+    CollapsibleSection* m_smartObjectSection = nullptr;
+    QLabel* m_smartObjectNameLabel = nullptr;
+    QLabel* m_smartObjectModeLabel = nullptr;
+    QLabel* m_smartObjectPathLabel = nullptr;
+    QLabel* m_smartObjectSizeLabel = nullptr;
+    QLabel* m_smartObjectInstancesLabel = nullptr;
+    QPushButton* m_smartObjectEditButton = nullptr;
+    QPushButton* m_smartObjectUpdateButton = nullptr;
+    QPushButton* m_smartObjectRelinkButton = nullptr;
+
     CollapsibleSection* m_maskSection = nullptr;
     QSlider* m_densitySlider = nullptr;
     QLabel* m_densityLabel = nullptr;

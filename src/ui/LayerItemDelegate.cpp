@@ -2,6 +2,7 @@
 #include "controller/ImageController.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
+#include "smartobject/SmartObjectData.hpp"
 #include "core/Document.hpp"
 #include "core/SolidColorData.hpp"
 #include "theme/Theme.hpp"
@@ -22,6 +23,9 @@ static constexpr int kItemHeight = 50;
 static constexpr int kThumbSize = 40;
 static constexpr int kMaskThumbSize = 40;
 static constexpr int kTextThumbIconSize = 24;
+// Corner badge over a Smart Object's thumbnail. Smaller than the type glyphs
+// above because it sits ON the thumbnail instead of replacing it.
+static constexpr int kSmartObjectBadgeSize = 13;
 static constexpr int kEyeSize = 20;
 static constexpr int kLockIconSize = 20;
 static constexpr int kLockBtnSize = 24;
@@ -241,6 +245,45 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
                 painter->setBrush(Qt::NoBrush);
                 painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
                 hasVisiblePixels = true;
+            } else if (node->layer->isSmartObjectLayer()) {
+                // The thumbnail keeps showing the real pixels (it IS the
+                // referenced document's render), so the Smart Object marker is
+                // a corner BADGE over the thumbnail rather than a glyph
+                // replacing it — a Smart Object is identified by what it
+                // references, not by having nothing to show.
+                if (!node->cachedThumb.isNull()) {
+                    painter->drawPixmap(innerThumb, QPixmap::fromImage(node->cachedThumb));
+                    hasVisiblePixels = imageHasVisiblePixels(node->cachedThumb);
+                } else {
+                    painter->fillRect(innerThumb, th->colorBackgroundSecondary);
+                }
+                const auto& data = *node->layer->smartObjectData;
+                const bool linked = data.mode == SmartObjectStorageMode::Linked;
+                static QPixmap embeddedPix(":/icons/smart-object.png");
+                static QPixmap linkedPix(":/icons/smart-object-linked.png");
+                const int badge = kSmartObjectBadgeSize;
+                const QRect badgeRect(thumbRect.right() - badge - 1,
+                                      thumbRect.bottom() - badge - 1, badge, badge);
+                painter->save();
+                // A broken link is tinted with the theme's warning colour so
+                // "this Smart Object can no longer reach its document" is
+                // visible without opening the Properties panel. The pixels
+                // shown are the persisted render — the only thing left of the
+                // reference — which is why the layer still looks normal.
+                if (data.linkBroken) {
+                    QPixmap tinted(linkedPix.size());
+                    tinted.fill(Qt::transparent);
+                    QPainter tp(&tinted);
+                    tp.drawPixmap(0, 0, linkedPix);
+                    tp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+                    tp.fillRect(tinted.rect(), th->colorWarning);
+                    tp.end();
+                    painter->drawPixmap(badgeRect, tinted);
+                } else {
+                    painter->setOpacity(th->iconOpacity);
+                    painter->drawPixmap(badgeRect, linked ? linkedPix : embeddedPix);
+                }
+                painter->restore();
             } else {
                 // Thumbnails are ALWAYS baked off the UI thread by LayerPanel
                 // (scheduleThumbnailBuild): scaling a layer image here would freeze
@@ -510,6 +553,20 @@ int LayerItemDelegate::handleRawThumbDoubleClick(const QStyleOptionViewItem& opt
         return -1;
     const int flat = index.data(Qt::UserRole).toInt();
     emit rawThumbDoubleClicked(flat);
+    return flat;
+}
+
+int LayerItemDelegate::handleSmartObjectThumbDoubleClick(const QStyleOptionViewItem& option,
+                                                         const QModelIndex& index,
+                                                         const QPoint& pos)
+{
+    auto* node = nodeFromIndex(index);
+    if (!node || !node->layer || !node->layer->isSmartObjectLayer())
+        return -1;
+    if (!thumbRect(option, index).contains(pos))
+        return -1;
+    const int flat = index.data(Qt::UserRole).toInt();
+    emit smartObjectThumbDoubleClicked(flat);
     return flat;
 }
 

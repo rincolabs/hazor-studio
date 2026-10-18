@@ -1021,6 +1021,43 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             rasterizeNode(idx);
         } else { success = false; }
     }
+    else if (toolName == "smart_object_create") {
+        int idx = getInt("index", -1);
+        std::vector<int> indices;
+        if (idx >= 0)
+            indices.push_back(idx);
+        else if (m_doc)
+            indices = m_doc->selectedList();
+        success = convertToSmartObject(indices) >= 0;
+    }
+    else if (toolName == "smart_object_place_embedded") {
+        success = placeEmbeddedDocument(QString::fromStdString(getStr("path"))) >= 0;
+    }
+    else if (toolName == "smart_object_place_linked") {
+        success = placeLinkedDocument(QString::fromStdString(getStr("path"))) >= 0;
+    }
+    else if (toolName == "smart_object_via_copy") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        success = idx >= 0 && newSmartObjectViaCopy(idx) >= 0;
+    }
+    else if (toolName == "smart_object_replace") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        success = idx >= 0
+            && replaceSmartObjectContents(idx, QString::fromStdString(getStr("path")));
+    }
+    else if (toolName == "smart_object_update") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        success = idx >= 0 && updateSmartObjectContent(idx);
+    }
+    else if (toolName == "smart_object_rasterize") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        auto* node = m_doc ? m_doc->nodeAt(idx) : nullptr;
+        if (!node || !node->layer || !node->layer->isSmartObjectLayer()) {
+            success = false;
+        } else {
+            rasterizeNode(idx);
+        }
+    }
     else if (toolName == "raw_develop") {
         int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
         auto* node = m_doc ? m_doc->nodeAt(idx) : nullptr;

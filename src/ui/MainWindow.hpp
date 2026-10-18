@@ -15,6 +15,7 @@ class QMenu;
 #include "controller/ImageController.hpp"
 #include "tools/ToolCatalog.hpp"
 #include "agent/AgentConfig.hpp"
+#include "smartobject/SmartObjectData.hpp"
 
 class QResizeEvent;
 class QEvent;
@@ -24,8 +25,11 @@ class QDragLeaveEvent;
 class QDropEvent;
 
 class CanvasView;
+class DocumentContainer;
 class RawDevelopWindow;
 class LayerPanel;
+// Defined in ui/LayerPanel.hpp; opaque here so this header stays light.
+enum class LayerSmartObjectCommand;
 class PropertiesPanel;
 class HistogramPanel;
 class BrushDynamicsPanel;
@@ -277,7 +281,26 @@ private:
         // .hzs Save/Save As target.
         QString sourcePath;
         bool isDirty = false;
-        std::unique_ptr<Document> document;
+        // The .hzs this tab's document belongs to. Owned by ContainerRegistry;
+        // the tab only borrows a reference, which is what keeps the container
+        // (and every embedded document in it) alive while any of its tabs is
+        // open — and keeps it alive after they all close, if a Linked
+        // reference from another project still points at it.
+        std::shared_ptr<DocumentContainer> container;
+        // Shared, not unique: a project tab's document is also held by the
+        // container, so neither side may own it exclusively. An undo in the
+        // parent that removes a Smart Object instance must not invalidate the
+        // child tab, and closing the child tab must not destroy a document the
+        // file still has to save — refcount gives both.
+        //
+        // For a tab editing a Smart Object's CONTENTS this is the container's
+        // open edit session: an isolated working copy, not the stored document
+        // (DocumentContainer::beginEditSession). Ctrl+S commits it; closing the
+        // tab discards it.
+        std::shared_ptr<Document> document;
+        // Which document of `container` this tab edits. Equals
+        // container->rootId() for an ordinary project tab.
+        SmartObjectDocId docId;
         QWidget* page = nullptr;
         CanvasView* canvas = nullptr;
         std::unique_ptr<ImageController> controller;
@@ -371,6 +394,11 @@ private:
                          const QVariantMap& defaultParams);
 
     DocumentTab& createTab(const QString& name, const QSize& size);
+    // Opens an existing document of `container` in a new tab, sharing it rather
+    // than copying it (Smart Object "Edit Contents", and the tail of createTab).
+    DocumentTab& createTabForDocument(const QString& name,
+                                      const std::shared_ptr<DocumentContainer>& container,
+                                      const SmartObjectDocId& docId);
     // Shared tail of onOpenFile() and Open Recent: dispatches `path` to the
     // project (.hzs), RAW or plain-image open flow by extension. Centralizing
     // this means both entry points register successful opens with
@@ -403,6 +431,58 @@ private:
     // Current flat index of `node` in `doc`, or -1 if it is no longer there.
     // Needed because a non-modal window (Hazor Develop) outlives the index it
     // was opened with, and may be applied while another tab is active.
+    // Index of the tab already editing (container, docId), or -1. One tab per
+    // document: a second one would mean two CommandHistories over the same
+    // Document.
+    int tabIndexForDocument(const DocumentContainer* container,
+                            const SmartObjectDocId& docId) const;
+    // Tab that owns `container`'s file name and dirty state (its root
+    // document's tab), or `fallbackIndex` when that tab is not open.
+    int rootTabIndexForContainer(const DocumentContainer* container,
+                                 int fallbackIndex) const;
+    // Tears one tab down (GL cleanup, panel detach, erase) with no save prompt
+    // and no companion-tab handling — onTabCloseRequested() owns those.
+    // Erasing the tab does NOT destroy its Document: the container holds it too.
+    void closeTabAt(int index);
+
+    // Ctrl+S on an embedded Smart Object's tab: commits the content (refreshes
+    // every instance of it) and marks the project unsaved, WITHOUT writing the
+    // .hzs. Embedded content reaches the disk when the project itself is saved
+    // — see saveProjectForTab().
+    bool commitEmbeddedContent(int index);
+    // Marks a container's root tab unsaved whichever tab is active. Used when a
+    // change reaches a project indirectly: committed embedded content, or a
+    // Smart Object render that changed a document's stored representation.
+    void markContainerRootDirty(const std::shared_ptr<DocumentContainer>& container);
+
+    // ── Smart Objects ───────────────────────────────────────────────────
+    // Opens (or reactivates) the tab that edits the Smart Object at
+    // `flatIndex`. Embedded content becomes a tab over the container's own
+    // document; a Linked one opens its .hzs as an ordinary project tab. Mirrors
+    // openHazorDevelop()'s wiring — identity by node, not by flat index.
+    void editSmartObjectContents(int flatIndex);
+    void convertSelectionToSmartObject();
+    void placeSmartObject(bool linked);
+    // Single entry point for the Layers-panel context menu: selects the layer
+    // the menu was opened on, then runs the same slot the Layer ▸ Smart Objects
+    // action runs. Nothing is reimplemented here.
+    void runSmartObjectCommand(int flatIndex, LayerSmartObjectCommand command);
+    void newSmartObjectViaCopy();
+    void replaceActiveSmartObjectContents();
+    void relinkActiveSmartObject();
+    void updateActiveSmartObjectContent();
+    void convertActiveSmartObjectStorage(bool toLinked);
+    // Coalesces "something changed" into one refresh pass. A Smart Object
+    // re-render is a full document composite, so a brush stroke on embedded
+    // content must not schedule one per dab.
+    void scheduleSmartObjectRefresh();
+    void flushSmartObjectRefresh();
+    void onSmartObjectRenderCommitted(const std::shared_ptr<DocumentContainer>& container,
+                                      const QStringList& affectedDocuments,
+                                      bool marksDirty);
+    // Controller of the tab that owns `container`'s cascade (its root
+    // document's tab), or null.
+    ImageController* rootControllerForContainer(const DocumentContainer* container) const;
     static int flatIndexOfNodeIn(const Document* doc, const LayerTreeNode* node);
     CanvasView* activeCanvas() const;
     Document* activeDocument() const;
@@ -410,6 +490,20 @@ private:
 
     QTabWidget* m_tabWidget = nullptr;
     std::vector<DocumentTab> m_tabs;
+
+    // ── Smart Object refresh debounce (see scheduleSmartObjectRefresh) ──
+    QTimer* m_smartObjectRefreshTimer = nullptr;
+    QAction* m_smartObjectConvertAction = nullptr;
+    QAction* m_smartObjectPlaceEmbeddedAction = nullptr;
+    QAction* m_smartObjectPlaceLinkedAction = nullptr;
+    QAction* m_smartObjectViaCopyAction = nullptr;
+    QAction* m_smartObjectReplaceAction = nullptr;
+    QAction* m_smartObjectEditAction = nullptr;
+    QAction* m_smartObjectRelinkAction = nullptr;
+    QAction* m_smartObjectUpdateAction = nullptr;
+    QAction* m_smartObjectToEmbeddedAction = nullptr;
+    QAction* m_smartObjectToLinkedAction = nullptr;
+    QMenu* m_smartObjectMenu = nullptr;
     int m_activeTabIndex = -1;
 
     // Open Hazor Develop windows, keyed by the RAW layer's node. Entries are

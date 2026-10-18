@@ -9,6 +9,8 @@
 #include "core/GuideTypes.hpp"
 #include "color/ColorProfile.hpp"
 
+class DocumentContainer;
+
 struct ProjectLoadResult {
     bool ok = false;
     QString error;
@@ -26,8 +28,28 @@ struct ProjectLoadResult {
     ColorProfileSource profileSource = ColorProfileSource::GeneratedDefault;
 };
 
+struct ContainerLoadResult {
+    bool ok = false;
+    QString error;
+    // Every document in the file: the root plus its embedded Smart Object
+    // documents, already wired by docId. Never null when ok.
+    std::shared_ptr<DocumentContainer> container;
+};
+
 class ProjectFileService {
 public:
     static bool saveProject(const Document& doc, const QString& path, QString* error = nullptr);
     static ProjectLoadResult loadProject(const QString& path);
+
+    // Multi-document form. Writes the container's root document plus every
+    // embedded document REACHABLE FROM THE ROOT — documents orphaned by an
+    // edit are kept alive in memory by the undo history but deliberately not
+    // persisted, which is what stops a .hzs from accumulating dead subgraphs.
+    // Updates nothing on the container; the caller owns setPath().
+    static bool saveContainer(const DocumentContainer& container,
+                              const QString& path, QString* error = nullptr);
+    // Reads any version (1..3). A v1/v2 file — or a v3 file with no embedded
+    // documents — yields a container holding exactly one document, so callers
+    // need no special case for "a project without Smart Objects".
+    static ContainerLoadResult loadContainer(const QString& path);
 };

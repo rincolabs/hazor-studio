@@ -376,6 +376,103 @@ worker → operation → state applied back + undo.
 
 ---
 
+### 3.4 Smart Objects — the cache is not the source of truth
+
+A Smart Object Layer displays another document's composite. The rule that keeps
+that from becoming a render-pipeline problem:
+
+> **For a Smart Object Layer, the referenced document is the *only* source of
+> truth. The layer's `cpuImage` is a discardable, regenerable representation
+> of it.**
+
+Everything else about the feature follows from that sentence.
+
+**The compositors know nothing about it, and must keep knowing nothing.** A
+Smart Object is an ordinary `Type::Layer` whose `Layer` carries a
+`smartObjectData` payload ([src/smartobject/SmartObjectData.hpp](../src/smartobject/SmartObjectData.hpp)).
+Its `cpuImage` holds the referenced document's render — exactly the way
+`rawData` + `cpuImage` hold a RAW file's developed result. So it composites as a
+plain raster layer, and `DocumentCompositor`, `LayerCompositor`, `GPUViewport`,
+`ProjectionCache` and `RenderCache` contain **zero lines** about it. Mask,
+blend, opacity, instance transform and layer styles work on it for free, and
+CPU/GPU consistency (§3, invariant 1) holds by construction: both paths read the
+same pixels.
+
+**Why the payload carries a `docId` and never a `Document*`.** This is the part
+that will look like an easy optimization later, so: the CPU projection is built
+on a **worker thread** over a `shallowClone()` snapshot
+(`ProjectionCache::makeSnapshot`). That snapshot is only thread-safe because
+every payload a layer shares is immutable or copy-on-write. A `Document` pointer
+in the payload would hand the compositor a live, UI-thread-mutated object graph
+to walk — a data race whose symptom appears nowhere near this file. Resolving a
+reference during a composite is therefore not a shortcut; it is the bug. The
+payload is also held as `shared_ptr<const SmartObjectData>`, so no clone,
+snapshot, paste or undo path can mutate through it: a change builds a new value
+and swaps the pointer.
+
+**The render is per `(document, destination profile)`, shared by instances.**
+`cpuImage` depends only on the referenced document and the profile it has to
+land in — the instance's transform, mask and effects are applied by the
+compositor, downstream. So `SmartObjectRenderService`
+([src/smartobject/SmartObjectRenderService.hpp](../src/smartobject/SmartObjectRenderService.hpp))
+keys work by `(docId, linkedPath, profile fingerprint)`, not by instance, and
+three instances of one document share a single `QImage` (free, via Qt's implicit
+sharing) instead of three identical composites. Nothing writes to that buffer —
+`hasDirectlyEditablePixels()` is false for these layers — so no instance can
+detach it.
+
+| Step | Where | Notes |
+|---|---|---|
+| Snapshot | `SmartObjectRenderService::request` (UI thread) | `shallowClone()`, same technique as `ProjectionCache::makeSnapshot`; the referenced document's `compositionGeneration` is captured **at scheduling time** as the job's identity |
+| Composite | worker | `DocumentCompositor::composite` with `RenderTargetType::Flatten` — the source of truth, so an instance can never disagree with an export |
+| Colour | worker | converted into the parent document's profile through `ColorManagementService`, the same path an imported image takes; the referenced document keeps its own profile |
+| Commit | `ImageController::commitSmartObjectRender` path (UI thread) | drops a result older than the last committed for the key, then hands the one `QImage` to every live instance and bumps each affected document's `compositionGeneration` |
+
+**No pending job holds a node pointer.** A job's identity is
+`(key, jobGeneration)`; the instances are resolved by walking the live tree at
+commit time. Keying pending work by `LayerTreeNode*` — which `m_pendingRawDevelops`
+does — is only narrowly safe for RAW (it needs the layer deleted mid-render *and*
+a reallocation at the same address); with a nested cascade re-entering the same
+keys, that window is wide open.
+
+**A nested cascade is chained by commit, not merely ordered.** If A displays B
+and B displays C, editing C must re-render B and then A. Enqueuing `[B, A]`
+together is not enough: run concurrently, A's snapshot still holds B's *old*
+pixels, and both outcomes are bad — if B's commit bumps `B.compositionGeneration`
+A re-renders (wasted work plus a visible flash of wrong content); if it does not,
+A stays stale forever. So A is scheduled only **after B commits**:
+
+```
+C changed  →  render B
+              B commits  →  ++B.compositionGeneration  →  render A
+                                                          A commits
+```
+
+The next level is *discovered* from what actually changed — the commit reports
+which documents it touched — rather than precomputed, so the order and the
+correctness come from the same mechanism. The cycle guard is separate and sits
+at resolve time: `DocumentContainer::canReference()` refuses an edge whose
+target can already reach its host, so a malformed file containing a loop renders
+nothing instead of cascading forever.
+
+**Updating the cache is never an undo step.** It mirrors the layer-style bake
+(`StyleBakePool` → `commitStyledBaseBake`, §2.4.1): off-thread over a COW
+snapshot, revision-discarded, committed with no command. Recording it would
+fight the very check that triggers it — an undo would restore old pixels, the
+staleness test would see them and re-render, undoing the undo. This does not
+weaken AGENTS.md invariant 5: that invariant covers *destructive edits*, and
+refreshing a regenerable cache is not one. `ProjectionCache`, `effectedTexture`
+and `styledBaseTexture` are the existing precedents.
+
+The one exception is an **unresolvable linked reference**. Its persisted render
+is then all that is left, so the instance keeps displaying it, is marked
+`linkBroken`, cannot be edited, and regenerates the moment the link resolves
+again. That is a fallback for a reference that cannot be resolved — not a second
+source of truth. It is also the only reason the render is persisted in the
+`.hzs` at all. See [SMART-OBJECTS.md](SMART-OBJECTS.md).
+
+---
+
 ## 4. Shared specification layer
 
 Four files, one contract — three for blending, one for resampling:
@@ -631,7 +728,7 @@ File: [src/controller/ImageController.cpp](../src/controller/ImageController.cpp
   blend mode (over a transparent backdrop the blend is not baked — W3C fade —
   and the appearance against lower layers is preserved). If both have pixels,
   the source blend is baked against the destination content and the result
-  becomes Normal (Photoshop-style limitation in areas where dst is transparent).
+  becomes Normal (a known limitation in areas where dst is transparent).
 - **Merge Visible** (`applyMergeVisibleState`): uses the full composite (real
   backdrop for all blends). It consumes only *effectively* visible nodes (node +
   ancestors). The result is hoisted to the root (props from surviving groups are
@@ -697,6 +794,7 @@ through the normal CPU path.
 | Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
 | Caches | `cache/RenderCache.*` |
 | Layer data | `core/Layer.*`, `core/LayerTreeNode.hpp` (`computeEffectedImage`, `computeStyledBaseImage`, `clone`/`shallowClone`), `core/RasterLayerStorage.*`, `core/TileManager.*` |
+| Smart Objects (§3.4) | `smartobject/SmartObjectData.hpp`, `smartobject/SmartObjectRenderService.*`, `smartobject/DocumentContainer.*`, `smartobject/ContainerRegistry.*`, `controller/ImageController_SmartObjects.cpp` — **nothing under `renderer/`** |
 | Adjustments | `core/AdjustmentTypes.*`, `core/CurvesData.*`, `core/ColorBalanceData.*`, `core/HueSaturationData.*`, `core/SolidColorData.hpp` |
 | Effects | `core/LayerEffect.*` (`applyEffectStack`, shared by layers and groups) |
 | Brush | `brush/BrushRenderer.*`, `brush/BrushEngine.*`, `brush/DynamicsEvaluator.*` |

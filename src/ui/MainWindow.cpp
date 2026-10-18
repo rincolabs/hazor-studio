@@ -77,6 +77,9 @@
 #include "core/LayerEffect.hpp"
 #include "io/ImageIO.hpp"
 #include "io/ProjectFileService.hpp"
+#include "smartobject/ContainerRegistry.hpp"
+#include "smartobject/DocumentContainer.hpp"
+#include "smartobject/SmartObjectTransfer.hpp"
 #include "io/RecentFilesManager.hpp"
 #include "color/ColorManagementService.hpp"
 #include "color/ColorProfile.hpp"
@@ -406,6 +409,23 @@ MainWindow::MainWindow(QWidget* parent)
 
     fileMenu->addSeparator();
 
+    // Place lives in File because it brings an external document INTO the
+    // current one, which is a file operation, not a layer operation. The
+    // Layer ▸ Smart Objects submenu deliberately does not repeat it.
+    m_smartObjectPlaceEmbeddedAction = fileMenu->addAction(tr("Place Embedded..."));
+    ShortcutManager::instance()->registerAction("file.place_embedded",
+                                                m_smartObjectPlaceEmbeddedAction);
+    connect(m_smartObjectPlaceEmbeddedAction, &QAction::triggered,
+            this, [this]() { placeSmartObject(/*linked=*/false); });
+
+    m_smartObjectPlaceLinkedAction = fileMenu->addAction(tr("Place Linked..."));
+    ShortcutManager::instance()->registerAction("file.place_linked",
+                                                m_smartObjectPlaceLinkedAction);
+    connect(m_smartObjectPlaceLinkedAction, &QAction::triggered,
+            this, [this]() { placeSmartObject(/*linked=*/true); });
+
+    fileMenu->addSeparator();
+
     m_importAction = fileMenu->addAction(tr("&Import Image..."));
     m_importAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I));
     ShortcutManager::instance()->registerAction("file.import", m_importAction);
@@ -654,6 +674,67 @@ MainWindow::MainWindow(QWidget* parent)
     m_rasterizeLayerAction = layerMenu->addAction(tr("Rasterize &Layer"));
     ShortcutManager::instance()->registerAction("layer.rasterize", m_rasterizeLayerAction);
     connect(m_rasterizeLayerAction, &QAction::triggered, this, &MainWindow::onMenuRasterizeLayer);
+
+    // Layer ▸ Smart Objects — the name, order and grouping follow the
+    // convention this kind of editor established, so the muscle memory
+    // transfers. Place lives in File (above), and Rasterize stays where it is:
+    // it is the generic "drop the non-destructive payload" action shared with
+    // Text/Shape/RAW.
+    m_smartObjectMenu = layerMenu->addMenu(tr("Smart &Objects"));
+
+    m_smartObjectConvertAction = m_smartObjectMenu->addAction(tr("&Convert to Smart Object"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.convert",
+                                                m_smartObjectConvertAction);
+    connect(m_smartObjectConvertAction, &QAction::triggered,
+            this, &MainWindow::convertSelectionToSmartObject);
+
+    m_smartObjectViaCopyAction =
+        m_smartObjectMenu->addAction(tr("&New Smart Object via Copy"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.via_copy",
+                                                m_smartObjectViaCopyAction);
+    connect(m_smartObjectViaCopyAction, &QAction::triggered,
+            this, &MainWindow::newSmartObjectViaCopy);
+
+    m_smartObjectMenu->addSeparator();
+
+    m_smartObjectEditAction = m_smartObjectMenu->addAction(tr("&Edit Contents"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.edit",
+                                                m_smartObjectEditAction);
+    connect(m_smartObjectEditAction, &QAction::triggered, this, [this]() {
+        if (m_doc) editSmartObjectContents(m_doc->activeFlatIndex);
+    });
+
+    m_smartObjectReplaceAction = m_smartObjectMenu->addAction(tr("&Replace Contents..."));
+    ShortcutManager::instance()->registerAction("layer.smart_object.replace",
+                                                m_smartObjectReplaceAction);
+    connect(m_smartObjectReplaceAction, &QAction::triggered,
+            this, &MainWindow::replaceActiveSmartObjectContents);
+
+    m_smartObjectRelinkAction = m_smartObjectMenu->addAction(tr("Relink to &File..."));
+    ShortcutManager::instance()->registerAction("layer.smart_object.relink",
+                                                m_smartObjectRelinkAction);
+    connect(m_smartObjectRelinkAction, &QAction::triggered,
+            this, &MainWindow::relinkActiveSmartObject);
+
+    m_smartObjectUpdateAction = m_smartObjectMenu->addAction(tr("&Update Modified Content"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.update",
+                                                m_smartObjectUpdateAction);
+    connect(m_smartObjectUpdateAction, &QAction::triggered,
+            this, &MainWindow::updateActiveSmartObjectContent);
+
+    m_smartObjectMenu->addSeparator();
+
+    m_smartObjectToLinkedAction = m_smartObjectMenu->addAction(tr("Convert to &Linked..."));
+    ShortcutManager::instance()->registerAction("layer.smart_object.to_linked",
+                                                m_smartObjectToLinkedAction);
+    connect(m_smartObjectToLinkedAction, &QAction::triggered,
+            this, [this]() { convertActiveSmartObjectStorage(/*toLinked=*/true); });
+
+    m_smartObjectToEmbeddedAction = m_smartObjectMenu->addAction(tr("Embed Lin&ked"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.embed_linked",
+                                                m_smartObjectToEmbeddedAction);
+    connect(m_smartObjectToEmbeddedAction, &QAction::triggered,
+            this, [this]() { convertActiveSmartObjectStorage(/*toLinked=*/false); });
 
     m_layerStylesAction = layerMenu->addAction(tr("Layer &Styles..."));
     ShortcutManager::instance()->registerAction("layer.styles", m_layerStylesAction);
@@ -1304,6 +1385,15 @@ MainWindow::MainWindow(QWidget* parent)
         showAiUpscaleDialog(UpscaleTarget::CurrentLayer);
     });
 
+    // ── Smart Object section ──
+    connect(m_propsPanel, &PropertiesPanel::smartObjectEditRequested, this, [this]() {
+        if (m_doc) editSmartObjectContents(m_doc->activeFlatIndex);
+    });
+    connect(m_propsPanel, &PropertiesPanel::smartObjectUpdateRequested,
+            this, &MainWindow::updateActiveSmartObjectContent);
+    connect(m_propsPanel, &PropertiesPanel::smartObjectRelinkRequested,
+            this, &MainWindow::relinkActiveSmartObject);
+
     // ── Document / Canvas page: all shortcuts to existing document logic. ──
     connect(m_propsPanel, &PropertiesPanel::canvasSizeEdited,
             this, &MainWindow::applyCanvasSizeEdit);
@@ -1770,6 +1860,10 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_layerPanel, &LayerPanel::rawEditRequested,
             this, [this](int flatIndex) { openHazorDevelop(flatIndex); });
+    connect(m_layerPanel, &LayerPanel::smartObjectEditRequested,
+            this, [this](int flatIndex) { editSmartObjectContents(flatIndex); });
+    connect(m_layerPanel, &LayerPanel::smartObjectCommandRequested,
+            this, &MainWindow::runSmartObjectCommand);
 
     connect(m_toolBar, &ToolOptionsBar::aiOpenSettingsRequested, this, &MainWindow::onOpenAiSettings);
     connect(m_toolBar, &ToolOptionsBar::brushSizeChanged, this, &MainWindow::onBrushSizeChanged);
@@ -2615,10 +2709,36 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
 
 MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize& size)
 {
-    auto doc = std::make_unique<Document>();
+    auto doc = std::make_shared<Document>();
     doc->name = name;
     doc->size = size;
     doc->zoom = 1.0f;
+
+    // Every tab is backed by a container, even a brand-new untitled document
+    // with no Smart Object in it: that way "save the container" is the only
+    // save path there is, and adding the first Smart Object later needs no
+    // migration (see DocumentContainer.hpp).
+    auto container = std::make_shared<DocumentContainer>(doc);
+    return createTabForDocument(name, container, container->rootId());
+}
+
+MainWindow::DocumentTab& MainWindow::createTabForDocument(
+    const QString& name,
+    const std::shared_ptr<DocumentContainer>& container,
+    const SmartObjectDocId& docId)
+{
+    // A tab editing a Smart Object's contents gets the container's open EDIT
+    // SESSION — the isolated working copy — and not the stored document: its
+    // edits must stay out of the project until Ctrl+S commits them. Every other
+    // tab (the root, a linked project's own tab) borrows the stored document
+    // itself, so an edit there is an edit in the container.
+    std::shared_ptr<Document> doc;
+    if (container) {
+        doc = container->editSession(docId);
+        if (!doc)
+            doc = container->document(docId);
+    }
+    Q_ASSERT(doc);
 
     auto ctrl = std::make_unique<ImageController>();
     auto* ctrlPtr = ctrl.get();
@@ -2634,6 +2754,26 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     pageLayout->addWidget(canvas);
     canvas->reloadRulerGuideSettings();
     ctrlPtr->setDocument(doc.get());
+    // The controller needs the container to resolve a Smart Object's docId.
+    // Shared, never owned: the registry is the only owner.
+    ctrlPtr->setDocumentContainer(container, docId);
+
+    // Editing ANY document of the container can invalidate Smart Object
+    // instances of it — including in other documents of the same file. The
+    // refresh is debounced and always driven by the container's root
+    // controller, so one cascade owner exists per file no matter how many tabs
+    // are open on it.
+    connect(ctrlPtr, &ImageController::imageChanged,
+            this, &MainWindow::scheduleSmartObjectRefresh);
+    connect(ctrlPtr, &ImageController::documentChanged,
+            this, &MainWindow::scheduleSmartObjectRefresh);
+    connect(ctrlPtr, &ImageController::smartObjectRenderCommitted, this,
+            [this, ctrlPtr](const SmartObjectDocId&, const QStringList& affected,
+                            bool marksDirty) {
+        onSmartObjectRenderCommitted(ctrlPtr->documentContainerPtr(), affected, marksDirty);
+    });
+    connect(ctrlPtr, &ImageController::smartObjectLinkStateChanged, this,
+            [this](int, bool) { refreshLayerPanel(); });
 
     // Adjustment editors bracket a live slider/curve drag through the controller
     // so the canvas previews on the GPU per-layer compositor instead of
@@ -3050,9 +3190,11 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
 
     DocumentTab tab;
     tab.name = name;
-    tab.currentProjectPath.clear();
+    tab.currentProjectPath = container ? container->path() : QString();
     tab.isDirty = false;
+    tab.container = container;
     tab.document = std::move(doc);
+    tab.docId = docId;
     tab.page = page;
     tab.canvas = canvas;
     tab.controller = std::move(ctrl);
@@ -3259,9 +3401,58 @@ void MainWindow::onTabChanged(int index)
 void MainWindow::onTabCloseRequested(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
+
+    const auto container = m_tabs[index].container;
+    const bool closingRoot = container && m_tabs[index].docId == container->rootId();
+
+    // Closing a project closes the tabs editing its Smart Object contents too,
+    // and those hold isolated working copies — so each one is asked FIRST, in
+    // its own terms ("commit into the Smart Object?"). The order matters: a
+    // commit makes the project unsaved, and the project's own prompt, right
+    // after, is then the one that offers to write it to disk.
+    if (closingRoot) {
+        for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+            if (i == index || m_tabs[i].container != container)
+                continue;
+            if (!ensureTabCanBeDiscardedOrSaved(i))
+                return;
+        }
+    }
+
     if (!ensureTabCanBeDiscardedOrSaved(index)) return;
 
+    // They are views into the same file, and one left open would offer to
+    // "Save" a project the user just closed.
+    if (closingRoot) {
+        for (int i = static_cast<int>(m_tabs.size()) - 1; i >= 0; --i) {
+            if (i == index || m_tabs[i].container != container)
+                continue;
+            closeTabAt(i);
+            if (i < index)
+                --index;
+        }
+        // The registry stops handing this file out. The container itself lives
+        // on for as long as a Linked reference from another open project still
+        // holds a shared_ptr to it — which is exactly the point of refcounting
+        // it rather than deleting it here.
+        if (!container->path().isEmpty())
+            ContainerRegistry::instance().forget(container->path());
+    }
+
+    closeTabAt(index);
+}
+
+void MainWindow::closeTabAt(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
+
     auto& tab = m_tabs[index];
+    // The isolated working copy exists for exactly as long as the tab editing
+    // it: dropping the session here is what discards uncommitted content edits
+    // (the user was asked first, in ensureTabCanBeDiscardedOrSaved) and what
+    // makes the next Edit Contents start from the committed document again.
+    if (tab.container && tab.docId != tab.container->rootId())
+        tab.container->endEditSession(tab.docId);
     if (tab.canvas)
         tab.canvas->cleanupDocumentLayers();
     QWidget* page = tab.page ? tab.page : m_tabWidget->widget(index);
@@ -3788,6 +3979,18 @@ void MainWindow::openHazorDevelop(int flatIndex)
     develop->activateWindow();
 }
 
+int MainWindow::tabIndexForDocument(const DocumentContainer* container,
+                                    const SmartObjectDocId& docId) const
+{
+    if (!container || docId.isEmpty())
+        return -1;
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+        if (m_tabs[i].container.get() == container && m_tabs[i].docId == docId)
+            return i;
+    }
+    return -1;
+}
+
 int MainWindow::flatIndexOfNodeIn(const Document* doc, const LayerTreeNode* node)
 {
     if (!doc || !node)
@@ -3888,9 +4091,35 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
 {
     if (index < 0 || index >= static_cast<int>(m_tabs.size()))
         return false;
-    auto& tab = m_tabs[index];
-    if (!tab.document)
+    if (!m_tabs[index].document)
         return false;
+
+    // Ctrl+S in a content tab does NOT write the project to disk: it COMMITS
+    // the tab's isolated working copy into the embedded Smart Object, updates
+    // every instance and marks the project as needing a save. Saving the
+    // contents and writing the project are two different acts. Writing the
+    // whole .hzs here would also flush unrelated edits the user made in the
+    // main document and had not chosen to save yet.
+    if (m_tabs[index].container
+        && m_tabs[index].docId != m_tabs[index].container->rootId()) {
+        if (!saveAs)
+            return commitEmbeddedContent(index);
+        // Save As from a content tab still means "write the project somewhere
+        // else" — the container is the only thing there is a file for, and
+        // writing the contents alone is Convert to Linked. But the file has to
+        // match what the user is looking at, so the isolated edits are
+        // committed first instead of being silently left out of the copy.
+        if (m_tabs[index].isDirty && !commitEmbeddedContent(index))
+            return false;
+    }
+
+    // Save is a CONTAINER operation, not a document one: a .hzs holds the root
+    // document plus every embedded Smart Object document, and one file has one
+    // save path. The path/dirty bookkeeping belongs to the root tab — the tab
+    // that owns the file name.
+    const int targetIndex = rootTabIndexForContainer(m_tabs[index].container.get(), index);
+    auto& tab = m_tabs[targetIndex];
+    const auto container = tab.container;
 
     QString path = tab.currentProjectPath;
     const bool choosingNewPath = saveAs || path.isEmpty();
@@ -3907,15 +4136,27 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
             path += ".hzs";
     }
 
+    // Linked Smart Object paths are stored relative to the .hzs that holds
+    // them, so writing the project somewhere else has to rewrite them BEFORE
+    // the save — otherwise the file goes out with links resolved against a
+    // location it no longer has. Not an undo step: it preserves the exact same
+    // references, expressed from the file's new home.
+    if (container && choosingNewPath)
+        smartobject::rebaseLinkedPaths(*container, path);
+
     beginProgressDelayed(tr("Progress"), tr("Saving Document"), false);
 
     QFutureWatcher<QPair<bool, QString>> watcher;
     QEventLoop loop;
     connect(&watcher, &QFutureWatcher<QPair<bool, QString>>::finished,
             &loop, &QEventLoop::quit);
-    watcher.setFuture(QtConcurrent::run([doc = tab.document.get(), path]() {
+    // The container is captured by shared_ptr so the worker cannot outlive it.
+    watcher.setFuture(QtConcurrent::run(
+        [container, doc = tab.document.get(), path]() {
         QString err;
-        const bool ok = ProjectFileService::saveProject(*doc, path, &err);
+        const bool ok = container
+            ? ProjectFileService::saveContainer(*container, path, &err)
+            : ProjectFileService::saveProject(*doc, path, &err);
         return QPair<bool, QString>(ok, err);
     }));
     loop.exec();
@@ -3929,6 +4170,11 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
         return false;
     }
 
+    // Re-key the registry before anything else: after a Save As the container is
+    // reachable at the new path and must no longer answer to the old one.
+    if (container)
+        ContainerRegistry::instance().registerContainer(container, path);
+
     tab.currentProjectPath = path;
     tab.name = QFileInfo(path).fileName();
     tab.isDirty = false;
@@ -3936,12 +4182,90 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
         tab.sourcePath = QFileInfo(path).absoluteFilePath();
         RecentFilesManager::instance()->addFile(path);
     }
-    if (index < m_tabWidget->count()) {
-        m_tabWidget->setTabText(index, tabLabel(tab.name));
-        m_tabWidget->setTabToolTip(index, tab.name);
+    if (targetIndex < m_tabWidget->count()) {
+        m_tabWidget->setTabText(targetIndex, tabLabel(tab.name));
+        m_tabWidget->setTabToolTip(targetIndex, tab.name);
+    }
+    // Other tabs of the same container were written along with it — but NOT a
+    // content tab with uncommitted edits: those live in a working copy the save
+    // deliberately did not pick up, so its asterisk has to stay. What reached
+    // the disk is everything that had been committed.
+    for (auto& other : m_tabs) {
+        if (other.container != container)
+            continue;
+        if (other.isDirty && other.docId != container->rootId())
+            continue;
+        other.isDirty = false;
     }
     updateDirtyUi();
+
+    // A project that other open projects LINK to just changed on disk. Their
+    // instances have to re-render, and each of them is then unsaved in its own
+    // right: the cached render is part of a .hzs, so a dependent's file no
+    // longer matches what is in memory. Their files are deliberately NOT
+    // written — only the project the user asked to save was.
+    scheduleSmartObjectRefresh();
     return true;
+}
+
+bool MainWindow::commitEmbeddedContent(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+        return false;
+    auto& tab = m_tabs[index];
+    if (!tab.container || !tab.controller)
+        return false;
+
+    // Nothing to commit is not a failure, and it must not mark the project
+    // unsaved: Ctrl+S on an untouched content tab would otherwise make the
+    // whole .hzs look edited for no reason.
+    if (!tab.isDirty) {
+        showViewportStatusMessage(tr("Smart Object contents are already up to date."), 2000);
+        return true;
+    }
+
+    // THIS is where the content tab's isolated working copy becomes the
+    // project's content: it is copied into the stored document, every instance
+    // of it re-renders, and the project starts differing from its file. The
+    // commit is driven by the container's ROOT controller — one cascade owner
+    // per file, whichever tab asked (see flushSmartObjectRefresh).
+    const SmartObjectDocId docId = tab.docId;
+    const auto container = tab.container;
+    auto* root = rootControllerForContainer(container.get());
+    if (!root || !root->commitSmartObjectEditSession(docId)) {
+        AppMessageDialog::warning(this, tr("Smart Object"),
+            tr("This Smart Object's contents could not be committed: its document "
+               "is no longer part of the project."));
+        return false;
+    }
+
+    tab.isDirty = false;                    // the content is committed
+    markContainerRootDirty(container);      // the .hzs is not written yet
+    updateDirtyUi();
+    showViewportStatusMessage(
+        tr("Smart Object contents updated. Save the project to write them to disk."),
+        3000);
+    return true;
+}
+
+void MainWindow::markContainerRootDirty(const std::shared_ptr<DocumentContainer>& container)
+{
+    if (!container)
+        return;
+    const int rootTab = tabIndexForDocument(container.get(), container->rootId());
+    if (rootTab < 0 || m_tabs[rootTab].isDirty)
+        return;
+    m_tabs[rootTab].isDirty = true;
+    updateDirtyUi();
+}
+
+int MainWindow::rootTabIndexForContainer(const DocumentContainer* container,
+                                         int fallbackIndex) const
+{
+    if (!container)
+        return fallbackIndex;
+    const int rootTab = tabIndexForDocument(container, container->rootId());
+    return rootTab >= 0 ? rootTab : fallbackIndex;
 }
 
 bool MainWindow::ensureTabCanBeDiscardedOrSaved(int index)
@@ -3952,20 +4276,31 @@ bool MainWindow::ensureTabCanBeDiscardedOrSaved(int index)
     if (!tab.isDirty)
         return true;
 
-    const QString displayName = tab.currentProjectPath.isEmpty()
+    // A tab editing a Smart Object's contents edits a working copy that lives
+    // only as long as the tab, so closing it DOES discard uncommitted work —
+    // and the prompt's "Save" means "commit into the Smart Object", not "write
+    // the file". Before isolation there was nothing to ask here; now there is.
+    const bool isContentTab = tab.container && tab.docId != tab.container->rootId();
+
+    const QString displayName = isContentTab
         ? tab.name
-        : QFileInfo(tab.currentProjectPath).fileName();
+        : (tab.currentProjectPath.isEmpty() ? tab.name
+                                            : QFileInfo(tab.currentProjectPath).fileName());
 
     const QList<AppMessageDialog::ButtonSpec> buttons = {
-        { tr("Save"), QMessageBox::AcceptRole },
+        { isContentTab ? tr("Commit") : tr("Save"), QMessageBox::AcceptRole },
         { tr("Discard"), QMessageBox::DestructiveRole },
         { tr("Cancel"), QMessageBox::RejectRole },
     };
     const int clicked = AppMessageDialog::choice(
         this, tr("Unsaved Changes"),
-        tr("The project \"%1\" has unsaved changes.").arg(displayName),
+        isContentTab
+            ? tr("The Smart Object contents \"%1\" have changes that are not in "
+                 "the project yet.").arg(displayName)
+            : tr("The project \"%1\" has unsaved changes.").arg(displayName),
         AppMessageDialog::Icon::Warning, buttons, /*defaultIndex=*/0,
-        tr("Do you want to save your changes?"));
+        isContentTab ? tr("Do you want to commit them to the Smart Object?")
+                     : tr("Do you want to save your changes?"));
 
     if (clicked == 0)
         return saveProjectForTab(index, false);
@@ -3979,68 +4314,81 @@ void MainWindow::markActiveTabDirty(bool dirty)
     if (m_activeTabIndex < 0 || m_activeTabIndex >= static_cast<int>(m_tabs.size()))
         return;
     auto& tab = m_tabs[m_activeTabIndex];
-    if (tab.isDirty == dirty)
-        return;
+    bool changed = tab.isDirty != dirty;
     tab.isDirty = dirty;
-    updateDirtyUi();
+
+    // The dirty mark stops HERE, deliberately: a content tab edits an isolated
+    // working copy, so the project it belongs to still matches its file. What
+    // marks the project unsaved is the commit (commitEmbeddedContent), not the
+    // edit — and the content tab's own asterisk is what says "these changes are
+    // not in the project yet". Closing the tab with the mark set prompts, so
+    // nothing is lost silently.
+
+    if (changed)
+        updateDirtyUi();
 }
 
 void MainWindow::updateDirtyUi()
 {
-    auto makeTitle = [this]() -> QString {
-        if (m_activeTabIndex < 0 || m_activeTabIndex >= static_cast<int>(m_tabs.size()))
-            return tr("Hazor Studio");
-        auto& tab = m_tabs[m_activeTabIndex];
+    // EVERY tab's label is refreshed, not just the active one. A change can now
+    // reach a project the user is not looking at — committing a Smart Object's
+    // contents marks the main document unsaved, and saving a linked file marks
+    // the projects that display it unsaved — and an asterisk that only appears
+    // once you switch to the tab is an asterisk nobody sees in time.
+    QString activeTitle = tr("Hazor Studio");
+
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+        auto& tab = m_tabs[i];
         QString baseName = tab.currentProjectPath.isEmpty()
             ? tab.name
             : QFileInfo(tab.currentProjectPath).fileName();
         if (baseName.isEmpty())
             baseName = tr("Untitled");
         const QString tabName = tab.isDirty ? tabLabel(baseName) + "*" : tabLabel(baseName);
-        if (m_activeTabIndex < m_tabWidget->count()) {
-            m_tabWidget->setTabText(m_activeTabIndex, tabName);
-            m_tabWidget->setTabToolTip(m_activeTabIndex, baseName);
+        if (i < m_tabWidget->count()) {
+            m_tabWidget->setTabText(i, tabName);
+            m_tabWidget->setTabToolTip(i, baseName);
         }
-        return QStringLiteral("%1 - Hazor Studio").arg(tabName);
-    };
+        if (i == m_activeTabIndex)
+            activeTitle = QStringLiteral("%1 - Hazor Studio").arg(tabName);
+    }
 
-    QString title = makeTitle();
-    setWindowTitle(title);
+    setWindowTitle(activeTitle);
 }
 
 bool MainWindow::loadProjectAsNewTab(const QString& path)
 {
-    const ProjectLoadResult loaded = ProjectFileService::loadProject(path);
-    if (!loaded.ok) {
+    // Through the registry, never ProjectFileService directly: one container per
+    // physical file for the whole application. Opening a .hzs that a Linked
+    // Smart Object already pulled in adopts that same container instead of
+    // building a second Document for the same bytes (see ContainerRegistry.hpp).
+    QString error;
+    auto container = ContainerRegistry::instance().open(path, &error);
+    if (!container || !container->rootDocument()) {
         AppMessageDialog::warning(this, tr("Open Project"),
-            loaded.error.isEmpty() ? tr("Invalid project file.") : loaded.error);
+            error.isEmpty() ? tr("Invalid project file.") : error);
         return false;
+    }
+
+    // A second tab for the same (container, document) would give one Document
+    // two CommandHistories and two dirty flags. Reactivate instead — the same
+    // rule "Edit Contents" follows for an already-open Smart Object document.
+    const int existingTab = tabIndexForDocument(container.get(), container->rootId());
+    if (existingTab >= 0) {
+        m_tabWidget->setCurrentIndex(existingTab);
+        RecentFilesManager::instance()->addFile(path);
+        return true;
     }
 
     const QString tabName = QFileInfo(path).fileName();
-    auto& tab = createTab(tabName, loaded.canvasSize);
+    // The loaded document is adopted as-is — no clone of the layer tree. The
+    // previous code cloned it because loadProject() handed back loose roots the
+    // tab had to copy into its own Document; documentFromJson() now builds the
+    // real Document, and cloning it here would detach the tab from the
+    // container that has to save it.
+    auto& tab = createTabForDocument(tabName, container, container->rootId());
     if (!tab.document || !tab.controller)
         return false;
-
-    tab.document->name = loaded.projectName;
-    tab.document->size = loaded.canvasSize;
-    tab.document->roots.clear();
-    for (const auto& root : loaded.roots) {
-        auto clone = root->clone(true);
-        tab.document->roots.push_back(std::move(clone));
-    }
-    tab.document->activeFlatIndex = std::clamp(loaded.activeFlatIndex, 0, std::max(0, tab.document->flatCount() - 1));
-    tab.document->resolutionDpi = loaded.resolutionDpi;
-    tab.document->colorMode = loaded.colorMode;
-    tab.document->bitDepth = loaded.bitDepth;
-    tab.document->setColorProfile(loaded.colorProfile);
-    tab.document->setProfileSource(loaded.profileSource);
-    tab.document->zoom = loaded.zoom;
-    tab.document->panOffset = loaded.panOffset;
-    tab.document->guideManager.setGuides(loaded.guides);
-    tab.document->selection.resize(loaded.canvasSize.width(), loaded.canvasSize.height());
-    tab.document->selection.clear();
-    tab.document->selection.setActive(false);
 
     // NOTE: masks live in the layer's base-pixel space anchored by maskOrigin
     // (see Layer::maskTargetBounds / DocumentCompositor), and ProjectFileService
@@ -4066,6 +4414,10 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     updateLayerMenuState();
     updateStatusFromDocument();
     updateDirtyUi();
+    // Validates every Smart Object reference in the file (so a Linked target
+    // that moved gets its broken badge) and re-renders only the genuinely stale
+    // ones — a persisted render is trusted.
+    tab.controller->refreshAllSmartObjectInstances(/*afterLoad=*/true);
     return true;
 }
 
@@ -4634,6 +4986,39 @@ void MainWindow::updateLayerMenuState()
     m_mergeLayersAction->setEnabled(hasLayer && hasMultiple && !m_ctrl->anyFullyLockedVisibleLayer());
     m_flattenImageAction->setEnabled(hasDoc && m_ctrl && m_doc->flatCount() >= 1 && !m_ctrl->anyFullyLockedVisibleLayer());
     m_rasterizeLayerAction->setEnabled(hasLayer && !isAdjustment && !pixelsLocked);
+
+    // Smart Objects. Per-item gating, not one "is this a Smart Object?" switch:
+    // it is what tells the user WHY something is unavailable — Embed Linked
+    // greys out on an embedded instance, not on every Smart Object.
+    if (m_smartObjectMenu) {
+        const auto smartData = (hasDoc && m_ctrl)
+            ? m_ctrl->smartObjectDataAt(m_doc->activeFlatIndex) : nullptr;
+        const bool isSmartObject = smartData != nullptr;
+        const bool isLinked = isSmartObject
+            && smartData->mode == SmartObjectStorageMode::Linked;
+        const bool isEmbedded = isSmartObject && !isLinked;
+
+        m_smartObjectMenu->setEnabled(hasDoc);
+        // Converting a Smart Object into another one is legal — that is how
+        // you nest them.
+        m_smartObjectConvertAction->setEnabled(
+            (hasLayer || isAdjustment || isGroupNode || multiSelected) && !fullyLocked);
+        m_smartObjectViaCopyAction->setEnabled(isSmartObject);
+        m_smartObjectEditAction->setEnabled(isSmartObject);
+        m_smartObjectReplaceAction->setEnabled(isSmartObject && !pixelsLocked);
+        // Relink / Update / Embed Linked are Linked-only: embedded content has
+        // no file to re-point at and can never be out of date, because editing
+        // it invalidates its instances immediately.
+        m_smartObjectRelinkAction->setEnabled(isLinked && !pixelsLocked);
+        m_smartObjectUpdateAction->setEnabled(isLinked);
+        m_smartObjectToEmbeddedAction->setEnabled(isLinked && !pixelsLocked);
+        m_smartObjectToLinkedAction->setEnabled(isEmbedded && !pixelsLocked);
+    }
+    // Place is a File-menu action: it needs an open document and nothing else.
+    if (m_smartObjectPlaceEmbeddedAction)
+        m_smartObjectPlaceEmbeddedAction->setEnabled(hasDoc);
+    if (m_smartObjectPlaceLinkedAction)
+        m_smartObjectPlaceLinkedAction->setEnabled(hasDoc);
     if (m_layerStylesAction) m_layerStylesAction->setEnabled(hasLayer && !isAdjustment && !fullyLocked);
     m_layerMaskAddAction->setEnabled(hasLayer && !hasMask && !fullyLocked);
     m_layerMaskRemoveAction->setEnabled(hasLayer && hasMask && !fullyLocked);
@@ -5677,6 +6062,27 @@ void MainWindow::refreshPropertiesPanel()
     m_propsPanel->setLayerTransformInfo(kind, m.wPx, m.hPx, m.xPx, m.yPx, m.rotDeg,
                                         node->canTransform() && !node->isPositionLocked());
 
+    PropertiesPanel::SmartObjectInfo smartInfo;
+    if (const auto data = m_ctrl ? m_ctrl->smartObjectDataAt(m_doc->activeFlatIndex)
+                                 : nullptr) {
+        smartInfo.valid = true;
+        smartInfo.linked = data->mode == SmartObjectStorageMode::Linked;
+        smartInfo.linkBroken = data->linkBroken;
+        smartInfo.path = m_ctrl->smartObjectLinkedPathAt(m_doc->activeFlatIndex);
+        smartInfo.sourceSize = data->state.sourceSize;
+        smartInfo.sourceDpi = data->state.sourceDpi;
+        smartInfo.instanceCount = m_ctrl->smartObjectInstanceCountAt(m_doc->activeFlatIndex);
+        if (auto* container = m_ctrl->documentContainer()) {
+            if (const auto referenced = container->document(data->docId))
+                smartInfo.documentName = referenced->name;
+        }
+        if (smartInfo.documentName.isEmpty()) {
+            smartInfo.documentName = smartInfo.linked
+                ? QFileInfo(data->linkedPath).completeBaseName() : node->name;
+        }
+    }
+    m_propsPanel->setSmartObjectInfo(smartInfo);
+
     bool hasMask = node->layer && !node->layer->maskImage.isNull();
     m_propsPanel->setMaskInfo(hasMask, node->layer->maskDensity, node->layer->maskFeather);
     if (hasMask && m_ctrl)
@@ -6334,6 +6740,39 @@ void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
         convertAction->setEnabled(m_rasterizeLayerAction->isEnabled());
         connect(convertAction, &QAction::triggered, this, &MainWindow::onMenuRasterizeLayer);
 
+        // ── Smart Objects ────────────────────────────────────────────
+        // Flat entries, not the submenu, and only the ones that apply to this
+        // layer — a context menu answers "what can I do with THIS?", so a
+        // common layer offers only Convert, and Relink never appears on
+        // embedded content. The actions themselves are the very same QActions
+        // the Layer menu uses, so there is one implementation and one place
+        // (updateLayerMenuState) deciding what is enabled.
+        if (m_smartObjectMenu && m_ctrl) {
+            updateLayerMenuState();
+            const auto smartData = m_ctrl->smartObjectDataAt(idx);
+            const bool isLinked = smartData
+                && smartData->mode == SmartObjectStorageMode::Linked;
+
+            menu.addSeparator();
+            if (!smartData) {
+                menu.addAction(m_smartObjectConvertAction);
+            } else {
+                menu.addAction(m_smartObjectEditAction);
+                menu.addAction(m_smartObjectViaCopyAction);
+                menu.addAction(m_smartObjectReplaceAction);
+                if (isLinked) {
+                    menu.addAction(m_smartObjectRelinkAction);
+                    menu.addAction(m_smartObjectUpdateAction);
+                    menu.addAction(m_smartObjectToEmbeddedAction);
+                } else {
+                    menu.addAction(m_smartObjectToLinkedAction);
+                }
+                // No Rasterize entry here: "Convert Layer" above is already
+                // this menu's rasterize action, and offering both would be two
+                // names for one command.
+            }
+        }
+
         menu.addSeparator();
 
         // ── Organization ──────────────────────────────────────────────
@@ -6462,4 +6901,313 @@ void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
     }
 
     menu.exec(globalPos);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Smart Objects
+// ─────────────────────────────────────────────────────────────────────────
+
+ImageController* MainWindow::rootControllerForContainer(const DocumentContainer* container) const
+{
+    if (!container)
+        return nullptr;
+    const int rootTab = tabIndexForDocument(container, container->rootId());
+    if (rootTab < 0)
+        return nullptr;
+    return m_tabs[rootTab].controller.get();
+}
+
+void MainWindow::scheduleSmartObjectRefresh()
+{
+    if (!m_smartObjectRefreshTimer) {
+        m_smartObjectRefreshTimer = new QTimer(this);
+        m_smartObjectRefreshTimer->setSingleShot(true);
+        connect(m_smartObjectRefreshTimer, &QTimer::timeout,
+                this, &MainWindow::flushSmartObjectRefresh);
+    }
+    // Restarted on every change, so a stroke or a slider drag produces exactly
+    // one refresh once the user pauses.
+    m_smartObjectRefreshTimer->start(200);
+}
+
+void MainWindow::flushSmartObjectRefresh()
+{
+    // Every open project is rechecked, not just the one that reported a change.
+    // Two cases need it and neither names a document:
+    //   • a Linked Smart Object in A.hzs watching B.hzs, when the user edits
+    //     (or saves) B.hzs in its own tab — A's container never hears about it;
+    //   • undo/redo of Replace Contents, which swaps the document stored under
+    //     a docId without any particular document "changing".
+    // The pass is O(nodes) with no file I/O and only dispatches genuinely stale
+    // instances, so running it wholesale once the user pauses is cheaper than
+    // the bookkeeping needed to narrow it.
+    for (auto& tab : m_tabs) {
+        if (!tab.container || !tab.controller)
+            continue;
+        // One controller drives a container's cascade: the root document's.
+        // Letting each tab drive its own would mean several render services
+        // compositing the same documents, each unaware of the others' commits.
+        if (tab.docId != tab.container->rootId())
+            continue;
+        tab.controller->refreshAllSmartObjectInstances();
+    }
+}
+
+void MainWindow::onSmartObjectRenderCommitted(
+    const std::shared_ptr<DocumentContainer>& container,
+    const QStringList& affectedDocuments, bool marksDirty)
+{
+    if (!container)
+        return;
+    for (auto& tab : m_tabs) {
+        if (tab.container != container || !affectedDocuments.contains(tab.docId))
+            continue;
+        if (tab.canvas) {
+            tab.canvas->syncLayersToGpu();
+            tab.canvas->update();
+        }
+    }
+    // The render that just landed IS part of the file (it is what an
+    // unresolvable link falls back to), so a document whose instances changed
+    // no longer matches its .hzs. `marksDirty` is false only for the pass that
+    // regenerates renders already stored on disk, right after a load —
+    // flagging a project as edited just for opening it would be wrong.
+    if (marksDirty && !affectedDocuments.isEmpty())
+        markContainerRootDirty(container);
+    // The instance's thumbnail and the Properties page both read the payload,
+    // which just changed.
+    refreshLayerPanel();
+    refreshPropertiesPanel();
+}
+
+void MainWindow::editSmartObjectContents(int flatIndex)
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const auto data = m_ctrl->smartObjectDataAt(flatIndex);
+    if (!data)
+        return;
+    m_ctrl->setActiveNode(flatIndex);
+
+    if (data->mode == SmartObjectStorageMode::Linked) {
+        // A Linked Smart Object's content is just another project: open it as a
+        // normal tab (loadProjectAsNewTab reactivates the existing one when the
+        // file is already open, which is the same container either way).
+        const QString path = m_ctrl->smartObjectLinkedPathAt(flatIndex);
+        if (path.isEmpty() || !QFileInfo(path).isFile()) {
+            AppMessageDialog::warning(this, tr("Smart Object"),
+                tr("The linked file \"%1\" could not be found. Use Relink… to point "
+                   "this Smart Object at its file.")
+                    .arg(QFileInfo(data->linkedPath).fileName()));
+            return;
+        }
+        loadProjectAsNewTab(path);
+        return;
+    }
+
+    auto container = m_ctrl->documentContainerPtr();
+    if (!container)
+        return;
+    auto content = container->document(data->docId);
+    if (!content) {
+        AppMessageDialog::warning(this, tr("Smart Object"),
+            tr("This Smart Object's document is missing from the project."));
+        return;
+    }
+
+    // One tab per document: a second one would give the same Document two
+    // command histories, and an undo in either would surprise the other.
+    const int existing = tabIndexForDocument(container.get(), data->docId);
+    if (existing >= 0) {
+        m_tabWidget->setCurrentIndex(existing);
+        return;
+    }
+
+    // The tab works on a COPY of the document, the way editing a separate
+    // content document does. Until Ctrl+S commits it, the instances keep
+    // showing the stored content and the project is genuinely unmodified —
+    // which is also what makes "close the content tab and lose the
+    // experiment" a real option.
+    container->beginEditSession(data->docId, smartobject::cloneDocument(*content));
+
+    auto& tab = createTabForDocument(content->name, container, data->docId);
+    // The content tab has no file of its own — Ctrl+S commits into the
+    // container, and only saving the project writes the .hzs (saveProjectForTab).
+    tab.currentProjectPath.clear();
+    tab.sourcePath.clear();
+    tab.isDirty = false;
+    m_activeTabIndex = m_tabWidget->currentIndex();
+    m_doc = tab.document.get();
+    m_ctrl = tab.controller.get();
+    m_canvas = tab.canvas;
+    if (m_canvas) {
+        m_canvas->syncLayersToGpu();
+        m_canvas->update();
+    }
+    refreshLayerPanel();
+    refreshPropertiesPanel();
+    refreshHistoryPanel();
+    updateLayerMenuState();
+    updateStatusFromDocument();
+    updateDirtyUi();
+}
+
+void MainWindow::convertSelectionToSmartObject()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    std::vector<int> indices = m_doc->selectedList();
+    if (indices.empty() && m_doc->activeFlatIndex >= 0)
+        indices.push_back(m_doc->activeFlatIndex);
+    if (m_ctrl->convertToSmartObject(indices) < 0)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::placeSmartObject(bool linked)
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        linked ? tr("Place Linked") : tr("Place Embedded"),
+        QString(), tr("Hazor Studio (*.hzs)"));
+    if (path.isEmpty())
+        return;
+
+    const int index = linked ? m_ctrl->placeLinkedDocument(path)
+                             : m_ctrl->placeEmbeddedDocument(path);
+    if (index < 0)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::runSmartObjectCommand(int flatIndex, LayerSmartObjectCommand command)
+{
+    if (!m_ctrl || !m_doc || flatIndex < 0)
+        return;
+    // Every slot below acts on the ACTIVE layer, so the layer the menu was
+    // opened on becomes active first. That also matches what the user sees: the
+    // row they right-clicked ends up selected.
+    if (m_doc->activeFlatIndex != flatIndex) {
+        m_ctrl->setActiveNode(flatIndex);
+        refreshLayerPanel();
+    }
+
+    switch (command) {
+    case LayerSmartObjectCommand::Convert:
+        convertSelectionToSmartObject();
+        break;
+    case LayerSmartObjectCommand::ViaCopy:
+        newSmartObjectViaCopy();
+        break;
+    case LayerSmartObjectCommand::EditContents:
+        editSmartObjectContents(flatIndex);
+        break;
+    case LayerSmartObjectCommand::ReplaceContents:
+        replaceActiveSmartObjectContents();
+        break;
+    case LayerSmartObjectCommand::RelinkToFile:
+        relinkActiveSmartObject();
+        break;
+    case LayerSmartObjectCommand::UpdateModified:
+        updateActiveSmartObjectContent();
+        break;
+    case LayerSmartObjectCommand::ConvertToLinked:
+        convertActiveSmartObjectStorage(/*toLinked=*/true);
+        break;
+    case LayerSmartObjectCommand::EmbedLinked:
+        convertActiveSmartObjectStorage(/*toLinked=*/false);
+        break;
+    case LayerSmartObjectCommand::Rasterize:
+        onMenuRasterizeLayer();
+        break;
+    }
+}
+
+void MainWindow::newSmartObjectViaCopy()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    if (m_ctrl->newSmartObjectViaCopy(m_doc->activeFlatIndex) < 0)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::replaceActiveSmartObjectContents()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const int flatIndex = m_doc->activeFlatIndex;
+    if (!m_ctrl->smartObjectDataAt(flatIndex))
+        return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Replace Contents"), QString(), tr("Hazor Studio (*.hzs)"));
+    if (path.isEmpty())
+        return;
+    if (!m_ctrl->replaceSmartObjectContents(flatIndex, path))
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::relinkActiveSmartObject()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const int flatIndex = m_doc->activeFlatIndex;
+    if (!m_ctrl->smartObjectDataAt(flatIndex))
+        return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Relink Smart Object"), QString(), tr("Hazor Studio (*.hzs)"));
+    if (path.isEmpty())
+        return;
+    if (!m_ctrl->relinkSmartObject(flatIndex, path))
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::updateActiveSmartObjectContent()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    if (m_ctrl->updateSmartObjectContent(m_doc->activeFlatIndex))
+        refreshLayersUi();
+}
+
+void MainWindow::convertActiveSmartObjectStorage(bool toLinked)
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const int flatIndex = m_doc->activeFlatIndex;
+    const auto data = m_ctrl->smartObjectDataAt(flatIndex);
+    if (!data)
+        return;
+
+    bool ok = false;
+    if (toLinked) {
+        // Converting to Linked has to produce the external file first, so it
+        // needs a path from the user before anything is changed.
+        QString suggested = m_doc->nodeAt(flatIndex) ? m_doc->nodeAt(flatIndex)->name
+                                                     : tr("Smart Object");
+        if (!suggested.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
+            suggested += QStringLiteral(".hzs");
+        QString path = QFileDialog::getSaveFileName(
+            this, tr("Convert to Linked"), suggested, tr("Hazor Studio (*.hzs)"));
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
+            path += QStringLiteral(".hzs");
+        ok = m_ctrl->convertSmartObjectToLinked(flatIndex, path);
+    } else {
+        ok = m_ctrl->convertSmartObjectToEmbedded(flatIndex);
+    }
+    if (!ok)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
 }

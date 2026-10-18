@@ -19,6 +19,23 @@ class ScrubbableValueInput;
 class ImageController;
 class LayerItemDelegate;
 
+// Smart Object commands offered by the layer context menu. The panel only
+// reports WHICH one was chosen — running them needs file dialogs and tab
+// management, which belong to MainWindow, and every one maps to the same action
+// the Layer ▸ Smart Objects menu uses. At file scope (not nested) so MainWindow
+// can forward-declare it rather than include this header.
+enum class LayerSmartObjectCommand {
+    Convert,
+    ViaCopy,
+    EditContents,
+    ReplaceContents,
+    RelinkToFile,
+    UpdateModified,
+    ConvertToLinked,
+    EmbedLinked,
+    Rasterize,
+};
+
 class LayerPanel : public QWidget {
     Q_OBJECT
 
@@ -31,6 +48,7 @@ public:
 
 signals:
     void activeLayerChanged(int index);
+    void smartObjectCommandRequested(int index, LayerSmartObjectCommand command);
     void addLayerRequested();
     void removeLayerRequested(int index);
     void grayscaleViewRequested(bool enabled);
@@ -47,6 +65,9 @@ signals:
     // The thumbnail of a RAW Layer was double-clicked. MainWindow selects the
     // layer and opens its independent Hazor Develop window.
     void rawEditRequested(int index);
+    // The thumbnail of a Smart Object was double-clicked. MainWindow opens (or
+    // reactivates) the tab that edits the document it references.
+    void smartObjectEditRequested(int index);
 
 private slots:
     void onCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* previous);

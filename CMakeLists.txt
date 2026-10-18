@@ -274,6 +274,7 @@ add_executable(Hazor WIN32
 
     src/controller/ImageController.cpp
     src/controller/ImageController_Tools.cpp
+    src/controller/ImageController_SmartObjects.cpp
     src/controller/ImageController.hpp
     src/controller/CommandHistory.cpp
     src/controller/CommandHistory.hpp
@@ -477,6 +478,20 @@ add_executable(Hazor WIN32
     src/io/ProjectFileService.hpp
     src/io/RecentFilesManager.cpp
     src/io/RecentFilesManager.hpp
+
+    # ── Smart Objects (tmp/feat-smartobjects.md) ──
+    # A Smart Object instance is an ordinary Type::Layer whose Layer carries a
+    # SmartObjectData payload; nothing here touches the compositors.
+    src/smartobject/SmartObjectData.hpp
+    src/smartobject/DocumentContainer.hpp
+    src/smartobject/DocumentContainer.cpp
+    src/smartobject/ContainerRegistry.hpp
+    src/smartobject/ContainerRegistry.cpp
+    src/smartobject/SmartObjectRenderService.hpp
+    src/smartobject/SmartObjectRenderService.cpp
+    src/smartobject/SmartObjectCommands.hpp
+    src/smartobject/SmartObjectTransfer.hpp
+    src/smartobject/SmartObjectTransfer.cpp
 
     # ── Native RAW engine API (Fase 3, tmp/feat-raw-therapee-plan.md) ──
     # The only part of Hazor allowed to #include "rtengine/..."; compiles in
