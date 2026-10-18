@@ -129,6 +129,20 @@ rule, same HSL model (`core/HueSaturationData`), same mask density ramp.
   `effectedTexture` (bake of effects/clipped adjustments),
   `styledBaseTexture` (base with style for live Single Layer Mode).
 
+There are **two tile systems, and they cull differently.** `TileManager`
+([src/core/TileManager.hpp](../src/core/TileManager.hpp)) is a dense grid over a
+document-sized `cpuImage`: every cell exists and is "visible" to
+`computeTilesForLayer` whatever it contains, and the layer additionally carries
+one document-sized RGBA8 texture. `RasterLayerStorage`
+([src/core/RasterLayerStorage.hpp](../src/core/RasterLayerStorage.hpp)) is a
+sparse map that only materialises a tile once something is painted into it
+(`replaceWithImage` skips contentless tiles), so an empty layer resolves to zero
+draws and zero VRAM. Because the live compositor redraws the *whole* stack into
+a canvas-sized FBO on every brush dab, a dense-grid layer costs a full-canvas
+quad per dab even when it is blank — which is why `ImageController::newLayer`
+creates new layers on the sparse storage, the same representation the first
+brush stroke would convert them to anyway.
+
 ### 2.4.1 Async layer-style bake
 
 Files: [src/renderer/StyleBakePool.\*](../src/renderer/StyleBakePool.hpp),
@@ -235,6 +249,62 @@ thumbnails on every slider step.
   tool is active.
 - [src/renderer/ProjectionCache.\*](../src/renderer/ProjectionCache.hpp): GL
   texture for the CPU projection, keyed by `doc + compositionGeneration`.
+
+Neither cache covers an interactive frame, which is the point of §2.6.
+
+### 2.6 What a live frame costs — known limitation
+
+**A live frame is O(layers × document pixels), and nothing is reused between
+frames.** `p.liveEdit` (brush/eraser stroke, move, transform, shape drag,
+adjustment drag, text editing) disables both caches above and routes the frame
+through `LayerCompositor::composite()`, which clears a canvas-sized group FBO
+and redraws the *entire* stack into it from scratch. A brush stroke calls
+`update()` per input event, so that whole-stack recomposite runs **per dab**.
+
+Three properties of that cost are worth stating plainly, because each one
+surprises people reading the code for the first time:
+
+- **It does not scale with zoom.** The group FBO is `doc->size`, not the
+  viewport, so painting zoomed out to 25% costs exactly what painting at 100%
+  costs.
+- **It does not scale with the dab.** A 3 px brush and a 300 px brush recompose
+  the same full canvas; only the CPU-side dab rasterisation
+  ([BrushRenderer.cpp](../src/brush/BrushRenderer.cpp), which touches just the
+  active layer's tiles) tracks the brush size.
+- **It scales with the layer count, content or not.** Every visible layer is one
+  more full-canvas pass. A layer that is *empty* is only free if it owns no
+  tiles — see the sparse/dense distinction in §2.4, which is why
+  `ImageController::newLayer` uses `RasterLayerStorage`.
+
+Two things have been done about the constant factor. The sparse storage above
+takes blank layers out of the loop entirely, and the grid-aligned 1:1 shortcut
+in the shared sampler (§4.2) cut each remaining layer's pass from 16
+`texelFetch` per document pixel to 1 — measured 7.5× on the per-frame sampling
+cost, at any layer count. **The O(layers) term itself is still there.**
+
+The fix that removes it is a **dirty-rect live composite**: during a stroke the
+only thing that changes is the dab's bounding rect, so the frame should
+recompose that rect rather than the canvas. The shape it would take:
+
+1. Promote the live composite's root FBO out of `pushGroupFbo`'s pool
+   ([GPUViewport.cpp](../src/renderer/GPUViewport.cpp)) into a dedicated member
+   keyed on `(doc, size)`, and stop clearing it per frame. It is in **document
+   space**, so pan and zoom do not invalidate it — only pixel mutation does.
+2. Accumulate the dirty rect. `CanvasView` already computes a per-segment rect
+   for the dense-tile path (`layer->dirtyRegion`); extend that to the
+   `rasterStorage` path and carry the accumulated rect in `RenderParams`.
+3. Scissor the viewport to that rect and hand it to the tile cullers in place of
+   `QRectF(0, 0, docW, docH)`. `renderNodes` is otherwise unchanged, so blend
+   semantics stay exact — the whole stack still runs, just clipped.
+4. Invalidate the whole FBO on anything that is not a dab: active-layer change,
+   visibility/opacity/blend edits, a `compositionGeneration` bump, resize. Those
+   frames fall back to today's full recomposite.
+
+Related, and worth fixing in the same pass: `drawShaderBlend` blits the whole
+target into `m_blendTex` on **every call**, and the raster-storage path calls it
+**per tile**, so a dab layer with a non-Normal blend mode already costs
+`tiles × full-canvas blit` per frame. A dirty rect shrinks that blit to the same
+rect.
 
 ---
 
@@ -343,7 +413,7 @@ that axis), never by a user setting:
 | footprint | Kernel | Behaviour |
 |---|---|---|
 | `> 1` | exact box of `footprint` texels | minification: the area average (what `cv::INTER_AREA` computes). Degenerates *continuously* into plain bilinear as the footprint approaches 1, so there is no seam to put a threshold at |
-| `≤ 1` | Keys cubic, `A = -0.75` | magnification, rotation, or a merely sub-pixel offset. At an integral sample position the weights are exactly `(0,1,0,0)`, so a grid-aligned 1:1 frame is still a **bit-exact copy** |
+| `≤ 1` | Keys cubic, `A = -0.75` | magnification, rotation, or a merely sub-pixel offset. At an integral sample position the weights are exactly `(0,1,0,0)`, so a grid-aligned 1:1 frame is still a **bit-exact copy** — which `sm_sampleSurface` detects and serves with a single fetch |
 
 `A = -0.75` is not a taste call: it is exactly `cv::INTER_CUBIC`, which every
 destructive path already bakes (§4.3), so a non-destructive layer scale and the
@@ -364,7 +434,7 @@ upscale of random RGBA: 10 789 pixels would exceed alpha unclamped, worst excess
 | Document → screen (the *view* step) | `uSharpMagnify = 1`: the box stays, and its width may drop below 1 — never the cubic | n/a — this step has no CPU counterpart; the projection **is** the CPU truth at document resolution |
 | Masks | bilinear R8 texture, ramp `mix(1, m, density)`, outside UV = 1 | same via DestinationIn + `maskDensityRamp` |
 
-Three consequences worth knowing:
+Five consequences worth knowing:
 
 - **The view step is the only place that sharpens *below* footprint 1.** There
   the box is narrower than a texel, so texel interiors stay flat and the blend
@@ -389,6 +459,21 @@ Three consequences worth knowing:
   CPU derives it from the transform — they agree only to within rounding, and
   without the slack the two backends could pick different kernels for the same
   draw. An axis minifying by less than 0.1% needs no prefilter anyway.
+- **The grid-aligned 1:1 draw short-circuits to one fetch.** When both axes are
+  on the cubic at footprint 1 (within the same 0.1%) *and* the sample lands on a
+  texel centre, `sm_sampleSurface` returns that texel instead of running the
+  separable pass. This is not an approximation — the Keys weights there are
+  exactly `(0,1,0,0)`, so the shortcut is the separable result without the
+  rounding the weight polynomials carry, and it is the same case the CPU hands
+  to QPainter as a whole-pixel copy. It matters because it is the live
+  compositor's *steady state*, not a corner case: `LayerCompositor` draws every
+  untransformed layer 1:1 into the canvas-sized group FBO and redraws the whole
+  stack per brush dab, so without it the stack cost 16 `texelFetch` per document
+  pixel per layer on every interactive frame. The footprint half of the test is
+  what keeps the branch warp-coherent — at footprint 1 either every fragment of
+  the primitive has an integral sample position or none has, whereas under
+  magnification only the fragments that happen to land on a texel centre would
+  qualify, splitting warps for no saving.
 - **Minification uses a pyramid where one exists.** A fixed tap budget spread
   over an ever-wider footprint undersamples (moiré at low zoom), so when the
   bound texture carries a premultiplied mip pyramid the sampler picks the level
@@ -579,6 +664,10 @@ render paths display the same pixels:
 
 `flushLayerToCpuImage` (ImageController) flattens tiles + cpuImage when a
 destructive operation needs a positioned full-size snapshot.
+
+Rasterising a dab is cheap and touches only the active layer. What a dab costs
+is the *frame* it triggers, which recomposites the whole stack — see §2.6 before
+profiling anything here.
 
 ---
 

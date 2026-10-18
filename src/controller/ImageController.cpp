@@ -1184,8 +1184,19 @@ void ImageController::newLayer()
 
     auto* newNode = m_doc->nodeAt(m_doc->activeFlatIndex);
     if (newNode && newNode->layer) {
-        if (size.width() * size.height() >= 256 * 256)
-            newNode->layer->enableTiling(m_doc->tileSize());
+        // Sparse raster storage, not the dense TileManager grid. An empty layer
+        // then owns no tile at all, so it draws nothing and holds no texture
+        // until something is actually painted on it. The grid is dense — every
+        // tile of the canvas is "visible" to the culler whatever it contains —
+        // and the live compositor redraws the whole stack into a canvas-sized
+        // FBO on every brush dab, so each blank layer used to add a full-canvas
+        // quad plus a document-sized RGBA8 texture to every frame of every
+        // stroke: paint performance fell off with the layer count even when the
+        // layers were empty. This is also the representation the first stroke
+        // converts the layer to anyway (CanvasView::beginBrushStroke →
+        // Layer::enableRasterStorage, a no-op once enabled), so the layer no
+        // longer changes shape underneath the user mid-gesture.
+        newNode->layer->enableRasterStorage(m_doc->tileSize());
         m_history.push(std::make_unique<AddLayerCommand>(
             m_doc, flatIndex, newNode->clone(), tr("Add Layer")));
     }

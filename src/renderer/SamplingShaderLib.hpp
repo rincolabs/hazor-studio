@@ -23,7 +23,10 @@
 //                   into the document — bilinear here would throw away
 //                   detail a scale-up is supposed to keep. At an integral
 //                   sample position its weights are exactly (0,1,0,0), so a
-//                   grid-aligned 1:1 frame is still a bit-exact copy.
+//                   grid-aligned 1:1 frame is still a bit-exact copy —
+//                   sm_sampleSurface recognises that case and fetches the one
+//                   texel instead of weighting sixteen, which is what the live
+//                   compositor does for every untransformed layer, per frame.
 //
 // The one exception is the document→screen *view* step (uSharpMagnify),
 // which keeps the box below footprint 1 as well: the box is then narrower
@@ -71,6 +74,14 @@ inline constexpr char kLib[] = R"(
     // where the CPU's transform algebra and the shader's screen-space
     // derivatives agree only to within rounding.
     const float SM_CUBIC_MAX_FOOTPRINT = 1.001;
+
+    // Slack for recognising the grid-aligned 1:1 draw that sm_sampleSurface
+    // short-circuits. The same 0.1% as above, for the same reason: a draw that
+    // is 1:1 by construction only comes out of the transform chain as 1:1 to
+    // within rounding. A sample displaced by a thousandth of a texel has cubic
+    // weights within 2e-3 of (0,1,0,0) — far below one 8-bit level — so the
+    // slack cannot make the shortcut visible.
+    const float SM_UNIT_EPS = 1.0e-3;
 
     vec4 sm_unpremultiply(vec4 c) {
         if (c.a > 0.0) {
@@ -225,6 +236,35 @@ inline constexpr char kLib[] = R"(
         // CPU compositor bakes.
         bvec2 cubic = viewStep ? bvec2(false)
                                : lessThanEqual(raw, vec2(SM_CUBIC_MAX_FOOTPRINT));
+
+        // Grid-aligned 1:1: both axes on the cubic at footprint 1 with the
+        // sample sitting on a texel centre, where the Keys weights are exactly
+        // (0,1,0,0). Taking that texel is not an approximation of the separable
+        // pass, it IS its result — minus the rounding the weight polynomials
+        // carry — and it mirrors the CPU, where DocumentCompositor hands a
+        // whole-pixel copy to QPainter rather than walking resampleAffine.
+        //
+        // Worth a branch because this is the live compositor's steady state,
+        // not a corner case: every untransformed layer is drawn 1:1 into the
+        // canvas-sized group FBO, so the stack costs 16 texelFetch per document
+        // pixel *per layer* on every interactive frame — the whole stack is
+        // redrawn per brush dab. Fifteen of those sixteen are multiplied by
+        // zero.
+        //
+        // Gated on the footprint as well as the position to keep the branch
+        // warp-coherent: at footprint 1 either every fragment of the primitive
+        // has an integral sample position or none has. Letting magnification in
+        // would qualify only the fragments that happen to land on a texel
+        // centre, splitting warps for no saving.
+        if (all(cubic)
+            && all(lessThanEqual(abs(raw - vec2(1.0)), vec2(SM_UNIT_EPS)))
+            && all(lessThanEqual(abs(p - round(p)), vec2(SM_UNIT_EPS)))) {
+            ivec2 hi = textureSize(tex, level) - ivec2(1);
+            vec4 t = sm_texel(tex, clamp(ivec2(round(p)), ivec2(0), hi),
+                              level, straightAlpha);
+            return sm_unpremultiply(sm_clampPremultiplied(t));
+        }
+
         vec2 width = viewStep ? max(raw, vec2(1.0e-4))
                               : max(raw, vec2(1.0));
         vec4 c = sm_sampleSeparable(tex, p, width, cubic, level, straightAlpha);
