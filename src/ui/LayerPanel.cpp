@@ -29,6 +29,7 @@
 #include <QLineEdit>
 
 #include <QSignalBlocker>
+#include <QSet>
 #include <QtConcurrent/QtConcurrent>
 #include <QMouseEvent>
 #include <QStyleOptionViewItem>
@@ -45,11 +46,70 @@
 
 namespace {
 static constexpr int kDraggingRole = Qt::UserRole + 200;
+// Identity of the node a row stands for. Stored on the row so refresh() can
+// tell "same list, fresh data" from a real structural change without having to
+// rebuild to find out.
+static constexpr int kNodeRole = Qt::UserRole + 201;
 class LayerTreeWidget : public QTreeWidget {
 public:
     explicit LayerTreeWidget(QWidget* parent = nullptr)
         : QTreeWidget(parent)
     {}
+
+    // Revealing the active layer is a deliberate gesture (LayerPanel::refresh()
+    // enables it only when the active node actually changed), not something
+    // every rebuild may do.
+    void setRevealEnabled(bool enabled) { m_revealEnabled = enabled; }
+
+    // QAbstractItemView::dropEvent is what normally clears DraggingState, the
+    // drop indicator and the auto-scroll timer — and it never runs here:
+    // LayerPanel::eventFilter handles the drop itself and consumes the event,
+    // and this widget calls startDrag() straight from mouseMoveEvent instead of
+    // going through the base implementation that resets the state afterwards.
+    // Left set, that state made the view start a drag with no button held: the
+    // DraggingState branch of QAbstractItemView::mouseMoveEvent never checks
+    // event->buttons(), so just moving the pointer over the panel after a drop
+    // grabbed whatever layer was under the cursor.
+    void endDragState()
+    {
+        setState(NoState);
+        stopAutoScroll();
+        viewport()->update();
+    }
+
+    // clear() deletes every item, so a press being tracked across a rebuild
+    // would leave a dangling pointer behind.
+    void forgetPressedItem()
+    {
+        m_pressItem = nullptr;
+        m_preserveSelectionOnPress = false;
+    }
+
+    // Two things QTreeView does on its own that the layer panel must not
+    // inherit, both funnelled through scrollTo():
+    //
+    //  • it scrolls to the current row on every currentChanged — and refresh()
+    //    re-sets the current item on every rebuild, which yanked the viewport
+    //    back to the active layer while the user was scrolling or dragging;
+    //  • to reach that row it force-expands every collapsed ancestor. That
+    //    expansion never reached node->collapsed (refresh() rebuilds with
+    //    signals blocked), so a layer inside a CLOSED group showed up while the
+    //    group still drew its "collapsed" arrow, and vanished again on the next
+    //    rebuild.
+    //
+    // Expansion is owned by node->collapsed; refresh() opens the ancestors in
+    // the model first, so by the time a real reveal gets here the path is
+    // already expanded and this only has to scroll.
+    void scrollTo(const QModelIndex& index, ScrollHint hint = EnsureVisible) override
+    {
+        if (!m_revealEnabled)
+            return;
+        for (QModelIndex parent = index.parent(); parent.isValid(); parent = parent.parent()) {
+            if (!isExpanded(parent))
+                return;
+        }
+        QTreeWidget::scrollTo(index, hint);
+    }
 
 protected:
     static bool isItemInTree(const QTreeWidgetItem* item, const QTreeWidget* tree)
@@ -133,6 +193,7 @@ protected:
         viewport()->update();
 
         QTreeWidget::startDrag(supportedActions);
+        endDragState();
 
         if (dragIndex.isValid())
             model()->setData(dragIndex, false, kDraggingRole);
@@ -143,7 +204,51 @@ private:
     QPoint m_pressPos;
     QTreeWidgetItem* m_pressItem = nullptr;
     bool m_preserveSelectionOnPress = false;
+    bool m_revealEnabled = true;
 };
+
+quintptr nodeToken(const LayerTreeNode* node)
+{
+    return reinterpret_cast<quintptr>(node);
+}
+
+quintptr rowNodeToken(const QTreeWidgetItem* item)
+{
+    return item ? item->data(0, kNodeRole).value<quintptr>() : 0;
+}
+
+void collectRowsDepthFirst(QTreeWidgetItem* item, QVector<QTreeWidgetItem*>& out)
+{
+    out.append(item);
+    for (int i = 0; i < item->childCount(); ++i)
+        collectRowsDepthFirst(item->child(i), out);
+}
+
+// Everything on a row that can change while the structure does not: a rename,
+// or a reorder elsewhere shifting this row's flat index. Qt's setters all
+// short-circuit on an equal value, so a row that did not change emits no
+// dataChanged and repaints nothing.
+void applyRowData(QTreeWidgetItem* item, LayerTreeNode* node, int flatIndex)
+{
+    item->setData(0, Qt::UserRole, flatIndex);
+    item->setData(0, Qt::UserRole + 1, static_cast<int>(node->type));
+    item->setData(0, Qt::UserRole + 2, node->collapsed ? 1 : 0);
+    item->setData(0, kNodeRole, QVariant::fromValue(nodeToken(node)));
+
+    // Groups and layers hosting Single-Layer-Mode adjustments are expandable in
+    // the tree. Use hasAdjustmentChildren() (not the visible-only variant) so a
+    // hidden nested adjustment keeps its parent row expandable instead of
+    // stranding it as an unreachable child.
+    const bool expandable = node->type == LayerTreeNode::Type::Group
+        || node->hasAdjustmentChildren();
+    item->setChildIndicatorPolicy(expandable
+        ? QTreeWidgetItem::ShowIndicator
+        : QTreeWidgetItem::DontShowIndicatorWhenChildless);
+
+    item->setText(0, node->name.isEmpty()
+        ? QString("Layer %1").arg(flatIndex + 1) : node->name);
+    item->setToolTip(0, node->name);
+}
 } // namespace
 
 static const char* kBlendModeNames[] = {
@@ -754,77 +859,172 @@ void LayerPanel::setController(ImageController* ctrl)
     refresh();
 }
 
-void LayerPanel::refresh()
+// Reuses the existing rows whenever the tree still mirrors the document, and
+// rebuilds from scratch only when the structure really changed. Returns true if
+// it rebuilt.
+//
+// refresh() runs on imageChanged, i.e. on every frame of a canvas drag, and
+// clearing the tree there threw away the scroll position, replayed the
+// expand animation of every group, cancelled an in-place rename and left the
+// view holding deleted items.
+bool LayerPanel::syncRows(const std::vector<LayerTreeNode*>& flat,
+                          QHash<LayerTreeNode*, QTreeWidgetItem*>& itemMap)
 {
-    m_updating = true;
-    m_tree->blockSignals(true);
+    const int count = static_cast<int>(flat.size());
+
+    QVector<QTreeWidgetItem*> rows;
+    rows.reserve(count);
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i)
+        collectRowsDepthFirst(m_tree->topLevelItem(i), rows);
+
+    // Rows are built in the pre-order Document::flatten() produces, so the two
+    // line up one to one. Comparing the parent as well as the node tells apart
+    // the arrangements that share a sequence — "B nested in A" vs "A then B".
+    bool reusable = rows.size() == count;
+    for (int i = 0; reusable && i < count; ++i) {
+        reusable = rowNodeToken(rows[i]) == nodeToken(flat[i])
+            && rowNodeToken(rows[i]->parent()) == nodeToken(flat[i]->parent);
+    }
+
+    if (reusable) {
+        for (int i = 0; i < count; ++i) {
+            applyRowData(rows[i], flat[i], i);
+            itemMap.insert(flat[i], rows[i]);
+        }
+        return false;
+    }
+
+    static_cast<LayerTreeWidget*>(m_tree)->forgetPressedItem();
     m_tree->clear();
 
-    if (!m_controller || !m_controller->document())
-        return;
-
-    auto* doc = m_controller->document();
-    auto flat = doc->flatten();
-
-    QHash<LayerTreeNode*, QTreeWidgetItem*> itemMap;
-
-    for (int i = 0; i < static_cast<int>(flat.size()); ++i) {
+    for (int i = 0; i < count; ++i) {
         auto* node = flat[i];
         auto* item = new QTreeWidgetItem();
         item->setFlags(item->flags() | Qt::ItemIsEditable);
-        item->setData(0, Qt::UserRole, i);
-        item->setData(0, Qt::UserRole + 1, static_cast<int>(node->type));
-        item->setData(0, Qt::UserRole + 2, node->collapsed ? 1 : 0);
-
-        // Groups and layers hosting Single-Layer-Mode adjustments are
-        // expandable in the tree. Use hasAdjustmentChildren() (not the
-        // visible-only variant) so a hidden nested adjustment keeps its
-        // parent row expandable instead of stranding it as an unreachable
-        // child.
-        if (node->type == LayerTreeNode::Type::Group
-            || node->hasAdjustmentChildren())
-            item->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
-
-        item->setText(0, node->name.isEmpty()
-            ? QString("Layer %1").arg(i + 1) : node->name);
-        item->setToolTip(0, node->name);
+        applyRowData(item, node, i);
 
         if (node->parent && itemMap.contains(node->parent))
             itemMap[node->parent]->addChild(item);
         else
             m_tree->addTopLevelItem(item);
 
-        itemMap[node] = item;
+        itemMap.insert(node, item);
+    }
+    return true;
+}
+
+void LayerPanel::refresh()
+{
+    if (!m_controller || !m_controller->document()) {
+        m_updating = true;
+        m_tree->blockSignals(true);
+        static_cast<LayerTreeWidget*>(m_tree)->forgetPressedItem();
+        m_tree->clear();
+        m_tree->blockSignals(false);
+        m_updating = false;
+        m_lastActiveNode = 0;
+        return;
     }
 
+    auto* doc = m_controller->document();
+    auto flat = doc->flatten();
+
+    m_updating = true;
+    m_tree->blockSignals(true);
+
+    // Animation belongs to the user's own gestures (the group arrow, Left and
+    // Right keys). Every setExpanded() below is state synchronisation, and
+    // animating those replayed the expand animation on each refresh — with
+    // imageChanged firing per frame, that meant continuously while dragging on
+    // the canvas.
+    const bool animated = m_tree->isAnimated();
+    m_tree->setAnimated(false);
+
+    QHash<LayerTreeNode*, QTreeWidgetItem*> itemMap;
+    const bool rebuilt = syncRows(flat, itemMap);
+
+    const int activeIdx = doc->activeFlatIndex;
+    LayerTreeNode* activeNode =
+        (activeIdx >= 0 && activeIdx < static_cast<int>(flat.size()))
+            ? flat[activeIdx] : nullptr;
+
+    // Reveal the active layer, but only when it genuinely changed. The
+    // controller re-emits activeLayerChanged on plenty of no-op paths
+    // (setSelectedIndices fires it for the same node, so does toggling another
+    // row's eye), and reacting to the signal itself would pop a group open
+    // again right after the user closed it. Identity is the node pointer — the
+    // flat index shifts on every reorder — kept as an opaque token that is
+    // compared and never dereferenced, since the node it named may be gone.
+    const auto activeToken = reinterpret_cast<quintptr>(activeNode);
+    const bool activeNodeChanged = activeToken != m_lastActiveNode;
+    m_lastActiveNode = activeToken;
+
+    // Opening the ancestors is written into the MODEL, not just into the view:
+    // the group's arrow then matches what the list shows, and the group stays
+    // open afterwards. Closing it by hand sticks — only the next active-layer
+    // change reveals again.
+    if (activeNodeChanged && activeNode) {
+        for (auto* ancestor = activeNode->parent; ancestor; ancestor = ancestor->parent)
+            ancestor->collapsed = false;
+    }
+
+    // node->collapsed is the only source of truth for expansion. Assert both
+    // states (not just "expand the open ones") so a row that the view opened
+    // behind the panel's back is closed again instead of lingering.
     for (auto it = itemMap.begin(); it != itemMap.end(); ++it) {
         const bool expandable = it.key()->type == LayerTreeNode::Type::Group
             || it.key()->hasAdjustmentChildren();
-        if (expandable && !it.key()->collapsed)
-            it.value()->setExpanded(true);
+        it.value()->setExpanded(expandable && !it.key()->collapsed);
     }
 
-    int activeIdx = doc->activeFlatIndex;
-    if (activeIdx >= 0 && activeIdx < static_cast<int>(flat.size())) {
-        auto* activeItem = itemMap.value(flat[activeIdx]);
-        if (activeItem)
-            m_tree->setCurrentItem(activeItem);
+    QTreeWidgetItem* activeItem = activeNode ? itemMap.value(activeNode) : nullptr;
+    if (activeItem) {
+        // setCurrentItem() scrolls to the row through scrollTo(); the gate
+        // keeps a plain rebuild from dragging the viewport along with it.
+        // NoUpdate because the selection is synced from the document right
+        // below — the default command clears and re-selects, which on a
+        // multi-selection undid itself on every refresh.
+        auto* tree = static_cast<LayerTreeWidget*>(m_tree);
+        tree->setRevealEnabled(activeNodeChanged);
+        m_tree->setCurrentItem(activeItem, 0, QItemSelectionModel::NoUpdate);
+        tree->setRevealEnabled(true);
     }
 
-    // Sync multi-selection from Document to tree
-    m_tree->clearSelection();
+    // Sync multi-selection from Document to tree, but only when it differs:
+    // clearSelection() plus re-selecting repaints every row, and on a reused
+    // tree the selection is usually already right.
+    QSet<QTreeWidgetItem*> wanted;
     for (int selIdx : doc->selectedFlatIndices) {
         if (selIdx >= 0 && selIdx < static_cast<int>(flat.size())) {
-            auto* selItem = itemMap.value(flat[selIdx]);
-            if (selItem)
-                selItem->setSelected(true);
+            if (auto* selItem = itemMap.value(flat[selIdx]))
+                wanted.insert(selItem);
         }
     }
+    // The active row stays selected even when the document's selection set is
+    // empty — the ClearAndSelect that setCurrentItem() used to perform
+    // guaranteed that much.
+    if (wanted.isEmpty() && activeItem)
+        wanted.insert(activeItem);
 
+    const auto selected = m_tree->selectedItems();
+    bool selectionMatches = selected.size() == wanted.size();
+    for (auto* item : selected) {
+        if (!wanted.contains(item)) {
+            selectionMatches = false;
+            break;
+        }
+    }
+    if (!selectionMatches) {
+        m_tree->clearSelection();
+        for (auto* item : wanted)
+            item->setSelected(true);
+    }
+
+    m_tree->setAnimated(animated);
     m_tree->blockSignals(false);
     m_updating = false;
 
-    int kindIdx = m_kindCombo->currentIndex();
+    const int kindIdx = m_kindCombo->currentIndex();
     if (kindIdx > 0) {
         auto matchesFilter = [&](LayerTreeNode* n) -> bool {
             if (!n) return false;
@@ -846,14 +1046,32 @@ void LayerPanel::refresh()
             return false;
         };
 
+        // setHidden() schedules a full relayout of the tree even when the value
+        // does not change, so only touch the rows that actually move.
         QTreeWidgetItemIterator it(m_tree);
         while (*it) {
             int srcIdx = (*it)->data(0, Qt::UserRole).toInt();
             bool show = matchesFilter(doc->nodeAt(srcIdx)) || hasMatchingDescendant(*it);
-            (*it)->setHidden(!show);
+            if ((*it)->isHidden() == show)
+                (*it)->setHidden(!show);
+            ++it;
+        }
+    } else if (!rebuilt) {
+        // Reused rows keep whatever the previous filter hid; a fresh tree
+        // starts out visible.
+        QTreeWidgetItemIterator it(m_tree);
+        while (*it) {
+            if ((*it)->isHidden())
+                (*it)->setHidden(false);
             ++it;
         }
     }
+
+    // The delegate reads visibility, locks, opacity and thumbnails straight off
+    // the node, so a reused tree has to be told to repaint — none of that goes
+    // through the item model.
+    if (!rebuilt)
+        m_tree->viewport()->update();
 
     updateTopBarFromActiveLayer();
     updateActiveTargetFromCurrent();
@@ -1286,14 +1504,22 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
             return true;
     }
     if (obj == m_tree->viewport() && event->type() == QEvent::Drop) {
-        if (!m_controller || !m_controller->document()) return false;
+        // Consuming the drop keeps QAbstractItemView::dropEvent from running,
+        // and with it the state reset it performs — see endDragState(). Do it
+        // first so every exit below is covered. The event is consumed on all of
+        // them too: the native InternalMove would reshuffle rows behind the
+        // document's back, and the next refresh() would silently undo it.
+        auto* tree = static_cast<LayerTreeWidget*>(m_tree);
+        tree->endDragState();
+
+        if (!m_controller || !m_controller->document()) return true;
 
         auto* srcItem = m_tree->currentItem();
-        if (!srcItem) return false;
+        if (!srcItem) return true;
 
         int srcIdx = srcItem->data(0, Qt::UserRole).toInt();
         auto* doc = m_controller->document();
-        if (!doc) return false;
+        if (!doc) return true;
 
         auto* dropEvent = static_cast<QDropEvent*>(event);
         auto* targetItem = m_tree->itemAt(dropEvent->position().toPoint());

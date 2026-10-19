@@ -8,6 +8,7 @@
 #include <QFutureWatcher>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -18,6 +19,7 @@ class QButtonGroup;
 class ScrubbableValueInput;
 class ImageController;
 class LayerItemDelegate;
+class LayerTreeNode;
 
 // Smart Object commands offered by the layer context menu. The panel only
 // reports WHICH one was chosen — running them needs file dialogs and tab
@@ -93,6 +95,11 @@ private:
     bool setCurrentVisibleRow(int row, bool extendSelection);
     bool moveCurrentVisibleRow(int delta, bool extendSelection);
     bool syncTreeSelectionToDocument();
+    // Brings the rows in line with `flat`, reusing them in place when the tree
+    // still mirrors the document and rebuilding only when the structure really
+    // changed. Fills `itemMap` either way; returns true if it rebuilt.
+    bool syncRows(const std::vector<LayerTreeNode*>& flat,
+                  QHash<LayerTreeNode*, QTreeWidgetItem*>& itemMap);
     void updateActiveTargetFromCurrent();
     bool eventFilter(QObject* obj, QEvent* event) override;
 
@@ -138,6 +145,12 @@ private:
     // its last frame; one refresh() runs when the live edit ends.
     bool m_adjustmentLiveEdit = false;
     ActiveTarget m_activeTarget = ActiveTarget::None;
+    // Identity of the node that was active on the last refresh(), so the panel
+    // can tell a real active-layer change from the many redundant
+    // activeLayerChanged emissions. Only a real change reveals the layer
+    // (opens the groups hiding it) and scrolls to it. Opaque token: compared,
+    // never dereferenced — the node it named may already be deleted.
+    quintptr m_lastActiveNode = 0;
 
     QFutureWatcher<std::shared_ptr<ThumbBatch>> m_thumbWatcher;
     quint64 m_thumbToken = 0;
