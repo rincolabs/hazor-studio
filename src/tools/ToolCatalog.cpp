@@ -40,6 +40,11 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
         {"set_layer_opacity", "Set layer opacity (0-1)", "Layer",
             {{"index", "int", -1, 100, -1},
              {"opacity", "float", 0, 1, 1}}},
+        {"set_layer_fill_opacity", "Set layer fill opacity (0-1): fades the "
+            "layer's own content and leaves its layer styles at full strength. "
+            "Layers only — a group has no fill opacity.", "Layer",
+            {{"index", "int", -1, 100, -1},
+             {"fill_opacity", "float", 0, 1, 1}}},
         {"set_layer_visibility", "Show or hide a layer", "Layer",
             {{"index", "int", -1, 100, -1},
              {"visible", "int", 0, 1, 1}}},

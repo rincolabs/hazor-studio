@@ -587,6 +587,10 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         int idx = getInt("index", m_doc->activeFlatIndex);
         setNodeOpacity(idx, static_cast<float>(get("opacity", 1.0)));
     }
+    else if (toolName == "set_layer_fill_opacity") {
+        int idx = getInt("index", m_doc->activeFlatIndex);
+        setNodeFillOpacity(idx, static_cast<float>(get("fill_opacity", 1.0)));
+    }
     else if (toolName == "set_layer_visibility") {
         int idx = getInt("index", m_doc->activeFlatIndex);
         setNodeVisibility(idx, get("visible", 1.0) > 0.5);

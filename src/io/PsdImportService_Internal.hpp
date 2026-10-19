@@ -112,15 +112,20 @@ QTransform ndcTransformForImageMap(const QTransform& imagePxToDocPx, const QSize
 BlendMode mapBlendMode(const psd::BlendMode& mode, Context& ctx, const QString& layerName);
 
 // Record-level PSD features that have no Hazor equivalent and that no
-// content-type converter owns: fill opacity, "Blend If" blending ranges,
-// knockout, and a clipped GROUP. Reported once per affected layer.
+// content-type converter owns: "Blend If" blending ranges, knockout, a clipped
+// GROUP, and a fill opacity on a node that has no Fill. Reported once per
+// affected layer.
 // `clippingHonoured` says whether the record's clipping flag was acted on — a
 // layer carries it natively (LayerTreeNode::clipped) and an adjustment is nested
 // as a Single-Layer-Mode child, so only a group drops it here. A layer whose
 // flag survives this but finds no base to clip to is reported by
 // buildSiblingLevel instead, which is where the base is resolved.
+// `fillOpacityHonoured` likewise: a Layer node carries `iOpa` natively
+// (LayerTreeNode::fillOpacity), while a group and an adjustment have no Fill in
+// this model — the same line the editors it follows draw for a group — so
+// those report it instead.
 void reportUnsupportedLayerProperties(const psd::LayerRecord& rec, Context& ctx, const QString& layerName,
-                                      bool clippingHonoured);
+                                      bool clippingHonoured, bool fillOpacityHonoured);
 
 // A descriptor colour value ("Clr ", "FillColor", ...): RGBC / CMYC / Grsc /
 // LbCl class ids, falling back to black.

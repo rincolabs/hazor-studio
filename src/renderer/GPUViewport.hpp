@@ -19,6 +19,7 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <optional>
 
 class Document;
 class Layer;
@@ -137,8 +138,17 @@ public:
     void bindMainVao();
     void unbindMainVao();
 
-    // Uniform setters used by LayerCompositor
-    void setMainUniforms(const QMatrix4x4& mvp, float opacity, bool hasMask, float maskDensity);
+    // Uniform setters used by LayerCompositor.
+    //
+    // `fillOpacity` is the layer's Fill (LayerTreeNode::compositeFillOpacity).
+    // It rides in the opacity uniform on purpose: the main shader only ever
+    // draws the Normal blend, where Fill and Opacity are the same factor on
+    // the source coverage. The eight modes where they are not go through the
+    // blend shader, which carries Fill as its own uniform — and keeping it out
+    // of the main shader means no direct-uniform draw site (the projection,
+    // the canvas decorations, the overlays) can be left with an unset Fill.
+    void setMainUniforms(const QMatrix4x4& mvp, float opacity, bool hasMask,
+                         float maskDensity, float fillOpacity = 1.0f);
     void setMainTexture(GLenum unit, GLuint tex);
     void setUVUniforms(const QVector2D& scale, const QVector2D& offset);
     void setMaskUVUniforms(const QVector2D& scale, const QVector2D& offset);
@@ -160,6 +170,7 @@ public:
                          const QMatrix4x4& mvp,
                          int blendMode,
                          float opacity,
+                         float fillOpacity,
                          bool hasMask,
                          float maskDensity,
                          int viewportW,
@@ -179,12 +190,19 @@ public:
     // passThrough makes the pop an interpolation towards the FBO instead of a
     // composite over the target, because a seeded FBO already contains the
     // backdrop. Push and pop must agree on it — see popGroupFbo.
+    //
+    // fillOpacity overrides the Fill the pop would otherwise read off
+    // `groupNode` (LayerTreeNode::compositeFillOpacity). Only the caller can
+    // tell a clip-alpha capture's sole node — whose Fill must stay out of the
+    // captured silhouette — from an ordinary composite-back, so the one caller
+    // that needs the distinction passes it in; everyone else leaves it unset.
     void pushGroupFbo(int vpW, int vpH, bool seedFromTarget = false);
     void popGroupFbo(LayerTreeNode* groupNode,
                      const QPointF& canvasHalfExtents,
                      const QMatrix4x4& viewMvp,
                      bool editingMask,
-                     bool passThrough = false);
+                     bool passThrough = false,
+                     std::optional<float> fillOpacity = std::nullopt);
 
     // ── Clipping-mask alpha (docs/RENDER-PIPELINE.md §4.6) ──
     //
@@ -424,7 +442,7 @@ private:
     // ── Uniform layout: blend program ──
     struct {
         GLint transform = -1, srcTexture = -1, dstTexture = -1;
-        GLint maskTexture = -1, blendMode = -1, opacity = -1;
+        GLint maskTexture = -1, blendMode = -1, opacity = -1, fillOpacity = -1;
         GLint viewportSize = -1, hasMask = -1, maskDensity = -1;
         GLint maskUvScale = -1, maskUvOffset = -1;
         GLint srcPremultiplied = -1, dstPremultiplied = -1;

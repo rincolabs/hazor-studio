@@ -117,13 +117,16 @@ private:
 
     ImageController* m_controller = nullptr;
 
-    QComboBox* m_kindCombo = nullptr;
     QComboBox* m_blendCombo = nullptr;
     // Whether m_blendCombo currently carries the group-only "Pass Through"
     // entry. Tracked so the combo is rebuilt when the active node changes
     // between a group and a layer, and not on every property refresh.
     bool m_blendComboHasPassThrough = false;
     ScrubbableValueInput* m_opacitySlider = nullptr;
+    // Fill Opacity — the same control as m_opacitySlider, driving the layer's
+    // own content instead of its finished result (LayerTreeNode::fillOpacity).
+    // Disabled while a Group is active: a group has no Fill of its own.
+    ScrubbableValueInput* m_fillSlider = nullptr;
     QButtonGroup* m_lockGroup = nullptr;
 
     QWidget* m_topBar = nullptr;

@@ -172,6 +172,11 @@ void GPUViewport::initShaders()
             uniform vec2 uMaskUVScale;
             uniform vec2 uMaskUVOffset;
             uniform int uBlendMode;
+            // Fill Opacity (docs/RENDER-PIPELINE.md §4.7). Its own uniform
+            // rather than folded into uOpacity because for eight modes it is a
+            // term *inside* bm_blendFilled, not a factor on the coverage — the
+            // main shader, which only ever draws Normal, does fold it in.
+            uniform float uFillOpacity;
             uniform float uSrcPremultiplied;
             uniform float uDstPremultiplied;
             uniform float uSharpMagnify;
@@ -209,7 +214,9 @@ void GPUViewport::initShaders()
                 float clipAlpha = 1.0;
                 if (uHasClip > 0.5)
                     clipAlpha = texture(uClipTexture, gl_FragCoord.xy / uClipSize).a;
-                src.a *= uOpacity * maskAlpha * clipAlpha;
+                src.a *= uOpacity
+                       * bm_fillBlendCoverage(uBlendMode, uFillOpacity)
+                       * maskAlpha * clipAlpha;
                 // Dissolve: coverage becomes a per-pixel 0/1 dither keyed on
                 // the document pixel. gl_FragCoord is in the render target, so
                 // Y is flipped into the CPU compositor's row order; the live
@@ -221,15 +228,27 @@ void GPUViewport::initShaders()
                                          uViewportSize.y - gl_FragCoord.y));
 
                 float sa = src.a, da = dst.a;
-                vec3 Cr = clamp(bm_blend(uBlendMode, dstColor, srcColor), 0.0, 1.0);
+                // Fill fades the source's bare, no-backdrop coverage while the
+                // blend term above keeps its full one — the regrouped composite
+                // in BlendMath.hpp, mirrored by
+                // DocumentCompositor::compositeManual. saBare == sa at Fill 1.
+                float saBare = sa * bm_fillBareCoverage(uBlendMode, uFillOpacity);
+                vec3 B = clamp(bm_blendFilled(uBlendMode, dstColor, srcColor,
+                                              uFillOpacity), 0.0, 1.0);
                 // Blend modes are only meaningful where a backdrop exists. Over a
                 // transparent backdrop (da < 1) — e.g. the bottom layer of an
                 // isolated group, drawn against the freshly-cleared group FBO —
-                // fade the blended color back toward the source so darken-type modes
+                // the source shows through as itself so darken-type modes
                 // (Multiply/Darken/ColorBurn/Overlay…) don't collapse to black.
-                // W3C compositing: Cs' = (1.0 - ab)*Cs + ab*B(Cb, Cs).
-                Cr = mix(srcColor, Cr, da);
-                fragColor = vec4(dstPremul * (1.0 - sa) + Cr * sa, da + sa * (1.0 - da));
+                // W3C compositing, grouped by the backdrop alpha:
+                //   Co = (1-ab)·saBare·Cs + ab·sa·B(Cb,Cs) + (1-sa)·premul(Cb)
+                //   ao = (1-ab)·saBare    + ab
+                // The backdrop term keeps the premultiplied value rather than
+                // re-multiplying dstColor, which would round-trip through the
+                // divide above for nothing.
+                fragColor = vec4((1.0 - da) * saBare * srcColor + da * sa * B
+                                     + (1.0 - sa) * dstPremul,
+                                 (1.0 - da) * saBare + da);
             }
         )";
     const QByteArray blendFSrc = shader_compat::adaptSource(blendFSrcRaw.constData());
@@ -245,6 +264,7 @@ void GPUViewport::initShaders()
     m_blendU.maskTexture  = m_blendProg->uniformLocation("uMaskTexture");
     m_blendU.blendMode    = m_blendProg->uniformLocation("uBlendMode");
     m_blendU.opacity      = m_blendProg->uniformLocation("uOpacity");
+    m_blendU.fillOpacity  = m_blendProg->uniformLocation("uFillOpacity");
     m_blendU.viewportSize = m_blendProg->uniformLocation("uViewportSize");
     m_blendU.hasMask       = m_blendProg->uniformLocation("uHasMask");
     m_blendU.maskDensity  = m_blendProg->uniformLocation("uMaskDensity");

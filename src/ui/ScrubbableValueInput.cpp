@@ -428,6 +428,7 @@ void ScrubbableValueInput::applyTheme()
     const QString accent = t->colorAccent.name();
     const QString text = t->colorTextPrimary.name();
     const QString border = t->colorBorderLight.name();
+    const QString textDisabled = t->colorTextDisabled.name();
 
     setStyleSheet(QStringLiteral(
         "ScrubbableValueInput {"
@@ -439,6 +440,14 @@ void ScrubbableValueInput::applyTheme()
         "ScrubbableValueInput:hover {"
         "  background: %4;"
         "  border-color: %5;"
+        "  padding: 2px 4px;"
+        "}"
+        // The chained form keeps the hover rule above from reaching a disabled
+        // control: Qt still resolves :hover on one, and a control that cannot
+        // be dragged must not look like it can be.
+        "ScrubbableValueInput:disabled, ScrubbableValueInput:hover:disabled {"
+        "  background: %1;"
+        "  border-color: %2;"
         "  padding: 2px 4px;"
         "}"
         "QToolButton {"
@@ -458,6 +467,9 @@ void ScrubbableValueInput::applyTheme()
         "  font-size: %8px;"
         "  padding: 2px 2px;"
         "}"
+        "QLabel:disabled {"
+        "  color: %9;"
+        "}"
         "QLabel#scrubbableValueLabel {"
         "  background-color: %1;"
         "  border: 1px solid %2;"
@@ -475,7 +487,8 @@ void ScrubbableValueInput::applyTheme()
         .arg(controlBg, border)
         .arg(t->radiusSM)
         .arg(hoverBg, accent, buttonBg, text)
-        .arg(t->fontSizeSM));
+        .arg(t->fontSizeSM)
+        .arg(textDisabled));
 
     if (m_sliderPopup) {
         m_sliderPopup->setStyleSheet(QStringLiteral(

@@ -54,6 +54,18 @@ public:
 
     QTransform transform;
     float opacity = 1.0f;
+    // Fill Opacity — the layer panel's "Fill" control
+    // (docs/RENDER-PIPELINE.md §4.7).
+    // `opacity` fades the layer's finished contribution, content *and* layer
+    // styles; this fades only the content, so a Drop Shadow keeps its full
+    // strength while the pixels casting it go invisible. A Group has no Fill
+    // (nor does it in the editors this model follows), and for a layer carrying
+    // an enabled layer style the value lives in the style bake rather than in
+    // the composite —
+    // which is why every consumer reads it through compositeFillOpacity() /
+    // bakeFillOpacity() and never off this field, so it cannot be applied
+    // twice or to a node that has no Fill.
+    float fillOpacity = 1.0f;
     bool visible = true;
     BlendMode blendMode = BlendMode::Normal;
     GroupBlendMode groupBlendMode = GroupBlendMode::Isolated;
@@ -126,6 +138,42 @@ public:
     bool hasEnabledEffects() const {
         return std::any_of(effects.begin(), effects.end(),
                            [](const LayerEffect& e) { return e.enabled; });
+    }
+
+    // True when at least one enabled effect is a *layer style* — a shadow,
+    // glow, stroke or overlay — rather than a filter or an adjustment effect.
+    // This is the predicate Fill Opacity branches on: a style is composited
+    // *with* the content into a single raster (computeStyledBaseImage), so
+    // separating "content" from "effects" can only happen inside that bake,
+    // whereas a filter or adjustment effect merely transforms the content and
+    // leaves Fill a composite-time factor.
+    bool hasEnabledLayerStyles() const {
+        return std::any_of(effects.begin(), effects.end(), [](const LayerEffect& e) {
+            return e.enabled
+                && LayerEffect::effectCategory(e.type)
+                       == LayerEffect::EffectCategory::LayerStyle;
+        });
+    }
+
+    // Fill Opacity as the data model means it: a Layer-node property, clamped.
+    // Reads 1 for Group/Adjustment nodes, which have no Fill.
+    float layerFillOpacity() const {
+        return type == Type::Layer ? std::clamp(fillOpacity, 0.0f, 1.0f) : 1.0f;
+    }
+
+    // Fill as the *style bake* has to apply it. Only a layer style forces it in
+    // there: content and styles are interleaved in one raster, and no factor
+    // applied to that raster afterwards could fade one without the other.
+    float bakeFillOpacity() const {
+        return hasEnabledLayerStyles() ? layerFillOpacity() : 1.0f;
+    }
+
+    // Fill as the *compositor* has to apply it — the complement of the above, so
+    // the two multiply to the layer's Fill exactly once. Without a layer style
+    // this is the whole of it, which is what keeps a Fill drag free of any
+    // re-bake: the whole bake is content, so one factor on the stage is exact.
+    float compositeFillOpacity() const {
+        return hasEnabledLayerStyles() ? 1.0f : layerFillOpacity();
     }
 
     // True when this layer's render must go through computeEffectedImage():
@@ -202,7 +250,7 @@ public:
         // Filters run first on the padded source so soft effects can grow
         // beyond tight raster/dab bounds before layer styles are composited.
         // Group effects reuse this exact stack via applyEffectStack().
-        result = applyEffectStack(result, effects);
+        result = applyEffectStack(result, effects, bakeFillOpacity());
 
         const QRectF baseBounds = baseRenderImageBounds();
         commitStyledBaseBake(result,
@@ -415,13 +463,34 @@ public:
     // (group effects) so both go through one code path — no duplicated effect
     // ordering. Filters run first, then layer styles inner->outer.
     static QImage applyEffectStack(const QImage& src,
-                                   const std::vector<LayerEffect>& effects)
+                                   const std::vector<LayerEffect>& effects,
+                                   float fillOpacity = 1.0f)
     {
         QImage result = src;
         for (const auto& e : effects) {
             if (LayerEffect::effectCategory(e.type) != LayerEffect::EffectCategory::LayerStyle)
                 result = e.apply(result);
         }
+
+        // ── Fill Opacity (docs/RENDER-PIPELINE.md §4.7) ──
+        // Fill fades the layer's own content and must leave the styles at full
+        // strength, so from here on the image being composited (`result`) and
+        // the silhouette the styles are generated from (`shape`) are two
+        // different pictures: the shadow is still cast by pixels Fill has made
+        // invisible. They are the same picture at Fill 100%, which is why
+        // `shape` is only materialised below it — the default path is
+        // byte-for-byte the stack this function has always run.
+        //
+        // `shape` accumulates the styles as well, so a Stroke still grows the
+        // silhouette the Drop Shadow is then cast from and a combination of
+        // styles behaves as it does at Fill 100%.
+        const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+        QImage shape;
+        if (fill < 0.999f) {
+            shape = result;   // COW; scaleAlpha detaches `result` from it
+            result = LayerEffect::scaleAlpha(result, fill);
+        }
+
         // render order: inner effects -> overlays -> stroke -> outer effects -> shadow
         static const QLatin1String kOrder[] = {
             QLatin1String("inner_shadow"),
@@ -434,8 +503,14 @@ public:
         };
         for (const auto& effectType : kOrder) {
             for (const auto& e : effects) {
-                if (e.type == effectType)
+                if (e.type != effectType)
+                    continue;
+                if (shape.isNull()) {
                     result = e.apply(result);
+                } else {
+                    result = e.applyOver(result, shape);
+                    shape  = e.apply(shape);
+                }
             }
         }
         return result;
@@ -776,6 +851,7 @@ public:
         node->name = preserveName ? name : name;
         node->nameIsAuto = nameIsAuto;
         node->opacity = opacity;
+        node->fillOpacity = fillOpacity;
         node->visible = visible;
         node->blendMode = blendMode;
         node->groupBlendMode = groupBlendMode;
@@ -859,6 +935,7 @@ public:
         node->name = name;
         node->nameIsAuto = nameIsAuto;
         node->opacity = opacity;
+        node->fillOpacity = fillOpacity;
         node->visible = visible;
         node->blendMode = blendMode;
         node->groupBlendMode = groupBlendMode;

@@ -318,12 +318,17 @@ QImage resampleAffine(const QImage& source, const QTransform& imgToCanvas,
 
 // Composite `src` over `dst` for every blend mode QPainter has no
 // CompositionMode for (the HSL modes, the light/arithmetic modes,
-// Dissolve). Both images are canvas-sized Format_ARGB32_Premultiplied;
-// `opacity` is the node opacity folded into the source alpha. Same W3C
+// Dissolve) — plus any mode whose Fill Opacity belongs inside the formula,
+// which the raster engine cannot express. Both images are canvas-sized
+// Format_ARGB32_Premultiplied; `opacity` is the node opacity folded into the
+// source alpha and `fillOpacity` the layer's Fill (1 = unchanged). Same W3C
 // compositing formula the blend shader runs, so the live GPU frame and this
 // result agree pixel for pixel.
-void compositeManual(QImage& dst, const QImage& src, BlendMode mode, float opacity)
+void compositeManual(QImage& dst, const QImage& src, BlendMode mode, float opacity,
+                     float fillOpacity)
 {
+    const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+    const bool fillInBlend = fill < 0.999f && blendmath::fillEntersBlend(mode);
     const int w = std::min(dst.width(), src.width());
     const int h = std::min(dst.height(), src.height());
     for (int y = 0; y < h; ++y) {
@@ -331,12 +336,15 @@ void compositeManual(QImage& dst, const QImage& src, BlendMode mode, float opaci
         const QRgb* s = reinterpret_cast<const QRgb*>(src.constScanLine(y));
         for (int x = 0; x < w; ++x) {
             const QRgb sp = s[x];
+            const QRgb dp = d[x];
+            const float ab = qAlpha(dp) / 255.0f;            // dst alpha
             const float sA0 = qAlpha(sp) / 255.0f;          // src coverage
             // Dissolve turns coverage into a per-pixel 0/1 dither keyed on the
             // document pixel; every other mode keeps its alpha. x,y are
             // document pixels (both images are canvas-aligned), which is what
             // the shader reconstructs from gl_FragCoord.
-            const float sa = blendmath::coverage(mode, sA0 * opacity, x, y);
+            const float sa = blendmath::coverage(
+                mode, sA0 * opacity * blendmath::fillBlendCoverage(mode, fill), x, y);
             if (sa <= 0.0f) continue;
 
             // Unpremultiply src colour (stage is premultiplied).
@@ -346,26 +354,45 @@ void compositeManual(QImage& dst, const QImage& src, BlendMode mode, float opaci
                       qBlue(sp) / 255.0f / sA0};
             }
 
-            const QRgb dp = d[x];
-            const float ab = qAlpha(dp) / 255.0f;            // dst alpha
             Vec3 cb{0, 0, 0};
             if (ab > 0.0f) {
                 cb = {qRed(dp) / 255.0f / ab, qGreen(dp) / 255.0f / ab,
                       qBlue(dp) / 255.0f / ab};
             }
 
-            const Vec3 B = blendmath::blend(mode, cb, cs);
-            // W3C: blended source colour Cs' = (1-ab)*Cs + ab*B
-            const Vec3 cp{(1.0f - ab) * cs[0] + ab * B[0],
-                          (1.0f - ab) * cs[1] + ab * B[1],
-                          (1.0f - ab) * cs[2] + ab * B[2]};
-
-            // Source-over with premultiplied output. dst channels are already
-            // premultiplied (dpr = qRed(dp)/255).
-            const float ao   = sa + ab * (1.0f - sa);
-            const float outR = sa * cp[0] + (1.0f - sa) * (qRed(dp)   / 255.0f);
-            const float outG = sa * cp[1] + (1.0f - sa) * (qGreen(dp) / 255.0f);
-            const float outB = sa * cp[2] + (1.0f - sa) * (qBlue(dp)  / 255.0f);
+            const Vec3 B = blendmath::blendFilled(mode, cb, cs, fill);
+            float ao   = 0.0f;
+            float outR = 0.0f;
+            float outG = 0.0f;
+            float outB = 0.0f;
+            if (!fillInBlend) {
+                // W3C: blended source colour Cs' = (1-ab)*Cs + ab*B, then
+                // source-over with premultiplied output. dst channels are
+                // already premultiplied (dpr = qRed(dp)/255).
+                const Vec3 cp{(1.0f - ab) * cs[0] + ab * B[0],
+                              (1.0f - ab) * cs[1] + ab * B[1],
+                              (1.0f - ab) * cs[2] + ab * B[2]};
+                ao   = sa + ab * (1.0f - sa);
+                outR = sa * cp[0] + (1.0f - sa) * (qRed(dp)   / 255.0f);
+                outG = sa * cp[1] + (1.0f - sa) * (qGreen(dp) / 255.0f);
+                outB = sa * cp[2] + (1.0f - sa) * (qBlue(dp)  / 255.0f);
+            } else {
+                // Same composite, regrouped by the backdrop alpha so Fill can
+                // fade the source's bare (no-backdrop) term while the blend
+                // term keeps full coverage — see blendmath::fillBareCoverage
+                // for the derivation and for why the two are not one factor.
+                // The branch exists only because the two forms differ by float
+                // regrouping, and the default path must stay bit-identical to
+                // what it produced before Fill existed.
+                const float saBare = sa * blendmath::fillBareCoverage(mode, fill);
+                ao   = (1.0f - ab) * saBare + ab;
+                outR = (1.0f - ab) * saBare * cs[0] + ab * sa * B[0]
+                     + (1.0f - sa) * (qRed(dp)   / 255.0f);
+                outG = (1.0f - ab) * saBare * cs[1] + ab * sa * B[1]
+                     + (1.0f - sa) * (qGreen(dp) / 255.0f);
+                outB = (1.0f - ab) * saBare * cs[2] + ab * sa * B[2]
+                     + (1.0f - sa) * (qBlue(dp)  / 255.0f);
+            }
             d[x] = qRgba(toByte(outR), toByte(outG), toByte(outB), toByte(ao));
         }
     }
@@ -543,14 +570,30 @@ QImage buildLayerStage(const LayerTreeNode* node, const Document* doc,
     return stage;
 }
 
+// The Fill factor the compositor has to apply to a layer node's stage.
+//
+// LayerTreeNode::compositeFillOpacity() already reads 1 for a layer whose Fill
+// is baked into its styled base; this adds the one case the node cannot know
+// about. When the node IS `rawPixelNode` its stage was built from the stored
+// pixels with its own effects bypassed (buildLayerStage), for the same reason
+// Fill must be bypassed here: clone/heal sampling feeds those pixels back into
+// the layer, where Fill applies again at render time, so baking it into the
+// sample would double it — and compound on every further sample.
+float compositeFill(const LayerTreeNode* node, const LayerTreeNode* rawPixelNode)
+{
+    if (rawPixelNode && node == rawPixelNode) return 1.0f;
+    return node->compositeFillOpacity();
+}
+
 // Renders a single Layer node into `target` (canvas-sized, premultiplied) with
-// its own blend mode and opacity. See buildLayerStage for `rawPixelNode`.
+// its own blend mode, opacity and Fill. See buildLayerStage for `rawPixelNode`.
 void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* doc,
                    const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode = nullptr)
 {
     const QImage stage = buildLayerStage(node, doc, ndcToPixel, rawPixelNode);
     if (stage.isNull()) return;
-    DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
+    DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity,
+                                       compositeFill(node, rawPixelNode));
 }
 
 // The per-pixel alpha a clipping base contributes, in canvas coordinates: the
@@ -1030,7 +1073,8 @@ void renderNodesFiltered(QImage& target,
             clipAlpha = clipAlphaFromStage(stage, node->opacity);
         }
         DocumentCompositor::compositeStage(target, stage, node->blendMode,
-                                           node->opacity);
+                                           node->opacity,
+                                           compositeFill(node, rawPixelNode));
     }
 }
 
@@ -1090,15 +1134,23 @@ QImage compositeFiltered(const Document* doc,
 } // namespace
 
 void DocumentCompositor::compositeStage(QImage& target, const QImage& stage,
-                                        BlendMode mode, float opacity)
+                                        BlendMode mode, float opacity,
+                                        float fillOpacity)
 {
-    if (blend::painterHasNativeMode(mode)) {
+    const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+    // QPainter only knows each mode at full strength, so a Fill that belongs
+    // *inside* the formula has to be composited by hand even for a mode the
+    // raster engine supports natively (Color Dodge/Burn, Difference). Where
+    // Fill is plain coverage it folds into the painter opacity instead, which
+    // is the same single factor on the source alpha.
+    const bool fillInBlend = fill < 0.999f && blendmath::fillEntersBlend(mode);
+    if (!fillInBlend && blend::painterHasNativeMode(mode)) {
         QPainter p(&target);
-        p.setOpacity(opacity);
+        p.setOpacity(opacity * fill);
         p.setCompositionMode(blend::painterMode(mode));
         p.drawImage(0, 0, stage);
     } else {
-        compositeManual(target, stage, mode, opacity);
+        compositeManual(target, stage, mode, opacity, fill);
     }
 }
 

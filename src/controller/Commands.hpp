@@ -1499,6 +1499,48 @@ private:
     QString m_name;
 };
 
+// Undoable change of a node's Fill Opacity (docs/RENDER-PIPELINE.md §4.7).
+//
+// Its own command rather than a tenth field on NodePropertyCommand: Fill is
+// never set in the same gesture as opacity/visibility/blend, and it is the one
+// composite property whose change can also invalidate the layer's styled-base
+// bake — which this has to redo on undo/redo exactly as the live edit did.
+class NodeFillOpacityCommand : public Command {
+public:
+    NodeFillOpacityCommand(Document* doc, int flatIndex,
+                           float before, float after, QString commandName)
+        : m_doc(doc)
+        , m_flatIndex(flatIndex)
+        , m_before(before)
+        , m_after(after)
+        , m_name(std::move(commandName))
+    {}
+
+    void execute() override { apply(m_after); }
+    void undo() override { apply(m_before); }
+
+    QString name() const override { return m_name; }
+
+private:
+    void apply(float fill) {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (!node) return;
+        node->fillOpacity = fill;
+        // Only a layer style puts Fill inside the bake, and only then does
+        // changing it have to re-run the style stack — see
+        // LayerTreeNode::bakeFillOpacity().
+        if (node->hasEnabledLayerStyles())
+            node->invalidateEffects();
+        ++m_doc->compositionGeneration;
+    }
+
+    Document* m_doc;
+    int m_flatIndex;
+    float m_before;
+    float m_after;
+    QString m_name;
+};
+
 // Undoable change of an adjustment node's payload (type + params). Used by the
 // Curves editor: every committed gesture — point add/move/remove, Input/Output
 // edit, preset change, channel reset, etc. — stores the before/after

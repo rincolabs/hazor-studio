@@ -2280,6 +2280,83 @@ void ImageController::commitNodeOpacity(int flatIndex, float opacity)
     if (m_doc) ++m_doc->compositionGeneration;
 }
 
+// ── Fill Opacity (docs/RENDER-PIPELINE.md §4.7) ─────────────────────────────
+//
+// Mirrors the four opacity entry points above, with two differences that both
+// come from Fill being a *content* property rather than a layer-result one:
+//
+//  - a Group has no Fill, here or in the editors this one follows, so these
+//    refuse anything but a Type::Layer node instead of silently storing a
+//    value no compositor would read;
+//  - a layer carrying an enabled layer style keeps its Fill inside the styled
+//    base (LayerTreeNode::bakeFillOpacity), so changing it there has to
+//    invalidate that bake. Without a style the bake is untouched — which is
+//    what keeps a Fill drag on an ordinary layer as cheap as an opacity drag
+//    instead of re-blurring a layer that has no blur.
+namespace {
+void applyNodeFill(LayerTreeNode* node, float fill)
+{
+    node->fillOpacity = fill;
+    if (node->hasEnabledLayerStyles())
+        node->invalidateEffects();
+}
+} // namespace
+
+void ImageController::setNodeFillOpacity(int flatIndex, float fillOpacity)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    const float before = node->fillOpacity;
+    const float after = std::clamp(fillOpacity, 0.0f, 1.0f);
+    if (before == after) return;
+    applyNodeFill(node, after);
+    m_history.push(std::make_unique<NodeFillOpacityCommand>(
+        m_doc, flatIndex, before, after, tr("Set Fill Opacity")));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::beginNodeFillOpacity(int flatIndex)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    m_fillOpacityLayerIdx = flatIndex;
+    m_fillOpacityBefore   = node->fillOpacity;
+}
+
+void ImageController::previewNodeFillOpacity(int flatIndex, float fillOpacity)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    applyNodeFill(node, std::clamp(fillOpacity, 0.0f, 1.0f));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::commitNodeFillOpacity(int flatIndex, float fillOpacity)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+
+    const float before = (m_fillOpacityLayerIdx == flatIndex && m_fillOpacityBefore >= 0.0f)
+                         ? m_fillOpacityBefore : node->fillOpacity;
+    const float after  = std::clamp(fillOpacity, 0.0f, 1.0f);
+
+    applyNodeFill(node, after);
+    m_fillOpacityBefore   = -1.0f;
+    m_fillOpacityLayerIdx = -1;
+
+    if (before == after) return;
+
+    m_history.push(std::make_unique<NodeFillOpacityCommand>(
+        m_doc, flatIndex, before, after, tr("Set Fill Opacity")));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
 void ImageController::setNodeVisibility(int flatIndex, bool visible)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);

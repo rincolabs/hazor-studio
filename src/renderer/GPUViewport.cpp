@@ -516,8 +516,12 @@ void GPUViewport::applyBlendClipUniforms()
 }
 
 void GPUViewport::setMainUniforms(const QMatrix4x4& mvp, float opacity,
-                                   bool hasMask, float maskDensity)
+                                   bool hasMask, float maskDensity,
+                                   float fillOpacity)
 {
+    // Fill rides in the opacity uniform — see the declaration for why. One
+    // factor, so the uniform cache below keeps working unchanged.
+    opacity *= std::clamp(fillOpacity, 0.0f, 1.0f);
     m_mainProg->setUniformValue(m_mainU.texture, 0);
     m_mainProg->setUniformValue(m_mainU.maskTexture, 1);
     // Follows the arm state, which is off for everything but a clipped layer's
@@ -797,6 +801,7 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
                                   const QMatrix4x4& mvp,
                                   int blendMode,
                                   float opacity,
+                                  float fillOpacity,
                                   bool hasMask,
                                   float maskDensity,
                                   int viewportW,
@@ -808,7 +813,9 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
         applyFixedBlend(static_cast<int>(BlendMode::Normal));
         m_mainProg->bind();
         m_vao.bind();
-        setMainUniforms(mvp, opacity, hasMask, maskDensity);
+        // The mode is already being approximated as Normal here, so Fill folds
+        // into the coverage like Normal's does.
+        setMainUniforms(mvp, opacity, hasMask, maskDensity, fillOpacity);
         setMainTexture(GL_TEXTURE0, srcTexture);
         setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
         setMaskUVUniforms(maskUvScale, maskUvOffset);
@@ -867,6 +874,7 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
                                  static_cast<float>(viewportH));
     m_blendProg->setUniformValue(m_blendU.blendMode, blendModeMap(blendMode));
     m_blendProg->setUniformValue(m_blendU.opacity, opacity);
+    m_blendProg->setUniformValue(m_blendU.fillOpacity, fillOpacity);
     m_blendProg->setUniformValue(m_blendU.hasMask, hasMask ? 1.0f : 0.0f);
     m_blendProg->setUniformValue(m_blendU.maskDensity, maskDensity);
     m_blendProg->setUniformValue(m_blendU.maskUvScale, maskUvScale);
@@ -1193,11 +1201,21 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                const QPointF& canvasHalfExtents,
                                const QMatrix4x4& viewMvp,
                                bool editingMask,
-                               bool passThrough)
+                               bool passThrough,
+                               std::optional<float> fillOpacity)
 {
     if (m_groupFboStack.empty()) return;
     auto entry = m_groupFboStack.back();
     m_groupFboStack.pop_back();
+
+    // Fill Opacity of whatever this pop composites back. Reads 1 for a Group
+    // (groups have no Fill) and for a styled layer (its Fill is already in the
+    // styled base the FBO was drawn from), so the only case it is not 1 is the
+    // one this pop is responsible for: a Layer node that isolated itself for
+    // its Single-Layer-Mode adjustments, whose Fill applies once to the
+    // finished result — the same place the CPU path applies it.
+    const float nodeFill =
+        std::clamp(fillOpacity.value_or(groupNode->compositeFillOpacity()), 0.0f, 1.0f);
 
     // Restore parent FBO. At the top level this is m_compositeBaseFbo — 0
     // (screen) normally, or the scene FBO while a managed display composite is
@@ -1351,6 +1369,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_blendProg->setUniformValue(m_blendU.blendMode,
                                          blendModeMap(static_cast<int>(groupNode->mergeBlendMode())));
             m_blendProg->setUniformValue(m_blendU.opacity, groupNode->opacity);
+            m_blendProg->setUniformValue(m_blendU.fillOpacity, nodeFill);
             m_blendProg->setUniformValue(m_blendU.hasMask, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskDensity, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskUvScale, QVector2D(1.0f, 1.0f));
@@ -1387,7 +1406,8 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_mainProg->setUniformValue(m_mainU.transform, mvp);
             m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
             m_mainProg->setUniformValue(m_mainU.texture, 0);
-            m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
+            m_mainProg->setUniformValue(m_mainU.opacity,
+                                        groupNode->opacity * nodeFill);
             m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
             m_mainProg->setUniformValue(m_mainU.maskDensity, 0.0f);
             m_mainProg->setUniformValue(m_mainU.instanced, 0);
@@ -1412,7 +1432,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         m_mainProg->setUniformValue(m_mainU.transform, mvp);
         m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
         m_mainProg->setUniformValue(m_mainU.texture, 0);
-        m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
+        m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity * nodeFill);
         m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
         m_mainProg->setUniformValue(m_mainU.instanced, 0);
         // Follows the clip arm state, which LayerCompositor sets only around

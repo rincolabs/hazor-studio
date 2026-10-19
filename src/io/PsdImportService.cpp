@@ -85,7 +85,8 @@ void applyCommonGroupProps(const psd::LayerRecord& rec, Context& ctx, LayerTreeN
     node.lockFlags = lockFlagsFromRecord(rec);
     node.collapsed = divider && divider->kind.kind() == psd::SectionType::Kind::ClosedFolder;
     convertLayerEffects(rec, ctx, node.name, node.effects);
-    reportUnsupportedLayerProperties(rec, ctx, node.name, /*clippingHonoured=*/false);
+    reportUnsupportedLayerProperties(rec, ctx, node.name, /*clippingHonoured=*/false,
+                                     /*fillOpacityHonoured=*/false);
     if (passThrough && node.hasEnabledEffects()) {
         // The one case the native model cannot carry: an effect needs the
         // group's own alpha, which only an isolated composite produces — see
@@ -238,7 +239,8 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
         node->blendMode = mapBlendMode(rec.blendMode, ctx, name);
         node->lockFlags = lockFlagsFromRecord(rec);
         node->transform = QTransform();
-        reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true);
+        reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true,
+                                         /*fillOpacityHonoured=*/false);
         if (node->layer)
             applyLayerMask(rec, ctx, name, *node->layer, QRect(QPoint(0, 0), ctx.docSize));
         return node;
@@ -248,6 +250,9 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
     node->name = name;
     node->visible = rec.isVisible();
     node->opacity = static_cast<float>(rec.opacity) / 255.0f;
+    // `iOpa` is PSD's own Fill Opacity, a distinct byte from the record's
+    // `opacity` — see LayerTreeNode::fillOpacity for the semantic difference.
+    node->fillOpacity = static_cast<float>(rec.fillOpacity()) / 255.0f;
     node->blendMode = mapBlendMode(rec.blendMode, ctx, name);
     node->lockFlags = lockFlagsFromRecord(rec);
     convertLayerEffects(rec, ctx, name, node->effects);
@@ -260,7 +265,8 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
     // like PSD does (LayerTreeNode::resolveClipBase). A clipped adjustment goes
     // the other way — see buildSiblingLevel.
     node->clipped = rec.clipping != 0;
-    reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true);
+    reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true,
+                                     /*fillOpacityHonoured=*/true);
 
     bool built = false;
     // Set by the converters whose placement may not be an axis-aligned rect

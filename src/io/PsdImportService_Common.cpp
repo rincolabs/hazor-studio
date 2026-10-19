@@ -107,12 +107,12 @@ BlendMode mapBlendMode(const psd::BlendMode& mode, Context& ctx, const QString& 
 }
 
 void reportUnsupportedLayerProperties(const psd::LayerRecord& rec, Context& ctx, const QString& layerName,
-                                      bool clippingHonoured)
+                                      bool clippingHonoured, bool fillOpacityHonoured)
 {
-    if (rec.fillOpacity() != 255) {
+    if (rec.fillOpacity() != 255 && !fillOpacityHonoured) {
         ctx.warn(QCoreApplication::translate("PsdImportService",
-            "Layer \"%1\": its Fill Opacity of %2%% has no equivalent in Hazor (which has one "
-            "opacity per layer) and was not applied.")
+            "Layer \"%1\": its Fill Opacity of %2%% was not applied — Fill is a "
+            "property of a layer and this node is not one.")
             .arg(layerName).arg(static_cast<int>(std::lround(rec.fillOpacity() * 100.0 / 255.0))));
     }
 

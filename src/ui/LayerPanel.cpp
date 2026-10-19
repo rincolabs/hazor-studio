@@ -342,7 +342,7 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     topLay->addWidget(m_blendRow);
 
-    // Row 2: kind + lock label + lock buttons
+    // Row 2: lock label + lock buttons + Fill
     m_lockRow = new QWidget(m_topBar);
     m_lockRow->setObjectName("layerLock");
 
@@ -378,12 +378,13 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     row2->addStretch();
 
-    m_kindCombo = new QComboBox(m_lockRow);
-    m_kindCombo->addItems({tr("Kind"), tr("Pixel"), tr("Text"), tr("Vector"),
-                           tr("Adjustment") });
-    m_kindCombo->setToolTip(tr("Filter by layer type"));
-    m_kindCombo->setMinimumWidth(80);
-    row2->addWidget(m_kindCombo);
+    // Deliberately the same widget class, range, suffix, step and label
+    // treatment as m_opacitySlider above, so Fill reads as its sibling rather
+    // than a second kind of control — the two together are the pair users of
+    // other layered editors come here looking for. It sits where the Kind type
+    // filter used to, which is the slot that was being held for it.
+    m_fillSlider = new ScrubbableValueInput(tr("Fill"), 0, 100, 100, tr("%"), 1, m_lockRow);
+    row2->addWidget(m_fillSlider);
 
     topLay->addWidget(m_lockRow);
 
@@ -478,6 +479,23 @@ LayerPanel::LayerPanel(QWidget* parent)
         m_controller->commitNodeOpacity(active, static_cast<float>(v) / 100.0f);
     });
 
+    // Same begin/preview/commit shape as opacity, so a Fill drag groups into
+    // one history step and the canvas follows every step of it.
+    connect(m_fillSlider, &ScrubbableValueInput::editingStarted, this, [this]() {
+        if (!m_controller) return;
+        m_controller->beginNodeFillOpacity(m_controller->document()->activeFlatIndex);
+    });
+    connect(m_fillSlider, &ScrubbableValueInput::valueChanged, this, [this](double v) {
+        if (!m_controller) return;
+        m_controller->previewNodeFillOpacity(m_controller->document()->activeFlatIndex,
+                                             static_cast<float>(v) / 100.0f);
+    });
+    connect(m_fillSlider, &ScrubbableValueInput::editingFinished, this, [this](double v) {
+        if (!m_controller) return;
+        m_controller->commitNodeFillOpacity(m_controller->document()->activeFlatIndex,
+                                            static_cast<float>(v) / 100.0f);
+    });
+
     connect(m_tree, &QTreeWidget::currentItemChanged,
             this, &LayerPanel::onCurrentItemChanged);
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this]() {
@@ -529,8 +547,6 @@ LayerPanel::LayerPanel(QWidget* parent)
     connect(m_groupBtn, &QPushButton::clicked, this, [this]() {
         if (m_controller) m_controller->newGroup();
     });
-    connect(m_kindCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) { refresh(); });
     connect(m_removeBtn, &QPushButton::clicked, this, [this]() {
         if (m_controller) m_controller->removeSelectedNodes();
     });
@@ -1064,41 +1080,9 @@ void LayerPanel::refresh()
     m_tree->blockSignals(false);
     m_updating = false;
 
-    const int kindIdx = m_kindCombo->currentIndex();
-    if (kindIdx > 0) {
-        auto matchesFilter = [&](LayerTreeNode* n) -> bool {
-            if (!n) return false;
-            switch (kindIdx) {
-            case 1: return n->type == LayerTreeNode::Type::Layer && n->layer && !n->layer->isTextLayer() && !n->layer->isShapeLayer();
-            case 2: return n->layer && n->layer->isTextLayer();
-            case 3: return n->layer && n->layer->isShapeLayer();
-            case 4: return n->type == LayerTreeNode::Type::Adjustment;
-            default: return false;
-            }
-        };
-
-        std::function<bool(QTreeWidgetItem*)> hasMatchingDescendant = [&](QTreeWidgetItem* item) -> bool {
-            for (int i = 0; i < item->childCount(); ++i) {
-                auto* child = item->child(i);
-                if (matchesFilter(doc->nodeAt(child->data(0, Qt::UserRole).toInt()))) return true;
-                if (hasMatchingDescendant(child)) return true;
-            }
-            return false;
-        };
-
-        // setHidden() schedules a full relayout of the tree even when the value
-        // does not change, so only touch the rows that actually move.
-        QTreeWidgetItemIterator it(m_tree);
-        while (*it) {
-            int srcIdx = (*it)->data(0, Qt::UserRole).toInt();
-            bool show = matchesFilter(doc->nodeAt(srcIdx)) || hasMatchingDescendant(*it);
-            if ((*it)->isHidden() == show)
-                (*it)->setHidden(!show);
-            ++it;
-        }
-    } else if (!rebuilt) {
-        // Reused rows keep whatever the previous filter hid; a fresh tree
-        // starts out visible.
+    if (!rebuilt) {
+        // Reused rows could still carry a hidden flag from an earlier state (a
+        // collapsed branch, a solo); a fresh tree starts out visible.
         QTreeWidgetItemIterator it(m_tree);
         while (*it) {
             if ((*it)->isHidden())
@@ -1763,8 +1747,21 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
 
 void LayerPanel::updateTopBarFromActiveLayer()
 {
+    // Fill is a Layer-node property, so "no layer" and "a group" both leave the
+    // control showing the neutral 100% and unavailable, rather than a value
+    // nothing would read. setEnabled (not setReadOnly) so the theme's disabled
+    // state shows it is unavailable instead of silently ignoring the drag.
+    auto showFill = [this](bool available, float value) {
+        m_fillSlider->blockSignals(true);
+        m_fillSlider->setValue(available
+            ? static_cast<int>(std::lround(value * 100.0f)) : 100);
+        m_fillSlider->blockSignals(false);
+        m_fillSlider->setEnabled(available);
+    };
+
     if (!m_controller) {
         m_opacitySlider->setValue(100);
+        showFill(false, 1.0f);
         return;
     }
 
@@ -1781,6 +1778,7 @@ void LayerPanel::updateTopBarFromActiveLayer()
         }
         m_blendCombo->setCurrentIndex(0);
         m_opacitySlider->setValue(100);
+        showFill(false, 1.0f);
         return;
     }
 
@@ -1808,6 +1806,8 @@ void LayerPanel::updateTopBarFromActiveLayer()
     m_opacitySlider->blockSignals(true);
     m_opacitySlider->setValue(opacityPct);
     m_opacitySlider->blockSignals(false);
+
+    showFill(node->type == LayerTreeNode::Type::Layer, node->fillOpacity);
 
     // Lock buttons reflect the folded lock state of the selection. A partial
     // lock reads as checked whenever Lock All is set (it implies all three), and

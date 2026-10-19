@@ -551,6 +551,16 @@ void LayerCompositor::renderNodes(
             }
         }
 
+        // Fill Opacity for the draws below (docs/RENDER-PIPELINE.md §4.7).
+        // LayerTreeNode::compositeFillOpacity() reads 1 for a layer whose Fill
+        // is already baked into its styled base, so it cannot be applied twice.
+        //
+        // A sole-node render is the clipping-mask alpha capture and nothing
+        // else, and a clip reads the base's *silhouette*: fading the base's
+        // content does not shrink the shape the layers above it clip to — the
+        // base's own opacity is folded into that alpha (§4.6), its Fill is not.
+        const float fillOpacity = soleNode ? 1.0f : node->compositeFillOpacity();
+
         // ── Single Layer Mode (clipped adjustment) — live GPU preview ──
         // A layer hosting visible adjustment children is composited like a
         // one-layer group: isolate the masked base into a canvas-sized FBO, run
@@ -583,7 +593,13 @@ void LayerCompositor::renderNodes(
             // the FBO: it must scale the finished (base + adjustments) result
             // once, the way the CPU path clips computeEffectedImage's output.
             gpu->setClipAlphaEnabled(clipArmed);
-            gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask);
+            // The Fill is handed over explicitly rather than re-read off the
+            // node inside the pop: during a clip-alpha capture this layer's own
+            // Fill must not reach the captured silhouette, while the children of
+            // a *group* base keep theirs (they are the group's content). Only
+            // the sole-node test above can tell those two apart.
+            gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask,
+                             /*passThrough=*/false, fillOpacity);
             gpu->setClipAlphaEnabled(false);
             gpu->mainProgram()->bind();
             gpu->bindMainVao();
@@ -868,6 +884,7 @@ void LayerCompositor::renderNodes(
                                          tile.mvp,
                                          static_cast<int>(node->blendMode),
                                          node->opacity,
+                                         fillOpacity,
                                          hasMask,
                                          node->layer->maskDensity,
                                          vp[2],
@@ -881,7 +898,7 @@ void LayerCompositor::renderNodes(
                 gpu->bindMainVao();
                 for (const auto& tile : tiles) {
                     gpu->setMainUniforms(tile.mvp, node->opacity, hasMask,
-                                         node->layer->maskDensity);
+                                         node->layer->maskDensity, fillOpacity);
                     gpu->setMainTexture(GL_TEXTURE0, tile.textureId);
                     gpu->setUVUniforms(tile.uvScale, tile.uvOffset);
                     gpu->setMaskUVUniforms(tile.maskUvScale, tile.maskUvOffset);
@@ -926,6 +943,7 @@ void LayerCompositor::renderNodes(
                                  mvp,
                                  static_cast<int>(node->blendMode),
                                  node->opacity,
+                                 fillOpacity,
                                  hasMask,
                                  node->layer->maskDensity,
                                  vp[2],
@@ -964,7 +982,7 @@ void LayerCompositor::renderNodes(
             gpu->mainProgram()->bind();
             gpu->bindMainVao();
             gpu->setMainUniforms(mvp, node->opacity, hasMask,
-                                 node->layer->maskDensity);
+                                 node->layer->maskDensity, fillOpacity);
             gpu->setMainTexture(GL_TEXTURE0, texId);
             gpu->setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
 

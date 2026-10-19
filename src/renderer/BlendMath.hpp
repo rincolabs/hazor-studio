@@ -126,6 +126,15 @@ inline Vec3 blend(BlendMode mode, const Vec3& cb, const Vec3& cs)
     case BlendMode::Saturation: r = setLum(setSat(cb, sat(cs)), lum(cb)); break;
     case BlendMode::Color:      r = setLum(cs, lum(cb)); break;
     case BlendMode::Luminosity: r = setLum(cb, lum(cs)); break;
+    // Dodge/burn and Difference normally run through QPainter's raster engine
+    // (blend::painterHasNativeMode), so these three cases are only reached when
+    // Fill Opacity has to be folded into the formula and the CPU path therefore
+    // has to composite them by hand — see DocumentCompositor::compositeStage.
+    case BlendMode::ColorDodge:  r = perChannel(dodge); break;
+    case BlendMode::ColorBurn:   r = perChannel(burn); break;
+    case BlendMode::Difference:
+        r = perChannel([](float b, float s) { return std::abs(b - s); });
+        break;
     case BlendMode::LinearBurn:
         r = perChannel([](float b, float s) { return b + s - 1.0f; });
         break;
@@ -156,6 +165,118 @@ inline Vec3 blend(BlendMode mode, const Vec3& cb, const Vec3& cs)
     }
     for (float& v : r) v = std::clamp(v, 0.0f, 1.0f);
     return r;
+}
+
+// ── Fill Opacity (docs/RENDER-PIPELINE.md §4.7) ─────────────────────────
+//
+// `opacity` fades a layer's finished contribution; Fill fades only the layer's
+// own content. For most blend modes that is the same arithmetic — one more
+// factor on the source coverage — which is why the two controls look alike on
+// a layer with no layer style. For eight of them it is not, and the behaviour
+// this kind of editor established is the reference: Color Burn, Linear Burn,
+// Color Dodge, Linear Dodge (Add), Vivid Light, Linear Light, Hard Mix and
+// Difference take Fill *inside* the blend function, as a source faded toward
+// the mode's neutral colour.
+//
+// Fading the coverage instead interpolates the already-clamped result and loses
+// exactly the saturating behaviour these modes are reached for: a Linear Dodge
+// layer at Fill 50% still burns to white wherever `cb + 0.5·cs >= 1`, while the
+// same layer at Opacity 50% cannot get past the midpoint between the backdrop
+// and white. Reproducing that is the whole reason Fill is not a second opacity.
+inline bool fillEntersBlend(BlendMode m)
+{
+    switch (m) {
+    case BlendMode::ColorBurn:
+    case BlendMode::LinearBurn:
+    case BlendMode::ColorDodge:
+    case BlendMode::LinearDodge:
+    case BlendMode::VividLight:
+    case BlendMode::LinearLight:
+    case BlendMode::HardMix:
+    case BlendMode::Difference:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// A mode's neutral source colour: the value `n` for which B(cb, n) == cb for
+// every backdrop, i.e. the source that leaves the picture alone. Fading the
+// source toward it is what reduces the blend's strength without stepping
+// outside the formula. Only defined for fillEntersBlend() modes, and Hard Mix
+// is the one of those that has none — see blendFilled().
+inline float fillNeutral(BlendMode m)
+{
+    switch (m) {
+    case BlendMode::ColorBurn:
+    case BlendMode::LinearBurn:   return 1.0f;   // white
+    case BlendMode::VividLight:
+    case BlendMode::LinearLight:  return 0.5f;   // mid grey
+    default:                      return 0.0f;   // black
+    }
+}
+
+// blend() with Fill folded into the source wherever the mode asks for it.
+inline Vec3 blendFilled(BlendMode mode, const Vec3& cb, const Vec3& cs, float fill)
+{
+    if (fill >= 0.999f || !fillEntersBlend(mode))
+        return blend(mode, cb, cs);
+    if (mode == BlendMode::HardMix) {
+        // Hard Mix is a step, so it has no neutral source colour: no `cs`
+        // makes step(1, cb + cs) equal cb. It is instead the infinite-contrast
+        // limit of a ramp through the backdrop, clamp(cb + (cb + cs - 1)·k), so
+        // Fill drives that contrast: k = f/(1-f) is 0 at Fill 0 (backdrop
+        // untouched, the layer gone) and diverges at Fill 100% (the step
+        // itself). That is the posterization softening into continuous tone
+        // which reducing Fill on a Hard Mix layer is used for — the one place
+        // in this table where the model is an extrapolation from the mode's
+        // shape rather than a neutral colour.
+        const float k = fill / (1.0f - fill);
+        Vec3 r;
+        for (int i = 0; i < 3; ++i)
+            r[i] = std::clamp(cb[i] + (cb[i] + cs[i] - 1.0f) * k, 0.0f, 1.0f);
+        return r;
+    }
+    const float n = fillNeutral(mode);
+    const Vec3 faded{n + (cs[0] - n) * fill,
+                     n + (cs[1] - n) * fill,
+                     n + (cs[2] - n) * fill};
+    return blend(mode, cb, faded);
+}
+
+// Fill's share of the source *coverage* — and there are two of them, because
+// the source reaches the result through two terms that Fill does not enter the
+// same way. Regroup the W3C composite by the backdrop's alpha:
+//
+//   Co = (1-ab)·sa·Cs  +  ab·[ sa·B(Cb,Cs) + (1-sa)·Cb ]
+//   ao = (1-ab)·sa     +  ab
+//
+// — identical algebra to `sa·Cs' + (1-sa)·Cb` with the W3C fade folded in
+// (§4.1), just grouped so the two roles are visible. The first term is the
+// source where there is *no* backdrop; the second is the blend where there is
+// one.
+//
+// For the eight modes Fill belongs inside B, so the blend term has to keep its
+// full coverage — that is exactly what preserves the saturating result a reduced
+// Fill is reached for. But B is irrelevant in the first term: with nothing to
+// blend against, the only thing that can fade the content there is its
+// coverage. So Fill multiplies the *bare* coverage and leaves the blend
+// coverage alone, which puts the composite where it has to be at both ends:
+//
+//   Fill 0  → bare coverage 0 and B(Cb, neutral) = Cb, so Co = ab·Cb and
+//             ao = ab: the backdrop untouched, at *every* backdrop alpha.
+//   Fill 1  → the two coverages coincide and this is the composite unchanged.
+//
+// Every other mode takes Fill as plain coverage, so both factors are `fill`
+// there and the regrouping collapses back to one.
+inline float fillBlendCoverage(BlendMode m, float fill)
+{
+    return fillEntersBlend(m) ? 1.0f : fill;
+}
+
+inline float fillBareCoverage(BlendMode /*m*/, float fill)
+{
+    return fill;
 }
 
 // ── Dissolve ────────────────────────────────────────────────────────────

@@ -118,6 +118,45 @@ inline constexpr char kLib[] = R"(
         return cs;                              // 25 Dissolve (see bm_coverage),
     }                                           // Normal / unmapped
 
+    // ── Fill Opacity (mirror of blendmath::fillEntersBlend/...) ──
+    // Eight modes take Fill *inside* the blend function instead of on the
+    // coverage; see renderer/BlendMath.hpp for why, and for the Hard Mix
+    // extrapolation. Ids are blend::shaderId (renderer/BlendRules.hpp).
+    bool bm_fillEntersBlend(int mode) {
+        return mode == 3      // Color Dodge
+            || mode == 4      // Color Burn
+            || mode == 5      // Difference
+            || mode == 15     // Linear Burn
+            || mode == 16     // Linear Dodge (Add)
+            || mode == 17     // Vivid Light
+            || mode == 18     // Linear Light
+            || mode == 20;    // Hard Mix
+    }
+    float bm_fillNeutral(int mode) {
+        if (mode == 4 || mode == 15) return 1.0;   // Color Burn, Linear Burn
+        if (mode == 17 || mode == 18) return 0.5;  // Vivid Light, Linear Light
+        return 0.0;    // Color Dodge, Linear Dodge, Difference
+    }
+    vec3 bm_blendFilled(int mode, vec3 cb, vec3 cs, float fill) {
+        if (fill >= 0.999 || !bm_fillEntersBlend(mode))
+            return bm_blend(mode, cb, cs);
+        if (mode == 20) {                          // Hard Mix — see BlendMath.hpp
+            float k = fill / (1.0 - fill);
+            return clamp(cb + (cb + cs - 1.0) * k, 0.0, 1.0);
+        }
+        return bm_blend(mode, cb, mix(vec3(bm_fillNeutral(mode)), cs, fill));
+    }
+    // Fill's two coverage factors — the blend term keeps full coverage for the
+    // eight modes (Fill is inside the formula there) while the source's bare,
+    // no-backdrop term is the one Fill fades. See BlendMath.hpp for the
+    // regrouping of the W3C composite these two come out of.
+    float bm_fillBlendCoverage(int mode, float fill) {
+        return bm_fillEntersBlend(mode) ? 1.0 : fill;
+    }
+    float bm_fillBareCoverage(int mode, float fill) {
+        return fill;
+    }
+
     // ── Dissolve ──
     // Mirror of blendmath::ditherNoise: the same 32-bit hash of the same
     // document pixel, so the live frame and the CPU projection dither exactly

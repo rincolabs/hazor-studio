@@ -363,7 +363,10 @@ compositeFiltered
          ├─ mask: DestinationIn with density ramp mix(1, m, density)
          ├─ clipping mask (§4.6): the stage's premultiplied channels are scaled
          │    by the base layer's own stage alpha (applyClipAlpha)
-         └─ compositeStage(target, stage, blendMode, opacity):
+         ├─ Fill Opacity (§4.7): a factor on the stage's contribution for most
+         │    modes, a term inside the formula for eight of them — and already
+         │    inside the bake when the layer carries a layer style
+         └─ compositeStage(target, stage, blendMode, opacity, fill):
               modes with QPainter equivalent → native;
               Hue/Saturation/Color/Luminosity → compositeNonSeparable
               (blendmath::blendHsl + manual W3C compositing)
@@ -493,13 +496,16 @@ decisions that live on the data model instead (the group compositing model,
 | File | Role |
 |---|---|
 | [src/renderer/BlendRules.hpp](../src/renderer/BlendRules.hpp) | maps `BlendMode` → primitive for each backend: shader id (`shaderId`), QPainter mode (`painterMode`), what requires shader/manual compositing |
-| [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C) and the separable modes QPainter lacks, both behind `blend(mode, cb, cs)`; `coverage` (Dissolve), `maskDensityRamp = mix(1, m, density)` |
-| [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 26 colour modes, `bm_coverage` the 27th (Dissolve) |
+| [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C) and the separable modes QPainter lacks, both behind `blend(mode, cb, cs)`; `coverage` (Dissolve), `maskDensityRamp = mix(1, m, density)`; Fill Opacity's share of the formula and of the two coverages (`blendFilled`, `fillBlendCoverage`/`fillBareCoverage`, §4.7) |
+| [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 26 colour modes, `bm_coverage` the 27th (Dissolve), `bm_blendFilled`/`bm_fill*Coverage` the Fill rule |
 | [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernels in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `boxWeights`/`cubicWeights`/`resampleAffine` in `DocumentCompositor.cpp` (§4.2) |
 
 **Maintenance rule:** when adding/changing a blend mode, update all three blend
 files together — `BlendMath.hpp` and `BlendShaderLib.hpp` are kept comparable
-function by function. ColorDodge/ColorBurn follow the edge semantics of Qt's
+function by function. A new mode also has to answer the §4.7 question — does
+Fill Opacity belong inside its formula? — in `fillEntersBlend`/`fillNeutral` and
+their `bm_*` mirrors; the default (no) is the right answer for every mode whose
+result is linear in the source's strength. ColorDodge/ColorBurn follow the edge semantics of Qt's
 raster engine (which executes the natively-supported separable modes on the
 CPU), without NaN; Vivid Light is expressed *through* them so the two agree at
 those edges. A fourth table lives in `BlendRules.hpp`: `pickerEntries()`, the
@@ -877,6 +883,9 @@ Three things it deliberately is **not**:
 - **Not a raster mask.** Nothing is created, stored or baked; the clipped
   layer's own pixels are untouched. It keeps its own mask, opacity, blend mode
   and styles, and several layers can share one base.
+- **Not reduced by the base's Fill** (§4.7). Fading a base's *content* is not
+  the same as changing the silhouette the layers above it clip to, so Fill stays
+  out of `alphaBase` — unlike the base's opacity, which is folded in.
 
 Base *opacity* is folded in, once, because fading the base fades everything
 clipped to it — the behaviour this kind of editor established. It lands in
@@ -975,6 +984,178 @@ the base automatically (§2.5, invariant 4).
 
 ---
 
+### 4.7 Fill Opacity
+
+A layer has two transparency controls and they are not two of the same thing:
+
+| | fades | lives on |
+|-|-|-|
+| **Opacity** | the layer's finished contribution — content *and* layer styles | every node |
+| **Fill** | only the layer's own content; the styles keep their strength | `Type::Layer` only |
+
+So a Drop Shadow stays fully lit while the pixels casting it go invisible, which
+is what the control is for. `LayerTreeNode::fillOpacity` holds it, and **nothing
+reads that field directly** — three accessors on the node split it between the
+two places it can be applied, so it can never land twice or on a node that has
+no Fill:
+
+| accessor | answer |
+|---|---|
+| `layerFillOpacity()` | the clamped value, or 1 for a Group/Adjustment |
+| `bakeFillOpacity()` | the share the *style bake* applies (1 unless the layer has an enabled layer style) |
+| `compositeFillOpacity()` | the share the *compositor* applies (the complement of the above) |
+
+**Where the split comes from.** A layer style is composited *with* the content
+into one raster (`computeStyledBaseImage`), so once that bake exists no factor
+applied to it could fade the content without fading the shadow too. Fill
+therefore has to enter *inside* the bake for a styled layer — and only there.
+A layer with no enabled layer style (the overwhelming majority, including one
+carrying filters or Single-Layer-Mode adjustments) is all content, so one factor
+at composite time is exact. That is not a micro-optimisation: it is what keeps a
+Fill drag as cheap as an opacity drag instead of re-running an OpenCV blur per
+slider step. On a styled layer a Fill change does invalidate the bake, and rides
+the existing async path (`StyleBakePool`, §2.4.1) exactly like a Layer Styles
+slider.
+
+#### Inside the bake: content vs shape
+
+`applyEffectStack` (`LayerTreeNode.hpp`) grows a second image below Fill 1:
+
+```
+filters                → content                      (filters ARE content)
+                         shape   = content            (full strength, kept aside)
+                         content = content × fill
+per layer style, in order:
+                         content = style.applyOver(content, shape)
+                         shape   = style.apply(shape)
+```
+
+Every layer style therefore takes two inputs: the `content` it composites over,
+and the `shape` its geometry and alpha are derived from (`LayerEffect::
+applyOver`). At Fill 1 the two are the same image and the stack is byte-for-byte
+the one that ran before Fill existed — which is why `shape` is only materialised
+below 1.
+
+`shape` accumulates the styles as well, so a Stroke still grows the silhouette
+the Drop Shadow is then cast from, and a combination of styles behaves as it
+does at Fill 1. **No style has a special case**: the separation is one rule
+applied to the stack, which is also what makes it hold for the next style added.
+
+#### At composite time: two coverages, not one
+
+For most blend modes Fill is one more factor on the source coverage, and
+`contentAlpha = originalAlpha × mask × fill` is the whole story. For **eight**
+modes it is not, and the behaviour this kind of editor established is the
+reference:
+
+> Color Burn · Linear Burn · Color Dodge · Linear Dodge (Add) ·
+> Vivid Light · Linear Light · Hard Mix · Difference
+
+These take Fill *inside* the blend function, as a source faded toward the mode's
+**neutral colour** — the value `n` for which `B(Cb, n) == Cb`. Fading the
+coverage instead interpolates the already-clamped result and loses exactly the
+saturating behaviour the modes are reached for: a Linear Dodge layer at Fill 50%
+still burns to white wherever `Cb + 0.5·Cs >= 1`, while the same layer at
+Opacity 50% cannot get past the midpoint between the backdrop and white.
+`blendmath::fillEntersBlend` / `fillNeutral` / `blendFilled` are that rule, with
+`bm_*` GLSL mirrors.
+
+Applying it needs the composite regrouped by the backdrop's alpha:
+
+```
+Co = (1-ab)·saBare·Cs  +  ab·[ sa·B(Cb,Cs) + (1-sa)·Cb ]
+ao = (1-ab)·saBare     +  ab
+```
+
+— identical algebra to `sa·Cs' + (1-sa)·Cb` with the W3C fade folded in (§4.1),
+just grouped so the source's two roles separate. The second term is the blend,
+and it keeps **full** coverage (`fillBlendCoverage`) because Fill is already
+inside `B`. The first is the source where there is *no* backdrop, where `B` is
+irrelevant and coverage is the only thing left that can fade the content, so
+Fill multiplies that one (`fillBareCoverage`). Both ends then land where they
+must, at *every* backdrop alpha:
+
+- **Fill 0** → bare coverage 0 and `B(Cb, neutral) = Cb`, so `Co = ab·Cb`,
+  `ao = ab`: the backdrop untouched.
+- **Fill 1** → the two coverages coincide and this is the composite unchanged.
+
+Collapsing the two into a single coverage ramped by `ab` looks like it works at
+both ends and does not: at an intermediate backdrop alpha the bare term
+reintroduces the source at a coverage the blend term already spent, and the
+output alpha comes out above the backdrop's. Measured before the regrouping, a
+Fill-0 Color Burn layer over a half-transparent backdrop shifted it by 64/255.
+
+**Hard Mix is the one extrapolation.** It is a step, so no `Cs` makes
+`step(1, Cb+Cs)` equal `Cb` — it has no neutral colour. It is instead the
+infinite-contrast limit of a ramp through the backdrop, so Fill drives that
+contrast:
+
+```
+clamp(Cb + (Cb + Cs - 1) · k),   k = fill / (1 - fill)
+```
+
+`k = 0` at Fill 0 leaves the backdrop; `k → ∞` at Fill 100% is the step itself.
+That is the posterization softening into continuous tone which reducing Fill on
+a Hard Mix layer is used for, and it is the only entry in the table derived from
+the mode's shape rather than from a neutral colour.
+
+#### Consequences elsewhere
+
+- **The CPU keeps two expressions.** `compositeManual` runs the regrouped form
+  only when Fill is inside the blend; the default path is the untouched one, so
+  every existing export stays bit-identical rather than moving by a rounding
+  step. The blend shader runs the regrouped form always — it is the same algebra
+  and the GPU was never bit-exact with the CPU anyway (§4.1).
+- **A mode QPainter implements natively still goes manual** once Fill is inside
+  the formula: the raster engine only knows each mode at full strength. That is
+  why `blendmath::blend()` now also carries Color Dodge, Color Burn and
+  Difference, which the CPU otherwise never evaluates itself.
+- **The main shader needs no Fill uniform.** It only ever draws Normal, where
+  Fill and Opacity are the same factor, so `setMainUniforms` folds Fill into the
+  opacity it uploads. Keeping it out of that shader means no direct-uniform draw
+  site — the projection, the canvas decorations, the overlays — can be left with
+  an unset Fill, which would have made them invisible.
+- **Masks are unchanged and Fill is applied after them.** The stage is masked
+  first, so `alpha × mask × fill`, and the mask's own density ramp is untouched.
+  The style bake reads the *masked* base exactly as before, so a mask still
+  shapes the shadow.
+- **A clipping base's Fill does not shrink the run** (§4.6). Fading a base's
+  content is not the same as changing the silhouette the layers above it clip
+  to, so Fill stays out of `alphaBase` while the base's *opacity* stays folded
+  in. On the GPU the sole-node capture is the only draw that must suppress Fill,
+  and `LayerCompositor` is the only place that can tell a capture's base from
+  the children of a *group* base (whose Fill is part of the group's content), so
+  it hands the value to `popGroupFbo` explicitly rather than letting the pop
+  re-read it off the node.
+- **Groups have no Fill**, which is also where this kind of editor has always
+  drawn the line. The field is ignored for a `Type::Group` node by
+  `layerFillOpacity()`, and the layer panel disables the control while one is
+  selected.
+- **Adjustment layers have no Fill either.** Their opacity already *is* the
+  strength of the adjustment; there is no content to fade separately.
+- **Smart Objects, Text and Shape layers need nothing of their own.** Fill acts
+  on whatever the layer's content resolves to — the referenced document's
+  render, the rasterised type, the shape sprite — so the editable model is
+  untouched, exactly like blend and opacity (§3.4).
+
+#### Known limits
+
+- **A styled layer with one of the eight modes takes the coverage treatment.**
+  Its Fill is inside the bake, where content and styles are already one raster,
+  so the composite cannot fade only the content's colour toward the mode's
+  neutral. Content and styles stay correctly separated; it is the blend-math
+  half of Fill that is skipped there.
+- **No "layer knocks out drop shadow" option.** Hazor's shadow is composited
+  under the content rather than clipped out beneath it, so at a reduced Fill the
+  shadow shows through the shape; editors that offer the option knock it out by
+  default. That is a missing layer-style setting, not a Fill behaviour, and
+  adding it belongs in `LayerEffect`.
+- **A styled clip base's Fill does reach its clip alpha**, because the bake it
+  is read from already contains it. Unstyled bases — the common case — are
+  exact.
+
+---
+
 ## 5. Merge semantics (consumes the CPU path)
 
 File: [src/controller/ImageController.cpp](../src/controller/ImageController.cpp)
@@ -1051,13 +1232,13 @@ through the normal CPU path.
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
 | Async layer-style bake | `renderer/StyleBakePool.*`, `renderer/AsyncStyleBaker.*` (§2.4.1) |
-| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp`; group compositing model (§4.5) and clipping-mask predicates (§4.6) in `core/LayerTreeNode.hpp` |
+| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp`; group compositing model (§4.5), clipping-mask predicates (§4.6) and the Fill Opacity accessors (§4.7) in `core/LayerTreeNode.hpp` |
 | Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
 | Caches | `cache/RenderCache.*` |
 | Layer data | `core/Layer.*`, `core/LayerTreeNode.hpp` (`computeEffectedImage`, `computeStyledBaseImage`, `clone`/`shallowClone`), `core/RasterLayerStorage.*`, `core/TileManager.*` |
 | Smart Objects (§3.4) | `smartobject/SmartObjectData.hpp`, `smartobject/SmartObjectRenderService.*`, `smartobject/DocumentContainer.*`, `smartobject/ContainerRegistry.*`, `controller/ImageController_SmartObjects.cpp` — **nothing under `renderer/`** |
 | Adjustments | `core/AdjustmentTypes.*`, `core/CurvesData.*`, `core/ColorBalanceData.*`, `core/HueSaturationData.*`, `core/SolidColorData.hpp` |
-| Effects | `core/LayerEffect.*` (`applyEffectStack`, shared by layers and groups) |
+| Effects | `core/LayerEffect.*` (`applyOver` — the content/shape split Fill needs, §4.7), `core/LayerTreeNode.hpp` (`applyEffectStack`, shared by layers and groups) |
 | Brush | `brush/BrushRenderer.*`, `brush/BrushEngine.*`, `brush/DynamicsEvaluator.*` |
 | Merges / operations | `controller/ImageController.cpp` (`applyMerge*State`, `mergeDownTargetFlat`, `runDocumentStateOperationAsync`) |
 | Export | `io/ImageIO.cpp` |

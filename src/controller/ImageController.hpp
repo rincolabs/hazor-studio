@@ -244,6 +244,15 @@ public:
     void beginNodeOpacity(int flatIndex);
     void previewNodeOpacity(int flatIndex, float opacity);
     void commitNodeOpacity(int flatIndex, float opacity);
+    // Fill Opacity — the layer's own content, leaving its layer styles at full
+    // strength (LayerTreeNode::fillOpacity, docs/RENDER-PIPELINE.md §4.7). Same
+    // four-call shape as opacity, so a drag is one history step: begin on
+    // press, preview per step, commit on release. A Group has no Fill and these
+    // are no-ops on one.
+    void setNodeFillOpacity(int flatIndex, float fillOpacity);
+    void beginNodeFillOpacity(int flatIndex);
+    void previewNodeFillOpacity(int flatIndex, float fillOpacity);
+    void commitNodeFillOpacity(int flatIndex, float fillOpacity);
     void setNodeVisibility(int flatIndex, bool visible);
     // Solo/isolate (Alt+Click eye): hides every node outside the target's branch
     // (ancestors + the target subtree) and force-shows its ancestors so it
@@ -655,6 +664,8 @@ private:
 
     float  m_opacityBefore = -1.0f;
     int    m_opacityLayerIdx = -1;
+    float  m_fillOpacityBefore = -1.0f;
+    int    m_fillOpacityLayerIdx = -1;
 
     // ── Layer-style bake progress (see setStyleBakeBusy) ──
     void updateStyleBakeProgress();

@@ -10,13 +10,19 @@ enum class BlendMode;
 class DocumentCompositor {
 public:
     // Composites `stage` over `target` (both ARGB32_Premultiplied, same
-    // canvas grid) with a node's blend mode and opacity — the one CPU
-    // execution of the blend spec (renderer/BlendRules.hpp): modes QPainter
+    // canvas grid) with a node's blend mode, opacity and Fill Opacity — the one
+    // CPU execution of the blend spec (renderer/BlendRules.hpp): modes QPainter
     // implements run through the raster engine, the rest per pixel through
     // blendmath. Public so the tools that blend into layer pixels (the
     // gradient tool) blend exactly like the projection does.
+    //
+    // `fillOpacity` is the layer's Fill as the *compositor* has to apply it
+    // (LayerTreeNode::compositeFillOpacity) — plain coverage for most modes,
+    // a term inside the formula for eight of them (docs/RENDER-PIPELINE.md
+    // §4.7). 1 leaves the composite exactly as it was before Fill existed.
     static void compositeStage(QImage& target, const QImage& stage,
-                               BlendMode mode, float opacity);
+                               BlendMode mode, float opacity,
+                               float fillOpacity = 1.0f);
 
     // Renders all visible layers into a single QImage at doc's native size.
     // Single source of truth for CPU compositing — used by Export, Flatten, and

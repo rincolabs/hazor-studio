@@ -720,6 +720,7 @@ QJsonObject nodeToJson(const LayerTreeNode& node,
     o["type"] = nodeTypeToString(node.type);
     o["visible"] = node.visible;
     o["opacity"] = node.opacity;
+    o["fillOpacity"] = node.fillOpacity;
     o["blendMode"] = static_cast<int>(node.blendMode);
     o["groupBlendMode"] = static_cast<int>(node.groupBlendMode);
     o["lockFlags"] = node.lockFlags;
@@ -839,6 +840,9 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
     node->type = nodeTypeFromString(o.value("type").toString("layer"));
     node->visible = o.value("visible").toBool(true);
     node->opacity = static_cast<float>(o.value("opacity").toDouble(1.0));
+    // Default 1.0 so a project saved before Fill Opacity existed loads with the
+    // layer's content at full strength — i.e. looking exactly as it was saved.
+    node->fillOpacity = static_cast<float>(o.value("fillOpacity").toDouble(1.0));
     node->blendMode = static_cast<BlendMode>(o.value("blendMode").toInt(0));
     // Default 0 == GroupBlendMode::Isolated so projects saved before group
     // blend modes existed load with the safe default.

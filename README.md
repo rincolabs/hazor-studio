@@ -33,6 +33,19 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   stroke, glows, overlays…), blend modes, grouping, and multi-layer transforms.
   Any layer or group can also be exported on its own (Export Layer/Group As...),
   trimmed to its rendered bounds or kept at the document's canvas size.
+- **Opacity and Fill** — the layer panel carries both. **Opacity** fades a
+  layer's finished contribution, its layer styles included; **Fill** fades only
+  the layer's own content and leaves the styles at full strength, so a drop
+  shadow, stroke or glow stays exactly as lit while the pixels casting it go
+  invisible. Fill is a layer property — groups have one opacity, the convention
+  this kind of editor established — and it is a compositing control, never an
+  edit: the pixels, the vector geometry and the editable text behind them are
+  untouched. For eight
+  blend modes (Color Burn, Linear Burn, Color Dodge, Linear Dodge, Vivid Light,
+  Linear Light, Hard Mix, Difference) Fill takes part in the blend arithmetic
+  itself rather than merely thinning the layer, which is what makes a reduced
+  Fill on those modes keep blowing out to white or black where a reduced Opacity
+  only fades toward the backdrop.
 - **Clipping masks** — any layer can be clipped to the one below it
   (**Layer ▸ Create Clipping Mask**, `Ctrl+Alt+G`, Alt-click the line between two
   rows, or the layer's context menu). The clipped layer shows only where the base
