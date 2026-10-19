@@ -27,6 +27,13 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   stroke, glows, overlays…), blend modes, grouping, and multi-layer transforms.
   Any layer or group can also be exported on its own (Export Layer/Group As...),
   trimmed to its rendered bounds or kept at the document's canvas size.
+- **Group blending: Normal or Pass Through** — a group's blend-mode menu offers
+  **Pass Through** alongside the ordinary modes. Normally a group composites its
+  layers in isolation and merges the finished result; Pass Through lets them
+  take part in the composite around the group instead, so a blend mode inside
+  the group reads the layers *below* it and an adjustment layer inside the group
+  reaches them too. The group's opacity and visibility still apply, and groups
+  can be nested in any combination of the two.
 - **Smart Objects** — a layer that displays another document and keeps it
   editable forever. Convert any selection into one, or place an existing
   `.hazor` (or legacy `.hzs`) project either *embedded* (stored inside your

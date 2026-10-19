@@ -2363,14 +2363,53 @@ void ImageController::setNodeBlendMode(int flatIndex, BlendMode mode)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    BlendMode before = node->blendMode;
-    if (before == mode) return;
+    const BlendMode before = node->blendMode;
+    // Choosing a real blend mode for a group also takes it out of Pass
+    // Through: the two are one choice in the UI, and a group that blends a
+    // composed result is by definition no longer passing its children
+    // through (see LayerTreeNode::GroupBlendMode).
+    const auto beforeGroup = node->groupBlendMode;
+    const bool leavesPassThrough =
+        node->type == LayerTreeNode::Type::Group
+        && beforeGroup != LayerTreeNode::GroupBlendMode::Isolated;
+    if (before == mode && !leavesPassThrough) return;
     node->blendMode = mode;
+    if (leavesPassThrough)
+        node->groupBlendMode = LayerTreeNode::GroupBlendMode::Isolated;
     m_history.push(std::make_unique<NodePropertyCommand>(
         m_doc, flatIndex, node->opacity, node->opacity,
         node->visible, node->visible,
         before, mode,
-        tr("Set Blend Mode")));
+        tr("Set Blend Mode"),
+        leavesPassThrough ? std::optional(beforeGroup) : std::nullopt,
+        leavesPassThrough ? std::optional(node->groupBlendMode) : std::nullopt));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::setNodeGroupBlendMode(int flatIndex,
+                                            LayerTreeNode::GroupBlendMode mode)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Group) return;
+    const auto before = node->groupBlendMode;
+    const BlendMode beforeBlend = node->blendMode;
+    // Pass Through leaves the group's blend slot unused, so it is reset here
+    // rather than left to resurface if the group is switched back — the single
+    // blend-mode control the user sees can only show one of the two.
+    const BlendMode afterBlend =
+        mode == LayerTreeNode::GroupBlendMode::PassThrough
+            ? BlendMode::Normal : beforeBlend;
+    if (before == mode && beforeBlend == afterBlend) return;
+    node->groupBlendMode = mode;
+    node->blendMode = afterBlend;
+    m_history.push(std::make_unique<NodePropertyCommand>(
+        m_doc, flatIndex, node->opacity, node->opacity,
+        node->visible, node->visible,
+        beforeBlend, afterBlend,
+        tr("Set Blend Mode"),
+        before, mode));
     emit layerChanged(flatIndex);
     emit imageChanged();
     if (m_doc) ++m_doc->compositionGeneration;
@@ -4551,7 +4590,7 @@ static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat)
 
     QImage merged = DocumentCompositor::compositeSubset(
         doc, {srcNode, dstNode}, /*applyAdjustments=*/false, ctx,
-        /*ancestorGroupsPassThrough=*/true);
+        /*ancestorGroupsDirect=*/true);
     requireMergeComposite(merged, doc);
 
     // dst keeps the merged pixels; its own clipped adjustments are already baked

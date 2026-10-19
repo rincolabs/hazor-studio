@@ -624,9 +624,64 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
 // here (destination-in against the canvas-aligned mask alpha) so the order
 // stays: compose children -> group mask -> group effects -> opacity/blend.
 // Never apply the mask to individual children.
+//
+// This is the *isolated* group's mask step, and it is the only one: a Pass
+// Through group must not come through here, because its stage holds the
+// backdrop too. Destination-in would punch the backdrop away wherever the
+// group mask is black instead of merely leaving it unchanged there. The mask
+// multiplies into that path's interpolation factor instead — see
+// compositePassThroughStage.
 void applyGroupMask(QImage& /*groupStage*/, const LayerTreeNode* /*group*/)
 {
     // intentionally empty until LayerTreeNode gains group masks
+}
+
+// Merges a Pass Through group's result back into the backdrop it was composed
+// against. `stage` started as a copy of `target` and had the group's children
+// composited into it, so the two already agree everywhere the group painted
+// nothing; what is left is to let the group's own opacity decide how much of
+// the difference survives.
+//
+// That makes this an interpolation, not a composite: a pass-through group has
+// no isolated result that could be drawn *over* the backdrop, and source-over
+// at `opacity` would re-apply the backdrop already present inside `stage` —
+// coming out too opaque wherever the backdrop is semi-transparent (a 0.5-alpha
+// backdrop under an empty 50% group would read 0.75 instead of staying 0.5).
+// A straight lerp of premultiplied colour *and* alpha is the composite the
+// model asks for: it reduces to "group absent" at opacity 0 and to `stage` at
+// opacity 1, and it is what the live GPU path reproduces in fixed-function
+// blending (GPUViewport::popGroupFbo's pass-through branch).
+//
+// When group masks arrive, multiply the per-pixel mask into `t` here. Never
+// route a pass-through stage through applyGroupMask().
+void compositePassThroughStage(QImage& target, const QImage& stage, float opacity)
+{
+    const float t = std::clamp(opacity, 0.0f, 1.0f);
+    if (t <= 0.0f) return;            // group has no effect at all
+    if (t >= 1.0f) { target = stage; return; }
+
+    const int w = std::min(target.width(), stage.width());
+    const int h = std::min(target.height(), stage.height());
+    for (int y = 0; y < h; ++y) {
+        QRgb*       d = reinterpret_cast<QRgb*>(target.scanLine(y));
+        const QRgb* s = reinterpret_cast<const QRgb*>(stage.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            if (d[x] == s[x]) continue;   // the group left this pixel alone
+            const QRgb dp = d[x];
+            const QRgb sp = s[x];
+            const float a = (qAlpha(sp) - qAlpha(dp)) / 255.0f * t + qAlpha(dp) / 255.0f;
+            const float r = (qRed(sp)   - qRed(dp))   / 255.0f * t + qRed(dp)   / 255.0f;
+            const float g = (qGreen(sp) - qGreen(dp)) / 255.0f * t + qGreen(dp) / 255.0f;
+            const float b = (qBlue(sp)  - qBlue(dp))  / 255.0f * t + qBlue(dp)  / 255.0f;
+            // Both endpoints satisfy colour <= alpha, so their convex
+            // combination does too — but only before 8-bit rounding, which can
+            // push a channel one step past alpha and make Qt's compositing
+            // produce a speck (same clamp as resampleAffine).
+            const uchar a8 = toByte(a);
+            d[x] = qRgba(std::min(toByte(r), a8), std::min(toByte(g), a8),
+                         std::min(toByte(b), a8), a8);
+        }
+    }
 }
 
 // Applies a group's layer effects to the already-composed (canvas-space) group
@@ -666,16 +721,22 @@ void applyGroupEffects(QImage& groupStage, const LayerTreeNode* group,
 }
 
 // Recursively composites a list of sibling nodes (top-to-bottom order in the
-// vector) bottom→top into `target`. Mirrors LayerCompositor::renderNodes:
-// Normal-blend groups composite their children directly into `target`;
-// non-Normal groups are isolated into an intermediate image then composited
-// with the group's opacity and blend mode.
+// vector) bottom→top into `target`. Mirrors LayerCompositor::renderNodes,
+// including its three ways of merging a Group (LayerTreeNode decides which,
+// so the two compositors cannot drift):
+//   - direct        children go straight into `target` — an opacity-1,
+//                   Normal-blend, effect/mask-free group, and every Pass
+//                   Through group at full opacity
+//   - pass-through  children go into a copy of `target`, which is then
+//                   interpolated back by the group's opacity
+//   - isolated      children go into a transparent buffer, which then takes
+//                   the group's mask/effects/opacity/blend as a unit
 void renderNodesFiltered(QImage& target,
                          const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough,
+                         bool forceDirectGroups,
                          const LayerTreeNode* rawPixelNode = nullptr);
 
 void renderNodes(QImage& target,
@@ -684,11 +745,27 @@ void renderNodes(QImage& target,
 {
     renderNodesFiltered(target, nodes, doc, ndcToPixel,
         [](const LayerTreeNode*) { return true; }, true,
-        /*groupsPassThrough=*/false);
+        /*forceDirectGroups=*/false);
 }
 
-bool subtreeHasIncludedLayer(const LayerTreeNode* node,
-                             const std::function<bool(const LayerTreeNode*)>& includeLayer)
+// True when a subtree can still change the composite under the current filter,
+// i.e. whether the group is worth descending into at all.
+//
+// An included Layer somewhere inside is the usual reason. The other one is a
+// Pass Through group holding a Normal-Mode adjustment: that adjustment acts on
+// the *backdrop* rather than on the group's own content, so it has an effect
+// even when the group contains no layer at all — an adjustment-only pass-
+// through group over the stack below it is a normal way to work, and pruning
+// it would silently drop the adjustment. An Isolated group in the same shape
+// has nothing to adjust — its buffer stays transparent — which is why the
+// extra reason is gated on pass-through, and on applyAdjustments so clone
+// sampling still consumes no adjustment. (The one Isolated case this prunes
+// and arguably should not is a layer-less group holding only a Solid Color
+// adjustment, which is a fill rather than a modifier. That predates Pass
+// Through and is left as it was.)
+bool subtreeAffectsComposite(const LayerTreeNode* node,
+                             const std::function<bool(const LayerTreeNode*)>& includeLayer,
+                             bool applyAdjustments)
 {
     if (!node || !node->visible)
         return false;
@@ -696,8 +773,11 @@ bool subtreeHasIncludedLayer(const LayerTreeNode* node,
         return node->layer && includeLayer(node);
     if (node->type != LayerTreeNode::Type::Group)
         return false;
+    const bool passThrough = applyAdjustments && node->isPassThroughGroup();
     for (const auto& child : node->children) {
-        if (subtreeHasIncludedLayer(child.get(), includeLayer))
+        if (passThrough && child && child->visible && child->isAdjustmentLayer())
+            return true;
+        if (subtreeAffectsComposite(child.get(), includeLayer, applyAdjustments))
             return true;
     }
     return false;
@@ -708,7 +788,7 @@ void renderNodesFiltered(QImage& target,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough,
+                         bool forceDirectGroups,
                          const LayerTreeNode* rawPixelNode)
 {
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
@@ -726,22 +806,38 @@ void renderNodesFiltered(QImage& target,
         }
 
         if (node->type == LayerTreeNode::Type::Group) {
-            if (!subtreeHasIncludedLayer(node, includeLayer))
+            if (!subtreeAffectsComposite(node, includeLayer, applyAdjustments))
                 continue;
-            if (groupsPassThrough || !node->needsIsolatedComposite()) {
-                // Fast path: an opacity-1, Normal-blend, effect-free, mask-free
-                // group composites identically whether its children are merged
-                // straight into the parent or isolated first, so skip the extra
-                // buffer. (A future PassThrough group would also take this path
-                // by design — see LayerTreeNode::needsIsolatedComposite.)
+            if (!forceDirectGroups && node->passThroughNeedsStage()) {
+                // Pass Through, with an opacity (or mask) of its own to apply
+                // to the group as a whole. The children still have to blend
+                // against the real backdrop, so the stage is a *copy* of it
+                // rather than a transparent buffer, and the group's opacity
+                // then decides how much of the difference survives.
+                QImage stage = target.copy();
+                renderNodesFiltered(stage, node->children, doc, ndcToPixel,
+                                    includeLayer, applyAdjustments,
+                                    forceDirectGroups, rawPixelNode);
+                compositePassThroughStage(target, stage, node->opacity);
+            } else if (forceDirectGroups || !node->needsIsolatedComposite()) {
+                // Direct path: an opacity-1, Normal-blend, effect-free,
+                // mask-free group composites identically whether its children
+                // are merged straight into the parent or isolated first, so
+                // skip the extra buffer.
                 //
-                // groupsPassThrough forces this path for merge subsets whose
+                // A Pass Through group at full opacity lands here too, and for
+                // it the "identically" is the point rather than a shortcut:
+                // merging the children into the parent target is what lets an
+                // inner blend mode read the layers below the group and an
+                // inner Normal-Mode adjustment reach them.
+                //
+                // forceDirectGroups forces this path for merge subsets whose
                 // result stays inside the group: its opacity/blend/effects
                 // remain live on the tree, so baking them here would apply
                 // them twice (see DocumentCompositor::compositeSubset).
                 renderNodesFiltered(target, node->children, doc, ndcToPixel,
                                     includeLayer, applyAdjustments,
-                                    groupsPassThrough, rawPixelNode);
+                                    forceDirectGroups, rawPixelNode);
             } else {
                 // Isolated group model — the group's mask/effects/opacity/blend
                 // apply once to the composed children, in this order:
@@ -750,10 +846,11 @@ void renderNodesFiltered(QImage& target,
                 groupStage.fill(Qt::transparent);
                 renderNodesFiltered(groupStage, node->children, doc, ndcToPixel,
                                     includeLayer, applyAdjustments,
-                                    groupsPassThrough, rawPixelNode);
+                                    forceDirectGroups, rawPixelNode);
                 applyGroupMask(groupStage, node);                 // no-op until group masks exist
                 applyGroupEffects(groupStage, node, doc->size);
-                DocumentCompositor::compositeStage(target, groupStage, node->blendMode,
+                DocumentCompositor::compositeStage(target, groupStage,
+                                                  node->mergeBlendMode(),
                                                   node->opacity);
             }
             continue;
@@ -799,7 +896,7 @@ QRect nonTransparentBounds(const QImage& img)
 QImage compositeFiltered(const Document* doc,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough = false,
+                         bool forceDirectGroups = false,
                          const LayerTreeNode* rawPixelNode = nullptr)
 {
     if (!doc || doc->flatCount() == 0 || doc->size.isEmpty())
@@ -816,7 +913,7 @@ QImage compositeFiltered(const Document* doc,
     ndcToPixel.scale(cw * 0.5, -ch * 0.5);
 
     renderNodesFiltered(result, doc->roots, doc, ndcToPixel, includeLayer,
-                        applyAdjustments, groupsPassThrough, rawPixelNode);
+                        applyAdjustments, forceDirectGroups, rawPixelNode);
 
     return result.convertToFormat(QImage::Format_RGBA8888);
 }
@@ -890,13 +987,13 @@ QImage DocumentCompositor::compositeSubset(
     const std::set<const LayerTreeNode*>& includeLayers,
     bool applyAdjustments,
     const RenderContext& /*ctx*/,
-    bool ancestorGroupsPassThrough)
+    bool ancestorGroupsDirect)
 {
     if (!doc)
         return QImage();
     return compositeFiltered(doc, [&includeLayers](const LayerTreeNode* node) {
         return includeLayers.count(node) > 0;
-    }, applyAdjustments, ancestorGroupsPassThrough);
+    }, applyAdjustments, ancestorGroupsDirect);
 }
 
 QImage DocumentCompositor::compositeIsolatedNode(const Document* doc, const LayerTreeNode* node,
@@ -941,13 +1038,18 @@ QImage DocumentCompositor::compositeIsolatedNode(const Document* doc, const Laye
         childStage.fill(Qt::transparent);
         renderNodesFiltered(childStage, node->children, doc, ndcToPixel,
                             [](const LayerTreeNode*) { return true; },
-                            /*applyAdjustments=*/true, /*groupsPassThrough=*/false);
+                            /*applyAdjustments=*/true, /*forceDirectGroups=*/false);
         applyGroupMask(childStage, node);                 // no-op until group masks exist
         applyGroupEffects(childStage, node, childStage.size());
         // The group's own blend mode/opacity, composited against a
         // transparent backdrop (no layers below it in an isolated export) —
-        // same W3C fade semantics as any other isolated composite here.
-        DocumentCompositor::compositeStage(result, childStage, node->blendMode,
+        // same W3C fade semantics as any other isolated composite here. A Pass
+        // Through group needs no separate path: with nothing behind it to pass
+        // through to, interpolating a transparent backdrop towards the children
+        // by `opacity` is exactly compositing them at that opacity, and
+        // mergeBlendMode() keeps the unused blend slot out of it.
+        DocumentCompositor::compositeStage(result, childStage,
+                                          node->mergeBlendMode(),
                                           node->opacity);
     } else {
         applyAdjustmentNode(result, node);

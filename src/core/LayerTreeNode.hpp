@@ -27,8 +27,15 @@ public:
     //  - Isolated (default): children are composited into an offscreen buffer,
     //    then the group's mask/effects/opacity/blend are applied once to that
     //    composed result before it is merged into the parent.
-    //  - PassThrough: future extension point (children blend with the layers
-    //    below the group). Not implemented yet; groups always act as Isolated.
+    //  - PassThrough: the children composite directly against the backdrop the
+    //    group sits on, so an inner blend mode reads the layers *below* the
+    //    group and an inner Normal-Mode adjustment reaches them as well. The
+    //    group then has no composed result of its own to blend, so `blendMode`
+    //    is unused in this mode: Pass Through is offered as one of the group's
+    //    blend-mode choices (ImageController::setNodeGroupBlendMode clears
+    //    `blendMode` back to Normal), so the two can never be set at once.
+    //    Opacity and the group mask still apply — to the pass-through result as
+    //    a whole, see passThroughNeedsStage().
     enum class GroupBlendMode { Isolated, PassThrough };
 
     Type type = Type::Layer;
@@ -100,18 +107,6 @@ public:
         if (type != Type::Layer) return false;
         for (const auto& c : children) {
             if (c && c->isAdjustmentLayer())
-                return true;
-        }
-        return false;
-    }
-
-    // Normal Mode inside a group: a visible adjustment in the group's direct
-    // child list forces isolated compositing so the adjustment only affects
-    // the group's own content (nested groups isolate themselves).
-    bool hasVisibleAdjustmentDirectChild() const {
-        if (type != Type::Group) return false;
-        for (const auto& c : children) {
-            if (c && c->visible && c->isAdjustmentLayer())
                 return true;
         }
         return false;
@@ -609,21 +604,96 @@ public:
         return type != Type::Group;
     }
 
+    // True when at least one node inside this Group's own composite scope
+    // reads the backdrop — a non-Normal blend mode, or a Normal-Mode
+    // adjustment. Such a node is exactly what makes the group's isolation
+    // observable: it is the difference between blending against the group's
+    // own content and blending against the whole stack below the group.
+    //
+    // "Scope" is not "subtree". A child group that isolates itself contains
+    // its backdrop readers, so only the mode it merges with counts; a child
+    // group that does *not* isolate (a Pass Through group, or a plain
+    // transparent one) puts its children in this scope, so they are walked
+    // too. Mutual recursion with needsIsolatedComposite() is what encodes
+    // that, and it terminates on tree depth.
+    bool groupScopeReadsBackdrop() const {
+        if (type != Type::Group) return false;
+        for (const auto& c : children) {
+            if (!c || !c->visible) continue;
+            if (c->isAdjustmentLayer()) return true;
+            if (c->mergeBlendMode() != BlendMode::Normal) return true;
+            if (c->type == Type::Group && !c->needsIsolatedComposite()
+                && c->groupScopeReadsBackdrop())
+                return true;
+        }
+        return false;
+    }
+
     // True when a Group must be composited into an offscreen buffer before
     // being merged into its parent — i.e. its mask/effects/opacity/blend must
-    // apply to the *composed* group result, not to each child. When false the
-    // compositor may merge the children straight into the parent, which is
-    // visually identical for an opacity-1, Normal-blend, effect-free, mask-free
-    // group. (A future PassThrough group would also take that fast path.)
+    // apply to the *composed* group result, not to each child, or its contents
+    // must blend against nothing but themselves. When false the compositor may
+    // merge the children straight into the parent, which is then visually
+    // identical — and is what a Pass Through group wants by definition.
     bool needsIsolatedComposite() const {
         if (type != Type::Group) return false;
+        // Pass Through is *defined* by not isolating: its children have to see
+        // the backdrop. Its own opacity/mask are handled by the pass-through
+        // stage instead (passThroughNeedsStage), not by isolation.
+        if (isPassThroughGroup()) return false;
         return blendMode != BlendMode::Normal
             || opacity < 0.999f
             || !effects.empty()
             || hasGroupMask()
-            // A Normal-Mode adjustment inside the group must only affect the
-            // group's own content, so the children compose in isolation.
-            || hasVisibleAdjustmentDirectChild();
+            // The reason the "merge straight into the parent" shortcut is not
+            // free: a child that reads the backdrop — a Normal-Mode adjustment
+            // or a blend mode — would read the layers *below the group*
+            // instead of the group's own content, which is Pass Through's job,
+            // not an Isolated group's.
+            || groupScopeReadsBackdrop();
+    }
+
+    // True when this Group composites its children straight against whatever
+    // is already in the render target instead of isolating them — the Pass
+    // Through model (see GroupBlendMode).
+    //
+    // Layer effects are the one group property that model cannot carry, so an
+    // effect demotes the group back to Isolated: a shadow/glow/stroke is
+    // generated from the node's *own* alpha, which only exists once the
+    // children are composed against transparency. A pass-through buffer is
+    // seeded with the backdrop instead, so the same code would grow a shadow
+    // around everything underneath the group. hasEnabledEffects() rather than
+    // `!effects.empty()` because the Layer Styles dialog keeps the styles it
+    // has turned off — see hasEnabledEffects().
+    bool isPassThroughGroup() const {
+        return type == Type::Group
+            && groupBlendMode == GroupBlendMode::PassThrough
+            && !hasEnabledEffects();
+    }
+
+    // True when a Pass Through group still needs an intermediate buffer: one
+    // of its own properties — opacity, or its mask — has to apply to the
+    // pass-through result *as a whole*. The children are then composited into
+    // a copy of the backdrop (so they keep blending against the outer content)
+    // and that copy is interpolated back over the untouched backdrop by
+    // opacity x mask; see DocumentCompositor's compositePassThroughStage.
+    //
+    // At opacity 1 with no mask the interpolation is the identity, so the
+    // children can be drawn straight into the target with no buffer at all —
+    // which is the cheap path, and the common one.
+    bool passThroughNeedsStage() const {
+        return isPassThroughGroup() && (opacity < 0.999f || hasGroupMask());
+    }
+
+    // The blend mode this node's composed result is merged into its parent
+    // scope with. Identical to `blendMode` for everything except a Pass
+    // Through group, which has no composed result of its own to blend and
+    // therefore leaves the slot unused — it reads as Normal here so a stale
+    // value (an older project file, a hand-edited one) can never blend a group
+    // that is not supposed to blend. See GroupBlendMode.
+    BlendMode mergeBlendMode() const {
+        return groupBlendMode == GroupBlendMode::PassThrough
+            ? BlendMode::Normal : blendMode;
     }
 
     // Group masks are not part of the data model yet (masks live on Layer).

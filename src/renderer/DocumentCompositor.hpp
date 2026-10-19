@@ -44,18 +44,19 @@ public:
     // layers and their own clipped adjustments (e.g. Merge Down). The visual
     // source of truth for layer-merge operations.
     //
-    // ancestorGroupsPassThrough: when true, groups reached by the filtered walk
+    // ancestorGroupsDirect: when true, groups reached by the filtered walk
     // composite their children directly — no isolation, so group opacity/blend/
     // effects are NOT baked into the result pixels. Use it when the merge result
     // stays nested inside those groups (Merge Down of two siblings): the group
     // properties remain live on the tree and would otherwise apply twice. Only
     // valid when every traversed group is a common ancestor of all included
-    // layers.
+    // layers. Unrelated to GroupBlendMode::PassThrough — this flag overrides
+    // whatever compositing model the groups themselves ask for.
     static QImage compositeSubset(const Document* doc,
                                   const std::set<const LayerTreeNode*>& includeLayers,
                                   bool applyAdjustments,
                                   const RenderContext& ctx,
-                                  bool ancestorGroupsPassThrough = false);
+                                  bool ancestorGroupsDirect = false);
 
     // Renders a single Layer/Group/Solid-Color-adjustment node in isolation —
     // its own transform/opacity/mask/effects/blend against a transparent

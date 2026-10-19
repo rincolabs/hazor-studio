@@ -374,19 +374,46 @@ void LayerCompositor::renderNodes(
         }
 
         if (node->type == LayerTreeNode::Type::Group) {
+            // How this group merges into the current scope. The three cases
+            // mirror DocumentCompositor::renderNodesFiltered; LayerTreeNode
+            // owns the decision so the two compositors cannot drift.
+            //
+            // Pass Through sends the children into a buffer *seeded* with the
+            // backdrop, which the group's opacity then interpolates towards.
+            // Seeding is a blit out of the current render target, so it needs
+            // that target to be the canvas-sized isolation FBO — it always is,
+            // since composite() isolates the whole live stack for any document
+            // with a root node, and hasTargetAccum is exactly that condition.
+            const bool wantsPassThroughStage = node->passThroughNeedsStage();
+            const bool passThrough = wantsPassThroughStage && hasTargetAccum;
+
             // Isolate into a group FBO when the group's blend or opacity must
             // apply to the composed result. Group effects/masks are applied
             // only by the CPU projection (DocumentCompositor), the visual
             // source of truth; the live GPU path mirrors blend + opacity so the
             // hand-off to the projection stays seamless.
-            const bool isolate = node->blendMode != BlendMode::Normal
-                              || node->opacity < 0.999f
-                              // A Normal-Mode adjustment inside the group must
-                              // only affect the group's own content (mirrors
-                              // needsIsolatedComposite on the CPU path).
-                              || node->hasVisibleAdjustmentDirectChild();
+            //
+            // None of those reasons applies to a Pass Through group: its blend
+            // slot is unused (mergeBlendMode), its opacity rides in the branch
+            // above, and an adjustment among its children is *meant* to reach
+            // the layers below the group rather than be contained. The one case
+            // left is a stage we could not seed; isolating is the right
+            // fallback there, because a backdrop we cannot copy holds no layer
+            // content and the two models then agree.
+            const bool isolate = node->isPassThroughGroup()
+                ? (wantsPassThroughStage && !passThrough)
+                : (node->mergeBlendMode() != BlendMode::Normal
+                   || node->opacity < 0.999f
+                   // A child that reads the backdrop — a blend mode, or a
+                   // Normal-Mode adjustment — must read the group's own
+                   // content, not the stack below the group. Same predicate
+                   // needsIsolatedComposite() uses on the CPU path; the two
+                   // conditions differ only in the group effects/masks the
+                   // live path leaves to the projection.
+                   || node->groupScopeReadsBackdrop());
             BLENDDBG() << "[GroupCompose] name=" << node->name
                      << "isolate=" << isolate
+                     << "passThrough=" << passThrough
                      << "blendMode=" << static_cast<int>(node->blendMode)
                      << "opacity=" << node->opacity
                      << "groupAccum=" << node->accumulatedTransform()
@@ -395,7 +422,23 @@ void LayerCompositor::renderNodes(
                      << "docSize=" << doc->size
                      << "zoom=" << doc->zoom
                      << "pan=" << doc->panOffset;
-            if (!isolate) {
+            if (passThrough) {
+                gpu->pushGroupFbo(doc->size.width(), doc->size.height(),
+                                  /*seedFromTarget=*/true);
+                const QTransform identity;
+                renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
+                            editingMask, hasPreview, previewTexture, forceFullResLod,
+                            showMaskOverlay, maskOverlayOpacity, gpu,
+                            true, identity, identity);
+                gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask,
+                                 /*passThrough=*/true);
+                gpu->mainProgram()->bind();
+                gpu->bindMainVao();
+            } else if (!isolate) {
+                // Direct: the children merge into the current target. For a
+                // full-opacity Pass Through group this is not a shortcut but
+                // the whole mechanism — it is what lets an inner blend mode
+                // read the layers below the group.
                 renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
                             editingMask, hasPreview, previewTexture, forceFullResLod,
                             showMaskOverlay, maskOverlayOpacity, gpu,

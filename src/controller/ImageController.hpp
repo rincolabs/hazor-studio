@@ -252,6 +252,10 @@ public:
     void toggleSoloVisibility(int flatIndex);
     bool isSoloVisibilityActive() const { return m_soloActive; }
     void setNodeBlendMode(int flatIndex, BlendMode mode);
+    // A Group's compositing model (Isolated / Pass Through). Shares the blend
+    // mode's control and history label because the two are one choice — see
+    // LayerTreeNode::GroupBlendMode. No-op on non-Group nodes.
+    void setNodeGroupBlendMode(int flatIndex, LayerTreeNode::GroupBlendMode mode);
     // Editing locks. setNodesLockBit toggles one LockFlag bit across a
     // (multi-)selection to a consistent on/off state; setNodeLockFlags sets the
     // full flag set on a single node. Both record one undoable history step.

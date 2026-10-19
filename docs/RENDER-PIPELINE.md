@@ -17,6 +17,7 @@ pixel by pixel, within the technical limits.
                         │  BlendMath.hpp         (C++ formulas)  │
                         │  BlendShaderLib.hpp    (GLSL formulas) │
                         │  SamplingShaderLib.hpp (GLSL resample) │
+                        │  LayerTreeNode.hpp     (group model)   │
                         └────────────┬───────────────────────────┘
                        used by       │      used by
               ┌──────────────────────┴──────────────────────┐
@@ -75,8 +76,10 @@ composite()
  │   └─ pushGroupFbo(doc)  →  renderNodes(root, canvas-NDC)  →  popGroupFbo(<live-root>)
  └─ renderNodes(nodes, bottom→top):
      ├─ Type::Adjustment  → drawAdjustmentPass()      (§2.3)
-     ├─ Type::Group       → isolate into group FBO if blend/opacity/child adjustment
-     │                      (pushGroupFbo → children in canvas-NDC → popGroupFbo)
+     ├─ Type::Group       → one of the three group models (§4.5): direct, or a
+     │                      group FBO (pushGroupFbo → children in canvas-NDC →
+     │                      popGroupFbo), transparent for Isolated and seeded
+     │                      with the backdrop for Pass Through
      └─ Type::Layer:
          ├─ Single Layer Mode (clippedAdjustmentsOnGpu):
          │    FBO per layer: drawLayerBaseIsolated() + clipped adjustments
@@ -319,7 +322,7 @@ File: [src/renderer/DocumentCompositor.cpp](../src/renderer/DocumentCompositor.c
 | `composite(doc, ctx)` | full flatten of visible layers (projection, export, flatten) |
 | `compositeOnlyFlatIndex` | a single layer (clone/heal sampling, without stack adjustments) |
 | `compositeFromFlatIndex` | from the index down (clone "current & below") |
-| `compositeSubset(doc, layers, applyAdjustments, ctx, ancestorGroupsPassThrough)` | subset in the real stack order — basis for Merge Down. With `ancestorGroupsPassThrough=true`, ancestor groups are **not** isolated (the group opacity/blend/effects stay live in the tree, not baked into the pixels) |
+| `compositeSubset(doc, layers, applyAdjustments, ctx, ancestorGroupsDirect)` | subset in the real stack order — basis for Merge Down. With `ancestorGroupsDirect=true`, ancestor groups are **not** isolated (the group opacity/blend/effects stay live in the tree, not baked into the pixels). Unrelated to `GroupBlendMode::PassThrough`: the flag overrides whatever model the groups themselves ask for |
 | `compositeIsolatedNode(doc, node, trimToLayerBounds)` | one Layer/Group/Solid-Color-adjustment node alone, against a transparent backdrop — Export Layer/Group As... (§3.3) |
 
 Output is always in document space (`doc->size`), `Format_RGBA8888`. This
@@ -339,8 +342,10 @@ compositeFiltered
      ├─ Adjustment (Normal-Mode) → applyAdjustmentNode over the accumulated result
      │    (solidcolor = fill composited with the node blend; others via adjustments::apply;
      │     blend ≠ Normal: the entire adjusted backdrop is re-composited with the mode)
-     ├─ Group → fast path (direct merge) when !needsIsolatedComposite or passThrough;
-     │    otherwise: isolate into stage → group mask (future) → group effects
+     ├─ Group → one of the three group models (§4.5):
+     │    direct merge when !needsIsolatedComposite (incl. a full-opacity Pass Through);
+     │    pass-through stage = copy of the target → children → compositePassThroughStage;
+     │    isolated: stage → group mask (future) → group effects
      │    (applyEffectStack, same stack used by layers) → compositeStage(blend, opacity)
      └─ Layer → drawLayerNode:
          ├─ source: computeEffectedImage() (bake of effects + clipped adjustments,
@@ -475,7 +480,9 @@ source of truth. It is also the only reason the render is persisted in the
 
 ## 4. Shared specification layer
 
-Four files, one contract — three for blending, one for resampling:
+Four files, one contract — three for blending, one for resampling — plus one
+decision that lives on the data model instead (the group compositing model,
+§4.5):
 
 | File | Role |
 |---|---|
@@ -731,6 +738,104 @@ canvas→screen when the projection is displayed — versus once on the GPU
 the live path. That is inherent to having a document-resolution projection
 (export **is** at that resolution) and is accepted.
 
+### 4.5 Group compositing models (Isolated / Pass Through)
+
+A group's `GroupBlendMode` ([core/LayerTreeNode.hpp](../src/core/LayerTreeNode.hpp))
+picks between two compositing models, and both compositors read the *same*
+predicates off the node so they cannot drift:
+
+| Predicate | Meaning |
+|---|---|
+| `needsIsolatedComposite()` | the children must compose against transparency first |
+| `isPassThroughGroup()` | the children compose against the backdrop |
+| `passThroughNeedsStage()` | ...and the group has an opacity/mask of its own to apply to that result |
+| `groupScopeReadsBackdrop()` | some node in the group's own scope reads the backdrop |
+| `mergeBlendMode()` | the mode a *composed* group result merges with (Normal for Pass Through) |
+
+That resolves to three paths, in both compositors:
+
+```
+direct          children straight into the current target, no buffer
+pass-through    children into a COPY of the target → interpolate back by opacity
+isolated        children into a transparent buffer → mask → effects → blend/opacity
+```
+
+**Isolated (the default).** The group is a unit: its children see only each
+other, and the composed result takes the group's mask, effects, opacity and
+blend mode once. The "direct" path is an optimisation of this model — it is
+taken when merging the children into the parent is *provably* the same picture,
+which needs more than an opacity-1 Normal group: no node in the group's own
+scope may read the backdrop. `groupScopeReadsBackdrop()` is that test, and the
+word *scope* is load-bearing — a nested group that isolates itself contains its
+own backdrop readers, so only the mode it merges with counts, while a nested
+group that does **not** isolate puts its children in this scope and is walked
+into. Skipping that test is what used to make a plain Normal group behave as
+Pass Through whenever a child had a blend mode.
+
+**Pass Through.** The children take part in the composite *around* the group:
+an inner blend mode reads the layers below the group, and an inner Normal-Mode
+adjustment reaches them. The group's blend slot is unused in this model
+(`mergeBlendMode()` reads Normal — the UI offers Pass Through as one of the
+group's blend-mode choices, so the two can never be set at once), while
+opacity, visibility and the group mask still apply.
+
+At full opacity with no mask the model *is* the direct path — no buffer at all.
+With an opacity or a mask the children go into a copy of the backdrop (so they
+keep blending against the outer content) and that copy is then **interpolated**
+back over the untouched backdrop:
+
+```
+out = mix(backdrop, backdropWithGroupApplied, opacity × mask)   premultiplied, incl. alpha
+```
+
+Interpolation, not source-over. The group has no isolated result that could be
+drawn *over* the backdrop, and compositing at `opacity` would re-apply the
+backdrop already inside the stage: a 0.5-alpha backdrop under an empty 50%
+pass-through group would read 0.75 instead of staying 0.5. The CPU form is
+`compositePassThroughStage` ([DocumentCompositor.cpp](../src/renderer/DocumentCompositor.cpp));
+the GPU reaches the same result in fixed function, with the group's opacity in
+*both* `uOpacity` and `glBlendColor`'s constant alpha —
+
+```
+rgb: GL_SRC_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA   →  Cs·(As·t) + Cd·(1-t) = premul(src)·t + dst·(1-t)
+a:   GL_ONE,       GL_ONE_MINUS_CONSTANT_ALPHA   →  As·t      + Ad·(1-t)
+```
+
+— because the main shader emits straight-alpha colour with `uOpacity` folded
+into its alpha (§2.2). Measured against the CPU form over 216
+backdrop/stage/opacity combinations: agreement within 1/255.
+
+The GPU seeds the stage by blitting the current render target into the group
+FBO (`pushGroupFbo(w, h, seedFromTarget=true)`), which is a 1:1 copy because a
+live stack is always isolated into a canvas-sized FBO (§2.1) and every group
+therefore renders inside one.
+
+**Two things Pass Through deliberately does not do.**
+
+- **Layer effects demote the group to Isolated.** A shadow/glow/stroke is
+  generated from the node's *own* alpha, which only exists once the children
+  are composed against transparency; a pass-through stage is seeded with the
+  backdrop, so the same code would grow a shadow around everything underneath
+  the group. `isPassThroughGroup()` returns false when an effect is *enabled*
+  (`hasEnabledEffects()`, not `!effects.empty()` — the Layer Styles dialog
+  keeps the styles it has turned off), and PSD import reports it as the one
+  Pass Through case it cannot carry across.
+- **The group mask belongs in the interpolation factor, never in the stage.**
+  Masks are not on the data model yet (`hasGroupMask()` is `false`), and the
+  extension point for the isolated path is `applyGroupMask`. A pass-through
+  stage must not go through it: destination-in would punch the *backdrop* away
+  wherever the mask is black instead of leaving it unchanged there.
+
+**Nesting falls out of the recursion.** A pass-through group inside a
+pass-through group reaches the document backdrop; a pass-through group inside
+an isolated one reaches the isolation boundary and stops; an isolated group
+inside a pass-through one keeps isolating. One pruning rule needs the model
+explicitly, though: `subtreeAffectsComposite` descends into a group that holds
+no included layer when it is pass-through and carries a visible Normal-Mode
+adjustment, because that adjustment acts on the backdrop — an adjustment-only
+pass-through group over the stack below it is a normal way to work, and the
+old layer-only test dropped it silently.
+
 ---
 
 ## 5. Merge semantics (consumes the CPU path)
@@ -809,7 +914,7 @@ through the normal CPU path.
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
 | Async layer-style bake | `renderer/StyleBakePool.*`, `renderer/AsyncStyleBaker.*` (§2.4.1) |
-| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp` |
+| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp`; group compositing model in `core/LayerTreeNode.hpp` (§4.5) |
 | Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
 | Caches | `cache/RenderCache.*` |
 | Layer data | `core/Layer.*`, `core/LayerTreeNode.hpp` (`computeEffectedImage`, `computeStyledBaseImage`, `clone`/`shallowClone`), `core/RasterLayerStorage.*`, `core/TileManager.*` |

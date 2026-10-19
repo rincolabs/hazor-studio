@@ -1423,6 +1423,13 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             emit imageChanged();
         }
     }
+    else if (toolName == "set_group_pass_through") {
+        int idx = getInt("index", m_doc->activeFlatIndex);
+        if (idx < 0) idx = m_doc->activeFlatIndex;
+        setNodeGroupBlendMode(idx, getInt("pass_through", 1) != 0
+            ? LayerTreeNode::GroupBlendMode::PassThrough
+            : LayerTreeNode::GroupBlendMode::Isolated);
+    }
     else if (toolName == "float_selection") {
         bool cut = getInt("cut", 0) != 0;
         if (!m_doc->selection.active() || m_doc->selection.isEmpty()) {

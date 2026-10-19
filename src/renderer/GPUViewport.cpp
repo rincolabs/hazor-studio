@@ -912,9 +912,13 @@ void GPUViewport::drawAdjustmentPass(int adjustmentType,
 
 // ── Group FBO ──────────────────────────────────────────────────
 
-void GPUViewport::pushGroupFbo(int vpW, int vpH)
+void GPUViewport::pushGroupFbo(int vpW, int vpH, bool seedFromTarget)
 {
     unsigned int fbo = 0, tex = 0;
+    // Captured before anything is rebound: the Pass Through seed copies out of
+    // whatever is currently being drawn into.
+    GLint srcFbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &srcFbo);
     // Reuse a pooled canvas-sized FBO when one matches; purge stale sizes so a
     // document resize doesn't leave dead full-canvas textures behind. The pool
     // exists because the live compositor pushes a group FBO every interactive
@@ -973,8 +977,37 @@ void GPUViewport::pushGroupFbo(int vpW, int vpH)
     glDisable(GL_SCISSOR_TEST);
 
     glViewport(0, 0, vpW, vpH);
-    glClearColor(0, 0, 0, 0);
-    glClear(GL_COLOR_BUFFER_BIT);
+
+    // A Pass Through group's children blend against the layers *below* the
+    // group, so its buffer starts as the backdrop rather than as transparency.
+    // The copy is a straight blit because both sides are the same canvas-sized
+    // render target in the same canvas-NDC space (the live stack is always
+    // isolated into one — LayerCompositor::composite), which is exactly the
+    // condition tested here: a differently-sized target is the screen, where
+    // the "backdrop" would be the canvas decorations, so there is nothing we
+    // would want to seed from and the usual clear applies.
+    bool seeded = false;
+    if (seedFromTarget && savedVp[2] == vpW && savedVp[3] == vpH) {
+        auto* extra = QOpenGLContext::currentContext()
+                          ? QOpenGLContext::currentContext()->extraFunctions()
+                          : nullptr;
+        if (extra) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(srcFbo));
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+            extra->glBlitFramebuffer(savedVp[0], savedVp[1],
+                                     savedVp[0] + vpW, savedVp[1] + vpH,
+                                     0, 0, vpW, vpH,
+                                     GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            // Back to binding both targets at the new FBO, which is the
+            // state the clear path below leaves behind.
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            seeded = true;
+        }
+    }
+    if (!seeded) {
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
     m_groupFboStack.push_back(
         {fbo, tex, vpW, vpH,
          {savedVp[0], savedVp[1], savedVp[2], savedVp[3]},
@@ -986,7 +1019,8 @@ void GPUViewport::pushGroupFbo(int vpW, int vpH)
 void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                const QPointF& canvasHalfExtents,
                                const QMatrix4x4& viewMvp,
-                               bool editingMask)
+                               bool editingMask,
+                               bool passThrough)
 {
     if (m_groupFboStack.empty()) return;
     auto entry = m_groupFboStack.back();
@@ -1037,7 +1071,57 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
     // SamplingShaderLib.hpp.
     const bool viewStep = !nested;
 
-    if (needsShaderBlend(static_cast<int>(groupNode->blendMode))) {
+    if (passThrough) {
+        // Pass Through: the FBO was seeded with the backdrop (pushGroupFbo's
+        // seedFromTarget) and the children were composited on top of it, so it
+        // already holds "backdrop with the group applied". Merging it back is
+        // therefore an interpolation towards that result by the group's
+        // opacity, not a composite *over* the target — source-over would count
+        // the backdrop a second time and come out too opaque wherever it is
+        // semi-transparent. This is the fixed-function form of the CPU path's
+        // compositePassThroughStage, and it has to agree with it pixel for
+        // pixel.
+        //
+        // The main shader emits straight-alpha colour with uOpacity folded into
+        // the alpha it outputs, so with t in both uOpacity and the blend
+        // constant the factors below evaluate to
+        //   rgb: Cs·(As·t) + Cd·(1-t)   = premultiplied(src)·t + dst·(1-t)
+        //   a:   As·t      + Ad·(1-t)
+        // i.e. exactly mix(dst, src, t) on premultiplied colour and alpha.
+        const float t = std::clamp(groupNode->opacity, 0.0f, 1.0f);
+        glBlendColor(0.0f, 0.0f, 0.0f, t);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA,
+                            GL_ONE, GL_ONE_MINUS_CONSTANT_ALPHA);
+        glBlendEquation(GL_FUNC_ADD);
+        glEnable(GL_BLEND);
+
+        m_mainProg->bind();
+        m_vao.bind();
+        m_mainProg->setUniformValue(m_mainU.transform, mvp);
+        m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
+        m_mainProg->setUniformValue(m_mainU.texture, 0);
+        m_mainProg->setUniformValue(m_mainU.opacity, t);
+        m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
+        m_mainProg->setUniformValue(m_mainU.instanced, 0);
+        setMainSourcePremultiplied(true);
+        setMainAlphaWeightedSampling(true);
+        setMainSharpMagnification(viewStep);
+        setMainMipLevels(0);
+        // Same render-target V-flip as the branches below.
+        setUVUniforms(QVector2D(1.0f, -1.0f), QVector2D(0.0f, 1.0f));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, entry.tex);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        setMainSharpMagnification(false);
+        setMainSourcePremultiplied(false);
+        setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
+
+        // Restore the standard source-over factors: these constant-alpha ones
+        // are this draw's alone. The blend *constant* is left as it is on
+        // purpose — nothing else selects a GL_CONSTANT_* factor, so it is read
+        // by no other draw, and re-setting it would only be noise.
+        applyFixedBlend(static_cast<int>(BlendMode::Normal));
+    } else if (needsShaderBlend(static_cast<int>(groupNode->mergeBlendMode()))) {
         // Two-pass blend: copy the current target (dst) into m_blendTex, then run
         // the blend shader sampling src = group FBO, dst = m_blendTex. All sizing
         // uses the restored target viewport (entry.vp) — not the canvas-sized FBO —
@@ -1087,7 +1171,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                          static_cast<float>(tw),
                                          static_cast<float>(th));
             m_blendProg->setUniformValue(m_blendU.blendMode,
-                                         blendModeMap(static_cast<int>(groupNode->blendMode)));
+                                         blendModeMap(static_cast<int>(groupNode->mergeBlendMode())));
             m_blendProg->setUniformValue(m_blendU.opacity, groupNode->opacity);
             m_blendProg->setUniformValue(m_blendU.hasMask, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskDensity, 0.0f);
@@ -1142,7 +1226,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         }
     } else {
         // Normal blend: draw with applyBlendMode
-        applyFixedBlend(static_cast<int>(groupNode->blendMode));
+        applyFixedBlend(static_cast<int>(groupNode->mergeBlendMode()));
         m_mainProg->bind();
         m_vao.bind();
         m_mainProg->setUniformValue(m_mainU.transform, mvp);

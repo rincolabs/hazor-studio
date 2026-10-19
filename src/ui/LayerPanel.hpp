@@ -119,6 +119,10 @@ private:
 
     QComboBox* m_kindCombo = nullptr;
     QComboBox* m_blendCombo = nullptr;
+    // Whether m_blendCombo currently carries the group-only "Pass Through"
+    // entry. Tracked so the combo is rebuilt when the active node changes
+    // between a group and a layer, and not on every property refresh.
+    bool m_blendComboHasPassThrough = false;
     ScrubbableValueInput* m_opacitySlider = nullptr;
     QButtonGroup* m_lockGroup = nullptr;
 

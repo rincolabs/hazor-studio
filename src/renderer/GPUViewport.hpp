@@ -167,12 +167,24 @@ public:
                          const QVector2D& maskUvScale = QVector2D(1.0f, 1.0f),
                          const QVector2D& maskUvOffset = QVector2D(0.0f, 0.0f));
 
-    // Group FBO
-    void pushGroupFbo(int vpW, int vpH);
+    // Group FBO.
+    //
+    // seedFromTarget starts the FBO as a 1:1 copy of the current render target
+    // instead of transparent — the Pass Through group model, where the children
+    // must keep blending against the backdrop outside the group. It only has
+    // an effect while another group FBO of the same size is already bound (the
+    // live stack always isolates into one, see LayerCompositor::composite); a
+    // target of a different size cannot be copied 1:1 and is cleared as usual.
+    //
+    // passThrough makes the pop an interpolation towards the FBO instead of a
+    // composite over the target, because a seeded FBO already contains the
+    // backdrop. Push and pop must agree on it — see popGroupFbo.
+    void pushGroupFbo(int vpW, int vpH, bool seedFromTarget = false);
     void popGroupFbo(LayerTreeNode* groupNode,
                      const QPointF& canvasHalfExtents,
                      const QMatrix4x4& viewMvp,
-                     bool editingMask);
+                     bool editingMask,
+                     bool passThrough = false);
 
     // Adjustment-layer pass (live GPU path). Copies the current render target
     // into the blend scratch texture and re-draws the canvas quad with the

@@ -16,6 +16,7 @@
 #include <QSize>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -1429,11 +1430,21 @@ private:
 
 class NodePropertyCommand : public Command {
 public:
+    // beforeGroupBlend/afterGroupBlend are the Group compositing model
+    // (Isolated vs Pass Through). They are optional because the combo that
+    // sets a group's Pass Through is the *same* control as the blend mode (see
+    // LayerTreeNode::GroupBlendMode), so those two properties change together
+    // and in one history step — while every other user of this command
+    // (opacity, visibility) must leave the model alone rather than reset it.
     NodePropertyCommand(Document* doc, int flatIndex,
                         float beforeOp, float afterOp,
                         bool beforeVis, bool afterVis,
                         BlendMode beforeBlend, BlendMode afterBlend,
-                        QString commandName)
+                        QString commandName,
+                        std::optional<LayerTreeNode::GroupBlendMode> beforeGroupBlend
+                            = std::nullopt,
+                        std::optional<LayerTreeNode::GroupBlendMode> afterGroupBlend
+                            = std::nullopt)
         : m_doc(doc)
         , m_flatIndex(flatIndex)
         , m_beforeOp(beforeOp)
@@ -1442,26 +1453,31 @@ public:
         , m_afterVis(afterVis)
         , m_beforeBlend(beforeBlend)
         , m_afterBlend(afterBlend)
+        , m_beforeGroupBlend(beforeGroupBlend)
+        , m_afterGroupBlend(afterGroupBlend)
         , m_name(std::move(commandName))
     {}
 
     void execute() override {
-        apply(m_afterOp, m_afterVis, m_afterBlend);
+        apply(m_afterOp, m_afterVis, m_afterBlend, m_afterGroupBlend);
     }
 
     void undo() override {
-        apply(m_beforeOp, m_beforeVis, m_beforeBlend);
+        apply(m_beforeOp, m_beforeVis, m_beforeBlend, m_beforeGroupBlend);
     }
 
     QString name() const override { return m_name; }
 
 private:
-    void apply(float op, bool vis, BlendMode bm) {
+    void apply(float op, bool vis, BlendMode bm,
+               std::optional<LayerTreeNode::GroupBlendMode> gbm) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (node) {
             node->opacity = op;
             node->visible = vis;
             node->blendMode = bm;
+            if (gbm)
+                node->groupBlendMode = *gbm;
             // A nested adjustment (Single Layer Mode) bakes opacity/visibility
             // into its parent layer's effected image — invalidate on undo/redo.
             if (node->type == LayerTreeNode::Type::Adjustment)
@@ -1478,6 +1494,8 @@ private:
     bool m_afterVis;
     BlendMode m_beforeBlend;
     BlendMode m_afterBlend;
+    std::optional<LayerTreeNode::GroupBlendMode> m_beforeGroupBlend;
+    std::optional<LayerTreeNode::GroupBlendMode> m_afterGroupBlend;
     QString m_name;
 };
 

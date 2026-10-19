@@ -252,11 +252,26 @@ void applyRowData(QTreeWidgetItem* item, LayerTreeNode* node, int flatIndex)
 }
 } // namespace
 
+// Pass Through is not a BlendMode value — it is a Group's compositing model
+// (LayerTreeNode::GroupBlendMode) — but it belongs in this combo all the same:
+// it is the alternative to blending the group's composed result, so offering
+// it anywhere else would let the user ask for both at once. It carries a
+// sentinel in the item data that cannot collide with a BlendMode (which is a
+// non-negative enum, persisted in .hzr and in the tool API).
+static constexpr int kPassThroughComboData = -1;
+
 // The combo is built from blend::pickerEntries() (renderer/BlendRules.hpp):
 // grouped order with separators, so the row index is NOT the BlendMode
-// value — the mode rides in the item data.
-static void fillBlendCombo(QComboBox* combo)
+// value — the mode rides in the item data. `withPassThrough` prepends the
+// group-only entry; the combo is rebuilt only when that flag flips (see
+// updateTopBarFromActiveLayer), never per selection change.
+static void fillBlendCombo(QComboBox* combo, bool withPassThrough)
 {
+    combo->clear();
+    if (withPassThrough) {
+        combo->addItem(LayerPanel::tr("Pass Through"), kPassThroughComboData);
+        combo->insertSeparator(combo->count());
+    }
     for (const auto& e : blend::pickerEntries()) {
         if (!e.label) {
             combo->insertSeparator(combo->count());
@@ -275,7 +290,9 @@ static int blendModeToComboIndex(const QComboBox* combo, BlendMode mode)
 static BlendMode comboIndexToBlendMode(const QComboBox* combo, int idx)
 {
     const QVariant data = combo->itemData(idx);
-    return data.isValid() ? static_cast<BlendMode>(data.toInt()) : BlendMode::Normal;
+    if (!data.isValid() || data.toInt() == kPassThroughComboData)
+        return BlendMode::Normal;
+    return static_cast<BlendMode>(data.toInt());
 }
 
 LayerPanel::LayerPanel(QWidget* parent)
@@ -315,7 +332,7 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     m_blendCombo = new QComboBox(m_blendRow);
 
-    fillBlendCombo(m_blendCombo);
+    fillBlendCombo(m_blendCombo, m_blendComboHasPassThrough);
     m_blendCombo->setToolTip(tr("Blending Mode"));
     m_blendCombo->setMinimumWidth(80);
     row1->addWidget(m_blendCombo, 1);
@@ -1227,6 +1244,15 @@ void LayerPanel::onBlendModeChanged(int index)
     auto* doc = m_controller->document();
     int active = doc->activeFlatIndex;
     if (active < 0 || active >= doc->flatCount()) return;
+    // One control, two properties: Pass Through switches the group's
+    // compositing model, everything else sets a blend mode (and, on a group,
+    // switches the model back). Both controller entry points record one
+    // history step, so the user sees a single undoable "Set Blend Mode".
+    if (m_blendCombo->itemData(index).toInt() == kPassThroughComboData) {
+        m_controller->setNodeGroupBlendMode(
+            active, LayerTreeNode::GroupBlendMode::PassThrough);
+        return;
+    }
     m_controller->setNodeBlendMode(active, comboIndexToBlendMode(m_blendCombo, index));
 }
 
@@ -1691,6 +1717,14 @@ void LayerPanel::updateTopBarFromActiveLayer()
     auto* doc = m_controller->document();
     int active = doc->activeFlatIndex;
     if (active < 0 || active >= doc->flatCount()) {
+        // Nothing active: drop back to the layer form of the combo so index 0
+        // is Normal rather than the group-only Pass Through entry.
+        if (m_blendComboHasPassThrough) {
+            m_blendComboHasPassThrough = false;
+            m_blendCombo->blockSignals(true);
+            fillBlendCombo(m_blendCombo, false);
+            m_blendCombo->blockSignals(false);
+        }
         m_blendCombo->setCurrentIndex(0);
         m_opacitySlider->setValue(100);
         return;
@@ -1699,8 +1733,21 @@ void LayerPanel::updateTopBarFromActiveLayer()
     auto* node = doc->nodeAt(active);
     if (!node) return;
 
+    // Pass Through is a Group-only choice, so the entry appears only while a
+    // group is active. Rebuilding is gated on the flag actually flipping: this
+    // function runs on every selection/property refresh, and clearing a combo
+    // the user may have open is not something to do for nothing.
+    const bool wantPassThrough = node->type == LayerTreeNode::Type::Group;
     m_blendCombo->blockSignals(true);
-    m_blendCombo->setCurrentIndex(blendModeToComboIndex(m_blendCombo, node->blendMode));
+    if (wantPassThrough != m_blendComboHasPassThrough) {
+        m_blendComboHasPassThrough = wantPassThrough;
+        fillBlendCombo(m_blendCombo, wantPassThrough);
+    }
+    m_blendCombo->setCurrentIndex(
+        node->groupBlendMode == LayerTreeNode::GroupBlendMode::PassThrough
+            && wantPassThrough
+            ? m_blendCombo->findData(kPassThroughComboData)
+            : blendModeToComboIndex(m_blendCombo, node->blendMode));
     m_blendCombo->blockSignals(false);
 
     int opacityPct = static_cast<int>(node->opacity * 100.0f);

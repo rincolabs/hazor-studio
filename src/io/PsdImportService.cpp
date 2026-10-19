@@ -75,17 +75,25 @@ void applyCommonGroupProps(const psd::LayerRecord& rec, Context& ctx, LayerTreeN
     const auto divider = rec.sectionDivider();
     const psd::BlendMode effective = (divider && divider->blendMode) ? *divider->blendMode : rec.blendMode;
     const bool passThrough = effective.kind() == psd::BlendMode::Kind::PassThrough;
-    // Pass Through gets its own, more specific line below; routing it through
-    // mapBlendMode as well would report the same group twice.
+    // Pass Through is a group's compositing model in Hazor as well
+    // (LayerTreeNode::GroupBlendMode), not a blend mode, so it maps onto that
+    // field and leaves the blend slot at Normal. Routing it through
+    // mapBlendMode would look for a BlendMode that does not exist.
+    node.groupBlendMode = passThrough ? LayerTreeNode::GroupBlendMode::PassThrough
+                                      : LayerTreeNode::GroupBlendMode::Isolated;
     node.blendMode = passThrough ? BlendMode::Normal : mapBlendMode(effective, ctx, node.name);
     node.lockFlags = lockFlagsFromRecord(rec);
     node.collapsed = divider && divider->kind.kind() == psd::SectionType::Kind::ClosedFolder;
     convertLayerEffects(rec, ctx, node.name, node.effects);
     reportUnsupportedLayerProperties(rec, ctx, node.name, /*clippingHonoured=*/false);
-    if (passThrough) {
+    if (passThrough && node.hasEnabledEffects()) {
+        // The one case the native model cannot carry: an effect needs the
+        // group's own alpha, which only an isolated composite produces — see
+        // LayerTreeNode::isPassThroughGroup().
         ctx.warn(QCoreApplication::translate("PsdImportService",
-            "Group \"%1\" uses Pass Through blending; Hazor always isolates group contents, "
-            "so layers below the group may look different.").arg(node.name));
+            "Group \"%1\" combines Pass Through blending with layer effects; Hazor isolates "
+            "the group's contents in that case, so layers below it may look different.")
+            .arg(node.name));
     }
 }
 
