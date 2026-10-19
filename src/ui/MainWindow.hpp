@@ -415,6 +415,12 @@ private:
     // new tab whose single layer carries RawLayerData (Fase 5), so it stays
     // non-destructively re-revealable instead of a flattened import.
     void openRawFileAsNewTab(const QString& path);
+    // .psd/.psb extensions are diverted here from onOpenFile(): parses the
+    // file with the psd library and converts it to a native document via
+    // PsdImportService, off the UI thread, behind an "Importing PSD" /
+    // "Converting…" progress dialog. Shows the compatibility report
+    // afterwards when PsdImportResult::warnings is non-empty.
+    void openPsdFileAsNewTab(const QString& path);
     // File > Open Recent item handler: activates the tab already showing
     // `path` if there is one, offers to remove `path` from the list if it no
     // longer exists, otherwise opens it via openPathAsNewTab().

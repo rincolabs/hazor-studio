@@ -53,6 +53,13 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   the current develop result directly above it; the original RAW Layer is kept,
   hidden and still re-developable, and the copy becomes the selected layer so
   the same tool paints on it from the next stroke on.
+- **PSD/PSB import** — open PSD/PSB documents (File → Open) straight into a
+  native Hazor document: layers, groups, masks, text, shapes, Smart Objects,
+  adjustment layers, layer styles, blend modes and document properties are
+  converted to their Hazor equivalent where one exists. Conversion runs in
+  the background behind a progress dialog, and a Compatibility Report lists
+  anything that had no Hazor equivalent and could not be carried over.
+  Saving stays in Hazor's native `.hazor` format.
 - **Selections** — Rectangular, elliptical, lasso, magic wand, quick select, and
   magnetic lasso, with feather/grow/shrink refinement, saved alpha channels, and
   quick mask.

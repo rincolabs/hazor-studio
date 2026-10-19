@@ -483,6 +483,16 @@ add_executable(Hazor WIN32
     src/io/ProjectFileService.hpp
     src/io/RecentFilesManager.cpp
     src/io/RecentFilesManager.hpp
+    src/io/PsdEngineData.hpp
+    src/io/PsdEngineData.cpp
+    src/io/PsdImportService.hpp
+    src/io/PsdImportService.cpp
+    src/io/PsdImportService_Internal.hpp
+    src/io/PsdImportService_Common.cpp
+    src/io/PsdImportService_Adjustments.cpp
+    src/io/PsdImportService_Shape.cpp
+    src/io/PsdImportService_Effects.cpp
+    src/io/PsdImportService_Text.cpp
 
     # ── Smart Objects (tmp/feat-smartobjects.md) ──
     # A Smart Object instance is an ordinary Type::Layer whose Layer carries a

@@ -81,6 +81,7 @@
 #include "smartobject/DocumentContainer.hpp"
 #include "smartobject/SmartObjectTransfer.hpp"
 #include "io/RecentFilesManager.hpp"
+#include "io/PsdImportService.hpp"
 #include "color/ColorManagementService.hpp"
 #include "color/ColorProfile.hpp"
 #include "raw/RawDevelopParams.hpp"
@@ -142,6 +143,7 @@
 #include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QEventLoop>
+#include <QFile>
 #include <QFutureWatcher>
 #include <QtConcurrent>
 #include <algorithm>
@@ -3629,7 +3631,7 @@ void MainWindow::onOpenFile()
         .section(QStringLiteral(";;"), 0, 0);
     const int parenClose = combinedFilter.lastIndexOf(QLatin1Char(')'));
     if (parenClose != -1)
-        combinedFilter.insert(parenClose, QStringLiteral(" *.hazor *.HAZOR *.hzs *.HZS"));
+        combinedFilter.insert(parenClose, QStringLiteral(" *.hazor *.HAZOR *.hzs *.HZS *.psd *.PSD *.psb *.PSB"));
 
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open Project or Image"), {}, combinedFilter);
@@ -3652,6 +3654,14 @@ void MainWindow::openPathAsNewTab(const QString& path)
     if (RawEngine::isSupportedExtension(
             normalizeImageExtension(QFileInfo(path).suffix()).toStdString())) {
         openRawFileAsNewTab(path);
+        return;
+    }
+
+    // PSD/PSB are their own import pipeline (PsdImportService), not a codec:
+    // they carry layers, masks, text, shapes and adjustments the generic
+    // codec path would flatten away.
+    if (path.endsWith(".psd", Qt::CaseInsensitive) || path.endsWith(".psb", Qt::CaseInsensitive)) {
+        openPsdFileAsNewTab(path);
         return;
     }
 
@@ -3912,6 +3922,99 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         result.pp3 = QString::fromStdString(params.toPP3String());
         result.developedSize = QSize(buffer.width, buffer.height);
         result.geometry = buffer.geometry;
+        return result;
+    }));
+}
+
+namespace {
+// Worker-thread result for openPsdFileAsNewTab()'s QtConcurrent job: parses
+// the file and converts it in one background pass (PsdImportService stays
+// independent of the UI thread entirely).
+struct PsdOpenResult {
+    bool ok = false;
+    QString errorMessage;
+    PsdImportResult import;
+};
+} // namespace
+
+void MainWindow::openPsdFileAsNewTab(const QString& path)
+{
+    beginProgressDelayed(tr("Importing PSD"), tr("Converting…"), false);
+    auto* watcher = new QFutureWatcher<PsdOpenResult>(this);
+    connect(watcher, &QFutureWatcher<PsdOpenResult>::finished, this, [this, watcher, path]() {
+        // takeResult(), not result(): PsdImportResult::roots is a vector of
+        // unique_ptr, so the future's result is move-only.
+        PsdOpenResult loaded = watcher->future().takeResult();
+        watcher->deleteLater();
+        closeProgress();
+
+        if (!loaded.ok) {
+            AppMessageDialog::warning(this, tr("Could Not Open PSD"), loaded.errorMessage);
+            return;
+        }
+
+        PsdImportResult& imp = loaded.import;
+        m_tabWidget->setUpdatesEnabled(false);
+        const QString title = QFileInfo(path).fileName();
+        auto& tab = createTab(title, imp.canvasSize);
+        if (m_doc) {
+            m_doc->resolutionDpi = imp.resolutionDpi;
+            m_doc->colorMode = imp.colorMode;
+            m_doc->bitDepth = imp.bitDepth;
+            m_doc->setColorProfile(imp.colorProfile);
+            m_doc->setProfileSource(imp.profileSource);
+            m_doc->guideManager.setGuides(std::move(imp.guides));
+            m_doc->selection.resize(imp.canvasSize.width(), imp.canvasSize.height());
+            m_doc->roots = std::move(imp.roots);
+            m_doc->activeFlatIndex = m_doc->roots.empty() ? -1 : 0;
+            m_doc->selectedFlatIndices.clear();
+            if (!m_doc->roots.empty())
+                m_doc->selectedFlatIndices.insert(0);
+        }
+        // Smart Object layers each got a freshly built content Document;
+        // register them in this tab's own container now that it exists
+        // (PsdImportResult has none of its own — see PsdImportService.hpp).
+        if (tab.container) {
+            for (auto& [docId, content] : imp.embeddedSmartObjects)
+                tab.container->addDocumentWithId(docId, content);
+        }
+        if (m_ctrl)
+            m_ctrl->refreshAllSmartObjectInstances(/*afterLoad=*/true);
+        if (m_canvas) {
+            m_canvas->syncLayersToGpu();
+            m_canvas->fitToView();
+            m_canvas->update();
+        }
+
+        tab.currentProjectPath.clear();
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
+        tab.isDirty = false;
+        RecentFilesManager::instance()->addFile(path);
+        m_tabWidget->setUpdatesEnabled(true);
+        updateStatusFromDocument();
+        refreshLayerPanel();
+        refreshPropertiesPanel();
+        updateLayerMenuState();
+        updateDirtyUi();
+
+        if (!imp.warnings.isEmpty()) {
+            AppMessageDialog::warning(this, tr("PSD Import — Compatibility Report"),
+                tr("The document was imported successfully, but some features are not supported "
+                   "by Hazor Studio."),
+                imp.warnings.join(QLatin1Char('\n')));
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([path]() {
+        PsdOpenResult result;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            result.errorMessage = tr("Could not read \"%1\".").arg(QFileInfo(path).fileName());
+            return result;
+        }
+        result.import = PsdImportService::importFromBytes(file.readAll());
+        result.ok = result.import.ok;
+        if (!result.ok)
+            result.errorMessage = result.import.errorMessage;
         return result;
     }));
 }

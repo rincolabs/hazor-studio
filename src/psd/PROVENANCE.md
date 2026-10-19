@@ -85,6 +85,11 @@ same algorithms and observable behavior:
 
 Standalone library + test suite, built via `add_subdirectory(src/psd)` from
 the root `CMakeLists.txt`. `Hazor` links `psd` (so `./scripts/build.sh`
-exercises the whole library on every build), but nothing in Hazor's own code
-includes or calls it yet — integration with Hazor's document system
-(`src/io/`) is deliberately deferred to a later change.
+exercises the whole library on every build).
+
+Integrated with Hazor's document system via `src/io/PsdImportService*`
+(File → Open for `.psd`/`.psb`): the import service is the only Hazor code
+that includes this library, keeping the parser itself independent of
+Hazor's document model as the modules above do. See
+`PsdImportService.cpp`'s file comment for the conversion policy (what has a
+Hazor equivalent is converted; the rest is reported, not approximated).
