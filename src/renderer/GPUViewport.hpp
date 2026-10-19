@@ -186,6 +186,39 @@ public:
                      bool editingMask,
                      bool passThrough = false);
 
+    // ── Clipping-mask alpha (docs/RENDER-PIPELINE.md §4.6) ──
+    //
+    // Captures ONE layer's isolated alpha into a dedicated canvas-sized texture
+    // that the layers clipped to it then multiply their own alpha by. The target
+    // is pushed onto the same stack the group FBOs use (so a nested push/pop
+    // inside the capture — a Single-Layer-Mode base isolating itself — restores
+    // the capture target and not the stack entry below it), but it is NOT
+    // composited anywhere on pop: the texture *is* the result.
+    //
+    // It must be its own buffer rather than the current render target: the clip
+    // reads the base layer's own alpha, never the alpha accumulated from the
+    // layers underneath it.
+    //
+    // `owner` identifies whose alpha the texture holds, so a caller can tell a
+    // reusable capture from a stale one even when a nested level re-captured in
+    // between. Returns false when a capture is already open or the target could
+    // not be allocated; `endClipAlphaCapture` is a no-op in that case.
+    bool beginClipAlphaCapture(int vpW, int vpH, const void* owner);
+    void endClipAlphaCapture();
+    const void* clipAlphaOwner() const { return m_clipOwner; }
+
+    // Drops the captured alpha and disarms. Must run once per frame: a capture
+    // is only valid for the frame it was taken in — the base's pixels, mask,
+    // transform or opacity may all have changed since. Within a frame the owner
+    // is what lets one capture serve the whole run of layers clipped to it.
+    void resetClipAlpha();
+
+    // Arms the capture for the draws that follow: while enabled, every main- and
+    // blend-shader draw multiplies its source alpha by the captured alpha. Must
+    // be disarmed again around anything that is not the clipped layer's own
+    // merge into its target — see LayerCompositor::renderNodes.
+    void setClipAlphaEnabled(bool enabled);
+
     // Adjustment-layer pass (live GPU path). Copies the current render target
     // into the blend scratch texture and re-draws the canvas quad with the
     // adjustment applied — non-destructive, mirroring the CPU compositor's
@@ -294,6 +327,18 @@ private:
     };
     std::vector<PooledFbo> m_groupFboPool;
 
+    // ── Clipping-mask alpha ──
+    // One canvas-sized buffer, kept outside the group pool because it survives
+    // the push/pop of the clipped layer's own isolation and is read as a texture
+    // while that happens. A single buffer is enough because a clipping run is
+    // contiguous: between a capture and the last draw that uses it, only the
+    // run's own layers are drawn, and none of them captures.
+    unsigned int m_clipFbo = 0, m_clipTex = 0;
+    int m_clipTexW = 0, m_clipTexH = 0;
+    bool m_clipCapturing = false;        // a capture is open (guards re-entry)
+    bool m_clipEnabled = false;          // the next draws multiply by m_clipTex
+    const void* m_clipOwner = nullptr;   // whose alpha m_clipTex holds
+
     // ── Tile renderer ──
     TileRenderer m_tileRenderer;
 
@@ -349,6 +394,8 @@ private:
         QVector2D mainUvOffset{-2.0f, -2.0f};
         QVector2D mainMaskUvScale{-2.0f, -2.0f};
         QVector2D mainMaskUvOffset{-2.0f, -2.0f};
+        float mainHasClip = -2.0f;
+        QVector2D mainClipSize{-2.0f, -2.0f};
         // Solid program
         QMatrix4x4 solidTransform;
         QVector4D solidColor{-2.0f, -2.0f, -2.0f, -2.0f};
@@ -368,6 +415,7 @@ private:
         GLint uvScale = -1, uvOffset = -1;
         GLint maskUvScale = -1, maskUvOffset = -1;
         GLint instanced = -1;
+        GLint clipTexture = -1, hasClip = -1, clipSize = -1;
     } m_mainU;
 
     // ── Uniform layout: solid program ──
@@ -381,6 +429,7 @@ private:
         GLint maskUvScale = -1, maskUvOffset = -1;
         GLint srcPremultiplied = -1, dstPremultiplied = -1;
         GLint sharpMagnify = -1, mipLevels = -1;
+        GLint clipTexture = -1, hasClip = -1, clipSize = -1;
     } m_blendU;
 
     // ── Uniform layout: selection program ──
@@ -438,6 +487,13 @@ private:
     void initCheckerTexture();
     void collectUniforms();
     bool ensureBlendTarget(int viewportW, int viewportH);
+    bool ensureClipTarget(int viewportW, int viewportH);
+    // Pushes the clipping-mask uniforms of the CURRENT arm state onto the main
+    // program. Called by setMainUniforms and by every popGroupFbo branch that
+    // sets the main uniforms by hand, so no main-shader draw can miss (or
+    // inherit) the clip.
+    void applyMainClipUniforms();
+    void applyBlendClipUniforms();
     void setMainSourcePremultiplied(bool premultiplied);
     void setMainAlphaWeightedSampling(bool enabled);
     // Lets the resampling box narrow below one texel when magnifying (crisp

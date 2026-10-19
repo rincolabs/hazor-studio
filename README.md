@@ -27,6 +27,17 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   stroke, glows, overlays…), blend modes, grouping, and multi-layer transforms.
   Any layer or group can also be exported on its own (Export Layer/Group As...),
   trimmed to its rendered bounds or kept at the document's canvas size.
+- **Clipping masks** — any layer can be clipped to the one below it
+  (**Layer ▸ Create Clipping Mask**, `Ctrl+Alt+G`, Alt-click the line between two
+  rows, or the layer's context menu). The clipped layer shows only where the base
+  layer is opaque, reading its alpha per pixel — so partial transparency, soft
+  brush edges and antialiasing come through as gradual coverage rather than a
+  hard cut-out. Nothing is baked: the clipped layer keeps its own pixels, mask,
+  opacity, blend mode and layer styles, several layers can share one base, and
+  editing the base updates all of them. The base can be a Pixel, Text, Shape,
+  RAW or Smart Object layer, or a **group** — clipping a layer to the combined
+  shape of a group below it works the same way. Clipped layers live inside groups
+  and nested groups, and survive duplication, reordering, undo/redo and saving.
 - **Group blending: Normal or Pass Through** — a group's blend-mode menu offers
   **Pass Through** alongside the ordinary modes. Normally a group composites its
   layers in isolation and merges the finished result; Pass Through lets them

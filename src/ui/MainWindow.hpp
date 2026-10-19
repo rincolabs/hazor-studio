@@ -335,7 +335,7 @@ private:
     void groupSelectedLayers();     // Ctrl+G
     void ungroupSelectedLayers();   // Ctrl+Shift+G
     void arrangeActiveLayer(int kind); // 0=forward 1=backward 2=front 3=back
-    void toggleActiveClipping();    // Ctrl+Alt+G (adjustment clipping)
+    void toggleActiveClipping();    // Ctrl+Alt+G (Create/Release Clipping Mask)
     // Applies a numeric Transform-panel edit (W/H/X/Y/rotation) to the active
     // layer through the centralized transform path. `field` is a
     // PropertiesPanel::TransformField; `value` is px or degrees.
@@ -609,6 +609,9 @@ private:
     QAction* m_mergeLayersAction = nullptr;
     QAction* m_flattenImageAction = nullptr;
     QAction* m_rasterizeLayerAction = nullptr;
+    // Layer ▸ Create/Release Clipping Mask — one action whose label follows the
+    // selection (see updateLayerMenuState).
+    QAction* m_clippingMaskAction = nullptr;
     QAction* m_layerStylesAction = nullptr;
     QAction* m_flipHorizontalAction = nullptr;
     QAction* m_flipVerticalAction = nullptr;

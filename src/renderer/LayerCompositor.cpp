@@ -117,6 +117,11 @@ void LayerCompositor::composite(Document* doc,
 {
     Q_UNUSED(grayscaleMaskView);
     const QTransform identity;
+    // No frame may inherit the previous frame's clipping-mask capture: the base
+    // may have been painted on, masked, moved or faded since. This also clears
+    // the arm, which the main shader shares with the canvas decorations and the
+    // projection display.
+    gpu->resetClipAlpha();
 
     const bool isolate = treeHasBlendMode(doc->roots)
                       || treeHasStackAdjustment(doc->roots)
@@ -169,7 +174,8 @@ void LayerCompositor::renderNodes(
     GPUViewport* gpu,
     bool hasTargetAccum,
     const QTransform& targetAccum,
-    const QTransform& invTargetAccum)
+    const QTransform& invTargetAccum,
+    const LayerTreeNode* soleNode)
 {
     QOpenGLFunctions* gl = QOpenGLContext::currentContext()
                                ? QOpenGLContext::currentContext()->functions()
@@ -190,6 +196,11 @@ void LayerCompositor::renderNodes(
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
         if (!node->visible) continue;
+        // Clip-alpha capture: this pass renders one base and nothing else. The
+        // check sits above the Adjustment and Group branches so a Group base is
+        // reached by it too, and its children are then drawn by the recursive
+        // call, which clears the filter.
+        if (soleNode && node != soleNode) continue;
 
         // ── Normal-Mode adjustment: full-canvas pass over the backdrop ──
         // Everything below this node in the current scope is already in the
@@ -505,6 +516,41 @@ void LayerCompositor::renderNodes(
                 node->invalidateEffects();
         }
 
+        // ── Clipping mask (docs/RENDER-PIPELINE.md §4.6) ──
+        // The clip multiplies this layer's source alpha by the BASE layer's own
+        // alpha — captured into its own canvas-sized buffer, never read from the
+        // current render target, which already holds every layer below. Mirrors
+        // DocumentCompositor::renderNodesFiltered, which resolves the base with
+        // the same LayerTreeNode predicates.
+        bool clipArmed = false;
+        if (node->isClippedLayer()) {
+            const LayerTreeNode* base =
+                LayerTreeNode::resolveClipBase(nodes, static_cast<size_t>(i));
+            if (base) {
+                // A hidden base hides its whole run (its alpha is zero
+                // everywhere) — the CPU path skips the layer for the same reason.
+                if (!base->visible) continue;
+                if (gpu->clipAlphaOwner() != base
+                    && gpu->beginClipAlphaCapture(doc->size.width(),
+                                                  doc->size.height(), base)) {
+                    const QTransform identity;
+                    renderNodes(nodes, doc, viewMvp, canvasHalfExtents, editingMask,
+                                hasPreview, previewTexture, forceFullResLod,
+                                /*showMaskOverlay=*/false, maskOverlayOpacity, gpu,
+                                /*hasTargetAccum=*/true, identity, identity,
+                                /*soleNode=*/base);
+                    gpu->endClipAlphaCapture();
+                    gpu->mainProgram()->bind();
+                    gpu->bindMainVao();
+                }
+                // The owner check also covers a failed capture: without a buffer
+                // holding this base's alpha the layer is drawn unclipped, which
+                // is the same fallback the data model uses for an unresolvable
+                // base. Better a too-wide layer than a blank one.
+                clipArmed = (gpu->clipAlphaOwner() == base);
+            }
+        }
+
         // ── Single Layer Mode (clipped adjustment) — live GPU preview ──
         // A layer hosting visible adjustment children is composited like a
         // one-layer group: isolate the masked base into a canvas-sized FBO, run
@@ -533,7 +579,12 @@ void LayerCompositor::renderNodes(
                         editingMask, /*hasPreview*/false, 0, forceFullResLod,
                         showMaskOverlay, maskOverlayOpacity, gpu,
                         /*hasTargetAccum*/true, identity, identity);
+            // The clip belongs to the composite-back, not to the passes inside
+            // the FBO: it must scale the finished (base + adjustments) result
+            // once, the way the CPU path clips computeEffectedImage's output.
+            gpu->setClipAlphaEnabled(clipArmed);
             gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask);
+            gpu->setClipAlphaEnabled(false);
             gpu->mainProgram()->bind();
             gpu->bindMainVao();
 
@@ -568,6 +619,12 @@ void LayerCompositor::renderNodes(
             }
             continue;
         }
+
+        // Every draw below merges this layer straight into the target, so the
+        // clip is armed across all of them (tiles included — the clip is indexed
+        // in document space, so a per-tile quad samples the right texels) and
+        // disarmed again before the loop moves on.
+        gpu->setClipAlphaEnabled(clipArmed);
 
         // ── Compute per-layer MVP ──
         QTransform totalTransform = hasTargetAccum
@@ -847,6 +904,7 @@ void LayerCompositor::renderNodes(
                                                maskOverlayOpacity, rubyOff, rubyScl);
                 }
             }
+            gpu->setClipAlphaEnabled(false);
             continue;
         }
 
@@ -982,6 +1040,7 @@ void LayerCompositor::renderNodes(
                 }
             }
         }
+        gpu->setClipAlphaEnabled(false);
     }
 }
 

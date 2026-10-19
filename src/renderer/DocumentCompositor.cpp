@@ -397,7 +397,16 @@ QTransform buildImgToCanvas(const LayerTreeNode* node, const Layer* layer,
     return imgToNdc * node->accumulatedTransform() * ndcToPixel;
 }
 
-// Renders a single Layer node into `target` (canvas-sized, premultiplied).
+// Builds a single Layer node's canvas-sized, premultiplied stage: its source
+// pixels placed through the img→canvas transform with its mask applied, but
+// WITHOUT its opacity and blend mode — those belong to compositeStage, which
+// merges the stage into the target. Null when the node has nothing to draw.
+//
+// Split out of drawLayerNode because a clipping base needs exactly this image's
+// alpha (docs/RENDER-PIPELINE.md §4.6) and nothing else: not the accumulated
+// backdrop, and not the base's blend mode, which has no effect on the alpha it
+// contributes.
+//
 // rawPixelNode: when this node IS rawPixelNode, render its stored pixels
 // straight — skipping its own layer effects and Single-Layer-Mode (clipped)
 // adjustment children, bypassing the baked effected image entirely. Used by
@@ -407,8 +416,8 @@ QTransform buildImgToCanvas(const LayerTreeNode* node, const Layer* layer,
 // double-up compounds every time the cloned pixels are themselves sampled
 // again). Other included layers keep rendering through their own effected
 // image as usual — they aren't being painted into, so no double-up risk.
-void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* doc,
-                   const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode = nullptr)
+QImage buildLayerStage(const LayerTreeNode* node, const Document* doc,
+                       const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode)
 {
     auto* layer = node->layer.get();
     const bool bypassEffects = rawPixelNode && node == rawPixelNode;
@@ -423,7 +432,7 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
                                          : layer->rasterBaseSize();
     const int baseW = baseSize.width();
     const int baseH = baseSize.height();
-    if (baseW <= 0 || baseH <= 0) return;
+    if (baseW <= 0 || baseH <= 0) return QImage();
 
     const QImage source = useShapeBase ? layer->renderImage()
                                        : bypassEffects ? node->baseRenderImage()
@@ -433,7 +442,7 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
                                                              : node->effectedImageBounds();
     const int lw = source.width();
     const int lh = source.height();
-    if (lw <= 0 || lh <= 0) return;
+    if (lw <= 0 || lh <= 0) return QImage();
 
     const QTransform imgToCanvas = buildImgToCanvas(node, layer, sourceBounds,
                                                     baseW, baseH, ndcToPixel, isShapeSprite);
@@ -531,8 +540,70 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
     }
 
     layerPainter.end();
+    return stage;
+}
 
+// Renders a single Layer node into `target` (canvas-sized, premultiplied) with
+// its own blend mode and opacity. See buildLayerStage for `rawPixelNode`.
+void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* doc,
+                   const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode = nullptr)
+{
+    const QImage stage = buildLayerStage(node, doc, ndcToPixel, rawPixelNode);
+    if (stage.isNull()) return;
     DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
+}
+
+// The per-pixel alpha a clipping base contributes, in canvas coordinates: the
+// alpha of the base's own stage, scaled by the base node's opacity. One byte
+// per document pixel — a quarter of what keeping the whole stage would cost,
+// and the colour is never needed.
+//
+// Folding the base's opacity in here is what this kind of editor does (fading
+// the base fades everything clipped to it) and it is applied exactly once: the
+// stage carries no opacity of its own, and the clipped layer's opacity is a
+// separate factor applied by its own compositeStage.
+QImage clipAlphaFromStage(const QImage& stage, float opacity)
+{
+    if (stage.isNull()) return QImage();
+    const int o = std::clamp(static_cast<int>(std::lround(opacity * 255.0f)), 0, 255);
+    QImage out(stage.size(), QImage::Format_Grayscale8);
+    for (int y = 0; y < stage.height(); ++y) {
+        const QRgb* src = reinterpret_cast<const QRgb*>(stage.constScanLine(y));
+        uchar*      dst = out.scanLine(y);
+        for (int x = 0; x < stage.width(); ++x)
+            dst[x] = static_cast<uchar>((qAlpha(src[x]) * o + 127) / 255);
+    }
+    return out;
+}
+
+// alphaClipped = alphaSource × alphaBase, applied to a clipped layer's
+// premultiplied stage so the product goes into the *normal* blend — no second
+// mask is created, and the backdrop already in the target is never read.
+//
+// Every channel is scaled, not just alpha: the stage is premultiplied, so
+// scaling colour by the same factor is what keeps it premultiplied. Rounding is
+// monotonic, so colour ≤ alpha survives it and Qt's compositing cannot produce
+// the out-of-range speck resampleAffine clamps for.
+void applyClipAlpha(QImage& stage, const QImage& clipAlpha)
+{
+    // Both buffers are canvas-sized by construction — buildLayerStage always
+    // renders into doc->size — which is what makes the pairing below a straight
+    // index match with no sampling in between.
+    if (stage.size() != clipAlpha.size()) return;
+    for (int y = 0; y < stage.height(); ++y) {
+        QRgb*        row = reinterpret_cast<QRgb*>(stage.scanLine(y));
+        const uchar* a   = clipAlpha.constScanLine(y);
+        for (int x = 0; x < stage.width(); ++x) {
+            const int ca = a[x];
+            if (ca == 255) continue;
+            if (ca == 0) { row[x] = 0; continue; }
+            const QRgb p = row[x];
+            row[x] = qRgba((qRed(p)   * ca + 127) / 255,
+                           (qGreen(p) * ca + 127) / 255,
+                           (qBlue(p)  * ca + 127) / 255,
+                           (qAlpha(p) * ca + 127) / 255);
+        }
+    }
 }
 
 // Scales every (premultiplied) channel of `stage` by the adjustment factor
@@ -739,6 +810,30 @@ void renderNodesFiltered(QImage& target,
                          bool forceDirectGroups,
                          const LayerTreeNode* rawPixelNode = nullptr);
 
+// A Group's own composite: its children against TRANSPARENCY, then the group
+// mask and the group effects — i.e. the isolated model's stage, before the
+// group's opacity and blend mode are applied to it.
+//
+// This is the alpha a clipping run reads from a group base (§4.6), and it is
+// the group's *own* content by definition: a Pass Through group's children see
+// the backdrop when the group is composited for real, but what a clip asks for
+// is the group's silhouette, so the capture isolates them. Same choice layer
+// effects make for a pass-through group (isPassThroughGroup()).
+QImage buildGroupStage(const LayerTreeNode* group, const Document* doc,
+                       const QTransform& ndcToPixel,
+                       const std::function<bool(const LayerTreeNode*)>& includeLayer,
+                       bool applyAdjustments, bool forceDirectGroups,
+                       const LayerTreeNode* rawPixelNode)
+{
+    QImage stage(doc->size, QImage::Format_ARGB32_Premultiplied);
+    stage.fill(Qt::transparent);
+    renderNodesFiltered(stage, group->children, doc, ndcToPixel, includeLayer,
+                        applyAdjustments, forceDirectGroups, rawPixelNode);
+    applyGroupMask(stage, group);                 // no-op until group masks exist
+    applyGroupEffects(stage, group, doc->size);
+    return stage;
+}
+
 void renderNodes(QImage& target,
                  const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
                  const Document* doc, const QTransform& ndcToPixel)
@@ -791,6 +886,14 @@ void renderNodesFiltered(QImage& target,
                          bool forceDirectGroups,
                          const LayerTreeNode* rawPixelNode)
 {
+    // Clipping-mask state for THIS sibling level (§4.6). A run of clipped
+    // layers shares one base, so the base's alpha is extracted once — while the
+    // base itself is being drawn, since the bottom→top walk reaches it first —
+    // and then reused by every layer in the run. Recursion gives each level its
+    // own copy, so a nested group cannot invalidate an outer run's alpha.
+    const LayerTreeNode* clipAlphaOwner = nullptr;
+    QImage clipAlpha;
+
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
         if (!node->visible) continue;
@@ -808,6 +911,13 @@ void renderNodesFiltered(QImage& target,
         if (node->type == LayerTreeNode::Type::Group) {
             if (!subtreeAffectsComposite(node, includeLayer, applyAdjustments))
                 continue;
+            // §4.6: a group can be the base of a clipping run. The alpha the run
+            // reads is the group's own content, which only an ISOLATED composite
+            // holds — so the isolated model below hands its stage over, and the
+            // other two models pay one extra pass for the alpha alone.
+            const bool clipBaseGroup =
+                LayerTreeNode::isClipBase(nodes, static_cast<size_t>(i));
+            QImage ownStage;
             if (!forceDirectGroups && node->passThroughNeedsStage()) {
                 // Pass Through, with an opacity (or mask) of its own to apply
                 // to the group as a whole. The children still have to blend
@@ -842,16 +952,20 @@ void renderNodesFiltered(QImage& target,
                 // Isolated group model — the group's mask/effects/opacity/blend
                 // apply once to the composed children, in this order:
                 //   compose children -> group mask -> group effects -> opacity/blend
-                QImage groupStage(doc->size, QImage::Format_ARGB32_Premultiplied);
-                groupStage.fill(Qt::transparent);
-                renderNodesFiltered(groupStage, node->children, doc, ndcToPixel,
-                                    includeLayer, applyAdjustments,
-                                    forceDirectGroups, rawPixelNode);
-                applyGroupMask(groupStage, node);                 // no-op until group masks exist
-                applyGroupEffects(groupStage, node, doc->size);
-                DocumentCompositor::compositeStage(target, groupStage,
+                ownStage = buildGroupStage(node, doc, ndcToPixel, includeLayer,
+                                           applyAdjustments, forceDirectGroups,
+                                           rawPixelNode);
+                DocumentCompositor::compositeStage(target, ownStage,
                                                   node->mergeBlendMode(),
                                                   node->opacity);
+            }
+            if (clipBaseGroup) {
+                if (ownStage.isNull())
+                    ownStage = buildGroupStage(node, doc, ndcToPixel, includeLayer,
+                                               applyAdjustments, forceDirectGroups,
+                                               rawPixelNode);
+                clipAlphaOwner = node;
+                clipAlpha = clipAlphaFromStage(ownStage, node->opacity);
             }
             continue;
         }
@@ -861,7 +975,62 @@ void renderNodesFiltered(QImage& target,
         if (!includeLayer(node))
             continue;
 
-        drawLayerNode(target, node, doc, ndcToPixel, rawPixelNode);
+        // ── Clipping mask (docs/RENDER-PIPELINE.md §4.6) ──
+        // A clipped layer contributes only where its base is opaque:
+        //   alphaClipped = alphaSource × alphaBase
+        // read per pixel off the base's OWN alpha — never off the alpha
+        // accumulated in `target`, which already holds every layer below.
+        const LayerTreeNode* clipTo = nullptr;
+        if (node->isClippedLayer()) {
+            const LayerTreeNode* base =
+                LayerTreeNode::resolveClipBase(nodes, static_cast<size_t>(i));
+            // The clip needs the base to take part in THIS walk. A filtered
+            // composite that leaves it out — clone sampling of a single layer,
+            // a merge subset that excludes it — has no base alpha to read and
+            // draws the layer unclipped rather than inventing one. Export
+            // Layer As... never gets here at all (compositeIsolatedNode calls
+            // drawLayerNode directly).
+            if (base && includeLayer(base)) {
+                // A hidden base hides its whole run: its alpha is zero
+                // everywhere.
+                if (!base->visible)
+                    continue;
+                // Normally already cached from drawing the base a few
+                // iterations ago; rebuilt only when the base was reached
+                // through a path that did not draw it.
+                if (base != clipAlphaOwner) {
+                    clipAlphaOwner = base;
+                    const QImage baseStage =
+                        base->type == LayerTreeNode::Type::Group
+                            ? buildGroupStage(base, doc, ndcToPixel, includeLayer,
+                                              applyAdjustments, forceDirectGroups,
+                                              rawPixelNode)
+                            : buildLayerStage(base, doc, ndcToPixel, rawPixelNode);
+                    clipAlpha = clipAlphaFromStage(baseStage, base->opacity);
+                }
+                // A base with nothing to draw (an empty layer) lets nothing
+                // through, so the whole run is skipped.
+                if (clipAlpha.isNull())
+                    continue;
+                clipTo = base;
+            }
+        }
+
+        QImage stage = buildLayerStage(node, doc, ndcToPixel, rawPixelNode);
+        if (stage.isNull())
+            continue;
+        if (clipTo) {
+            applyClipAlpha(stage, clipAlpha);
+        } else if (LayerTreeNode::isClipBase(nodes, static_cast<size_t>(i))) {
+            // This node is a base: keep its alpha for the run above it, which
+            // the bottom→top walk has not reached yet. Extracting it here is
+            // what spares the run a second full stage build; it costs one
+            // byte-per-pixel pass, far less than the stage it reads.
+            clipAlphaOwner = node;
+            clipAlpha = clipAlphaFromStage(stage, node->opacity);
+        }
+        DocumentCompositor::compositeStage(target, stage, node->blendMode,
+                                           node->opacity);
     }
 }
 

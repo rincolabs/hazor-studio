@@ -2415,6 +2415,131 @@ void ImageController::setNodeGroupBlendMode(int flatIndex,
     if (m_doc) ++m_doc->compositionGeneration;
 }
 
+// ── Clipping masks ──────────────────────────────────────────────────────────
+//
+// The whole feature is a flag on a sibling (LayerTreeNode::clipped); the
+// compositors resolve the base from the sibling order, so nothing here has to
+// track or store a relationship. These helpers only locate the node among its
+// siblings, which is where "the layer below" is defined — the flat index is not
+// that, because it walks into groups and Single-Layer-Mode children.
+namespace {
+
+const std::vector<std::unique_ptr<LayerTreeNode>>* siblingsOf(const Document* doc,
+                                                              const LayerTreeNode* node)
+{
+    if (!doc || !node) return nullptr;
+    return node->parent ? &node->parent->children : &doc->roots;
+}
+
+// Index of `node` in its own sibling vector, or -1.
+int siblingIndexOf(const std::vector<std::unique_ptr<LayerTreeNode>>& siblings,
+                   const LayerTreeNode* node)
+{
+    for (size_t i = 0; i < siblings.size(); ++i) {
+        if (siblings[i].get() == node)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+} // namespace
+
+bool ImageController::isClippingMask(int flatIndex) const
+{
+    const auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    return node && node->isClippedLayer();
+}
+
+bool ImageController::isClippingMaskBase(int flatIndex) const
+{
+    const auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    const auto* siblings = siblingsOf(m_doc, node);
+    if (!siblings) return false;
+    const int idx = siblingIndexOf(*siblings, node);
+    return idx >= 0 && LayerTreeNode::isClipBase(*siblings, static_cast<size_t>(idx));
+}
+
+bool ImageController::canCreateClippingMask(int flatIndex) const
+{
+    const auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
+        return false;
+    if (node->clipped) return false;
+    const auto* siblings = siblingsOf(m_doc, node);
+    if (!siblings) return false;
+    const int idx = siblingIndexOf(*siblings, node);
+    return idx >= 0
+        && LayerTreeNode::resolveClipBase(*siblings, static_cast<size_t>(idx)) != nullptr;
+}
+
+void ImageController::toggleClippingMask(const std::vector<int>& flatIndices)
+{
+    if (!m_doc || flatIndices.empty()) return;
+
+    // Candidates, in flat order, restricted to the node type the flag means
+    // anything for. An adjustment in the selection is ignored here: it clips by
+    // becoming its host's child instead (MainWindow::toggleActiveClipping routes
+    // those to moveAdjustmentToLayer).
+    std::vector<LayerTreeNode*> candidates;
+    for (int idx : flatIndices) {
+        auto* node = m_doc->nodeAt(idx);
+        if (node && node->type == LayerTreeNode::Type::Layer && node->layer)
+            candidates.push_back(node);
+    }
+    if (candidates.empty()) return;
+
+    std::vector<ClippingMaskCommand::Entry> entries;
+    auto add = [&](LayerTreeNode* node, bool on) {
+        if (!node || node->clipped == on) return;
+        const int flat = flatIndexOfNode(m_doc, node);
+        if (flat < 0) return;
+        entries.push_back({flat, node->clipped, on});
+    };
+
+    const bool anyClipped = std::any_of(candidates.begin(), candidates.end(),
+                                        [](const LayerTreeNode* n) { return n->clipped; });
+    if (anyClipped) {
+        // Release: a selection that already contains clipped layers is read as
+        // "undo this", which is how a single toggle command is expected to act.
+        for (auto* node : candidates)
+            add(node, false);
+    } else {
+        for (auto* node : candidates) {
+            const auto* siblings = siblingsOf(m_doc, node);
+            if (!siblings) continue;
+            const int idx = siblingIndexOf(*siblings, node);
+            if (idx < 0) continue;
+            // Release Clipping Mask on the BASE releases everything clipped to
+            // it — selecting the base is the usual way to undo a whole run.
+            if (LayerTreeNode::isClipBase(*siblings, static_cast<size_t>(idx))) {
+                for (int j = idx - 1; j >= 0; --j) {
+                    if (!(*siblings)[j] || !(*siblings)[j]->isClippedLayer())
+                        break;
+                    add((*siblings)[j].get(), false);
+                }
+                continue;
+            }
+            if (LayerTreeNode::resolveClipBase(*siblings, static_cast<size_t>(idx)))
+                add(node, true);
+        }
+    }
+    if (entries.empty()) return;
+
+    const bool creating  = entries.front().after;
+    const int changedFlat = entries.front().flatIndex;
+    for (const auto& e : entries) {
+        if (auto* node = m_doc->nodeAt(e.flatIndex))
+            node->clipped = e.after;
+    }
+    ++m_doc->compositionGeneration;
+    m_history.push(std::make_unique<ClippingMaskCommand>(
+        m_doc, std::move(entries),
+        creating ? tr("Create Clipping Mask") : tr("Release Clipping Mask")));
+
+    emit layerChanged(changedFlat);
+    emit imageChanged();
+}
+
 static QString lockBitName(int flagBit, bool on)
 {
     const QString verb = on ? QObject::tr("Lock") : QObject::tr("Unlock");

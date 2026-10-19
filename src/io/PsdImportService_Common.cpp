@@ -136,9 +136,10 @@ void reportUnsupportedLayerProperties(const psd::LayerRecord& rec, Context& ctx,
 
     if (rec.clipping != 0 && !clippingHonoured) {
         ctx.warn(QCoreApplication::translate("PsdImportService",
-            "Layer \"%1\": it is clipped to the layer below it. Hazor only clips adjustment "
-            "layers, so this layer was imported unclipped and covers more than it did in "
-            "the original file.").arg(layerName));
+            "Layer \"%1\": it is clipped to the layer below it. Hazor can clip a layer or "
+            "an adjustment — including to a group — but not a group as a whole, so this one "
+            "was imported unclipped and covers more than it did in the original "
+            "file.").arg(layerName));
     }
 }
 

@@ -618,6 +618,22 @@ LayerPanel::LayerPanel(QWidget* parent)
                 });
             }
 
+            // Clipping Mask. One entry, labelled as whichever of the two
+            // commands applies (mirrors the Layer menu): Release on a clipped
+            // layer or on the base a run is clipped to, Create otherwise.
+            if (m_controller) {
+                const bool clipped = m_controller->isClippingMask(idx);
+                const bool isBase  = m_controller->isClippingMaskBase(idx);
+                if (clipped || isBase || m_controller->canCreateClippingMask(idx)) {
+                    menu.addSeparator();
+                    menu.addAction((clipped || isBase) ? tr("Release Clipping Mask")
+                                                       : tr("Create Clipping Mask"),
+                                   [this, idx]() {
+                        if (m_controller) m_controller->toggleClippingMask({idx});
+                    });
+                }
+            }
+
             if (m_controller) {
                 auto* node = m_controller->document() ? m_controller->document()->nodeAt(idx) : nullptr;
                 const bool isPixelLayer = node && node->type == LayerTreeNode::Type::Layer
@@ -1497,6 +1513,44 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
             if (m_controller)
                 m_controller->removeSelectedNodes();
             return true;
+        }
+    }
+    if (obj == m_tree->viewport() && event->type() == QEvent::MouseButtonPress) {
+        auto* mouseEvent = static_cast<QMouseEvent*>(event);
+        // Alt+click on the line BETWEEN two rows creates or releases the
+        // clipping mask of the upper one — the gesture this kind of editor
+        // established. The band covers both sides of the line so it does not
+        // need pixel-hunting, and it is only a few pixels tall: every other hit
+        // area in the row (eye, thumbnail, lock, fx) is vertically centred and
+        // well clear of it, so an Alt+click on those still reaches the delegate
+        // (solo visibility) untouched.
+        static constexpr int kClipBoundaryBand = 4;
+        if (m_controller && mouseEvent->button() == Qt::LeftButton
+            && (mouseEvent->modifiers() & Qt::AltModifier)) {
+            const QPoint pos = mouseEvent->pos();
+            QTreeWidgetItem* upper = nullptr;
+            if (auto* item = m_tree->itemAt(pos)) {
+                const QRect rect = m_tree->visualItemRect(item);
+                if (pos.y() >= rect.bottom() - kClipBoundaryBand) {
+                    upper = item;                        // the line below this row
+                } else if (pos.y() <= rect.top() + kClipBoundaryBand) {
+                    // The line above it, but only when the row there is a
+                    // SIBLING: across a container boundary (a group's last child
+                    // above a root-level layer) "the layer below" is in another
+                    // container, so the gesture has no unambiguous meaning.
+                    auto* above = m_tree->itemAbove(item);
+                    if (above && above->parent() == item->parent())
+                        upper = above;
+                }
+            }
+            if (upper) {
+                // layerChanged/imageChanged from the controller refresh the panel
+                // and the canvas, so there is nothing to do here but consume the
+                // click (it would otherwise also re-select a row).
+                m_controller->toggleClippingMask(
+                    {upper->data(0, Qt::UserRole).toInt()});
+                return true;
+            }
         }
     }
     if (obj == m_tree->viewport() && event->type() == QEvent::MouseButtonDblClick) {

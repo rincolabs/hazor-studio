@@ -628,8 +628,12 @@ MainWindow::MainWindow(QWidget* parent)
         addArrange(QStringLiteral("layer.arrange.backward"), tr("Send &Backward"),  1);
         addArrange(QStringLiteral("layer.arrange.to_back"),  tr("Send to &Back"),   3);
     }
-    addLayerMenuAction(layerMenu, QStringLiteral("layer.clipping.toggle"),
-                       tr("Create/Release &Clipping Mask"), &MainWindow::toggleActiveClipping);
+    // One action, label swapped in updateLayerMenuState between "Create" and
+    // "Release" — the Layer menu reads as the two commands it is, while the
+    // single Ctrl+Alt+G toggle keeps working on whatever the selection is.
+    m_clippingMaskAction =
+        addLayerMenuAction(layerMenu, QStringLiteral("layer.clipping.toggle"),
+                           tr("Create &Clipping Mask"), &MainWindow::toggleActiveClipping);
 
     // New Adjustment Layer > <adjustment>. Populated from the adjustment
     // registry so new adjustments appear here automatically.
@@ -4875,12 +4879,31 @@ void MainWindow::arrangeActiveLayer(int kind)
 void MainWindow::toggleActiveClipping()
 {
     if (!m_ctrl || !m_doc) return;
+    auto* node = m_doc->activeNode();
+    if (!node) return;
+
+    // Two mechanisms share this one command, because the user is asking for one
+    // thing ("clip this to the layer below") and the model stores it differently
+    // per node type:
+    //  - a Layer node carries a `clipped` flag and the compositors read the base
+    //    layer's alpha straight off its sibling (LayerTreeNode::isClippedLayer);
+    //  - an Adjustment node clips by BECOMING its host layer's child, which is
+    //    Single Layer Mode and is handled below.
+    if (node->type == LayerTreeNode::Type::Layer && node->layer) {
+        std::vector<int> indices(m_doc->selectedFlatIndices.begin(),
+                                 m_doc->selectedFlatIndices.end());
+        if (indices.empty() && m_doc->activeFlatIndex >= 0)
+            indices.push_back(m_doc->activeFlatIndex);
+        m_ctrl->toggleClippingMask(indices);
+        refreshLayersUi();
+        return;
+    }
+
     // "Single-Layer-Mode" here is a parent relationship: a clipped adjustment is
     // a child of its host Layer. The toggle moves the active adjustment between
     // the host's child list and the normal stack (both ops push an atomic
-    // LayerTreeStateCommand). Clipping is adjustment-only in this model.
-    auto* node = m_doc->activeNode();
-    if (!node || !node->isAdjustmentLayer()) return;
+    // LayerTreeStateCommand).
+    if (!node->isAdjustmentLayer()) return;
     const int adjIdx = m_doc->activeFlatIndex;
     const auto flat = m_doc->flatten();
     if (node->parent && node->parent->type == LayerTreeNode::Type::Layer) {
@@ -5097,6 +5120,26 @@ void MainWindow::updateLayerMenuState()
     m_mergeLayersAction->setEnabled(hasLayer && hasMultiple && !m_ctrl->anyFullyLockedVisibleLayer());
     m_flattenImageAction->setEnabled(hasDoc && m_ctrl && m_doc->flatCount() >= 1 && !m_ctrl->anyFullyLockedVisibleLayer());
     m_rasterizeLayerAction->setEnabled(hasLayer && !isAdjustment && !pixelsLocked);
+
+    // Clipping Mask: the label states which of the two commands the current
+    // selection would run, and the entry is disabled when neither applies (no
+    // layer below to clip to, and nothing clipped to release).
+    if (m_clippingMaskAction) {
+        const int activeIdx = hasDoc ? m_doc->activeFlatIndex : -1;
+        const bool clipped  = m_ctrl && m_ctrl->isClippingMask(activeIdx);
+        const bool isBase   = m_ctrl && m_ctrl->isClippingMaskBase(activeIdx);
+        const bool canClip  = m_ctrl && m_ctrl->canCreateClippingMask(activeIdx);
+        // An adjustment keeps the Single-Layer-Mode meaning of this command, so
+        // it stays enabled for one whenever a host layer exists below it.
+        const bool adjustmentClip = isAdjustment && activeNode
+            && (activeNode->parent
+                    ? activeNode->parent->type == LayerTreeNode::Type::Layer
+                    : hasMultiple);
+        m_clippingMaskAction->setText((clipped || isBase)
+                                          ? tr("Release &Clipping Mask")
+                                          : tr("Create &Clipping Mask"));
+        m_clippingMaskAction->setEnabled(clipped || isBase || canClip || adjustmentClip);
+    }
 
     // Smart Objects. Per-item gating, not one "is this a Smart Object?" switch:
     // it is what tells the user WHY something is unavailable — Embed Linked

@@ -38,6 +38,12 @@ static constexpr int kGroupIconSize = 24;
 static constexpr int kGroupBtnSize = 26;
 static constexpr int kMargin = 6;
 static constexpr int kIndent = 16;
+// Extra left inset of a clipped layer's row, plus the width reserved inside it
+// for the "clipped to the layer below" arrow. Follows the convention this kind
+// of editor established: the clipped rows sit in from their base and carry a
+// downward-right arrow, so a clipping run reads as one unit at a glance.
+static constexpr int kClipIndent = 14;
+static constexpr int kClipArrowSize = 9;
 static constexpr int kGap = 4;
 static constexpr int kArrowSize = 12;
 static constexpr int kThumbToLabelPadding = 16;
@@ -92,6 +98,30 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
     if (extraIndent > 0)
         painter->fillRect(r.left(), r.top(), extraIndent, r.height(), th->colorPanelBackground);
     int x = r.left() + extraIndent;
+
+    // Clipping indicator: an angled arrow pointing down-right at the base layer
+    // this row is clipped to, drawn in the inset childIndent() just reserved.
+    if (node->isClippedLayer()) {
+        const int cy = r.center().y();
+        const int cx = x - kClipIndent + (kClipIndent - kClipArrowSize) / 2;
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setOpacity(th->iconOpacity);
+        QPen pen(th->colorTextPrimary, 1.2);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        // Down, then right: the stem drops towards the base layer below and the
+        // head turns into the row, i.e. the standard elbow arrow. The whole
+        // glyph stays inside the kClipIndent gutter.
+        painter->drawLine(cx, cy - kClipArrowSize / 2, cx, cy + kClipArrowSize / 2);
+        painter->drawLine(cx, cy + kClipArrowSize / 2,
+                          cx + kClipArrowSize, cy + kClipArrowSize / 2);
+        painter->drawLine(cx + kClipArrowSize - 3, cy + kClipArrowSize / 2 - 3,
+                          cx + kClipArrowSize, cy + kClipArrowSize / 2);
+        painter->drawLine(cx + kClipArrowSize - 3, cy + kClipArrowSize / 2 + 3,
+                          cx + kClipArrowSize, cy + kClipArrowSize / 2);
+        painter->restore();
+    }
 
     QFont iconFont = painter->font();
     iconFont.setPixelSize(th->fontSizeMD);
@@ -640,12 +670,15 @@ LayerTreeNode* LayerItemDelegate::nodeFromIndex(const QModelIndex& index) const
 int LayerItemDelegate::childIndent(const QModelIndex& index) const
 {
     auto* node = nodeFromIndex(index);
+    // A clipping mask is a flag on a sibling, not a nesting level, so it does
+    // not come out of the parent walk — it is added on top of the real depth.
+    const int clipIndent = (node && node->isClippedLayer()) ? kClipIndent : 0;
     int depth = 0;
     while (node && node->parent) {
         ++depth;
         node = node->parent;
     }
-    return depth * kIndent;
+    return depth * kIndent + clipIndent;
 }
 
 QRect LayerItemDelegate::eyeRect(const QStyleOptionViewItem& option, const QModelIndex& index) const

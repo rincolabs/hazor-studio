@@ -256,6 +256,20 @@ public:
     // mode's control and history label because the two are one choice — see
     // LayerTreeNode::GroupBlendMode. No-op on non-Group nodes.
     void setNodeGroupBlendMode(int flatIndex, LayerTreeNode::GroupBlendMode mode);
+    // ── Clipping masks (LayerTreeNode::clipped) ──
+    // A clipped Layer node draws only where the base layer below it is opaque.
+    // Pure composite state: nothing is baked, so one history step is a flag flip
+    // per node. One Ctrl+Alt+G toggle, so one entry point:
+    //  - a clipped layer in the selection  → release it
+    //  - a base with a run clipped to it   → release the whole run
+    //  - anything else with a base below   → clip it
+    // Nodes without a resolvable base (the bottom of a container, a group below)
+    // are skipped; canCreateClippingMask reports that so the UI can grey out.
+    void toggleClippingMask(const std::vector<int>& flatIndices);
+    bool isClippingMask(int flatIndex) const;       // the node is clipped
+    bool isClippingMaskBase(int flatIndex) const;   // a run is clipped to it
+    bool canCreateClippingMask(int flatIndex) const;
+
     // Editing locks. setNodesLockBit toggles one LockFlag bit across a
     // (multi-)selection to a consistent on/off state; setNodeLockFlags sets the
     // full flag set on a single node. Both record one undoable history step.

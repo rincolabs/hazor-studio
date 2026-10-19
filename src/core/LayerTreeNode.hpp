@@ -60,6 +60,9 @@ public:
 
     bool collapsed = false;
     int lockFlags = LockNone;
+    // Clipping mask: draw only where the base layer below is opaque. See the
+    // isClippedLayer()/resolveClipBase() block further down for the semantics —
+    // the flag alone is not the whole rule.
     bool clipped = false;
 
     std::vector<LayerEffect> effects;
@@ -700,6 +703,72 @@ public:
     // This single hook lets the compositor route groups through the isolated
     // path once group masks exist — no other compositor change is required.
     bool hasGroupMask() const { return false; }
+
+    // ── Clipping masks (docs/RENDER-PIPELINE.md §4.6) ─────────────────────
+    //
+    // `clipped` means: limit this node's contribution to the effective alpha of
+    // its *base* — the first sibling below it that is not itself clipped. The
+    // base's alpha is read per pixel (its own transparency, its mask, its
+    // transform, its layer styles, its opacity), so partial transparency and
+    // antialiased edges survive. Nothing is baked: no raster mask is created and
+    // the clipped layer keeps its own pixels, mask, opacity, blend mode and
+    // layer styles.
+    //
+    // It is a flag on a *sibling*, not a parent relationship — which is what
+    // separates it from the other clipping mechanism in this model: an
+    // adjustment clipped to a layer becomes that layer's child (Single Layer
+    // Mode, see hasVisibleAdjustmentChildren). That is why `clipped` is only
+    // meaningful on Type::Layer nodes, and why the two never interact.
+    bool isClippedLayer() const {
+        return clipped && type == Type::Layer && layer != nullptr;
+    }
+
+    // May this node serve as the base a clipping run reads its alpha from?
+    // Pixel, Text, Shape, RAW and Smart Object layers all qualify — they are
+    // Type::Layer with drawable pixels of their own — and so does a Group,
+    // whose alpha is its children composed against transparency (§4.6). An
+    // Adjustment node does not: it has no alpha of its own, only a modifier on
+    // the backdrop.
+    bool canBeClipBase() const {
+        return type == Type::Group || (type == Type::Layer && layer != nullptr);
+    }
+
+    // Resolves the clipping base of `siblings[index]`: the first node BELOW it
+    // that is not part of the same clipping run. Child vectors are stored
+    // top-to-bottom, so "below" is a higher index.
+    //
+    // nullptr when that node cannot be a base (a group, an adjustment) or when
+    // there is none at all (the bottom of the container). A node whose base does
+    // not resolve renders unclipped, which is also what keeps a `clipped` flag
+    // harmless after the layer it clipped to was deleted or reordered away.
+    //
+    // Both compositors call this, so the run cannot be resolved two ways.
+    static const LayerTreeNode* resolveClipBase(
+        const std::vector<std::unique_ptr<LayerTreeNode>>& siblings, size_t index)
+    {
+        for (size_t j = index + 1; j < siblings.size(); ++j) {
+            const LayerTreeNode* candidate = siblings[j].get();
+            if (!candidate) continue;
+            if (candidate->isClippedLayer()) continue;   // same run — keep going down
+            return candidate->canBeClipBase() ? candidate : nullptr;
+        }
+        return nullptr;
+    }
+
+    // True when the sibling directly above `siblings[index]` clips to it, i.e.
+    // the node is the base of a clipping run. The run is contiguous, so the one
+    // neighbour decides it. Lets a compositor build the base's alpha in the same
+    // pass that draws the base, and lets Release Clipping Mask on a base release
+    // everything clipped to it.
+    static bool isClipBase(const std::vector<std::unique_ptr<LayerTreeNode>>& siblings,
+                           size_t index)
+    {
+        if (index == 0 || index >= siblings.size()) return false;
+        const LayerTreeNode* self = siblings[index].get();
+        if (!self || !self->canBeClipBase() || self->isClippedLayer()) return false;
+        const LayerTreeNode* above = siblings[index - 1].get();
+        return above && above->isClippedLayer();
+    }
 
     std::unique_ptr<LayerTreeNode> clone(bool preserveName = false) const {
         auto node = std::make_unique<LayerTreeNode>();

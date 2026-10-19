@@ -1565,6 +1565,33 @@ private:
     QString m_name;
 };
 
+// Clipping Mask (LayerTreeNode::clipped) across one or more nodes. Pure
+// composite state — no pixel moves and no mask is created — so execute/undo is
+// a flag flip plus the generation bump that makes the compositors re-read the
+// base layer's alpha.
+class ClippingMaskCommand : public Command {
+public:
+    struct Entry { int flatIndex; bool before; bool after; };
+
+    ClippingMaskCommand(Document* doc, std::vector<Entry> entries, QString commandName)
+        : m_doc(doc), m_entries(std::move(entries)), m_name(std::move(commandName)) {}
+
+    void execute() override { for (const auto& e : m_entries) apply(e.flatIndex, e.after); }
+    void undo() override { for (const auto& e : m_entries) apply(e.flatIndex, e.before); }
+    QString name() const override { return m_name; }
+
+private:
+    void apply(int flatIndex, bool clipped) {
+        if (auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr)
+            node->clipped = clipped;
+        if (m_doc) ++m_doc->compositionGeneration;
+    }
+
+    Document* m_doc;
+    std::vector<Entry> m_entries;
+    QString m_name;
+};
+
 class LayerEffectsCommand : public Command {
 public:
     LayerEffectsCommand(Document* doc, int flatIndex,

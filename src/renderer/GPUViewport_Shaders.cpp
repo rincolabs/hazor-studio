@@ -61,6 +61,16 @@ void GPUViewport::initShaders()
         uniform vec2 uUVOffset;
         uniform vec2 uMaskUVScale;
         uniform vec2 uMaskUVOffset;
+        // Clipping mask (docs/RENDER-PIPELINE.md §4.6): the base layer's own
+        // alpha, captured into a canvas-sized texture. Indexed by gl_FragCoord
+        // rather than by a UV, because the clip lives in DOCUMENT space while
+        // this quad's UVs are in the layer's — every live layer draw happens
+        // inside a canvas-sized FBO (LayerCompositor::composite), the same
+        // property Dissolve's dither relies on, so the fragment grid IS the
+        // document grid. Both buffers are GL render targets, so no V flip.
+        uniform sampler2D uClipTexture;
+        uniform float uHasClip;
+        uniform vec2 uClipSize;
         vec4 sampleSource(sampler2D tex, vec2 uv) {
             vec4 c = texture(tex, uv);
             if (uAlphaWeightedSampling > 0.5)
@@ -82,7 +92,13 @@ void GPUViewport::initShaders()
                 maskAlpha = texture(uMaskTexture, maskUV).r;
             }
             maskAlpha = mix(1.0, maskAlpha, uMaskDensity);
-            fragColor = vec4(c.rgb, c.a * uOpacity * maskAlpha);
+            float clipAlpha = 1.0;
+            if (uHasClip > 0.5)
+                clipAlpha = texture(uClipTexture, gl_FragCoord.xy / uClipSize).a;
+            // Straight-alpha out (sampleSource unpremultiplies), so the clip is
+            // one more factor on the alpha — alphaClipped = alphaSource × alphaBase
+            // — and the fixed-function blend below does the compositing.
+            fragColor = vec4(c.rgb, c.a * uOpacity * maskAlpha * clipAlpha);
         }
     )";
 
@@ -160,6 +176,11 @@ void GPUViewport::initShaders()
             uniform float uDstPremultiplied;
             uniform float uSharpMagnify;
             uniform int uMipLevels;
+            // Clipping mask — see the main shader for why this is indexed by
+            // gl_FragCoord and not by a UV.
+            uniform sampler2D uClipTexture;
+            uniform float uHasClip;
+            uniform vec2 uClipSize;
 
             vec4 sampleSource(sampler2D tex, vec2 uv) {
                 return sm_sampleSurface(
@@ -185,7 +206,10 @@ void GPUViewport::initShaders()
                     ? dst.rgb
                     : dst.rgb * dst.a;
                 vec3 srcColor = src.rgb;
-                src.a *= uOpacity * maskAlpha;
+                float clipAlpha = 1.0;
+                if (uHasClip > 0.5)
+                    clipAlpha = texture(uClipTexture, gl_FragCoord.xy / uClipSize).a;
+                src.a *= uOpacity * maskAlpha * clipAlpha;
                 // Dissolve: coverage becomes a per-pixel 0/1 dither keyed on
                 // the document pixel. gl_FragCoord is in the render target, so
                 // Y is flipped into the CPU compositor's row order; the live
@@ -230,6 +254,9 @@ void GPUViewport::initShaders()
     m_blendU.dstPremultiplied = m_blendProg->uniformLocation("uDstPremultiplied");
     m_blendU.sharpMagnify = m_blendProg->uniformLocation("uSharpMagnify");
     m_blendU.mipLevels   = m_blendProg->uniformLocation("uMipLevels");
+    m_blendU.clipTexture = m_blendProg->uniformLocation("uClipTexture");
+    m_blendU.hasClip     = m_blendProg->uniformLocation("uHasClip");
+    m_blendU.clipSize    = m_blendProg->uniformLocation("uClipSize");
 
     // ── Selection / Marching Ants program ──
     m_selectProg = new QOpenGLShaderProgram();
@@ -775,4 +802,7 @@ void GPUViewport::collectUniforms()
     m_mainU.maskUvScale = m_mainProg->uniformLocation("uMaskUVScale");
     m_mainU.maskUvOffset = m_mainProg->uniformLocation("uMaskUVOffset");
     m_mainU.instanced   = m_mainProg->uniformLocation("uInstanced");
+    m_mainU.clipTexture = m_mainProg->uniformLocation("uClipTexture");
+    m_mainU.hasClip     = m_mainProg->uniformLocation("uHasClip");
+    m_mainU.clipSize    = m_mainProg->uniformLocation("uClipSize");
 }

@@ -17,7 +17,8 @@ pixel by pixel, within the technical limits.
                         │  BlendMath.hpp         (C++ formulas)  │
                         │  BlendShaderLib.hpp    (GLSL formulas) │
                         │  SamplingShaderLib.hpp (GLSL resample) │
-                        │  LayerTreeNode.hpp     (group model)   │
+                        │  LayerTreeNode.hpp     (group model,   │
+                        │                         clipping run)  │
                         └────────────┬───────────────────────────┘
                        used by       │      used by
               ┌──────────────────────┴──────────────────────┐
@@ -81,6 +82,9 @@ composite()
      │                      popGroupFbo), transparent for Isolated and seeded
      │                      with the backdrop for Pass Through
      └─ Type::Layer:
+         ├─ clipping mask (isClippedLayer, §4.6): the base below is captured
+         │    into a dedicated canvas-sized alpha buffer (soleLayer re-render),
+         │    which every draw below multiplies its source alpha by
          ├─ Single Layer Mode (clippedAdjustmentsOnGpu):
          │    FBO per layer: drawLayerBaseIsolated() + clipped adjustments
          │    as GPU passes; popGroupFbo applies the real opacity/blend once
@@ -347,7 +351,7 @@ compositeFiltered
      │    pass-through stage = copy of the target → children → compositePassThroughStage;
      │    isolated: stage → group mask (future) → group effects
      │    (applyEffectStack, same stack used by layers) → compositeStage(blend, opacity)
-     └─ Layer → drawLayerNode:
+     └─ Layer → drawLayerNode (= buildLayerStage + compositeStage):
          ├─ source: computeEffectedImage() (bake of effects + clipped adjustments,
          │    mask included) or renderImage() (shape base); dabs = rasterStorage.toImage()
          ├─ transform: buildImgToCanvas (img→NDC→canvas, same chain as io/ImageIO
@@ -357,6 +361,8 @@ compositeFiltered
          │    (downscale) or a Keys cubic (upscale/rotate/sub-pixel offset) (§4.2);
          │    whole-pixel copy and projective transforms → QPainter
          ├─ mask: DestinationIn with density ramp mix(1, m, density)
+         ├─ clipping mask (§4.6): the stage's premultiplied channels are scaled
+         │    by the base layer's own stage alpha (applyClipAlpha)
          └─ compositeStage(target, stage, blendMode, opacity):
               modes with QPainter equivalent → native;
               Hue/Saturation/Color/Luminosity → compositeNonSeparable
@@ -480,9 +486,9 @@ source of truth. It is also the only reason the render is persisted in the
 
 ## 4. Shared specification layer
 
-Four files, one contract — three for blending, one for resampling — plus one
-decision that lives on the data model instead (the group compositing model,
-§4.5):
+Four files, one contract — three for blending, one for resampling — plus two
+decisions that live on the data model instead (the group compositing model,
+§4.5, and the clipping-mask run, §4.6):
 
 | File | Role |
 |---|---|
@@ -836,6 +842,137 @@ adjustment, because that adjustment acts on the backdrop — an adjustment-only
 pass-through group over the stack below it is a normal way to work, and the
 old layer-only test dropped it silently.
 
+### 4.6 Clipping masks
+
+A Layer node with `clipped` set contributes only where its **base** — the first
+sibling below it that is not itself clipped — is opaque:
+
+```
+alphaClipped(x, y) = alphaSource(x, y) · alphaBase(x, y)      in [0, 1]
+```
+
+Both compositors read the same three predicates off the data model
+([core/LayerTreeNode.hpp](../src/core/LayerTreeNode.hpp)), so the run cannot be
+resolved two ways:
+
+| Predicate | Meaning |
+|---|---|
+| `isClippedLayer()` | this node clips to the base below it (a `Type::Layer` with the flag) |
+| `canBeClipBase()` | the node may *be* a base — any `Type::Layer`, or a `Type::Group` |
+| `resolveClipBase(siblings, i)` / `isClipBase(siblings, i)` | the run's base, and the reverse question |
+
+**What `alphaBase` is.** The alpha of the base layer's own canvas-space stage —
+its stored transparency, its mask (with the density ramp), its layer styles and
+Single-Layer-Mode adjustments, its transform — times the base node's *opacity*.
+Three things it deliberately is **not**:
+
+- **Not the accumulated backdrop.** The render target already holds every layer
+  below; using its alpha would clip to the union of the whole stack. Both paths
+  build the base in a buffer of its own for exactly this reason.
+- **Not the base's blend mode.** W3C alpha compositing is `αo = αs + αb(1-αs)`,
+  independent of the colour blend function, so against a transparent buffer the
+  alpha is `αs` whatever the mode is. That is why the GPU capture can re-render
+  the base through the ordinary draw path without overriding anything, and why
+  the CPU reads `buildLayerStage` (which has no blend step at all).
+- **Not a raster mask.** Nothing is created, stored or baked; the clipped
+  layer's own pixels are untouched. It keeps its own mask, opacity, blend mode
+  and styles, and several layers can share one base.
+
+Base *opacity* is folded in, once, because fading the base fades everything
+clipped to it — the behaviour this kind of editor established. It lands in
+`alphaBase`, never in the clipped layer's own `compositeStage`/`uOpacity`, so it
+cannot be applied twice.
+
+**A group base's alpha is its children composed against transparency** —
+`buildGroupStage` (CPU), which is the isolated model's stage: children, then the
+group mask, then the group effects, before the group's opacity and blend mode.
+Only an *isolated* composite holds that, so the isolated path hands its stage
+over and the other two models (§4.5) pay one extra pass for the alpha alone. For
+a **Pass Through** group that is deliberately not the stage it composites with:
+its children see the backdrop when it is composited for real, while a clip asks
+for the group's own silhouette — the same choice layer effects make
+(`isPassThroughGroup()`). On the GPU all three models reduce to the same thing,
+because the capture buffer is transparent: `soleNode = group` renders it through
+whichever model it asks for and the result is "its own content × its opacity".
+
+Real files rely on this: a layer sitting directly above a group, clipped to the
+group's combined shape, is a normal way to mask artwork with a set of shapes,
+and PSDs in the wild are authored that way.
+
+**CPU** ([DocumentCompositor.cpp](../src/renderer/DocumentCompositor.cpp)):
+`buildLayerStage` was split out of `drawLayerNode` to serve this — the base's
+stage is built once, while the base is being drawn (the walk is bottom→top, so
+it reaches the base first), and `clipAlphaFromStage` keeps its alpha as one byte
+per document pixel. `applyClipAlpha` then scales **all four** premultiplied
+channels of each clipped layer's stage, which is what keeps it premultiplied;
+rounding is monotonic, so `colour ≤ alpha` survives it.
+
+**GPU** ([LayerCompositor.cpp](../src/renderer/LayerCompositor.cpp) +
+`GPUViewport::beginClipAlphaCapture`): the base is re-rendered into a dedicated
+canvas-sized FBO through `renderNodes(..., soleNode = base)` — the *same* draw
+code the stack uses, so the alpha the clip reads cannot disagree with the pixels
+the base shows. The filter sits above the Adjustment and Group branches, which is
+what lets a Group base go through it with its children following. The capture target is pushed onto the group-FBO stack (so a
+nested push/pop inside it — a Single-Layer-Mode base isolating itself — restores
+the capture target, not the stack entry below it) but is never composited back:
+the texture is the result. `setClipAlphaEnabled` then arms the main and blend
+shaders, which multiply their source alpha by `texture(uClipTexture,
+gl_FragCoord.xy / uClipSize).a`.
+
+Four properties of that shader lookup are load-bearing:
+
+- **It is indexed by `gl_FragCoord`, not by a UV.** The clip lives in document
+  space while a layer quad's UVs are in the layer's own space. A live stack is
+  always isolated into a canvas-sized FBO (§2.1), so the fragment grid *is* the
+  document grid — the same property Dissolve's dither depends on (§4.1). It is
+  also what makes the per-tile draws of a `rasterStorage` layer each sample the
+  right texels with no extra bookkeeping.
+- **No V flip.** Both the clip buffer and the render target are GL render
+  targets, so their row orders already agree.
+- **One buffer is enough.** A clipping run is contiguous, so between a capture
+  and the last draw that uses it only that run's own layers are drawn, and none
+  of them captures. `clipAlphaOwner()` identifies whose alpha the buffer holds
+  (compared, never dereferenced), so one capture serves the whole run, and
+  `resetClipAlpha()` drops it once per frame — a capture is only valid for the
+  frame it was taken in, since the base may have been painted on since.
+- **The arm is disarmed around anything that is not the merge.** For a clipped
+  layer that isolates itself for Single-Layer-Mode adjustments, the clip belongs
+  to the `popGroupFbo` composite-back — once, to the finished result — and must
+  be off while the base and the adjustment passes render *into* that FBO. Every
+  `popGroupFbo` branch pushes the current arm state through
+  `applyMainClipUniforms`/`applyBlendClipUniforms`, so no main-shader draw can
+  miss a clip or inherit one.
+
+**Two deliberate limits.**
+
+- **A group can be a base but cannot itself be clipped.** Being a base only
+  needs the group's own alpha, which `buildGroupStage` produces. Clipping the
+  group *itself* would mean scaling the alpha of whatever it merges with, and
+  two of its three models (§4.5) have no merge of their own to scale — the
+  children go straight into the target. PSD import reports a clipped group as
+  the one clipping case it cannot carry.
+- **The base's blend mode does not apply to the run.** Elsewhere a clipping
+  group composites as a unit through the base's blend mode; here each clipped
+  layer composites individually with its own mode, against the real backdrop.
+
+**Where the clip does not apply.** A filtered composite that leaves the base out
+of the walk draws the layer unclipped rather than inventing a base: clone/heal
+sampling of a single layer (`compositeOnlyFlatIndex`), a merge subset that
+excludes it, and `compositeIsolatedNode` (Export Layer As..., which calls
+`drawLayerNode` directly and documents itself as excluding every other node).
+A clipped layer whose base does not *resolve* — the bottom of a container, or an
+adjustment directly below it — is likewise drawn unclipped, which is what keeps a
+stale flag harmless after the base was deleted or reordered away. PSD import
+reports that case from `buildSiblingLevel`, using this same resolution, so the
+warning can never disagree with what is rendered. A **hidden** base is the
+one case that is not a fallback: its alpha is zero everywhere, so the whole run
+is skipped.
+
+The flag is pure composite state: `ClippingMaskCommand`
+([controller/Commands.hpp](../src/controller/Commands.hpp)) flips it and bumps
+`compositionGeneration`, which is what makes the clipped layers follow an edit to
+the base automatically (§2.5, invariant 4).
+
 ---
 
 ## 5. Merge semantics (consumes the CPU path)
@@ -914,7 +1051,7 @@ through the normal CPU path.
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
 | Async layer-style bake | `renderer/StyleBakePool.*`, `renderer/AsyncStyleBaker.*` (§2.4.1) |
-| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp`; group compositing model in `core/LayerTreeNode.hpp` (§4.5) |
+| Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp`; group compositing model (§4.5) and clipping-mask predicates (§4.6) in `core/LayerTreeNode.hpp` |
 | Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
 | Caches | `cache/RenderCache.*` |
 | Layer data | `core/Layer.*`, `core/LayerTreeNode.hpp` (`computeEffectedImage`, `computeStyledBaseImage`, `clone`/`shallowClone`), `core/RasterLayerStorage.*`, `core/TileManager.*` |

@@ -144,6 +144,8 @@ GPUViewport::~GPUViewport()
     if (m_displayLutTex) glDeleteTextures(1, &m_displayLutTex);
     if (m_sceneTex)      glDeleteTextures(1, &m_sceneTex);
     if (m_sceneFbo)      glDeleteFramebuffers(1, &m_sceneFbo);
+    if (m_clipTex)       glDeleteTextures(1, &m_clipTex);
+    if (m_clipFbo)       glDeleteFramebuffers(1, &m_clipFbo);
     for (auto& e : m_groupFboPool) {
         if (e.fbo) glDeleteFramebuffers(1, &e.fbo);
         if (e.tex) glDeleteTextures(1, &e.tex);
@@ -388,6 +390,61 @@ bool GPUViewport::ensureBlendTarget(int viewportW, int viewportH)
     return true;
 }
 
+// Canvas-sized RGBA8 target for the clipping-mask alpha. Same shape as
+// ensureBlendTarget, with one deliberate difference: GL_LINEAR filtering. The
+// clip is sampled at gl_FragCoord.xy, i.e. exactly on texel centres, so linear
+// is bit-exact here — and it is what keeps the sample correct if a future caller
+// ever reads the buffer at a different resolution.
+bool GPUViewport::ensureClipTarget(int viewportW, int viewportH)
+{
+    if (viewportW <= 0 || viewportH <= 0) return false;
+
+    GLint prevDrawFbo = 0;
+    GLint prevReadFbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFbo);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
+
+    if (m_clipFbo == 0) glGenFramebuffers(1, &m_clipFbo);
+    if (m_clipTex == 0) glGenTextures(1, &m_clipTex);
+    if (m_clipFbo == 0 || m_clipTex == 0) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
+        return false;
+    }
+
+    if (viewportW != m_clipTexW || viewportH != m_clipTexH) {
+        glBindTexture(GL_TEXTURE_2D, m_clipTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, viewportW, viewportH, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, m_clipFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, m_clipTex, 0);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            qWarning("Clip FBO incomplete: %x", status);
+            m_clipTexW = 0;
+            m_clipTexH = 0;
+            m_clipOwner = nullptr;
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
+            return false;
+        }
+        m_clipTexW = viewportW;
+        m_clipTexH = viewportH;
+        // The buffer was reallocated: whatever it held is gone.
+        m_clipOwner = nullptr;
+    }
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
+    return true;
+}
+
 // ── VAO binding helpers ───────────────────────────────────────
 
 void GPUViewport::bindMainVao()
@@ -405,11 +462,67 @@ void GPUViewport::resetUniformCache()
     m_uc = UniformCache{};
 }
 
+void GPUViewport::setClipAlphaEnabled(bool enabled)
+{
+    const bool want = enabled && m_clipTex != 0 && m_clipTexW > 0 && m_clipTexH > 0;
+    if (want == m_clipEnabled) return;
+    m_clipEnabled = want;
+    // Unit 3 is the clip's alone (main uses 0/1, blend 0/1/2), so the binding can
+    // be made once per arm instead of per tile draw. Leave unit 0 active: every
+    // draw path assumes it.
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, m_clipEnabled ? m_clipTex : 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+void GPUViewport::resetClipAlpha()
+{
+    setClipAlphaEnabled(false);
+    m_clipOwner = nullptr;
+}
+
+void GPUViewport::applyMainClipUniforms()
+{
+    const float hc = m_clipEnabled ? 1.0f : 0.0f;
+    const QVector2D size(static_cast<float>(m_clipTexW),
+                         static_cast<float>(m_clipTexH));
+    // The size is part of the cache key, not just the flag: a document resize
+    // reallocates the buffer while the flag may well stay 1, and a stale
+    // uClipSize would offset every clip lookup.
+    if (qFuzzyCompare(1.0f + m_uc.mainHasClip, 1.0f + hc)
+        && (hc <= 0.0f || m_uc.mainClipSize == size))
+        return;
+    m_mainProg->setUniformValue(m_mainU.hasClip, hc);
+    // Pinned even while disarmed: left at its default the sampler would share
+    // unit 0 with uTexture, which is legal but reads as a mistake.
+    m_mainProg->setUniformValue(m_mainU.clipTexture, 3);
+    m_uc.mainHasClip = hc;
+    if (hc > 0.0f) {
+        m_mainProg->setUniformValue(m_mainU.clipSize, size);
+        m_uc.mainClipSize = size;
+    }
+}
+
+void GPUViewport::applyBlendClipUniforms()
+{
+    const float hc = m_clipEnabled ? 1.0f : 0.0f;
+    m_blendProg->setUniformValue(m_blendU.hasClip, hc);
+    m_blendProg->setUniformValue(m_blendU.clipTexture, 3);
+    if (hc > 0.0f) {
+        m_blendProg->setUniformValue(m_blendU.clipSize,
+                                     QVector2D(static_cast<float>(m_clipTexW),
+                                               static_cast<float>(m_clipTexH)));
+    }
+}
+
 void GPUViewport::setMainUniforms(const QMatrix4x4& mvp, float opacity,
                                    bool hasMask, float maskDensity)
 {
     m_mainProg->setUniformValue(m_mainU.texture, 0);
     m_mainProg->setUniformValue(m_mainU.maskTexture, 1);
+    // Follows the arm state, which is off for everything but a clipped layer's
+    // own merge — so no other main-shader draw can pick a clip up.
+    applyMainClipUniforms();
     setMainSourcePremultiplied(false);
     setMainAlphaWeightedSampling(true);
     // Off by default for every main-shader draw: only the doc→screen view steps
@@ -765,6 +878,7 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
     // a smooth filter, so the GPU must magnify it the same way.
     m_blendProg->setUniformValue(m_blendU.sharpMagnify, 0.0f);
     m_blendProg->setUniformValue(m_blendU.mipLevels, 0);
+    applyBlendClipUniforms();
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, srcTexture);
@@ -1016,6 +1130,65 @@ void GPUViewport::pushGroupFbo(int vpW, int vpH, bool seedFromTarget)
 
 }
 
+bool GPUViewport::beginClipAlphaCapture(int vpW, int vpH, const void* owner)
+{
+    if (m_clipCapturing) return false;
+    if (!ensureClipTarget(vpW, vpH)) return false;
+
+    // Same bookkeeping as pushGroupFbo — saved viewport/scissor, scissor off for
+    // the canvas-sized render — but onto a buffer the pool does not own, and
+    // with no composite-back on pop. See the comments there for why each piece
+    // is needed.
+    GLint savedVp[4] = {0, 0, vpW, vpH};
+    glGetIntegerv(GL_VIEWPORT, savedVp);
+    GLint savedScissor[4] = {0, 0, vpW, vpH};
+    glGetIntegerv(GL_SCISSOR_BOX, savedScissor);
+    const GLboolean scissorOn = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_clipFbo);
+    glViewport(0, 0, vpW, vpH);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    m_groupFboStack.push_back(
+        {m_clipFbo, m_clipTex, vpW, vpH,
+         {savedVp[0], savedVp[1], savedVp[2], savedVp[3]},
+         {savedScissor[0], savedScissor[1], savedScissor[2], savedScissor[3]},
+         scissorOn});
+
+    // The base is captured UNCLIPPED: a base is by definition not itself part of
+    // the run, and leaving the previous arm set would multiply the old alpha in.
+    setClipAlphaEnabled(false);
+    m_clipCapturing = true;
+    m_clipOwner = owner;
+    return true;
+}
+
+void GPUViewport::endClipAlphaCapture()
+{
+    if (!m_clipCapturing) return;
+    m_clipCapturing = false;
+    if (m_groupFboStack.empty()) return;
+
+    const auto entry = m_groupFboStack.back();
+    m_groupFboStack.pop_back();
+
+    // Restore the target and its viewport/scissor exactly as popGroupFbo does,
+    // but draw nothing: the texture is the result, and the buffer is not pooled.
+    if (!m_groupFboStack.empty())
+        glBindFramebuffer(GL_FRAMEBUFFER, m_groupFboStack.back().fbo);
+    else
+        glBindFramebuffer(GL_FRAMEBUFFER, m_compositeBaseFbo);
+    glViewport(entry.vp[0], entry.vp[1], entry.vp[2], entry.vp[3]);
+    glScissor(entry.scissorBox[0], entry.scissorBox[1],
+              entry.scissorBox[2], entry.scissorBox[3]);
+    if (entry.scissorEnabled)
+        glEnable(GL_SCISSOR_TEST);
+    else
+        glDisable(GL_SCISSOR_TEST);
+}
+
 void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                const QPointF& canvasHalfExtents,
                                const QMatrix4x4& viewMvp,
@@ -1103,6 +1276,11 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         m_mainProg->setUniformValue(m_mainU.opacity, t);
         m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
         m_mainProg->setUniformValue(m_mainU.instanced, 0);
+        // Follows the clip arm state, which LayerCompositor sets only around
+        // the pop of a clipped Layer node that isolated itself for its
+        // Single-Layer-Mode adjustments: the clip then applies once, to the
+        // composed result, instead of to each pass inside the FBO.
+        applyMainClipUniforms();
         setMainSourcePremultiplied(true);
         setMainAlphaWeightedSampling(true);
         setMainSharpMagnification(viewStep);
@@ -1182,6 +1360,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_blendProg->setUniformValue(m_blendU.sharpMagnify,
                                          viewStep ? 1.0f : 0.0f);
             m_blendProg->setUniformValue(m_blendU.mipLevels, 0);
+            applyBlendClipUniforms();
 
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, entry.tex);
@@ -1212,6 +1391,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
             m_mainProg->setUniformValue(m_mainU.maskDensity, 0.0f);
             m_mainProg->setUniformValue(m_mainU.instanced, 0);
+            applyMainClipUniforms();
             setMainSourcePremultiplied(true);
             setMainAlphaWeightedSampling(true);
             setMainSharpMagnification(viewStep);
@@ -1235,6 +1415,11 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
         m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
         m_mainProg->setUniformValue(m_mainU.instanced, 0);
+        // Follows the clip arm state, which LayerCompositor sets only around
+        // the pop of a clipped Layer node that isolated itself for its
+        // Single-Layer-Mode adjustments: the clip then applies once, to the
+        // composed result, instead of to each pass inside the FBO.
+        applyMainClipUniforms();
         setMainSourcePremultiplied(true);
         setMainAlphaWeightedSampling(true);
         setMainSharpMagnification(viewStep);

@@ -143,8 +143,13 @@ std::vector<std::unique_ptr<LayerTreeNode>> buildSiblingLevel(std::span<const ps
         auto leaf = buildLeafNode(rec, ctx, scratchDoc);
         if (!leaf)
             continue; // unsupported adjustment/fill content; already reported
-        const bool clipped = leaf->type == LayerTreeNode::Type::Adjustment && rec.clipping != 0;
-        entries.push_back({std::move(leaf), clipped});
+        // PSD's clipping flag maps onto the two Hazor mechanisms: an
+        // adjustment/fill layer becomes its host's Single-Layer-Mode child
+        // (resolved below), while a pixel/text/shape layer keeps the flag it was
+        // already given in buildLeafNode and clips to the sibling below it.
+        const bool clippedAdjustment =
+            leaf->type == LayerTreeNode::Type::Adjustment && rec.clipping != 0;
+        entries.push_back({std::move(leaf), clippedAdjustment});
     }
 
     // Resolve clipping (PSD "clip to layer below" on an adjustment/fill
@@ -180,6 +185,22 @@ std::vector<std::unique_ptr<LayerTreeNode>> buildSiblingLevel(std::span<const ps
     out.reserve(resolved.size());
     for (auto it = resolved.rbegin(); it != resolved.rend(); ++it)
         out.push_back(std::move(it->node));
+
+    // Report the clipping flags the native model could not act on, using the
+    // compositors' OWN resolution (LayerTreeNode::resolveClipBase) so the
+    // warning can never disagree with what is rendered. What is left after a
+    // layer or group base resolves is the bottom of a container and an
+    // adjustment sitting directly below — both are drawn unclipped.
+    for (size_t i = 0; i < out.size(); ++i) {
+        if (!out[i] || !out[i]->isClippedLayer())
+            continue;
+        if (LayerTreeNode::resolveClipBase(out, i))
+            continue;
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": it is clipped to the layer below it, but at its level there is "
+            "no layer or group below it to clip to, so it was imported unclipped and covers "
+            "more than it did in the original file.").arg(out[i]->name));
+    }
     return out;
 }
 
@@ -234,7 +255,12 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
     node->layer->name = name;
     node->layer->owner = node.get();
 
-    reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/false);
+    // "Clip to the layer below" on a pixel/text/shape layer is a native flag on
+    // the node; the compositors resolve the base from the sibling order, exactly
+    // like PSD does (LayerTreeNode::resolveClipBase). A clipped adjustment goes
+    // the other way — see buildSiblingLevel.
+    node->clipped = rec.clipping != 0;
+    reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true);
 
     bool built = false;
     // Set by the converters whose placement may not be an axis-aligned rect
