@@ -2286,18 +2286,26 @@ void ImageController::commitNodeOpacity(int flatIndex, float opacity)
 // come from Fill being a *content* property rather than a layer-result one:
 //
 //  - a Group has no Fill, here or in the editors this one follows, so these
-//    refuse anything but a Type::Layer node instead of silently storing a
-//    value no compositor would read;
-//  - a layer carrying an enabled layer style keeps its Fill inside the styled
-//    base (LayerTreeNode::bakeFillOpacity), so changing it there has to
-//    invalidate that bake. Without a style the bake is untouched — which is
-//    what keeps a Fill drag on an ordinary layer as cheap as an opacity drag
-//    instead of re-blurring a layer that has no blur.
+//    refuse one (LayerTreeNode::hasFillOpacity) instead of silently storing a
+//    value no compositor would read. A Layer and an Adjustment both have one;
+//  - a node whose Fill lives in a bake has to invalidate that bake when it
+//    changes — see applyNodeFill. An ordinary layer's does not, which is what
+//    keeps a Fill drag as cheap as an opacity drag instead of re-blurring a
+//    layer that has no blur.
 namespace {
 void applyNodeFill(LayerTreeNode* node, float fill)
 {
     node->fillOpacity = fill;
-    if (node->hasEnabledLayerStyles())
+    // Two kinds of node hold their Fill inside a cached bake rather than
+    // applying it at composite time, and both have to re-run it here:
+    //  - a layer with an enabled layer style keeps Fill in its styled base
+    //    (LayerTreeNode::bakeFillOpacity);
+    //  - a Single-Layer-Mode adjustment's Fill is spent where its parent layer
+    //    bakes its clipped adjustments (computeEffectedImage), which
+    //    invalidateEffects() reaches through its parent hop — the same reason
+    //    setNodeVisibility invalidates on any Adjustment node.
+    if (node->fillLivesInStyleBake()
+        || node->type == LayerTreeNode::Type::Adjustment)
         node->invalidateEffects();
 }
 } // namespace
@@ -2305,7 +2313,7 @@ void applyNodeFill(LayerTreeNode* node, float fill)
 void ImageController::setNodeFillOpacity(int flatIndex, float fillOpacity)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
-    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    if (!node || !node->hasFillOpacity()) return;
     const float before = node->fillOpacity;
     const float after = std::clamp(fillOpacity, 0.0f, 1.0f);
     if (before == after) return;
@@ -2320,7 +2328,7 @@ void ImageController::setNodeFillOpacity(int flatIndex, float fillOpacity)
 void ImageController::beginNodeFillOpacity(int flatIndex)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
-    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    if (!node || !node->hasFillOpacity()) return;
     m_fillOpacityLayerIdx = flatIndex;
     m_fillOpacityBefore   = node->fillOpacity;
 }
@@ -2328,7 +2336,7 @@ void ImageController::beginNodeFillOpacity(int flatIndex)
 void ImageController::previewNodeFillOpacity(int flatIndex, float fillOpacity)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
-    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    if (!node || !node->hasFillOpacity()) return;
     applyNodeFill(node, std::clamp(fillOpacity, 0.0f, 1.0f));
     emit layerChanged(flatIndex);
     emit imageChanged();
@@ -2338,7 +2346,7 @@ void ImageController::previewNodeFillOpacity(int flatIndex, float fillOpacity)
 void ImageController::commitNodeFillOpacity(int flatIndex, float fillOpacity)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
-    if (!node || node->type != LayerTreeNode::Type::Layer) return;
+    if (!node || !node->hasFillOpacity()) return;
 
     const float before = (m_fillOpacityLayerIdx == flatIndex && m_fillOpacityBefore >= 0.0f)
                          ? m_fillOpacityBefore : node->fillOpacity;

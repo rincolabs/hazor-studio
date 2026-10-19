@@ -37,10 +37,14 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   layer's finished contribution, its layer styles included; **Fill** fades only
   the layer's own content and leaves the styles at full strength, so a drop
   shadow, stroke or glow stays exactly as lit while the pixels casting it go
-  invisible. Fill is a layer property — groups have one opacity, the convention
+  invisible. An **adjustment layer** has a Fill too, where "content" is the
+  contribution the adjustment makes to the composite: Fill at 50% is half as
+  much of the same curve, not a flatter curve, and at 0% the adjustment is gone
+  while its parameters, its mask and its blend mode are all still there to turn
+  back up. Only groups have no Fill — they carry one opacity, the convention
   this kind of editor established — and it is a compositing control, never an
-  edit: the pixels, the vector geometry and the editable text behind them are
-  untouched. For eight
+  edit: the pixels, the vector geometry, the editable text and the adjustment
+  settings behind them are untouched. For eight
   blend modes (Color Burn, Linear Burn, Color Dodge, Linear Dodge, Vivid Light,
   Linear Light, Hard Mix, Difference) Fill takes part in the blend arithmetic
   itself rather than merely thinning the layer, which is what makes a reduced

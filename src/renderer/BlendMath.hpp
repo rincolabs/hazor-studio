@@ -269,6 +269,13 @@ inline Vec3 blendFilled(BlendMode mode, const Vec3& cb, const Vec3& cs, float fi
 //
 // Every other mode takes Fill as plain coverage, so both factors are `fill`
 // there and the regrouping collapses back to one.
+//
+// Both are factors on the *same* pre-Fill coverage. Deriving one from the
+// other — `saBare = sa · fillBareCoverage` where `sa` already carries the
+// blend factor — spends Fill twice (fill²) in the bare term for every mode
+// that is not one of the eight, and it hides: the term is multiplied by
+// (1-ab), so an opaque backdrop zeroes it and only a partly transparent one
+// shows the difference.
 inline float fillBlendCoverage(BlendMode m, float fill)
 {
     return fillEntersBlend(m) ? 1.0f : fill;

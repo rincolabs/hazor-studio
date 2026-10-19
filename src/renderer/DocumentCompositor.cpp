@@ -700,6 +700,16 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
         density = l->maskDensity;
     }
 
+    // Fill fades how much of the adjustment's contribution reaches the
+    // composite, leaving the adjustment's own parameters alone — a Curves at
+    // Fill 50% is half as much of the same curve, not a flatter curve
+    // (docs/RENDER-PIPELINE.md §4.7). It is a second factor beside `opacity`,
+    // applied *after* the mask like everywhere else, and it reaches each of the
+    // three branches below at the point that branch spends the node's coverage,
+    // so compositeStage still owns the eight modes that take Fill inside the
+    // blend function rather than on the coverage.
+    const float fill = node->compositeFillOpacity();
+
     // Solid Color is a fill, not a backdrop transform: it generates a single
     // colour on demand (no permanent full-document bitmap) and composites it
     // source-over the stack with the node's blend mode/opacity/mask — covering
@@ -713,22 +723,32 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
         stage.fill(qPremultiply(qRgba(c.red(), c.green(), c.blue(), c.alpha())));
         // The mask reveals/hides the fill per pixel (mix(1, mask, density)).
         modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-        DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
+        DocumentCompositor::compositeStage(target, stage, node->blendMode,
+                                           node->opacity, fill);
         return;
     }
 
     if (node->blendMode == BlendMode::Normal) {
-        adjustments::apply(target, *node->adjustment, node->opacity,
+        // A Normal-mode pass is a mix toward the adjusted backdrop, where Fill
+        // and Opacity are the same factor on the adjustment's contribution — so
+        // the two fold into one mix strength, the same fold setMainUniforms
+        // does for a Normal layer draw (§4.7).
+        adjustments::apply(target, *node->adjustment, node->opacity * fill,
                            mask, maskTopLeft, density);
         return;
     }
 
     // Non-Normal blend: blend the fully-adjusted backdrop over the original
     // with the node's blend mode; the mask modulates the source coverage.
+    // Fill goes to compositeStage rather than onto the stage's alpha, because
+    // for the eight modes of blendmath::fillEntersBlend it belongs inside the
+    // blend function — fading this stage's coverage instead would interpolate
+    // the already-clamped result.
     QImage stage = target.copy();
     adjustments::apply(stage, *node->adjustment, 1.0f);
     modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-    DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
+    DocumentCompositor::compositeStage(target, stage, node->blendMode,
+                                       node->opacity, fill);
 }
 
 // Group-mask extension point. Masks currently live on Layer, not on

@@ -214,25 +214,34 @@ void GPUViewport::initShaders()
                 float clipAlpha = 1.0;
                 if (uHasClip > 0.5)
                     clipAlpha = texture(uClipTexture, gl_FragCoord.xy / uClipSize).a;
-                src.a *= uOpacity
-                       * bm_fillBlendCoverage(uBlendMode, uFillOpacity)
-                       * maskAlpha * clipAlpha;
+                // The source's coverage before Fill. Both coverages below are
+                // factors on *this* — taking one off the other would spend
+                // Fill twice wherever the two agree (BlendMath.hpp).
+                float cov = src.a * uOpacity * maskAlpha * clipAlpha;
                 // Dissolve: coverage becomes a per-pixel 0/1 dither keyed on
                 // the document pixel. gl_FragCoord is in the render target, so
                 // Y is flipped into the CPU compositor's row order; the live
                 // stack is always isolated into a canvas-sized FBO
                 // (LayerCompositor::composite), which makes that target the
                 // document grid and keeps the pattern stable under pan/zoom.
-                src.a = bm_coverage(uBlendMode, src.a,
-                                    vec2(gl_FragCoord.x,
-                                         uViewportSize.y - gl_FragCoord.y));
-
-                float sa = src.a, da = dst.a;
+                // It runs on each coverage, after its Fill factor, the way the
+                // CPU dithers the coverage it ends up spending; Dissolve is not
+                // one of the eight, so the two decisions are the same one.
+                vec2 ditherPix = vec2(gl_FragCoord.x,
+                                      uViewportSize.y - gl_FragCoord.y);
                 // Fill fades the source's bare, no-backdrop coverage while the
-                // blend term above keeps its full one — the regrouped composite
-                // in BlendMath.hpp, mirrored by
+                // blend term keeps its full one — the regrouped composite in
+                // BlendMath.hpp, mirrored by
                 // DocumentCompositor::compositeManual. saBare == sa at Fill 1.
-                float saBare = sa * bm_fillBareCoverage(uBlendMode, uFillOpacity);
+                float sa = bm_coverage(
+                    uBlendMode,
+                    cov * bm_fillBlendCoverage(uBlendMode, uFillOpacity),
+                    ditherPix);
+                float saBare = bm_coverage(
+                    uBlendMode,
+                    cov * bm_fillBareCoverage(uBlendMode, uFillOpacity),
+                    ditherPix);
+                float da = dst.a;
                 vec3 B = clamp(bm_blendFilled(uBlendMode, dstColor, srcColor,
                                               uFillOpacity), 0.0, 1.0);
                 // Blend modes are only meaningful where a backdrop exists. Over a
@@ -456,6 +465,13 @@ void GPUViewport::initShaders()
             uniform sampler2D uCurveLut;
             uniform vec2 uViewportSize;
             uniform float uOpacity;
+            // Fill Opacity (docs/RENDER-PIPELINE.md §4.7) — the share of the
+            // adjustment's contribution that reaches the composite. Its own
+            // uniform rather than folded into uOpacity because the Solid Color
+            // branch runs a real blend, where for eight modes Fill is a term
+            // *inside* bm_blendFilled and not a factor on the coverage. The
+            // backdrop-transform branches are Normal-mode mixes and do fold it.
+            uniform float uFillOpacity;
             uniform float uHasMask;
             uniform float uMaskDensity;
             uniform int uAdjustmentType;
@@ -620,32 +636,59 @@ void GPUViewport::initShaders()
                 }
                 maskAlpha = mix(1.0, maskAlpha, uMaskDensity);
                 float f = clamp(uOpacity * maskAlpha, 0.0, 1.0);
+                float fill = clamp(uFillOpacity, 0.0, 1.0);
                 if (uAdjustmentType == 4) {
                     // Solid Color — a fill, not a backdrop transform. Composite a
                     // premultiplied colour over the backdrop with the node's blend
                     // mode (mirrors the blend shader + DocumentCompositor so the
                     // live frame matches the CPU projection for every mode). f folds
                     // opacity*mask; uSolidColor.a folds the colour's own alpha.
-                    float sa = clamp(uSolidColor.a * f, 0.0, 1.0);
+                    // Coverage before Fill: each of the two coverages below is
+                    // a factor on this one, never on the other (BlendMath.hpp).
+                    float cov = clamp(uSolidColor.a * f, 0.0, 1.0);
                     // Dissolve dithers the fill's coverage — same hash, same
-                    // document pixel as the blend shader and the CPU path.
-                    sa = bm_coverage(uSolidBlendMode, sa,
-                                     vec2(gl_FragCoord.x,
-                                          uViewportSize.y - gl_FragCoord.y));
+                    // document pixel as the blend shader and the CPU path, and
+                    // run on each coverage after its Fill factor. Dissolve is
+                    // not one of the eight, so the two decisions coincide.
+                    vec2 ditherPix = vec2(gl_FragCoord.x,
+                                          uViewportSize.y - gl_FragCoord.y);
+                    float sa = bm_coverage(
+                        uSolidBlendMode,
+                        cov * bm_fillBlendCoverage(uSolidBlendMode, fill),
+                        ditherPix);
                     vec3 srcColor = uSolidColor.rgb;
                     float da = dst.a;                         // backdrop alpha
                     vec3 dstColor = da > 0.0039 ? dst.rgb / da : dst.rgb;
-                    // bm_blend returns srcColor for -1 (Normal) / unmapped ids.
-                    vec3 Cr = clamp(bm_blend(uSolidBlendMode, dstColor, srcColor),
-                                    0.0, 1.0);
-                    // W3C: blend modes only meaningful over an existing backdrop;
-                    // fade back to the source where the backdrop is transparent.
-                    Cr = mix(srcColor, Cr, da);
-                    // Source-over with premultiplied output (dst.rgb is premul).
-                    fragColor = vec4(dst.rgb * (1.0 - sa) + Cr * sa,
-                                     da + sa * (1.0 - da));
+                    // Fill fades the source's bare, no-backdrop coverage while
+                    // the blend term keeps its full one — the regrouped
+                    // composite the blend shader and
+                    // DocumentCompositor::compositeManual run, and the identity
+                    // the previous `mix(srcColor, Cr, da)` form was already a
+                    // Fill-1 case of. saBare == sa at Fill 1.
+                    float saBare = bm_coverage(
+                        uSolidBlendMode,
+                        cov * bm_fillBareCoverage(uSolidBlendMode, fill),
+                        ditherPix);
+                    // bm_blendFilled returns srcColor for -1 (Normal) / unmapped
+                    // ids, and takes Fill inside the formula for the eight modes
+                    // that need it there.
+                    vec3 B = clamp(bm_blendFilled(uSolidBlendMode, dstColor,
+                                                  srcColor, fill),
+                                   0.0, 1.0);
+                    // W3C grouped by the backdrop alpha, premultiplied output:
+                    //   Co = (1-ab)·saBare·Cs + ab·sa·B(Cb,Cs) + (1-sa)·premul(Cb)
+                    //   ao = (1-ab)·saBare    + ab
+                    // Blend modes are only meaningful over an existing backdrop,
+                    // which is what the (1-da) term carries: the source shows
+                    // through as itself where there is nothing to blend against.
+                    fragColor = vec4((1.0 - da) * saBare * srcColor + da * sa * B
+                                         + (1.0 - sa) * dst.rgb,
+                                     (1.0 - da) * saBare + da);
                 } else {
-                    fragColor = vec4(mix(dst.rgb, adjusted, f), dst.a);
+                    // A backdrop transform is a Normal-mode mix, where Fill and
+                    // Opacity are the same factor on the adjustment's
+                    // contribution, so one product covers both (§4.7).
+                    fragColor = vec4(mix(dst.rgb, adjusted, f * fill), dst.a);
                 }
             }
         )";
@@ -661,6 +704,7 @@ void GPUViewport::initShaders()
     m_adjustU.maskTexture    = m_adjustProg->uniformLocation("uMaskTexture");
     m_adjustU.viewportSize   = m_adjustProg->uniformLocation("uViewportSize");
     m_adjustU.opacity        = m_adjustProg->uniformLocation("uOpacity");
+    m_adjustU.fillOpacity    = m_adjustProg->uniformLocation("uFillOpacity");
     m_adjustU.hasMask        = m_adjustProg->uniformLocation("uHasMask");
     m_adjustU.maskDensity    = m_adjustProg->uniformLocation("uMaskDensity");
     m_adjustU.adjustmentType = m_adjustProg->uniformLocation("uAdjustmentType");

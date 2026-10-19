@@ -906,6 +906,7 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
 
 void GPUViewport::drawAdjustmentPass(int adjustmentType,
                                      float opacity,
+                                     float fillOpacity,
                                      GLuint maskTexture,
                                      bool hasMask,
                                      float maskDensity,
@@ -924,7 +925,12 @@ void GPUViewport::drawAdjustmentPass(int adjustmentType,
                                      const QColor& solidColor,
                                      int solidBlendMode)
 {
-    if (adjustmentType < 0 || opacity <= 0.0f)
+    const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+    // Fill 0 is the adjustment contributing nothing, for every blend mode: the
+    // bare coverage goes to 0 and B(Cb, neutral) == Cb, so the regrouped
+    // composite below collapses to the untouched backdrop. Skipping the pass
+    // outright is that result without the full-target blit and draw.
+    if (adjustmentType < 0 || opacity <= 0.0f || fill <= 0.0f)
         return;
     if (!m_adjustProg || !m_adjustProg->isLinked())
         return;
@@ -968,6 +974,7 @@ void GPUViewport::drawAdjustmentPass(int adjustmentType,
                                   static_cast<float>(viewportW),
                                   static_cast<float>(viewportH));
     m_adjustProg->setUniformValue(m_adjustU.opacity, opacity);
+    m_adjustProg->setUniformValue(m_adjustU.fillOpacity, fill);
     m_adjustProg->setUniformValue(m_adjustU.hasMask, hasMask ? 1.0f : 0.0f);
     m_adjustProg->setUniformValue(m_adjustU.maskDensity, maskDensity);
     m_adjustProg->setUniformValue(m_adjustU.adjustmentType, adjustmentType);

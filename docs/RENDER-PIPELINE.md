@@ -118,10 +118,16 @@ use the blend shader.
 ### 2.3 GPU adjustments
 
 `drawAdjustmentPass` redraws the quad by sampling the backdrop copy
-(`m_blendTex`) and emits `mix(backdrop, adjusted, opacity × mask)`. The shader
-branches **must mirror** `adjustments::apply()`
+(`m_blendTex`) and emits `mix(backdrop, adjusted, opacity × fill × mask)`. The
+shader branches **must mirror** `adjustments::apply()`
 ([src/core/AdjustmentTypes.cpp](../src/core/AdjustmentTypes.cpp)) — same LUT
 rule, same HSL model (`core/HueSaturationData`), same mask density ramp.
+
+Fill Opacity (§4.7) rides its own `uFillOpacity` uniform rather than arriving
+pre-multiplied into `uOpacity`, because the Solid Color branch is a real blend
+(`uSolidBlendMode`) where for eight modes Fill belongs *inside* the formula —
+the same split the blend shader makes. The pass is skipped outright at Fill 0,
+which is the backdrop untouched for every mode.
 
 ### 2.4 Tiles, LOD, and uploads
 
@@ -346,6 +352,8 @@ compositeFiltered
      ├─ Adjustment (Normal-Mode) → applyAdjustmentNode over the accumulated result
      │    (solidcolor = fill composited with the node blend; others via adjustments::apply;
      │     blend ≠ Normal: the entire adjusted backdrop is re-composited with the mode)
+     │    Fill Opacity (§4.7) scales the contribution: folded into the mix strength
+     │    on the Normal path, handed to compositeStage on the other two
      ├─ Group → one of the three group models (§4.5):
      │    direct merge when !needsIsolatedComposite (incl. a full-opacity Pass Through);
      │    pass-through stage = copy of the target → children → compositePassThroughStage;
@@ -986,24 +994,32 @@ the base automatically (§2.5, invariant 4).
 
 ### 4.7 Fill Opacity
 
-A layer has two transparency controls and they are not two of the same thing:
+A node has two transparency controls and they are not two of the same thing:
 
 | | fades | lives on |
 |-|-|-|
-| **Opacity** | the layer's finished contribution — content *and* layer styles | every node |
-| **Fill** | only the layer's own content; the styles keep their strength | `Type::Layer` only |
+| **Opacity** | the node's finished contribution — content *and* layer styles | every node |
+| **Fill** | only the node's own content; the styles keep their strength | `Type::Layer` and `Type::Adjustment` |
 
 So a Drop Shadow stays fully lit while the pixels casting it go invisible, which
-is what the control is for. `LayerTreeNode::fillOpacity` holds it, and **nothing
-reads that field directly** — three accessors on the node split it between the
-two places it can be applied, so it can never land twice or on a node that has
-no Fill:
+is what the control is for. On an Adjustment node the "content" being faded is
+the *contribution the adjustment makes to the composite* — see "Adjustment
+layers" below. `LayerTreeNode::fillOpacity` holds the value, and **nothing reads
+that field directly** — four accessors on the node say who has a Fill and split
+it between the two places it can be applied, so it can never land twice or on a
+node that has none:
 
 | accessor | answer |
 |---|---|
-| `layerFillOpacity()` | the clamped value, or 1 for a Group/Adjustment |
-| `bakeFillOpacity()` | the share the *style bake* applies (1 unless the layer has an enabled layer style) |
+| `hasFillOpacity()` | whether the node type has the control at all (Layer or Adjustment — not Group) |
+| `layerFillOpacity()` | the clamped value, or 1 for a Group |
+| `bakeFillOpacity()` | the share the *style bake* applies (1 unless `fillLivesInStyleBake()`) |
 | `compositeFillOpacity()` | the share the *compositor* applies (the complement of the above) |
+
+`fillLivesInStyleBake()` is the single predicate the split turns on: a
+`Type::Layer` with an enabled layer style, and nothing else. An Adjustment node
+is never it — its `effects` are not rendered at all, so routing its Fill into a
+bake that never runs would silently drop the control.
 
 **Where the split comes from.** A layer style is composited *with* the content
 into one raster (`computeStyledBaseImage`), so once that bake exists no factor
@@ -1072,8 +1088,12 @@ just grouped so the source's two roles separate. The second term is the blend,
 and it keeps **full** coverage (`fillBlendCoverage`) because Fill is already
 inside `B`. The first is the source where there is *no* backdrop, where `B` is
 irrelevant and coverage is the only thing left that can fade the content, so
-Fill multiplies that one (`fillBareCoverage`). Both ends then land where they
-must, at *every* backdrop alpha:
+Fill multiplies that one (`fillBareCoverage`). Both are factors on the *same*
+pre-Fill coverage: deriving `saBare` from an `sa` that already carries the blend
+factor spends Fill twice (`fill²`) in the bare term for every mode outside the
+eight, and the `(1-ab)` in front of that term hides it from any check run over
+an opaque backdrop. Both ends then land where they must, at *every* backdrop
+alpha:
 
 - **Fill 0** → bare coverage 0 and `B(Cb, neutral) = Cb`, so `Co = ab·Cb`,
   `ao = ab`: the backdrop untouched.
@@ -1098,6 +1118,48 @@ clamp(Cb + (Cb + Cs - 1) · k),   k = fill / (1 - fill)
 That is the posterization softening into continuous tone which reducing Fill on
 a Hard Mix layer is used for, and it is the only entry in the table derived from
 the mode's shape rather than from a neutral colour.
+
+#### On an Adjustment layer: the contribution, not the parameters
+
+An adjustment layer has a Fill for the same reason a pixel layer does — it has
+content of its own to fade — and its content is the *difference it makes to the
+backdrop*. Fill scales that difference and never the adjustment's parameters: a
+Curves at Fill 50% is half as much of the same curve, not a flatter curve, so
+the curve, the mask and the blend mode are all still there to turn back up. Fill
+0 is the adjustment contributing nothing; Fill 100% is byte-for-byte the result
+from before Fill reached these nodes.
+
+There is no new mechanism. The adjustment node's `compositeFillOpacity()` — the
+whole of its Fill, since it has no style bake to split with — is handed to each
+of the three places an adjustment's contribution is spent, at the point that
+place already spends the node's opacity:
+
+| where | path | how Fill arrives |
+|---|---|---|
+| Normal-Mode, Normal blend | `applyAdjustmentNode` / `drawAdjustmentPass` | folded into the mix strength: `opacity × mask × fill` |
+| Normal-Mode, other blend | `applyAdjustmentNode` → `compositeStage` | as that call's `fillOpacity`, so the eight modes keep the blend-math treatment |
+| Solid Color | `compositeStage` / the `adjust` shader's fill branch | same, on a real source colour rather than a transformed backdrop |
+| Single Layer Mode (clipped) | `computeEffectedImage`, `computeEffectedThumbnail` | folded into the mix strength, like the Normal case it is |
+
+Two of those rows fold Fill into the opacity, and that is exact rather than a
+shortcut: a Normal-mode adjustment pass is `mix(backdrop, adjusted, f)`, where
+Fill and Opacity are the same factor on `f` — the same fold `setMainUniforms`
+does for a Normal layer draw. The rows that do *not* fold are the ones that run
+a blend function, because for the eight modes of `fillEntersBlend` Fill is a
+term inside `B` and not a factor on the coverage. That is why the `adjust`
+shader gained a `uFillOpacity` of its own rather than taking Fill pre-multiplied
+into `uOpacity`: its Solid Color branch is a real blend, and folding there would
+have given the GPU the coverage treatment while the CPU gave the blend one.
+
+Mirroring that Solid Color branch on `bm_blendFilled` + `bm_fill*Coverage` also
+moved it onto the regrouped composite the blend shader already ran. That is not
+a behaviour change: the previous `mix(srcColor, Cr, da)` form is the same
+algebra at Fill 1, which is where every existing document sits.
+
+A reduced Fill on a *non-Normal* adjustment fades the already-adjusted backdrop
+as the blend's source, so the mode's own arithmetic still decides the result —
+a Linear Dodge adjustment at Fill 50% keeps saturating to white instead of
+sliding back toward the unadjusted picture, exactly as it does on a pixel layer.
 
 #### Consequences elsewhere
 
@@ -1127,12 +1189,22 @@ the mode's shape rather than from a neutral colour.
   the children of a *group* base (whose Fill is part of the group's content), so
   it hands the value to `popGroupFbo` explicitly rather than letting the pop
   re-read it off the node.
-- **Groups have no Fill**, which is also where this kind of editor has always
-  drawn the line. The field is ignored for a `Type::Group` node by
-  `layerFillOpacity()`, and the layer panel disables the control while one is
-  selected.
-- **Adjustment layers have no Fill either.** Their opacity already *is* the
-  strength of the adjustment; there is no content to fade separately.
+- **Groups are the only node type with no Fill**, which is also where this kind
+  of editor has always drawn the line: a group's content is its children, and
+  each of those carries its own Fill already. `hasFillOpacity()` is that rule —
+  `layerFillOpacity()` reads 1 for a `Type::Group`, the layer panel disables the
+  control while one is selected, and the four `ImageController` entry points
+  refuse the edit rather than storing a value no compositor would read.
+- **An adjustment node's Fill invalidates a bake when it is nested.** A
+  Single-Layer-Mode adjustment is baked into its parent layer's effected image,
+  so `applyNodeFill` (and `NodeFillOpacityCommand`, which has to redo exactly
+  what the live edit did) routes an Adjustment node through
+  `invalidateEffects()` — the same reason `setNodeVisibility` does. The parent
+  hop inside `invalidateEffects()` is what reaches the bake; a Normal-Mode
+  adjustment has no bake to re-run and the call costs nothing.
+- **PSD's `iOpa` is honoured on an adjustment layer.** It is the same byte on
+  the same record, so the import no longer warns that it was dropped; only a
+  group still does (`reportUnsupportedLayerProperties`).
 - **Smart Objects, Text and Shape layers need nothing of their own.** Fill acts
   on whatever the layer's content resolves to — the referenced document's
   render, the rasterised type, the shape sprite — so the editable model is
@@ -1153,6 +1225,13 @@ the mode's shape rather than from a neutral colour.
 - **A styled clip base's Fill does reach its clip alpha**, because the bake it
   is read from already contains it. Unstyled bases — the common case — are
   exact.
+- **A non-Normal adjustment's Fill takes the mix treatment on live GPU frames.**
+  Not a Fill limit: `LayerCompositor` already renders a blend mode on an
+  adjustment node as Normal (§2.1), so Fill follows the path the pass actually
+  takes and is a factor on the mix there. The CPU projection — the source of
+  truth — shows the blended result, Fill inside the formula where the mode asks
+  for it, as soon as the interaction settles. Solid Color is unaffected: its
+  blend mode *is* honoured on the GPU, and so is its Fill's share of it.
 
 ---
 

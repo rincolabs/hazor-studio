@@ -111,8 +111,8 @@ void reportUnsupportedLayerProperties(const psd::LayerRecord& rec, Context& ctx,
 {
     if (rec.fillOpacity() != 255 && !fillOpacityHonoured) {
         ctx.warn(QCoreApplication::translate("PsdImportService",
-            "Layer \"%1\": its Fill Opacity of %2%% was not applied — Fill is a "
-            "property of a layer and this node is not one.")
+            "Layer \"%1\": its Fill Opacity of %2%% was not applied — a group "
+            "has no Fill of its own, only the layers inside it do.")
             .arg(layerName).arg(static_cast<int>(std::lround(rec.fillOpacity() * 100.0 / 255.0))));
     }
 

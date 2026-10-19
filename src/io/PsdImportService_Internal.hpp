@@ -120,10 +120,10 @@ BlendMode mapBlendMode(const psd::BlendMode& mode, Context& ctx, const QString& 
 // as a Single-Layer-Mode child, so only a group drops it here. A layer whose
 // flag survives this but finds no base to clip to is reported by
 // buildSiblingLevel instead, which is where the base is resolved.
-// `fillOpacityHonoured` likewise: a Layer node carries `iOpa` natively
-// (LayerTreeNode::fillOpacity), while a group and an adjustment have no Fill in
-// this model — the same line the editors it follows draw for a group — so
-// those report it instead.
+// `fillOpacityHonoured` likewise: a Layer node and an Adjustment node both
+// carry `iOpa` natively (LayerTreeNode::fillOpacity), while a group has no Fill
+// in this model — the same line the editors it follows draw — so only a group
+// reports it instead.
 void reportUnsupportedLayerProperties(const psd::LayerRecord& rec, Context& ctx, const QString& layerName,
                                       bool clippingHonoured, bool fillOpacityHonoured);
 

@@ -236,11 +236,15 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
             return nullptr; // no Hazor equivalent; reported by tryBuildAdjustment
         node->visible = rec.isVisible();
         node->opacity = static_cast<float>(rec.opacity) / 255.0f;
+        // `iOpa` — PSD's own Fill Opacity — applies to an adjustment layer too,
+        // where it fades the adjustment's contribution rather than any pixels
+        // (LayerTreeNode::fillOpacity, docs/RENDER-PIPELINE.md §4.7).
+        node->fillOpacity = static_cast<float>(rec.fillOpacity()) / 255.0f;
         node->blendMode = mapBlendMode(rec.blendMode, ctx, name);
         node->lockFlags = lockFlagsFromRecord(rec);
         node->transform = QTransform();
         reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true,
-                                         /*fillOpacityHonoured=*/false);
+                                         /*fillOpacityHonoured=*/true);
         if (node->layer)
             applyLayerMask(rec, ctx, name, *node->layer, QRect(QPoint(0, 0), ctx.docSize));
         return node;

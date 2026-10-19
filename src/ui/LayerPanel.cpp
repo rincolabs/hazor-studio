@@ -1747,10 +1747,12 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
 
 void LayerPanel::updateTopBarFromActiveLayer()
 {
-    // Fill is a Layer-node property, so "no layer" and "a group" both leave the
-    // control showing the neutral 100% and unavailable, rather than a value
-    // nothing would read. setEnabled (not setReadOnly) so the theme's disabled
-    // state shows it is unavailable instead of silently ignoring the drag.
+    // Fill belongs to the node types that have content of their own to fade —
+    // a Layer and an Adjustment (LayerTreeNode::hasFillOpacity) — so "no layer"
+    // and "a group" both leave the control showing the neutral 100% and
+    // unavailable, rather than a value nothing would read. setEnabled (not
+    // setReadOnly) so the theme's disabled state shows it is unavailable
+    // instead of silently ignoring the drag.
     auto showFill = [this](bool available, float value) {
         m_fillSlider->blockSignals(true);
         m_fillSlider->setValue(available
@@ -1807,7 +1809,7 @@ void LayerPanel::updateTopBarFromActiveLayer()
     m_opacitySlider->setValue(opacityPct);
     m_opacitySlider->blockSignals(false);
 
-    showFill(node->type == LayerTreeNode::Type::Layer, node->fillOpacity);
+    showFill(node->hasFillOpacity(), node->fillOpacity);
 
     // Lock buttons reflect the folded lock state of the selection. A partial
     // lock reads as checked whenever Lock All is set (it implies all three), and

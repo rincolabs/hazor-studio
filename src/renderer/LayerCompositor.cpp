@@ -362,8 +362,15 @@ void LayerCompositor::renderNodes(
                 solidBlendMode = blend::shaderId(node->blendMode);
             }
 
+            // Fill fades the adjustment's contribution to the composite while
+            // its parameters stay as they are (§4.7). An Adjustment node is
+            // never a clipping base (LayerTreeNode::canBeClipBase), so the
+            // sole-node suppression the layer draws below need does not apply
+            // here, and it never splits its Fill with a style bake either —
+            // compositeFillOpacity() is the whole of it.
             gpu->drawAdjustmentPass(adjustments::shaderId(node->adjustment->type),
                                     node->opacity,
+                                    node->compositeFillOpacity(),
                                     hasMask ? lyr->maskTextureId : 0,
                                     hasMask,
                                     lyr ? lyr->maskDensity : 1.0f,

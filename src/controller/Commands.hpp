@@ -1526,10 +1526,13 @@ private:
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (!node) return;
         node->fillOpacity = fill;
-        // Only a layer style puts Fill inside the bake, and only then does
-        // changing it have to re-run the style stack — see
-        // LayerTreeNode::bakeFillOpacity().
-        if (node->hasEnabledLayerStyles())
+        // Same rule as ImageController::applyNodeFill, which this has to redo
+        // exactly: a layer style puts Fill inside the styled base
+        // (LayerTreeNode::bakeFillOpacity), and an adjustment's Fill is spent
+        // in its parent layer's clipped-adjustment bake when it is nested —
+        // both are caches an undo has to invalidate, not just a stored value.
+        if (node->fillLivesInStyleBake()
+            || node->type == LayerTreeNode::Type::Adjustment)
             node->invalidateEffects();
         ++m_doc->compositionGeneration;
     }

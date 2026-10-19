@@ -149,7 +149,10 @@ inline constexpr char kLib[] = R"(
     // Fill's two coverage factors — the blend term keeps full coverage for the
     // eight modes (Fill is inside the formula there) while the source's bare,
     // no-backdrop term is the one Fill fades. See BlendMath.hpp for the
-    // regrouping of the W3C composite these two come out of.
+    // regrouping of the W3C composite these two come out of. Both multiply the
+    // same pre-Fill coverage; multiplying the bare one onto a coverage that
+    // already carries the blend factor spends Fill twice for every mode but
+    // the eight.
     float bm_fillBlendCoverage(int mode, float fill) {
         return bm_fillEntersBlend(mode) ? 1.0 : fill;
     }

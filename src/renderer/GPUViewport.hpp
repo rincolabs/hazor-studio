@@ -247,8 +247,15 @@ public:
     // "curves" and "colorbalance" adjustments; null for adjustments that don't
     // use a LUT. `preserveLuminosity` enables the Color Balance luma-restoring
     // pass on top of the LUT.
+    //
+    // `fillOpacity` is the node's Fill (LayerTreeNode::compositeFillOpacity):
+    // the share of the adjustment's contribution that reaches the composite,
+    // independent of `opacity` and applied after the mask — §4.7. An
+    // adjustment never splits its Fill with a style bake, so the whole of it
+    // arrives here.
     void drawAdjustmentPass(int adjustmentType,
                             float opacity,
+                            float fillOpacity,
                             GLuint maskTexture,
                             bool hasMask,
                             float maskDensity,
@@ -470,7 +477,8 @@ private:
     // ── Uniform layout: adjustment program ──
     struct {
         GLint transform = -1, dstTexture = -1, maskTexture = -1;
-        GLint viewportSize = -1, opacity = -1, hasMask = -1, maskDensity = -1;
+        GLint viewportSize = -1, opacity = -1, fillOpacity = -1;
+        GLint hasMask = -1, maskDensity = -1;
         GLint adjustmentType = -1, maskUvScale = -1, maskUvOffset = -1;
         GLint curveLut = -1;
         GLint preserveLuminosity = -1;

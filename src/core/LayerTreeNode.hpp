@@ -58,10 +58,12 @@ public:
     // (docs/RENDER-PIPELINE.md §4.7).
     // `opacity` fades the layer's finished contribution, content *and* layer
     // styles; this fades only the content, so a Drop Shadow keeps its full
-    // strength while the pixels casting it go invisible. A Group has no Fill
-    // (nor does it in the editors this model follows), and for a layer carrying
-    // an enabled layer style the value lives in the style bake rather than in
-    // the composite —
+    // strength while the pixels casting it go invisible. On an Adjustment node
+    // the "content" is the contribution the adjustment makes to the composite,
+    // which Fill fades without touching the adjustment's own parameters. A
+    // Group has no Fill (nor does it in the editors this model follows — see
+    // hasFillOpacity), and for a layer carrying an enabled layer style the
+    // value lives in the style bake rather than in the composite —
     // which is why every consumer reads it through compositeFillOpacity() /
     // bakeFillOpacity() and never off this field, so it cannot be applied
     // twice or to a node that has no Fill.
@@ -155,25 +157,55 @@ public:
         });
     }
 
-    // Fill Opacity as the data model means it: a Layer-node property, clamped.
-    // Reads 1 for Group/Adjustment nodes, which have no Fill.
+    // Does this node type have a Fill control at all? A Layer and an Adjustment
+    // both do: a layer's Fill fades its pixels, an adjustment's fades the
+    // contribution its adjustment makes to the composite — same control, same
+    // field, the thing being faded is what differs. A Group has none, here as
+    // in the editors this model follows, because a group's "content" is its
+    // children and each of those carries its own Fill already.
+    //
+    // The layer panel and the four ImageController entry points gate on this,
+    // so the enabled control, the undoable edit and what layerFillOpacity() is
+    // willing to report cannot drift apart.
+    bool hasFillOpacity() const {
+        return type == Type::Layer || type == Type::Adjustment;
+    }
+
+    // Fill Opacity as the data model means it, clamped. Reads 1 for a Group,
+    // which has no Fill.
     float layerFillOpacity() const {
-        return type == Type::Layer ? std::clamp(fillOpacity, 0.0f, 1.0f) : 1.0f;
+        return hasFillOpacity() ? std::clamp(fillOpacity, 0.0f, 1.0f) : 1.0f;
+    }
+
+    // True when this node's Fill is applied *inside* the style bake instead of
+    // by the compositor — the one split the two accessors below arbitrate.
+    //
+    // Only a Type::Layer can be in that position: it is the only node whose
+    // `effects` are baked into a styled base (computeStyledBaseImage), where
+    // content and styles become one raster no later factor could separate. An
+    // Adjustment node's effects are never rendered at all, so routing its Fill
+    // into a bake that does not run would silently drop the control.
+    bool fillLivesInStyleBake() const {
+        return type == Type::Layer && hasEnabledLayerStyles();
     }
 
     // Fill as the *style bake* has to apply it. Only a layer style forces it in
     // there: content and styles are interleaved in one raster, and no factor
     // applied to that raster afterwards could fade one without the other.
     float bakeFillOpacity() const {
-        return hasEnabledLayerStyles() ? layerFillOpacity() : 1.0f;
+        return fillLivesInStyleBake() ? layerFillOpacity() : 1.0f;
     }
 
     // Fill as the *compositor* has to apply it — the complement of the above, so
-    // the two multiply to the layer's Fill exactly once. Without a layer style
+    // the two multiply to the node's Fill exactly once. Without a layer style
     // this is the whole of it, which is what keeps a Fill drag free of any
     // re-bake: the whole bake is content, so one factor on the stage is exact.
+    // An Adjustment node is always this case — it has no style bake to split
+    // with, so its Fill is applied wherever its contribution is composited
+    // (applyAdjustmentNode, drawAdjustmentPass, and the Single-Layer-Mode bake
+    // in computeEffectedImage).
     float compositeFillOpacity() const {
-        return hasEnabledLayerStyles() ? 1.0f : layerFillOpacity();
+        return fillLivesInStyleBake() ? 1.0f : layerFillOpacity();
     }
 
     // True when this layer's render must go through computeEffectedImage():
@@ -371,7 +403,13 @@ public:
                 maskTopLeft = adj->layer->maskOrigin - resultOrigin;
                 density = adj->layer->maskDensity;
             }
-            adjustments::apply(result, *adj->adjustment, adj->opacity,
+            // A clipped adjustment composites Normal-mode, where its Fill and
+            // its opacity are the same factor on its contribution, so the two
+            // fold into one mix strength (§4.7). Fill is applied here and not
+            // on the adjustment's parameters: a Fill of 50% is half as much of
+            // the same curve, not half the curve.
+            adjustments::apply(result, *adj->adjustment,
+                               adj->opacity * adj->compositeFillOpacity(),
                                mask, maskTopLeft, density);
         }
 
@@ -452,7 +490,10 @@ public:
                                      static_cast<int>(std::lround(offFull.y() * fy)));
                 density = adj->layer->maskDensity;
             }
-            adjustments::apply(result, *adj->adjustment, adj->opacity,
+            // Same opacity × Fill fold as computeEffectedImage, so the panel
+            // thumbnail shows the Fill the canvas does.
+            adjustments::apply(result, *adj->adjustment,
+                               adj->opacity * adj->compositeFillOpacity(),
                                mask, maskTopLeft, density);
         }
         return clampToMax(result);
