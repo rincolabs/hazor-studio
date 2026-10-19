@@ -25,7 +25,14 @@
 The core PSD/PSB module set, rewritten in C++20: `error`, `io`, `header`,
 `blend`, `compression` (+ `packbits`), `image_data`, `descriptor`, `tagged`,
 `resources`, `metadata`, `layer`, `pixels`, `tree`, `file`, `builder`, and
-`filter_effects` (needed by `tagged`'s smart-filter cache block). This is
+`filter_effects` (needed by `tagged`'s smart-filter cache block).
+
+`Linked.hpp`/`Linked.cpp` is **not** a port: upstream validates the structure
+of the placed-layer (`SoLd`/`SoLE`/`PlLd`) and linked-file
+(`lnk2`/`lnk3`/`lnkD`) blocks but never exposes their contents, which the
+Smart Object import needs. It is a read-only view over bytes `Tagged` already
+owns, written against Adobe's specification plus the field order psd-tools and
+ag-psd document — see the file comment. This is
 enough to parse and reconstruct a full PSD/PSB document: header, image
 resources, the layer/mask section (records, masks, blending ranges, channel
 data, nested groups), tagged blocks, the merged image, and per-layer/merged

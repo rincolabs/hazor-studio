@@ -38,6 +38,8 @@ add_library(psd STATIC
     Metadata.cpp
     Layer.hpp
     Layer.cpp
+    Linked.hpp
+    Linked.cpp
     File.hpp
     File.cpp
     Pixels.hpp
