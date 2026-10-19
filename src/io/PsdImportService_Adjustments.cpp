@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 namespace psdimport {
 
@@ -34,11 +35,13 @@ curves::PointList identity() { return curves::identityPoints(); }
 // `curv` (Curves block): pencil flag (1), version (2, must be 1 or
 // 4), channel bitmask (4), then per set bit (0..31): either a 256-byte
 // freehand map or a u16 point count + (output,input) u16 pairs.
-bool parseCurves(const std::vector<uint8_t>& d, curves::CurvesData& out)
+bool parseCurves(const std::vector<uint8_t>& d, curves::CurvesData& out, bool& pencilResampled)
 {
+    pencilResampled = false;
     if (d.size() < 7)
         return false;
     const bool pencil = d[0] != 0;
+    pencilResampled = pencil;
     const uint16_t version = be16(d, 1);
     if (version != 1 && version != 4)
         return false;
@@ -112,8 +115,8 @@ bool parseColorBalance(const std::vector<uint8_t>& d, colorbalance::ColorBalance
 
 // `hue2` (Hue/Saturation block): version(2) colorize-flag(1 byte at
 // offset 2), master H/S/L at offset 4 (colorize) or 10 (not), then six
-// 14-byte per-band records from offset 16 (4 i16 bounds + h/s/l i16; bounds
-// are not reproduced here — Hazor's band geometry stays at its defaults).
+// 14-byte per-band records from offset 16 (4 i16 hue bounds + h/s/l i16),
+// all of which Hazor models.
 bool parseHueSaturation(const std::vector<uint8_t>& d, huesaturation::HueSaturationData& out)
 {
     if (d.size() < 12)
@@ -128,10 +131,39 @@ bool parseHueSaturation(const std::vector<uint8_t>& d, huesaturation::HueSaturat
         huesaturation::Range::Cyans, huesaturation::Range::Blues, huesaturation::Range::Magentas,
     };
     for (int i = 0; i < 6; ++i) {
-        const size_t at = 16 + static_cast<size_t>(i) * 14 + 8; // skip the 4 bound values
-        if (at + 6 > d.size())
+        const size_t at = 16 + static_cast<size_t>(i) * 14;
+        if (at + 14 > d.size())
             break;
-        out.ranges[static_cast<size_t>(kBandOrder[i])] = huesaturation::HslValues{bei16(d, at), bei16(d, at + 2), bei16(d, at + 4)};
+        out.ranges[static_cast<size_t>(kBandOrder[i])] =
+            huesaturation::HslValues{bei16(d, at + 8), bei16(d, at + 10), bei16(d, at + 12)};
+
+        // The four 2-byte bounds in front of those sliders are the band's hue
+        // geometry (outer start, inner start, inner end, outer end; degrees
+        // 0..360, wrapping for Reds) — which is exactly what Hazor's editable
+        // HueRange models, so there is no reason to leave the band at its
+        // default. They are unwrapped into the monotone frame HueRange::
+        // weight() works in, then shifted so the band's centre lands in
+        // [0, 360); a file that never refined its bands then reproduces
+        // defaultBandRanges() to the degree.
+        double bounds[4];
+        for (int k = 0; k < 4; ++k)
+            bounds[k] = bei16(d, at + static_cast<size_t>(k) * 2);
+        for (int k = 1; k < 4; ++k) {
+            while (bounds[k] < bounds[k - 1])
+                bounds[k] += 360.0;
+        }
+        if (bounds[3] - bounds[0] <= 0.0)
+            continue; // degenerate/absent geometry: keep Hazor's default band
+        const double center = 0.5 * (bounds[1] + bounds[2]);
+        const double shift = 360.0 * std::floor(center / 360.0);
+        huesaturation::HueRange& band = out.band(kBandOrder[i]);
+        band.enabled = true;
+        band.centerHue = static_cast<float>(center - shift);
+        band.outerStart = static_cast<float>(bounds[0] - shift);
+        band.innerStart = static_cast<float>(bounds[1] - shift);
+        band.innerEnd = static_cast<float>(bounds[2] - shift);
+        band.outerEnd = static_cast<float>(bounds[3] - shift);
+        band.supportsWrap = band.outerStart < 0.0f || band.outerEnd > 360.0f;
     }
     out.presetName = QStringLiteral("Custom");
     return true;
@@ -143,10 +175,17 @@ bool tryBuildAdjustment(const psd::LayerRecord& rec, Context& ctx, const QString
 {
     if (const auto* b = rec.block(psdKey("curv"))) {
         curves::CurvesData cd;
-        if (parseCurves(b->data, cd)) {
+        bool pencilResampled = false;
+        if (parseCurves(b->data, cd, pencilResampled)) {
             node.adjustment = std::make_shared<AdjustmentData>();
             node.adjustment->type = QStringLiteral("curves");
             node.adjustment->params = cd.toParams();
+            if (pencilResampled) {
+                ctx.warn(QCoreApplication::translate("PsdImportService",
+                    "Layer \"%1\": its Curves adjustment was drawn freehand (pencil mode), which "
+                    "stores a value per input level; Hazor curves are control points, so it was "
+                    "resampled and is only an approximation.").arg(layerName));
+            }
         } else {
             ctx.warn(QCoreApplication::translate("PsdImportService",
                 "Layer \"%1\": its Curves settings could not be read; the layer was not imported.").arg(layerName));

@@ -1,4 +1,4 @@
-// Vector mask (`vmsk`/`vsms`) + fill (`SoCo`) + stroke (`vstk`) -> Hazor's
+// Vector mask (`vmsk`/`vsms`) + fill (`SoCo`/`vscg`) + stroke (`vstk`) -> Hazor's
 // ShapeData, rasterized through the same ShapeLayerUpdater path a
 // hand-drawn shape layer uses.
 //
@@ -15,6 +15,8 @@
 
 #include <QCoreApplication>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <span>
 
@@ -114,6 +116,54 @@ VectorPath pathFromSubpaths(const std::vector<Subpath>& subs)
     return vp;
 }
 
+// One shape layer's fill content. The format has carried it two ways: a plain
+// `SoCo`/`GdFl`/`PtFl` block (the original form, still used by a fill layer
+// with a vector mask) and, since CS6, `vscg` — a 4-byte content-type key
+// followed by that same descriptor. A modern shape layer carries ONLY `vscg`,
+// so reading `SoCo` alone leaves its fill at whatever default the importer
+// invents.
+struct FillContent {
+    bool present = false;
+    bool solid = false;   // false + present == gradient or pattern
+    QColor color{200, 200, 200, 255};
+};
+
+FillContent readFillContent(const psd::LayerRecord& rec)
+{
+    FillContent out;
+    auto fromDescriptor = [&out](std::span<const uint8_t> body, bool knownSolid) {
+        const auto parsed = psd::VersionedDescriptor::parsePrefix(body);
+        if (!parsed.hasValue())
+            return;
+        out.present = true;
+        const psd::Value* clr = parsed.value().first.descriptor.get("Clr ");
+        if (knownSolid && clr && clr->kind() == psd::Value::Kind::DescriptorKind) {
+            out.solid = true;
+            out.color = colorFromDescriptor(clr->asDescriptor());
+        }
+    };
+
+    if (const auto* soco = rec.block(psdKey("SoCo")); soco && !soco->data.empty()) {
+        fromDescriptor(soco->data, /*knownSolid=*/true);
+        if (out.present)
+            return out;
+    }
+    if (const auto* gdfl = rec.block(psdKey("GdFl")); gdfl && !gdfl->data.empty()) {
+        out.present = true;
+        return out; // gradient: present, not solid
+    }
+    if (const auto* ptfl = rec.block(psdKey("PtFl")); ptfl && !ptfl->data.empty()) {
+        out.present = true;
+        return out; // pattern: present, not solid
+    }
+    if (const auto* vscg = rec.block(psdKey("vscg")); vscg && vscg->data.size() > 4) {
+        const bool solid = std::memcmp(vscg->data.data(), "SoCo", 4) == 0;
+        fromDescriptor(std::span<const uint8_t>(vscg->data.data() + 4, vscg->data.size() - 4), solid);
+        out.present = true;
+    }
+    return out;
+}
+
 double unitToPx(const psd::Value* v, double dpi, double fallback)
 {
     if (!v) return fallback;
@@ -165,20 +215,11 @@ bool tryBuildShape(const psd::LayerRecord& rec, Context& ctx, const QString& lay
     shape.transform.localToCanvas = QTransform(); // path coordinates are already canvas NDC
     shape.style.antiAlias = true;
 
-    const auto* soco = rec.block(psdKey("SoCo"));
+    const FillContent fill = readFillContent(rec);
     const auto* vstk = rec.block(psdKey("vstk"));
 
-    bool fillEnabled = soco != nullptr;
-    shape.style.fillColor = QColor(200, 200, 200, 255);
-    if (soco) {
-        const auto parsed = psd::VersionedDescriptor::parsePrefix(soco->data);
-        if (parsed.hasValue()) {
-            if (const psd::Value* clr = parsed.value().first.descriptor.get("Clr ");
-                clr && clr->kind() == psd::Value::Kind::DescriptorKind) {
-                shape.style.fillColor = colorFromDescriptor(clr->asDescriptor());
-            }
-        }
-    }
+    bool fillEnabled = fill.present;
+    shape.style.fillColor = fill.color;
 
     shape.style.strokeEnabled = false;
     if (vstk) {
@@ -205,12 +246,54 @@ bool tryBuildShape(const psd::LayerRecord& rec, Context& ctx, const QString& lay
                         "Layer \"%1\": its shape stroke uses a gradient or pattern, which Hazor's "
                         "shape stroke does not support; a solid color was used instead.").arg(layerName));
                 }
+                // Stroke opacity has no field of its own in ShapeStyle, but the
+                // stroke colour's alpha is what ShapeRenderer's QPen uses, so
+                // the two multiply into one value with no loss.
+                const double strokeOpacity = std::clamp(unitToPx(d.get("strokeStyleOpacity"), ctx.dpi, 100.0), 0.0, 100.0);
+                strokeColor.setAlphaF(static_cast<float>(strokeColor.alphaF() * strokeOpacity / 100.0));
+
                 const double widthPx = unitToPx(d.get("strokeStyleLineWidth"), ctx.dpi, 1.0);
                 shape.style.strokeEnabled = true;
                 shape.style.strokeColor = strokeColor;
                 shape.style.strokeWidth = ctx.docSize.width() > 0 ? widthPx * 2.0 / ctx.docSize.width() : 0.002;
+
+                // Hazor always strokes centred on the path (ShapeRenderer's
+                // strokePath), so an inside/outside stroke lands half its width
+                // off on both sides.
+                if (const psd::Value* align = d.get("strokeStyleLineAlignment");
+                    align && align->kind() == psd::Value::Kind::Enumerated
+                    && !align->asEnumerated().value.is("strokeStyleAlignCenter")) {
+                    ctx.warn(QCoreApplication::translate("PsdImportService",
+                        "Layer \"%1\": its shape stroke is aligned inside/outside the path; Hazor "
+                        "centers strokes on the path, so its %2px stroke is offset by half its width.")
+                        .arg(layerName).arg(static_cast<int>(std::lround(widthPx))));
+                }
+                if (const psd::Value* dashes = d.get("strokeStyleLineDashSet");
+                    dashes && dashes->kind() == psd::Value::Kind::List && !dashes->asList().empty()) {
+                    ctx.warn(QCoreApplication::translate("PsdImportService",
+                        "Layer \"%1\": its shape stroke is dashed, which Hazor does not support; a "
+                        "solid stroke was used instead.").arg(layerName));
+                }
+                if (const psd::Value* blend = d.get("strokeStyleBlendMode");
+                    blend && blend->kind() == psd::Value::Kind::Enumerated
+                    && !blend->asEnumerated().value.is("Nrml")) {
+                    ctx.warn(QCoreApplication::translate("PsdImportService",
+                        "Layer \"%1\": its shape stroke uses a blend mode, which Hazor's shape "
+                        "stroke does not support; it was drawn normally.").arg(layerName));
+                }
             }
         }
+    }
+
+    // A gradient- or pattern-filled shape would otherwise render with
+    // ShapeStyle's placeholder grey. The record's own cached pixels DO carry
+    // the real fill, so hand the layer back to the raster path.
+    if (fillEnabled && fill.present && !fill.solid) {
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": its shape is filled with a gradient or pattern, which Hazor's shape "
+            "fill does not support; it was imported as pixels instead of an editable shape.")
+            .arg(layerName));
+        return false;
     }
     shape.style.fillEnabled = fillEnabled;
 

@@ -23,11 +23,14 @@
 #include "psd/Tree.hpp"
 #include "smartobject/DocumentContainer.hpp"
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QImage>
 #include <QTransform>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <span>
 
 using namespace psdimport;
@@ -71,11 +74,15 @@ void applyCommonGroupProps(const psd::LayerRecord& rec, Context& ctx, LayerTreeN
     node.opacity = static_cast<float>(rec.opacity) / 255.0f;
     const auto divider = rec.sectionDivider();
     const psd::BlendMode effective = (divider && divider->blendMode) ? *divider->blendMode : rec.blendMode;
-    node.blendMode = mapBlendMode(effective, ctx, node.name);
+    const bool passThrough = effective.kind() == psd::BlendMode::Kind::PassThrough;
+    // Pass Through gets its own, more specific line below; routing it through
+    // mapBlendMode as well would report the same group twice.
+    node.blendMode = passThrough ? BlendMode::Normal : mapBlendMode(effective, ctx, node.name);
     node.lockFlags = lockFlagsFromRecord(rec);
     node.collapsed = divider && divider->kind.kind() == psd::SectionType::Kind::ClosedFolder;
     convertLayerEffects(rec, ctx, node.name, node.effects);
-    if (divider && divider->blendMode && divider->blendMode->kind() == psd::BlendMode::Kind::PassThrough) {
+    reportUnsupportedLayerProperties(rec, ctx, node.name, /*clippingHonoured=*/false);
+    if (passThrough) {
         ctx.warn(QCoreApplication::translate("PsdImportService",
             "Group \"%1\" uses Pass Through blending; Hazor always isolates group contents, "
             "so layers below the group may look different.").arg(node.name));
@@ -168,68 +175,6 @@ std::vector<std::unique_ptr<LayerTreeNode>> buildSiblingLevel(std::span<const ps
     return out;
 }
 
-// A Smart Object layer -> a real, editable Hazor Smart Object instance: a
-// fresh one-layer content Document holding the layer's own cached/rendered
-// pixels (the only source this library can recover — see PROVENANCE.md;
-// PlLd/SoLd/SoLE's linked/embedded original file is not re-extracted),
-// registered under a new docId that the caller must add to the destination
-// container (PsdImportResult::embeddedSmartObjects). `node->layer`'s own
-// cpuImage becomes that same render, exactly like any already-rendered
-// instance — e.g. one just loaded from a .hazor file, see
-// ProjectFileService's "sourceGeneration" round-trip — so nothing here
-// touches the async SmartObjectRenderService at all.
-bool tryBuildSmartObject(const psd::LayerRecord& rec, Context& ctx, const QString& name, LayerTreeNode& node)
-{
-    QImage pixels = decodeLayerRgba(rec, ctx.file, ctx, name);
-    if (pixels.isNull())
-        return false;
-
-    auto content = std::make_shared<Document>();
-    content->name = name;
-    content->size = pixels.size();
-    content->resolutionDpi = ctx.dpi;
-    content->selection.resize(pixels.width(), pixels.height());
-
-    auto contentNode = std::make_unique<LayerTreeNode>();
-    contentNode->type = LayerTreeNode::Type::Layer;
-    contentNode->name = name;
-    contentNode->layer = std::make_shared<Layer>();
-    contentNode->layer->name = name;
-    contentNode->layer->owner = contentNode.get();
-    contentNode->layer->cpuImage = pixels;
-    contentNode->layer->resetTransform = QTransform();
-    contentNode->layer->hasResetTransform = true;
-    content->roots.push_back(std::move(contentNode));
-    content->activeFlatIndex = 0;
-    content->selectedFlatIndices = {0};
-
-    const SmartObjectDocId docId = DocumentContainer::generateDocId();
-    ctx.embeddedDocs.emplace_back(docId, content);
-
-    auto soData = std::make_shared<SmartObjectData>();
-    soData->mode = SmartObjectStorageMode::Embedded;
-    soData->docId = docId;
-    soData->state.sourceSize = content->size;
-    soData->state.sourceDpi = content->resolutionDpi;
-    // Matches the fresh content Document's own (untouched) compositionGeneration
-    // (0): the staleness test (sourceGeneration != source->compositionGeneration)
-    // then reads this instance as already up to date, so it keeps showing
-    // `pixels` instead of queuing a redundant re-render on first open.
-    soData->state.sourceGeneration = 0;
-    node.layer->smartObjectData = std::move(soData);
-    node.layer->cpuImage = pixels;
-
-    const QRectF rectPx(rec.rect.left, rec.rect.top,
-                        static_cast<qreal>(rec.rect.width()), static_cast<qreal>(rec.rect.height()));
-    node.transform = ndcTransformForPixelRect(rectPx, ctx.docSize);
-
-    ctx.warn(QCoreApplication::translate("PsdImportService",
-        "Layer \"%1\": its Smart Object was imported as an embedded Smart Object containing a "
-        "flattened copy of the rendered pixels; the original linked/embedded source file was "
-        "not preserved.").arg(name));
-    return true;
-}
-
 // Content-type dispatch for one ordinary (non-group) layer record.
 std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Context& ctx, Document& scratchDoc)
 {
@@ -264,6 +209,7 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
         node->blendMode = mapBlendMode(rec.blendMode, ctx, name);
         node->lockFlags = lockFlagsFromRecord(rec);
         node->transform = QTransform();
+        reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/true);
         if (node->layer)
             applyLayerMask(rec, ctx, name, *node->layer, QRect(QPoint(0, 0), ctx.docSize));
         return node;
@@ -280,10 +226,20 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
     node->layer->name = name;
     node->layer->owner = node.get();
 
+    reportUnsupportedLayerProperties(rec, ctx, name, /*clippingHonoured=*/false);
+
     bool built = false;
+    // Set by the converters whose placement may not be an axis-aligned rect
+    // (rotated type, a transformed Smart Object): they anchor the record's
+    // mask themselves, because currentImageRectPx() below cannot.
+    bool maskApplied = false;
     if (hasText)
-        built = tryBuildText(rec, ctx, name, *node);
-    if (!built && hasVectorMask && (socoBlock || rec.block(psdKey("vstk"))))
+        built = tryBuildText(rec, ctx, name, *node, maskApplied);
+    // `vscg` is where a CS6+ shape layer keeps its fill; `vstk` its stroke.
+    // Either one (or the legacy `SoCo`) means the vector mask is a shape's
+    // outline rather than a mask over pixels.
+    if (!built && hasVectorMask
+        && (socoBlock || rec.block(psdKey("vstk")) || rec.block(psdKey("vscg"))))
         built = tryBuildShape(rec, ctx, name, *node, scratchDoc);
     if (!built && (gdflBlock || ptflBlock) && !socoBlock) {
         ctx.warn(QCoreApplication::translate("PsdImportService",
@@ -291,7 +247,7 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
             .arg(name, gdflBlock ? QStringLiteral("Gradient Fill") : QStringLiteral("Pattern Fill")));
     }
     if (!built && hasSmart)
-        built = tryBuildSmartObject(rec, ctx, name, *node);
+        built = tryBuildSmartObject(rec, ctx, name, *node, maskApplied);
     if (!built) {
         QImage pixels = decodeLayerRgba(rec, ctx.file, ctx, name);
         if (pixels.isNull()) {
@@ -315,17 +271,21 @@ std::unique_ptr<LayerTreeNode> buildLeafNode(const psd::LayerRecord& rec, Contex
         // shape/text layer's rendered image may not match PSD's stored rect
         // exactly (it is rebuilt from vector/text content), and the mask
         // must be anchored to whatever rect the layer actually occupies.
-        const QRect ownerRect = currentImageRectPx(*node, ctx.docSize);
-        applyLayerMask(rec, ctx, name, *node->layer, ownerRect);
+        if (!maskApplied) {
+            const QRect ownerRect = currentImageRectPx(*node, ctx.docSize);
+            applyLayerMask(rec, ctx, name, *node->layer, ownerRect);
+        }
         node->layer->resetTransform = node->transform;
         node->layer->hasResetTransform = true;
     }
     return node;
 }
 
-} // namespace
-
-PsdImportResult PsdImportService::import(const psd::PsdFile& file)
+// The whole document-level conversion, parameterized by how many Smart Object
+// sources deep it already is. PsdImportService::import() is this at depth 0;
+// importEmbeddedSmartObjectDocument() re-enters it one level deeper for an
+// embedded PSD/PSB source.
+PsdImportResult importDocument(const psd::PsdFile& file, int smartObjectDepth)
 {
     PsdImportResult result;
     const psd::Header& header = file.header;
@@ -347,6 +307,7 @@ PsdImportResult PsdImportService::import(const psd::PsdFile& file)
         result.resolutionDpi = 72.0;
 
     Context ctx{file, result.canvasSize, result.resolutionDpi, {}};
+    ctx.smartObjectDepth = smartObjectDepth;
 
     switch (modeKind) {
     case psd::ColorMode::Kind::Grayscale:
@@ -473,6 +434,308 @@ PsdImportResult PsdImportService::import(const psd::PsdFile& file)
     result.warnings = ctx.warnings;
     result.embeddedSmartObjects = std::move(ctx.embeddedDocs);
     return result;
+}
+
+} // namespace
+
+namespace psdimport {
+
+namespace {
+
+// "8BPS": the magic every PSD and PSB starts with. An embedded Smart Object
+// source is whatever file was placed (another PSD, a PNG, a JPEG, an AI), so
+// the bytes have to be sniffed before they reach the PSD parser.
+bool looksLikePsd(std::span<const uint8_t> bytes)
+{
+    return bytes.size() >= 4 && bytes[0] == '8' && bytes[1] == 'B'
+        && bytes[2] == 'P' && bytes[3] == 'S';
+}
+
+// The affine mapping a placed source's own pixel grid (origin top-left, Y
+// down, `sourceSize` pixels) onto the destination quad the file recorded.
+// Corners are TL, TR, BR, BL; a parallelogram is exactly an affine image of
+// the source rectangle, which is why PlacedQuad::isAffine() is the
+// precondition for using this at all.
+QTransform quadToTransform(const psd::PlacedQuad& quad, const QSize& sourceSize)
+{
+    const double w = std::max(1, sourceSize.width());
+    const double h = std::max(1, sourceSize.height());
+    return QTransform((quad.x(1) - quad.x(0)) / w, (quad.y(1) - quad.y(0)) / w,
+                      (quad.x(3) - quad.x(0)) / h, (quad.y(3) - quad.y(0)) / h,
+                      quad.x(0), quad.y(0));
+}
+
+// Can this placement be expressed as the plain pixel RECT that
+// ndcTransformForPixelRect()/currentImageRectPx() assume? Rotation, skew and
+// mirroring cannot, and have to go through ndcTransformForImageMap() instead.
+bool isUprightScale(const QTransform& t)
+{
+    return std::abs(t.m12()) < 1e-6 && std::abs(t.m21()) < 1e-6
+        && t.m11() > 0.0 && t.m22() > 0.0
+        && std::abs(t.m13()) < 1e-12 && std::abs(t.m23()) < 1e-12;
+}
+
+// A one-layer content Document holding `pixels`: the shape a placed
+// raster source (PNG/JPEG) takes, and the shape of the fallback when no
+// source file can be recovered at all.
+std::shared_ptr<Document> singleLayerDocument(const QString& name, const QImage& pixels, double dpi)
+{
+    auto doc = std::make_shared<Document>();
+    doc->name = name;
+    doc->size = pixels.isNull() ? QSize(1, 1) : pixels.size();
+    doc->resolutionDpi = dpi > 0.0 ? dpi : 72.0;
+    doc->selection.resize(doc->size.width(), doc->size.height());
+
+    auto contentNode = std::make_unique<LayerTreeNode>();
+    contentNode->type = LayerTreeNode::Type::Layer;
+    contentNode->name = name;
+    contentNode->layer = std::make_shared<Layer>();
+    contentNode->layer->name = name;
+    contentNode->layer->owner = contentNode.get();
+    contentNode->layer->cpuImage = pixels;
+    contentNode->layer->resetTransform = QTransform();
+    contentNode->layer->hasResetTransform = true;
+    doc->roots.push_back(std::move(contentNode));
+    doc->activeFlatIndex = 0;
+    doc->selectedFlatIndices = {0};
+    return doc;
+}
+
+} // namespace
+
+EmbeddedPsdSource importEmbeddedSmartObjectDocument(std::span<const uint8_t> bytes, Context& ctx,
+                                                     const QString& layerName)
+{
+    EmbeddedPsdSource out;
+    const int depth = ctx.smartObjectDepth + 1;
+    if (depth >= kMaxSmartObjectDepth) {
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": its Smart Object sources nest more than %2 levels deep; the innermost "
+            "one was imported as flattened pixels.").arg(layerName).arg(kMaxSmartObjectDepth));
+        return out;
+    }
+
+    const auto parsed = psd::PsdFile::fromBytes(bytes);
+    if (!parsed.hasValue()) {
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": its Smart Object's source document could not be read (%2); the layer's "
+            "flattened pixels were used instead.")
+            .arg(layerName, QString::fromStdString(parsed.error().message())));
+        return out;
+    }
+    const psd::PsdFile& file = parsed.value();
+
+    PsdImportResult nested = importDocument(file, depth);
+    if (!nested.ok) {
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": its Smart Object's source document could not be converted (%2); the "
+            "layer's flattened pixels were used instead.").arg(layerName, nested.errorMessage));
+        return out;
+    }
+
+    auto doc = std::make_shared<Document>();
+    doc->name = layerName;
+    doc->size = nested.canvasSize;
+    doc->resolutionDpi = nested.resolutionDpi;
+    doc->colorMode = nested.colorMode;
+    doc->bitDepth = nested.bitDepth;
+    doc->setColorProfile(nested.colorProfile);
+    doc->setProfileSource(nested.profileSource);
+    if (!doc->size.isEmpty())
+        doc->selection.resize(doc->size.width(), doc->size.height());
+    doc->guideManager.setGuides(std::move(nested.guides));
+    doc->roots = std::move(nested.roots);
+    doc->activeFlatIndex = doc->roots.empty() ? -1 : 0;
+    doc->selectedFlatIndices.clear();
+    if (!doc->roots.empty())
+        doc->selectedFlatIndices.insert(0);
+
+    // A Smart Object inside a Smart Object source is still an instance of a
+    // document in THIS file's container (SmartObjectData holds a docId, not a
+    // pointer — see SmartObjectData.hpp), so its content document has to
+    // travel up to the one container the caller will register everything in.
+    for (auto& entry : nested.embeddedSmartObjects)
+        ctx.embeddedDocs.push_back(std::move(entry));
+    for (const QString& line : nested.warnings) {
+        ctx.warn(QCoreApplication::translate("PsdImportService", "Smart Object \"%1\" → %2")
+                     .arg(layerName, line));
+    }
+
+    out.document = std::move(doc);
+    // The source's own last stored render: shown until Hazor has composited
+    // the content document itself, so the instance is never blank.
+    if (const auto composite = file.compositeRgba8(); composite.hasValue())
+        out.mergedImage = rgbaImageToQImage(composite.value());
+    return out;
+}
+
+// A Smart Object layer -> a real, editable Hazor Smart Object instance whose
+// content document is the ORIGINAL embedded file (`lnk2`/`lnk3`/
+// `lnkD` + the layer's `Idnt`), converted in full: a placed PSD keeps its own
+// layer tree, a placed PNG/JPEG becomes a one-layer document. Only when no
+// source can be recovered does it fall back to a flattened copy of the
+// layer's cached render, and it says so.
+//
+// The content document is registered under a fresh docId the caller must add
+// to the destination container (PsdImportResult::embeddedSmartObjects).
+bool tryBuildSmartObject(const psd::LayerRecord& rec, Context& ctx, const QString& layerName,
+                         LayerTreeNode& node, bool& maskApplied)
+{
+    maskApplied = false;
+
+    const auto placedResult = psd::readPlacedLayer(rec);
+    const psd::PlacedLayer* placed = placedResult.hasValue() ? &placedResult.value() : nullptr;
+    const psd::LinkedFile* linked = (placed && !placed->uniqueId.empty())
+        ? psd::findLinkedFile(ctx.linkedFiles(), placed->uniqueId) : nullptr;
+
+    std::shared_ptr<Document> content;
+    QImage provisional;
+
+    // Re-placing the source is only an improvement when the placement itself
+    // can be reproduced. A warped or perspective-placed Smart Object — the
+    // normal case in a mockup template — cannot be, so such a layer keeps the
+    // record's own cached render: the stored pixels, warp already baked in,
+    // placed at the rect it stored them for. That is not a degraded fallback,
+    // it is the SAME representation Hazor's own Distort produces (warpDistort()
+    // bakes cv::warpPerspective into cpuImage and leaves an axis-aligned
+    // placementTransform() behind), and an instance composites as an ordinary
+    // raster layer, so the perspective renders correctly everywhere.
+    //
+    // Why not have both — the real source document AND those baked pixels?
+    // It works until the first re-render, and then breaks unrecoverably:
+    // onSmartObjectRenderFinished() writes the content document's own
+    // (unwarped) composite straight into cpuImage without touching
+    // node->transform and without passing through any warp stage — nothing in
+    // the Smart Object path knows about distortData — so the layer would flatten
+    // AND take the source's aspect ratio into a rect sized for the warped
+    // footprint. Render commits are caches that deliberately bypass undo, so
+    // there would be no way back. Reproducing a warped Smart Object needs that
+    // render commit to re-apply the stored quad, which is a Hazor feature, not
+    // something this converter can stand in for.
+    const bool placementReproducible = placed && placed->isPlainAffine();
+    if (!placementReproducible) {
+        const bool perspective = placed && placed->nonAffineTransform && placed->transform
+            && !placed->nonAffineTransform->equals(*placed->transform);
+        ctx.warn(placed && placed->warped
+            ? QCoreApplication::translate("PsdImportService",
+                  "Layer \"%1\": its Smart Object is warped, which Hazor cannot reproduce. It was "
+                  "imported as a Smart Object holding a flattened copy of the warped render "
+                  "stored in the file, so it looks right but its original source file was not "
+                  "preserved.")
+                  .arg(layerName)
+            : perspective
+            ? QCoreApplication::translate("PsdImportService",
+                  "Layer \"%1\": its Smart Object is placed in perspective, which Hazor layer "
+                  "transforms cannot express. It was imported as a Smart Object holding a "
+                  "flattened copy of the render stored in the file, so it looks right but its "
+                  "original source file was not preserved.").arg(layerName)
+            : QCoreApplication::translate("PsdImportService",
+                  "Layer \"%1\": its Smart Object's placement could not be read; it was imported "
+                  "as a Smart Object holding a flattened copy of the rendered pixels.")
+                  .arg(layerName));
+    }
+
+    if (placementReproducible && linked && linked->isEmbedded()) {
+        const std::span<const uint8_t> bytes(linked->data.data(), linked->data.size());
+        if (looksLikePsd(bytes)) {
+            EmbeddedPsdSource source = importEmbeddedSmartObjectDocument(bytes, ctx, layerName);
+            content = std::move(source.document);
+            provisional = std::move(source.mergedImage);
+        } else {
+            QImage decoded;
+            if (decoded.loadFromData(QByteArray::fromRawData(
+                    reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size())))) {
+                provisional = decoded.convertToFormat(QImage::Format_RGBA8888);
+                content = singleLayerDocument(qs(linked->fileName), provisional,
+                                              placed->sourceResolution > 0.0 ? placed->sourceResolution : ctx.dpi);
+            } else {
+                ctx.warn(QCoreApplication::translate("PsdImportService",
+                    "Layer \"%1\": its Smart Object's source file (\"%2\") is in a format Hazor "
+                    "cannot decode; the layer's flattened pixels were used instead.")
+                    .arg(layerName, qs(linked->fileName)));
+            }
+        }
+    } else if (placementReproducible && linked) {
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": its Smart Object links to the external file \"%2\", which is not stored "
+            "inside this document; the layer's flattened pixels were used instead.")
+            .arg(layerName, qs(linked->fileName)));
+    } else if (placementReproducible && !linked) {
+        ctx.warn(QCoreApplication::translate("PsdImportService",
+            "Layer \"%1\": the file behind its Smart Object is not recorded in this document; the "
+            "layer's flattened pixels were used instead.").arg(layerName));
+    }
+
+    const bool recovered = content != nullptr;
+    if (!recovered) {
+        QImage pixels = decodeLayerRgba(rec, ctx.file, ctx, layerName);
+        if (pixels.isNull())
+            return false;
+        provisional = pixels;
+        content = singleLayerDocument(layerName, pixels, ctx.dpi);
+    }
+
+    const QSize sourceSize = content->size.isEmpty() ? QSize(1, 1) : content->size;
+    if (provisional.size() != sourceSize) {
+        // The instance's pixels have to cover exactly the content document's
+        // canvas: that is the extent the placement below maps. A mismatch
+        // means the file's merged image is unusable here, so start transparent
+        // and let the first real render fill it in.
+        provisional = QImage(sourceSize, QImage::Format_RGBA8888);
+        provisional.fill(Qt::transparent);
+    }
+
+    // Where the source lands. `Trnf` is a quad in destination pixels covering
+    // the source's FULL extent, which is exactly the instance image's extent.
+    QTransform imageToDocPx;
+    if (recovered && placementReproducible && placed->transform) {
+        imageToDocPx = quadToTransform(*placed->transform, sourceSize);
+    } else {
+        // No usable placement (or a flattened fallback whose pixels ARE the
+        // stored rect): put the image where the file last rendered it.
+        const QRectF stored(rec.rect.left, rec.rect.top,
+                            static_cast<qreal>(rec.rect.width()), static_cast<qreal>(rec.rect.height()));
+        const QRectF target = stored.isEmpty() ? QRectF(QPointF(0, 0), QSizeF(sourceSize)) : stored;
+        imageToDocPx = QTransform::fromScale(target.width() / sourceSize.width(),
+                                             target.height() / sourceSize.height());
+        imageToDocPx *= QTransform::fromTranslate(target.left(), target.top());
+    }
+
+    const SmartObjectDocId docId = DocumentContainer::generateDocId();
+    ctx.embeddedDocs.emplace_back(docId, content);
+
+    auto soData = std::make_shared<SmartObjectData>();
+    soData->mode = SmartObjectStorageMode::Embedded;
+    soData->docId = docId;
+    soData->state.sourceSize = content->size;
+    soData->state.sourceDpi = content->resolutionDpi;
+    // `provisional` is PHOTOSHOP's render of the source, not Hazor's, so the
+    // instance really is stale: leaving it marked never-rendered is what makes
+    // refreshAllSmartObjectInstances() composite the content document for real
+    // on open, exactly as ImageController::makeSmartObjectNode relies on.
+    soData->state.sourceGeneration = kSmartObjectNeverRendered;
+    node.layer->smartObjectData = std::move(soData);
+    node.layer->cpuImage = provisional;
+
+    if (isUprightScale(imageToDocPx)) {
+        node.transform = ndcTransformForPixelRect(
+            QRectF(imageToDocPx.dx(), imageToDocPx.dy(),
+                   imageToDocPx.m11() * sourceSize.width(), imageToDocPx.m22() * sourceSize.height()),
+            ctx.docSize);
+    } else {
+        node.transform = ndcTransformForImageMap(imageToDocPx, sourceSize, ctx.docSize);
+        applyLayerMaskThroughTransform(rec, ctx, layerName, *node.layer, sourceSize, imageToDocPx);
+        maskApplied = true;
+    }
+
+    return true;
+}
+
+} // namespace psdimport
+
+PsdImportResult PsdImportService::import(const psd::PsdFile& file)
+{
+    return importDocument(file, 0);
 }
 
 PsdImportResult PsdImportService::importFromBytes(const QByteArray& bytes)
