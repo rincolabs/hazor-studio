@@ -135,9 +135,9 @@ std::vector<ToolDefinition> ToolCatalog::buildCatalog()
              {"steps", "int", 1, 150, 20},
              {"seed", "int", -1, 2147483647, -1}}},
 
-        {"set_layer_blend_mode", "Set layer blend mode (0=Normal,1=Multiply,2=Screen,3=Overlay,4=Darken,5=Lighten,6=ColorDodge,7=ColorBurn,8=HardLight,9=SoftLight,10=Difference,11=Exclusion,12=Hue,13=Saturation,14=Color,15=Luminosity)", "Layer",
+        {"set_layer_blend_mode", "Set layer blend mode (0=Normal,1=Multiply,2=Screen,3=Overlay,4=Darken,5=Lighten,6=ColorDodge,7=ColorBurn,8=HardLight,9=SoftLight,10=Difference,11=Exclusion,12=Hue,13=Saturation,14=Color,15=Luminosity,16=LinearBurn,17=LinearDodge,18=VividLight,19=LinearLight,20=PinLight,21=HardMix,22=DarkerColor,23=LighterColor,24=Subtract,25=Divide,26=Dissolve)", "Layer",
             {{"index", "int", -1, 100, -1},
-             {"mode", "int", 0, 15, 0}}},
+             {"mode", "int", 0, 26, 0}}},
         {"float_selection", "Create new layer from current selection (cut=1 removes from source)", "Selection",
             {{"cut", "int", 0, 1, 0}}},
         {"delete_selected", "Delete (clear to transparent) the pixels within the active selection", "Selection", {}},

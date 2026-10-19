@@ -1,6 +1,6 @@
 #include "GradientRenderer.hpp"
 
-#include "renderer/BlendRules.hpp"
+#include "renderer/DocumentCompositor.hpp"
 
 #include <QPainter>
 #include <algorithm>
@@ -261,12 +261,11 @@ QImage GradientRenderer::compositeGradient(const GradientRenderRequest& request)
     if (source.isNull())
         return request.baseImage;
 
-    QPainter painter(&base);
-    painter.setCompositionMode(blend::painterHasNativeMode(request.blendMode)
-        ? blend::painterMode(request.blendMode)
-        : QPainter::CompositionMode_SourceOver);
-    painter.drawImage(0, 0, source);
-    painter.end();
+    // The tool opacity is already folded into the gradient's alpha, hence
+    // opacity 1 here. Compositing through the CPU compositor keeps the tool on
+    // the same blend spec as the layer stack, including the modes QPainter has
+    // no CompositionMode for.
+    DocumentCompositor::compositeStage(base, source, request.blendMode, 1.0f);
 
     QImage result = base.convertToFormat(QImage::Format_RGBA8888);
     if (request.lockAlpha) {

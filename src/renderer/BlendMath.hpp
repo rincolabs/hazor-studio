@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 
 // ─────────────────────────────────────────────────────────────────────────
 // Shared blend/composite math — the CPU half of the render specification.
@@ -70,16 +71,116 @@ inline Vec3 setSat(Vec3 c, float s)
     return c;
 }
 
-// Non-separable (HSL) blend modes — W3C compositing-1.
-inline Vec3 blendHsl(BlendMode mode, const Vec3& cb, const Vec3& cs)
+// ── Separable per-channel modes (b = backdrop, s = source) ───────────────
+// Channels are the document's own gamma-encoded values, which is what these
+// formulas are defined on. Dodge/burn carry the raster-engine boundary
+// semantics (see the header comment); the light modes are expressed through
+// them so Vivid Light and ColorDodge/ColorBurn agree on those boundaries.
+
+inline float dodge(float b, float s)
 {
+    return (b + s >= 1.0f) ? 1.0f : std::min(1.0f, b / (1.0f - s));
+}
+
+inline float burn(float b, float s)
+{
+    return (s <= 0.0f || b + s <= 1.0f) ? 0.0f
+                                        : 1.0f - std::min(1.0f, (1.0f - b) / s);
+}
+
+// Burn on the lower half of the source range, dodge on the upper half, each
+// driven at twice the distance from mid grey.
+inline float vividLight(float b, float s)
+{
+    return (s <= 0.5f) ? burn(b, 2.0f * s) : dodge(b, 2.0f * s - 1.0f);
+}
+
+// Replaces the backdrop only where the doubled source overshoots it.
+inline float pinLight(float b, float s)
+{
+    return (s > 0.5f) ? std::max(b, 2.0f * s - 1.0f) : std::min(b, 2.0f * s);
+}
+
+// b / s, saturating at white. A black source divides to white for every
+// backdrop, including black: the ratio is undefined there and the surrounding
+// limit is white, which is also how dodge resolves its own 0/0 corner.
+inline float divide(float b, float s)
+{
+    if (s <= 0.0f) return 1.0f;
+    return std::min(1.0f, b / s);
+}
+
+// Blend math for every mode the CPU composites per pixel: the non-separable
+// HSL modes (W3C compositing-1) and the separable modes QPainter has no
+// CompositionMode for. The natively-supported modes never reach here — they
+// run through the raster engine (blend::painterHasNativeMode). Clamped where
+// the GLSL mirror clamps, so both paths round the same values.
+inline Vec3 blend(BlendMode mode, const Vec3& cb, const Vec3& cs)
+{
+    const auto perChannel = [&](auto f) -> Vec3 {
+        return {f(cb[0], cs[0]), f(cb[1], cs[1]), f(cb[2], cs[2])};
+    };
+    Vec3 r;
     switch (mode) {
-    case BlendMode::Hue:        return setLum(setSat(cs, sat(cb)), lum(cb));
-    case BlendMode::Saturation: return setLum(setSat(cb, sat(cs)), lum(cb));
-    case BlendMode::Color:      return setLum(cs, lum(cb));
-    case BlendMode::Luminosity: return setLum(cb, lum(cs));
-    default:                    return cs;
+    case BlendMode::Hue:        r = setLum(setSat(cs, sat(cb)), lum(cb)); break;
+    case BlendMode::Saturation: r = setLum(setSat(cb, sat(cs)), lum(cb)); break;
+    case BlendMode::Color:      r = setLum(cs, lum(cb)); break;
+    case BlendMode::Luminosity: r = setLum(cb, lum(cs)); break;
+    case BlendMode::LinearBurn:
+        r = perChannel([](float b, float s) { return b + s - 1.0f; });
+        break;
+    case BlendMode::LinearDodge:
+        r = perChannel([](float b, float s) { return b + s; });
+        break;
+    case BlendMode::VividLight:  r = perChannel(vividLight); break;
+    case BlendMode::LinearLight:
+        r = perChannel([](float b, float s) { return b + 2.0f * s - 1.0f; });
+        break;
+    case BlendMode::PinLight:    r = perChannel(pinLight); break;
+    case BlendMode::HardMix:
+        // The sum thresholded at white: every channel ends up 0 or 1.
+        r = perChannel([](float b, float s) { return (b + s < 1.0f) ? 0.0f : 1.0f; });
+        break;
+    case BlendMode::DarkerColor:
+        // Whole-colour choice by luma, not per channel — no new hues.
+        r = (lum(cs) < lum(cb)) ? cs : cb;
+        break;
+    case BlendMode::LighterColor:
+        r = (lum(cs) > lum(cb)) ? cs : cb;
+        break;
+    case BlendMode::Subtract:
+        r = perChannel([](float b, float s) { return b - s; });
+        break;
+    case BlendMode::Divide:      r = perChannel(divide); break;
+    default:                     r = cs; break; // Dissolve (see coverage), Normal
     }
+    for (float& v : r) v = std::clamp(v, 0.0f, 1.0f);
+    return r;
+}
+
+// ── Dissolve ────────────────────────────────────────────────────────────
+// Deterministic hash of a document pixel → [0,1). Integer math on purpose:
+// a float hash (fract(sin(...))) is not reproducible between the CPU and the
+// GPU, and the two paths must dither the *same* pixels or the pattern shifts
+// when a live frame is replaced by the projection.
+inline float ditherNoise(int x, int y)
+{
+    uint32_t h = static_cast<uint32_t>(x) * 73856093u
+               ^ static_cast<uint32_t>(y) * 19349663u;
+    h ^= h >> 13;
+    h *= 2654435761u;
+    h ^= h >> 16;
+    return static_cast<float>(h & 0xFFFFFFu) * (1.0f / 16777216.0f);
+}
+
+// Dissolve spends coverage as probability instead of translucency: the source
+// wins whole pixels where the threshold passes and is absent elsewhere, so
+// opacity, mask and soft edges turn into a dither. Every other mode keeps its
+// coverage untouched.
+inline float coverage(BlendMode mode, float alpha, int x, int y)
+{
+    if (mode != BlendMode::Dissolve) return alpha;
+    return (ditherNoise(x, y) < alpha) ? 1.0f : 0.0f;
 }
 
 // Layer-mask density ramp: density 1 applies the mask as-is, density 0

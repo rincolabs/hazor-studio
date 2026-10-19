@@ -8,6 +8,7 @@
 #include "brush/BrushPresetManager.hpp"
 #include "gradient/GradientPresetManager.hpp"
 #include "gradient/GradientRenderer.hpp"
+#include "renderer/BlendRules.hpp"
 #include "ui/gradient/GradientEditorDialog.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -2391,13 +2392,18 @@ QWidget* ToolOptionsBar::createGradientPage()
 
     lay->addWidget(new QLabel(tr("Mode:")));
     m_gradientBlendModeCombo = new QComboBox(this);
-    m_gradientBlendModeCombo->addItems({
-        tr("Normal"), tr("Multiply"), tr("Screen"), tr("Overlay"),
-        tr("Darken"), tr("Lighten"), tr("Color Dodge"), tr("Color Burn"),
-        tr("Hard Light"), tr("Soft Light"), tr("Difference"), tr("Exclusion"),
-        tr("Hue"), tr("Saturation"), tr("Color"), tr("Luminosity")
-    });
-    m_gradientBlendModeCombo->setFixedWidth(118);
+    // Same grouped picker as the layer panel (renderer/BlendRules.hpp); the
+    // BlendMode value rides in the item data, not in the row index.
+    for (const auto& e : blend::pickerEntries()) {
+        if (!e.label) {
+            m_gradientBlendModeCombo->insertSeparator(m_gradientBlendModeCombo->count());
+            continue;
+        }
+        m_gradientBlendModeCombo->addItem(tr(e.label), static_cast<int>(e.mode));
+    }
+    // Wider than the other tool combos: the grouped picker carries longer
+    // labels ("Linear Dodge (Add)").
+    m_gradientBlendModeCombo->setFixedWidth(140);
     lay->addWidget(m_gradientBlendModeCombo);
 
     lay->addWidget(new ToolBarSeparator(this));
@@ -2436,7 +2442,10 @@ QWidget* ToolOptionsBar::createGradientPage()
         emit gradientDefinitionChanged(m_gradientDefinition);
     });
     connect(m_gradientBlendModeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &ToolOptionsBar::gradientBlendModeChanged);
+            this, [this](int index) {
+        const QVariant mode = m_gradientBlendModeCombo->itemData(index);
+        if (mode.isValid()) emit gradientBlendModeChanged(mode.toInt());
+    });
     connect(m_gradientOpacityInput, &ScrubbableValueInput::valueChanged, this, [this](double value) {
         emit gradientOpacityChanged(scrubInt(value));
     });

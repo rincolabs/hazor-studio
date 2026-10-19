@@ -71,7 +71,7 @@ BOOST_AUTO_TEST_CASE(blend_mode_tool_exists)
         if (p.name == "mode") {
             hasMode = true;
             BOOST_CHECK_EQUAL(p.minVal, 0);
-            BOOST_CHECK_EQUAL(p.maxVal, 15);
+            BOOST_CHECK_EQUAL(p.maxVal, 26);
             break;
         }
     }

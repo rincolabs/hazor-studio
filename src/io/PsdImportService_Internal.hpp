@@ -105,11 +105,10 @@ QTransform ndcTransformForPixelRect(const QRectF& rectPx, const QSize& docSize);
 QTransform ndcTransformForImageMap(const QTransform& imagePxToDocPx, const QSize& imageSizePx,
                                    const QSize& docSize);
 
-// Maps a psd::BlendMode onto Hazor's BlendMode. Every Hazor mode has a
-// same-named PSD counterpart; a PSD mode with no Hazor equivalent (Dissolve,
-// Linear Burn/Dodge, Darker/Lighter Color, Vivid/Linear/Pin Light, Hard Mix,
-// Subtract, Divide, group Pass Through) maps to Normal and is reported once
-// per affected layer via ctx.warn().
+// Maps a psd::BlendMode onto Hazor's BlendMode. The two sets are the same 27
+// layer modes under the same names; what is left over is group Pass Through
+// (and any key this reader does not know), which maps to Normal and is
+// reported once per affected layer via ctx.warn().
 BlendMode mapBlendMode(const psd::BlendMode& mode, Context& ctx, const QString& layerName);
 
 // Record-level PSD features that have no Hazor equivalent and that no

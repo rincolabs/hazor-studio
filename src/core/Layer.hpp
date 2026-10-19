@@ -23,6 +23,10 @@ struct RawLayerData;
 struct SmartObjectData;
 class LayerTreeNode;
 
+// The enum VALUE is persisted (.hzr `blendMode`, ProjectFileService) and is
+// the `mode` argument of the set_layer_blend_mode tool, so modes are appended
+// here and never reordered. Picker order is a separate table
+// (blend::uiOrder, renderer/BlendRules.hpp).
 enum class BlendMode {
     Normal = 0,
     Multiply,
@@ -39,7 +43,18 @@ enum class BlendMode {
     Hue,
     Saturation,
     Color,
-    Luminosity
+    Luminosity,
+    LinearBurn,
+    LinearDodge,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    DarkerColor,
+    LighterColor,
+    Subtract,
+    Divide,
+    Dissolve
 };
 
 enum class LayerType {

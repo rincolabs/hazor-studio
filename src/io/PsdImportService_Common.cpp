@@ -83,6 +83,17 @@ BlendMode mapBlendMode(const psd::BlendMode& mode, Context& ctx, const QString& 
     case psd::BlendMode::Kind::Saturation: return BlendMode::Saturation;
     case psd::BlendMode::Kind::Color: return BlendMode::Color;
     case psd::BlendMode::Kind::Luminosity: return BlendMode::Luminosity;
+    case psd::BlendMode::Kind::LinearBurn: return BlendMode::LinearBurn;
+    case psd::BlendMode::Kind::LinearDodge: return BlendMode::LinearDodge;
+    case psd::BlendMode::Kind::VividLight: return BlendMode::VividLight;
+    case psd::BlendMode::Kind::LinearLight: return BlendMode::LinearLight;
+    case psd::BlendMode::Kind::PinLight: return BlendMode::PinLight;
+    case psd::BlendMode::Kind::HardMix: return BlendMode::HardMix;
+    case psd::BlendMode::Kind::DarkerColor: return BlendMode::DarkerColor;
+    case psd::BlendMode::Kind::LighterColor: return BlendMode::LighterColor;
+    case psd::BlendMode::Kind::Subtract: return BlendMode::Subtract;
+    case psd::BlendMode::Kind::Divide: return BlendMode::Divide;
+    case psd::BlendMode::Kind::Dissolve: return BlendMode::Dissolve;
     default:
         break;
     }

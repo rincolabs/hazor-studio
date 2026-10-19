@@ -26,15 +26,16 @@
 // non-Normal group blend modes, and the same transform chain.
 //
 // Blend-mode semantics come from renderer/BlendRules.hpp (shared with the
-// GPU path). The four non-separable HSL modes (Hue/Saturation/Color/
-// Luminosity) have no QPainter::CompositionMode and are composited manually
-// per pixel below, using the same HSL helpers as the blend shader.
+// GPU path). Modes with no QPainter::CompositionMode — the non-separable HSL
+// modes, the light/arithmetic modes and Dissolve — are composited
+// manually per pixel below (compositeManual), using the same blendmath
+// helpers the blend shader mirrors.
 // ─────────────────────────────────────────────────────────────────────────
 
 namespace {
 
-// Non-separable (HSL) blend math comes from renderer/BlendMath.hpp — the
-// shared CPU/GPU specification (GLSL mirror: renderer/BlendShaderLib.hpp).
+// Blend math comes from renderer/BlendMath.hpp — the shared CPU/GPU
+// specification (GLSL mirror: renderer/BlendShaderLib.hpp).
 using blendmath::Vec3;
 
 inline uchar toByte(float v)
@@ -315,12 +316,13 @@ QImage resampleAffine(const QImage& source, const QTransform& imgToCanvas,
     return out;
 }
 
-// Composite `src` over `dst` using a non-separable HSL blend mode.
-// Both images are canvas-sized Format_ARGB32_Premultiplied. `opacity` is the
-// node opacity folded into the source alpha. Uses the standard W3C
-// non-separable compositing formula, consistent with QPainter's handling of
-// the separable modes.
-void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float opacity)
+// Composite `src` over `dst` for every blend mode QPainter has no
+// CompositionMode for (the HSL modes, the light/arithmetic modes,
+// Dissolve). Both images are canvas-sized Format_ARGB32_Premultiplied;
+// `opacity` is the node opacity folded into the source alpha. Same W3C
+// compositing formula the blend shader runs, so the live GPU frame and this
+// result agree pixel for pixel.
+void compositeManual(QImage& dst, const QImage& src, BlendMode mode, float opacity)
 {
     const int w = std::min(dst.width(), src.width());
     const int h = std::min(dst.height(), src.height());
@@ -330,7 +332,11 @@ void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float
         for (int x = 0; x < w; ++x) {
             const QRgb sp = s[x];
             const float sA0 = qAlpha(sp) / 255.0f;          // src coverage
-            const float sa  = sA0 * opacity;                 // effective src alpha
+            // Dissolve turns coverage into a per-pixel 0/1 dither keyed on the
+            // document pixel; every other mode keeps its alpha. x,y are
+            // document pixels (both images are canvas-aligned), which is what
+            // the shader reconstructs from gl_FragCoord.
+            const float sa = blendmath::coverage(mode, sA0 * opacity, x, y);
             if (sa <= 0.0f) continue;
 
             // Unpremultiply src colour (stage is premultiplied).
@@ -348,7 +354,7 @@ void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float
                       qBlue(dp) / 255.0f / ab};
             }
 
-            const Vec3 B = blendmath::blendHsl(mode, cb, cs);
+            const Vec3 B = blendmath::blend(mode, cb, cs);
             // W3C: blended source colour Cs' = (1-ab)*Cs + ab*B
             const Vec3 cp{(1.0f - ab) * cs[0] + ab * B[0],
                           (1.0f - ab) * cs[1] + ab * B[1],
@@ -362,21 +368,6 @@ void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float
             const float outB = sa * cp[2] + (1.0f - sa) * (qBlue(dp)  / 255.0f);
             d[x] = qRgba(toByte(outR), toByte(outG), toByte(outB), toByte(ao));
         }
-    }
-}
-
-// Composite a fully-rendered canvas-sized `stage` onto `target` with the
-// given blend mode and opacity. Separable/native modes go through QPainter;
-// HSL modes are composited manually.
-void compositeStage(QImage& target, const QImage& stage, BlendMode mode, float opacity)
-{
-    if (blend::painterHasNativeMode(mode)) {
-        QPainter p(&target);
-        p.setOpacity(opacity);
-        p.setCompositionMode(blend::painterMode(mode));
-        p.drawImage(0, 0, stage);
-    } else {
-        compositeNonSeparable(target, stage, mode, opacity);
     }
 }
 
@@ -541,7 +532,7 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
 
     layerPainter.end();
 
-    compositeStage(target, stage, node->blendMode, node->opacity);
+    DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
 }
 
 // Scales every (premultiplied) channel of `stage` by the adjustment factor
@@ -608,7 +599,7 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
         stage.fill(qPremultiply(qRgba(c.red(), c.green(), c.blue(), c.alpha())));
         // The mask reveals/hides the fill per pixel (mix(1, mask, density)).
         modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-        compositeStage(target, stage, node->blendMode, node->opacity);
+        DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
         return;
     }
 
@@ -623,7 +614,7 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
     QImage stage = target.copy();
     adjustments::apply(stage, *node->adjustment, 1.0f);
     modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-    compositeStage(target, stage, node->blendMode, node->opacity);
+    DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity);
 }
 
 // Group-mask extension point. Masks currently live on Layer, not on
@@ -762,7 +753,8 @@ void renderNodesFiltered(QImage& target,
                                     groupsPassThrough, rawPixelNode);
                 applyGroupMask(groupStage, node);                 // no-op until group masks exist
                 applyGroupEffects(groupStage, node, doc->size);
-                compositeStage(target, groupStage, node->blendMode, node->opacity);
+                DocumentCompositor::compositeStage(target, groupStage, node->blendMode,
+                                                  node->opacity);
             }
             continue;
         }
@@ -830,6 +822,19 @@ QImage compositeFiltered(const Document* doc,
 }
 
 } // namespace
+
+void DocumentCompositor::compositeStage(QImage& target, const QImage& stage,
+                                        BlendMode mode, float opacity)
+{
+    if (blend::painterHasNativeMode(mode)) {
+        QPainter p(&target);
+        p.setOpacity(opacity);
+        p.setCompositionMode(blend::painterMode(mode));
+        p.drawImage(0, 0, stage);
+    } else {
+        compositeManual(target, stage, mode, opacity);
+    }
+}
 
 QImage DocumentCompositor::composite(const Document* doc, const RenderContext& /*ctx*/)
 {
@@ -942,7 +947,8 @@ QImage DocumentCompositor::compositeIsolatedNode(const Document* doc, const Laye
         // The group's own blend mode/opacity, composited against a
         // transparent backdrop (no layers below it in an isolated export) —
         // same W3C fade semantics as any other isolated composite here.
-        compositeStage(result, childStage, node->blendMode, node->opacity);
+        DocumentCompositor::compositeStage(result, childStage, node->blendMode,
+                                          node->opacity);
     } else {
         applyAdjustmentNode(result, node);
     }

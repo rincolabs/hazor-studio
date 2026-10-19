@@ -7,6 +7,7 @@
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
+#include "renderer/BlendRules.hpp"
 #include "smartobject/SmartObjectData.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -251,23 +252,30 @@ void applyRowData(QTreeWidgetItem* item, LayerTreeNode* node, int flatIndex)
 }
 } // namespace
 
-static const char* kBlendModeNames[] = {
-    "Normal", "Multiply", "Screen", "Overlay",
-    "Darken", "Lighten", "Color Dodge", "Color Burn",
-    "Hard Light", "Soft Light", "Difference", "Exclusion",
-    "Hue", "Saturation", "Color", "Luminosity"
-};
-static constexpr int kNumBlendModes = sizeof(kBlendModeNames) / sizeof(kBlendModeNames[0]);
-
-static int blendModeToComboIndex(BlendMode mode)
+// The combo is built from blend::pickerEntries() (renderer/BlendRules.hpp):
+// grouped order with separators, so the row index is NOT the BlendMode
+// value — the mode rides in the item data.
+static void fillBlendCombo(QComboBox* combo)
 {
-    return static_cast<int>(mode);
+    for (const auto& e : blend::pickerEntries()) {
+        if (!e.label) {
+            combo->insertSeparator(combo->count());
+            continue;
+        }
+        combo->addItem(LayerPanel::tr(e.label), static_cast<int>(e.mode));
+    }
 }
 
-static BlendMode comboIndexToBlendMode(int idx)
+static int blendModeToComboIndex(const QComboBox* combo, BlendMode mode)
 {
-    if (idx < 0 || idx >= kNumBlendModes) return BlendMode::Normal;
-    return static_cast<BlendMode>(idx);
+    const int idx = combo->findData(static_cast<int>(mode));
+    return idx >= 0 ? idx : 0;
+}
+
+static BlendMode comboIndexToBlendMode(const QComboBox* combo, int idx)
+{
+    const QVariant data = combo->itemData(idx);
+    return data.isValid() ? static_cast<BlendMode>(data.toInt()) : BlendMode::Normal;
 }
 
 LayerPanel::LayerPanel(QWidget* parent)
@@ -307,8 +315,7 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     m_blendCombo = new QComboBox(m_blendRow);
 
-    for (int i = 0; i < kNumBlendModes; ++i)
-        m_blendCombo->addItem(tr(kBlendModeNames[i]));
+    fillBlendCombo(m_blendCombo);
     m_blendCombo->setToolTip(tr("Blending Mode"));
     m_blendCombo->setMinimumWidth(80);
     row1->addWidget(m_blendCombo, 1);
@@ -1220,7 +1227,7 @@ void LayerPanel::onBlendModeChanged(int index)
     auto* doc = m_controller->document();
     int active = doc->activeFlatIndex;
     if (active < 0 || active >= doc->flatCount()) return;
-    m_controller->setNodeBlendMode(active, comboIndexToBlendMode(index));
+    m_controller->setNodeBlendMode(active, comboIndexToBlendMode(m_blendCombo, index));
 }
 
 void LayerPanel::onOpacityChanged(int value)
@@ -1693,7 +1700,7 @@ void LayerPanel::updateTopBarFromActiveLayer()
     if (!node) return;
 
     m_blendCombo->blockSignals(true);
-    m_blendCombo->setCurrentIndex(blendModeToComboIndex(node->blendMode));
+    m_blendCombo->setCurrentIndex(blendModeToComboIndex(m_blendCombo, node->blendMode));
     m_blendCombo->blockSignals(false);
 
     int opacityPct = static_cast<int>(node->opacity * 100.0f);

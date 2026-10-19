@@ -480,16 +480,20 @@ Four files, one contract — three for blending, one for resampling:
 | File | Role |
 |---|---|
 | [src/renderer/BlendRules.hpp](../src/renderer/BlendRules.hpp) | maps `BlendMode` → primitive for each backend: shader id (`shaderId`), QPainter mode (`painterMode`), what requires shader/manual compositing |
-| [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C), `blendHsl`, `maskDensityRamp = mix(1, m, density)` |
-| [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 15 modes |
+| [src/renderer/BlendMath.hpp](../src/renderer/BlendMath.hpp) | C++ formulas: non-separable HSL (lum/clipColor/setLum/sat/setSat W3C) and the separable modes QPainter lacks, both behind `blend(mode, cb, cs)`; `coverage` (Dissolve), `maskDensityRamp = mix(1, m, density)` |
+| [src/renderer/BlendShaderLib.hpp](../src/renderer/BlendShaderLib.hpp) | the same formulas in GLSL (`bm_*`), injected into the blend shader and adjust shader; `bm_blend(mode, cb, cs)` covers the 26 colour modes, `bm_coverage` the 27th (Dissolve) |
 | [src/renderer/SamplingShaderLib.hpp](../src/renderer/SamplingShaderLib.hpp) | the resampling kernels in GLSL (`sm_*`), injected into **both** the main shader and the blend shader; C++ mirror is `boxWeights`/`cubicWeights`/`resampleAffine` in `DocumentCompositor.cpp` (§4.2) |
 
 **Maintenance rule:** when adding/changing a blend mode, update all three blend
 files together — `BlendMath.hpp` and `BlendShaderLib.hpp` are kept comparable
 function by function. ColorDodge/ColorBurn follow the edge semantics of Qt's
-raster engine (which executes separable modes on the CPU), without NaN. The
-same rule holds for the sampler: `SamplingShaderLib.hpp` and `resampleAffine`
-move together.
+raster engine (which executes the natively-supported separable modes on the
+CPU), without NaN; Vivid Light is expressed *through* them so the two agree at
+those edges. A fourth table lives in `BlendRules.hpp`: `pickerEntries()`, the
+grouped order and labels every blend-mode combo is built from — `BlendMode`
+values are appended (they are persisted in `.hzr` and in the tool API), so the
+enum order is not a display order. The same rule holds for the sampler:
+`SamplingShaderLib.hpp` and `resampleAffine` move together.
 
 ### 4.1 Alpha and compositing
 
@@ -500,6 +504,21 @@ move together.
 - Blend modes read the backdrop: over a transparent backdrop, both sides apply
   the W3C fade `Cs' = (1-ab)·Cs + ab·B(Cb,Cs)` (shader: `mix(srcColor, Cr, da)`;
   QPainter: native). Consequence for merges: see §5.
+- Modes QPainter has no `CompositionMode` for (the HSL modes, the
+  light/arithmetic modes, Dissolve) run per pixel through
+  `DocumentCompositor::compositeStage` — the one CPU execution of the spec, also
+  used by the gradient tool so a tool blend matches a layer blend.
+- **Dissolve is a coverage mode, not a colour formula.** Both sides convert the
+  effective source alpha (opacity × mask × soft edges) into a 0/1 dither keyed
+  on the *document* pixel with the same 32-bit integer hash
+  (`blendmath::ditherNoise` / `bm_ditherNoise`); a float hash would not be
+  reproducible across the two. The shader reads that pixel from `gl_FragCoord`
+  with Y flipped, which is the document grid because a live stack is always
+  isolated into a canvas-sized FBO (§2.1) — so the pattern does not move with
+  pan/zoom and does not change when the frame is replaced by the projection.
+  The threshold still compares against each side's own alpha, so on a soft edge
+  the documented sampling tolerance (§4.2) can flip an individual pixel between
+  the two paths; the dither pattern itself is identical.
 
 ### 4.2 Sampling / antialiasing (equivalence)
 

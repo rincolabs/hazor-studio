@@ -5,9 +5,19 @@
 
 class Document;
 class LayerTreeNode;
+enum class BlendMode;
 
 class DocumentCompositor {
 public:
+    // Composites `stage` over `target` (both ARGB32_Premultiplied, same
+    // canvas grid) with a node's blend mode and opacity — the one CPU
+    // execution of the blend spec (renderer/BlendRules.hpp): modes QPainter
+    // implements run through the raster engine, the rest per pixel through
+    // blendmath. Public so the tools that blend into layer pixels (the
+    // gradient tool) blend exactly like the projection does.
+    static void compositeStage(QImage& target, const QImage& stage,
+                               BlendMode mode, float opacity);
+
     // Renders all visible layers into a single QImage at doc's native size.
     // Single source of truth for CPU compositing — used by Export, Flatten, and
     // any other operation that needs a pixel-accurate flattened image.

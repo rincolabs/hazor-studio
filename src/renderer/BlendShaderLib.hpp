@@ -8,7 +8,8 @@
 // (the blend shader and the adjustment shader's Solid Color branch), so the
 // GPU has exactly ONE copy of each formula. Mode ids are blend::shaderId
 // (renderer/BlendRules.hpp); anything unmapped (incl. -1 = Normal) falls
-// through to the source colour.
+// through to the source colour. Dissolve is not a colour formula: it is
+// applied to the source coverage instead, by bm_coverage().
 //
 // The separable modes on the CPU run through QPainter, so bm_dodge/bm_burn
 // implement Qt's raster-engine boundary semantics (which also avoid the
@@ -58,6 +59,17 @@ inline constexpr char kLib[] = R"(
         float d = (b < 0.25) ? ((16.0*b - 12.0)*b + 4.0)*b : sqrt(b);
         return b + (2.0*s - 1.0) * (d - b);
     }
+    // Burn below mid grey, dodge above it, at twice the distance from 0.5 —
+    // so Vivid Light inherits the dodge/burn boundary semantics above.
+    float bm_vividLight(float b, float s) {
+        return (s <= 0.5) ? bm_burn(b, 2.0*s) : bm_dodge(b, 2.0*s - 1.0);
+    }
+    float bm_pinLight(float b, float s) {
+        return (s > 0.5) ? max(b, 2.0*s - 1.0) : min(b, 2.0*s);
+    }
+    float bm_divide(float b, float s) {
+        return (s <= 0.0) ? 1.0 : min(1.0, b / s);
+    }
     // cb = backdrop, cs = source (both straight, 0..1). Ids from
     // renderer/BlendRules.hpp (blend::shaderId).
     vec3 bm_blend(int mode, vec3 cb, vec3 cs) {
@@ -86,7 +98,43 @@ inline constexpr char kLib[] = R"(
         if (mode == 12) return cs + cb - cs*cb;                    // Screen
         if (mode == 13) return min(cs, cb);                        // Darken
         if (mode == 14) return max(cs, cb);                        // Lighten
-        return cs;                                                 // Normal / unmapped
+        if (mode == 15) return cb + cs - 1.0;                      // Linear Burn
+        if (mode == 16) return cb + cs;                            // Linear Dodge
+        if (mode == 17) return vec3(bm_vividLight(cb.r, cs.r),
+                                    bm_vividLight(cb.g, cs.g),
+                                    bm_vividLight(cb.b, cs.b));
+        if (mode == 18) return cb + 2.0*cs - 1.0;                  // Linear Light
+        if (mode == 19) return vec3(bm_pinLight(cb.r, cs.r),
+                                    bm_pinLight(cb.g, cs.g),
+                                    bm_pinLight(cb.b, cs.b));
+        if (mode == 20) return step(1.0, cb + cs);                 // Hard Mix
+        // Whole-colour choice by luma, not per channel — no new hues.
+        if (mode == 21) return (bm_lum(cs) < bm_lum(cb)) ? cs : cb; // Darker Color
+        if (mode == 22) return (bm_lum(cs) > bm_lum(cb)) ? cs : cb; // Lighter Color
+        if (mode == 23) return cb - cs;                            // Subtract
+        if (mode == 24) return vec3(bm_divide(cb.r, cs.r),
+                                    bm_divide(cb.g, cs.g),
+                                    bm_divide(cb.b, cs.b));
+        return cs;                              // 25 Dissolve (see bm_coverage),
+    }                                           // Normal / unmapped
+
+    // ── Dissolve ──
+    // Mirror of blendmath::ditherNoise: the same 32-bit hash of the same
+    // document pixel, so the live frame and the CPU projection dither exactly
+    // the same pixels. highp is required — ES defaults int to mediump, which
+    // may be 16-bit and would wrap the hash differently.
+    float bm_ditherNoise(vec2 p) {
+        highp uint h = uint(p.x) * 73856093u ^ uint(p.y) * 19349663u;
+        h ^= h >> 13u;
+        h *= 2654435761u;
+        h ^= h >> 16u;
+        return float(h & 0xFFFFFFu) * (1.0 / 16777216.0);
+    }
+    // Dissolve spends coverage as probability instead of translucency: whole
+    // source pixels where the threshold passes, backdrop elsewhere. `pix` is
+    // the document pixel (gl_FragCoord with Y flipped to the CPU's row order).
+    float bm_coverage(int mode, float a, vec2 pix) {
+        return (mode == 25) ? ((bm_ditherNoise(pix) < a) ? 1.0 : 0.0) : a;
     }
 )";
 

@@ -186,6 +186,15 @@ void GPUViewport::initShaders()
                     : dst.rgb * dst.a;
                 vec3 srcColor = src.rgb;
                 src.a *= uOpacity * maskAlpha;
+                // Dissolve: coverage becomes a per-pixel 0/1 dither keyed on
+                // the document pixel. gl_FragCoord is in the render target, so
+                // Y is flipped into the CPU compositor's row order; the live
+                // stack is always isolated into a canvas-sized FBO
+                // (LayerCompositor::composite), which makes that target the
+                // document grid and keeps the pattern stable under pan/zoom.
+                src.a = bm_coverage(uBlendMode, src.a,
+                                    vec2(gl_FragCoord.x,
+                                         uViewportSize.y - gl_FragCoord.y));
 
                 float sa = src.a, da = dst.a;
                 vec3 Cr = clamp(bm_blend(uBlendMode, dstColor, srcColor), 0.0, 1.0);
@@ -571,6 +580,11 @@ void GPUViewport::initShaders()
                     // live frame matches the CPU projection for every mode). f folds
                     // opacity*mask; uSolidColor.a folds the colour's own alpha.
                     float sa = clamp(uSolidColor.a * f, 0.0, 1.0);
+                    // Dissolve dithers the fill's coverage — same hash, same
+                    // document pixel as the blend shader and the CPU path.
+                    sa = bm_coverage(uSolidBlendMode, sa,
+                                     vec2(gl_FragCoord.x,
+                                          uViewportSize.y - gl_FragCoord.y));
                     vec3 srcColor = uSolidColor.rgb;
                     float da = dst.a;                         // backdrop alpha
                     vec3 dstColor = da > 0.0039 ? dst.rgb / da : dst.rgb;
