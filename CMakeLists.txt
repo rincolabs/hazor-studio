@@ -195,6 +195,11 @@ if(ENABLE_RAWENGINE)
     endif()
 endif()
 
+# `psd` — native C++ PSD/PSB reader/writer library, vendored under src/psd/
+# (see src/psd/PROVENANCE.md). Self-contained; linked into Hazor below but
+# not yet wired into Hazor's document system.
+add_subdirectory(src/psd)
+
 # Single source of truth for the app version: project(... VERSION ...) above.
 # Everything that displays a version (splash screen, About dialog, MCP server
 # info, packaging) derives from the generated header instead of a hardcoded literal.
@@ -845,6 +850,7 @@ qt_add_resources(Hazor "shape_icons"
 
 target_link_libraries(Hazor PRIVATE
     theme_lib
+    psd
     Qt6::Widgets
     Qt6::OpenGLWidgets
     Qt6::Network
