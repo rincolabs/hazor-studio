@@ -4,9 +4,9 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include "ui/FlowLayout.hpp"
-#include "ui/NewDocumentDialog.hpp"
 #include "ui/RecentThumbnailCache.hpp"
 
+#include <QButtonGroup>
 #include <QContextMenuEvent>
 #include <QDesktopServices>
 #include <QFileInfo>
@@ -34,7 +34,9 @@
 #include <QVBoxLayout>
 
 #include <functional>
+#include <numeric>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -49,6 +51,98 @@ constexpr int kRecentCardHeight = 258;
 constexpr int kTemplateCardHeight = 238;
 constexpr int kCardPreviewWidth = 272;
 constexpr int kCardPreviewHeight = 166;
+
+struct SocialTemplatePreset {
+    QString id;
+    QString platform;
+    QString name;
+    int width = 0;
+    int height = 0;
+};
+
+struct PlatformFilter {
+    QString id;
+    QString label;
+};
+
+const std::vector<SocialTemplatePreset>& socialTemplates()
+{
+    static const std::vector<SocialTemplatePreset> templates = {
+        {QStringLiteral("instagram-square-post"), QStringLiteral("instagram"), QStringLiteral("Square Post"), 1080, 1080},
+        {QStringLiteral("instagram-portrait-post-4-5"), QStringLiteral("instagram"), QStringLiteral("Portrait Post (4:5)"), 1080, 1350},
+        {QStringLiteral("instagram-portrait-post-3-4"), QStringLiteral("instagram"), QStringLiteral("Portrait Post (3:4)"), 1080, 1440},
+        {QStringLiteral("instagram-story"), QStringLiteral("instagram"), QStringLiteral("Story"), 1080, 1920},
+        {QStringLiteral("instagram-reel"), QStringLiteral("instagram"), QStringLiteral("Reel"), 1080, 1920},
+        {QStringLiteral("instagram-carousel"), QStringLiteral("instagram"), QStringLiteral("Carousel"), 1080, 1350},
+
+        {QStringLiteral("tiktok-vertical-video-cover"), QStringLiteral("tiktok"), QStringLiteral("Vertical Video / Cover"), 1080, 1920},
+        {QStringLiteral("tiktok-square-post"), QStringLiteral("tiktok"), QStringLiteral("Square Post"), 1080, 1080},
+
+        {QStringLiteral("youtube-thumbnail"), QStringLiteral("youtube"), QStringLiteral("Thumbnail"), 1280, 720},
+        {QStringLiteral("youtube-thumbnail-hq"), QStringLiteral("youtube"), QStringLiteral("Thumbnail HQ"), 3840, 2160},
+        {QStringLiteral("youtube-shorts"), QStringLiteral("youtube"), QStringLiteral("Shorts"), 1080, 1920},
+        {QStringLiteral("youtube-channel-banner"), QStringLiteral("youtube"), QStringLiteral("Channel Banner"), 2560, 1440},
+
+        {QStringLiteral("facebook-square-post"), QStringLiteral("facebook"), QStringLiteral("Square Post"), 1080, 1080},
+        {QStringLiteral("facebook-story-reel"), QStringLiteral("facebook"), QStringLiteral("Story / Reel"), 1080, 1920},
+        {QStringLiteral("facebook-profile-cover"), QStringLiteral("facebook"), QStringLiteral("Profile Cover"), 851, 315},
+
+        {QStringLiteral("linkedin-square-post"), QStringLiteral("linkedin"), QStringLiteral("Square Post"), 1080, 1080},
+        {QStringLiteral("linkedin-landscape-post"), QStringLiteral("linkedin"), QStringLiteral("Landscape Post"), 1200, 628},
+        {QStringLiteral("linkedin-profile-banner"), QStringLiteral("linkedin"), QStringLiteral("Profile Banner"), 1584, 396},
+
+        {QStringLiteral("pinterest-standard-pin"), QStringLiteral("pinterest"), QStringLiteral("Standard Pin"), 1000, 1500},
+
+        {QStringLiteral("x-landscape-post"), QStringLiteral("x"), QStringLiteral("Landscape Post"), 1200, 675},
+        {QStringLiteral("x-profile-banner"), QStringLiteral("x"), QStringLiteral("Profile Banner"), 1500, 500},
+    };
+    return templates;
+}
+
+QString platformDisplayName(const QString& platform)
+{
+    if (platform == QLatin1String("tiktok"))
+        return QStringLiteral("TikTok");
+    if (platform == QLatin1String("youtube"))
+        return QStringLiteral("YouTube");
+    if (platform == QLatin1String("linkedin"))
+        return QStringLiteral("LinkedIn");
+    if (platform == QLatin1String("x"))
+        return QStringLiteral("X");
+
+    QString label = platform;
+    if (!label.isEmpty())
+        label[0] = label[0].toUpper();
+    return label;
+}
+
+const std::vector<PlatformFilter>& platformFilters()
+{
+    static const std::vector<PlatformFilter> filters = [] {
+        std::vector<PlatformFilter> result = {
+            {QStringLiteral("all"), QStringLiteral("All")},
+        };
+        QSet<QString> seen;
+        for (const SocialTemplatePreset& preset : socialTemplates()) {
+            if (seen.contains(preset.platform))
+                continue;
+            seen.insert(preset.platform);
+            result.push_back({preset.platform, platformDisplayName(preset.platform)});
+        }
+        return result;
+    }();
+    return filters;
+}
+
+QString aspectRatioText(int width, int height)
+{
+    const int divisor = std::gcd(width, height);
+    const int ratioWidth = width / divisor;
+    const int ratioHeight = height / divisor;
+    if (ratioWidth <= 20 && ratioHeight <= 20)
+        return QStringLiteral("%1:%2").arg(ratioWidth).arg(ratioHeight);
+    return QStringLiteral("%1:1").arg(qreal(width) / height, 0, 'f', 2);
+}
 
 QString dimensionsText(const QSize& size)
 {
@@ -337,11 +431,12 @@ private:
 
 class TemplateCard final : public QFrame {
 public:
-    TemplateCard(const DocumentSizePreset& preset, std::function<void()> select,
+    TemplateCard(const SocialTemplatePreset& preset, std::function<void()> select,
                  QWidget* parent = nullptr)
-        : QFrame(parent), m_select(std::move(select))
+        : QFrame(parent), m_platform(preset.platform), m_select(std::move(select))
     {
         setObjectName(QStringLiteral("HomeTemplateCard"));
+        setProperty("templateId", preset.id);
         setFrameShape(QFrame::NoFrame);
         setCursor(Qt::PointingHandCursor);
         setFixedSize(kDocumentCardWidth, kTemplateCardHeight);
@@ -353,15 +448,21 @@ public:
         layout->setSpacing(theme->spaceSM);
         layout->addWidget(new FormatPreview(QSizeF(preset.width, preset.height), this));
 
-        auto* name = new QLabel(preset.label, this);
+        auto* name = new QLabel(preset.name, this);
         name->setObjectName(QStringLiteral("HomeCardTitle"));
         layout->addWidget(name);
 
-        auto* detail = new QLabel(tr("%1 × %2 %3").arg(preset.width, 0, 'f', 2)
-                                  .arg(preset.height, 0, 'f', 2).arg(preset.unit), this);
+        auto* detail = new QLabel(
+            tr("%1 × %2 px  ·  %3")
+                .arg(preset.width)
+                .arg(preset.height)
+                .arg(aspectRatioText(preset.width, preset.height)),
+            this);
         detail->setObjectName(QStringLiteral("HomeCardDetail"));
         layout->addWidget(detail);
     }
+
+    const QString& platform() const { return m_platform; }
 
 protected:
     void mouseReleaseEvent(QMouseEvent* event) override
@@ -374,6 +475,7 @@ protected:
     }
 
 private:
+    QString m_platform;
     std::function<void()> m_select;
 };
 
@@ -461,7 +563,56 @@ HomeWorkspace::HomeWorkspace(QWidget* parent)
 
     m_sections = new QStackedWidget(this);
     m_sections->addWidget(makeGridScrollArea(&m_recentLayout, m_sections));
-    m_sections->addWidget(makeGridScrollArea(&m_templateLayout, m_sections));
+
+    auto* templatePage = new QWidget(m_sections);
+    templatePage->setObjectName(QStringLiteral("HomeTemplatePage"));
+    auto* templatePageLayout = new QVBoxLayout(templatePage);
+    templatePageLayout->setContentsMargins(0, 0, 0, 0);
+    templatePageLayout->setSpacing(0);
+
+    auto* filterScroll = new QScrollArea(templatePage);
+    filterScroll->setObjectName(QStringLiteral("HomeTemplateFiltersScroll"));
+    filterScroll->setFrameShape(QFrame::NoFrame);
+    filterScroll->setWidgetResizable(true);
+    filterScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    filterScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    filterScroll->setFixedHeight(80);
+
+    auto* filterContent = new QWidget(filterScroll);
+    filterContent->setObjectName(QStringLiteral("HomeTemplateFiltersContent"));
+    auto* filterLayout = new QHBoxLayout(filterContent);
+    filterLayout->setContentsMargins(theme->spaceXXL, theme->spaceLG,
+                                     theme->spaceXXL, theme->spaceLG);
+    filterLayout->setSpacing(theme->spaceLG);
+    filterLayout->setSizeConstraint(QLayout::SetMinimumSize);
+
+    auto* filterGroup = new QButtonGroup(this);
+    filterGroup->setExclusive(true);
+    const auto& filters = platformFilters();
+    for (int index = 0; index < static_cast<int>(filters.size()); ++index) {
+        const PlatformFilter& filter = filters[index];
+        auto* chip = new QPushButton(filter.label, filterContent);
+        chip->setObjectName(QStringLiteral("HomeTemplateFilter"));
+        chip->setCheckable(true);
+        chip->setChecked(index == 0);
+        chip->setMinimumSize(72, 42);
+        chip->setCursor(Qt::PointingHandCursor);
+        filterGroup->addButton(chip, index);
+        filterLayout->addWidget(chip);
+    }
+    filterLayout->addStretch(1);
+    filterScroll->setWidget(filterContent);
+    templatePageLayout->addWidget(filterScroll);
+    templatePageLayout->addWidget(
+        makeGridScrollArea(&m_templateLayout, templatePage), 1);
+    m_sections->addWidget(templatePage);
+
+    connect(filterGroup, &QButtonGroup::idClicked, this, [this](int index) {
+        const auto& filters = platformFilters();
+        if (index >= 0 && index < static_cast<int>(filters.size()))
+            applyTemplateFilter(filters[index].id);
+    });
+
     root->addWidget(m_sections, 1);
     connect(m_sectionTabs, &QTabBar::currentChanged, m_sections,
             &QStackedWidget::setCurrentIndex);
@@ -481,16 +632,6 @@ HomeWorkspace::HomeWorkspace(QWidget* parent)
 void HomeWorkspace::storeDocumentThumbnail(const QString& path, const Document* document)
 {
     m_thumbnails->storeDocument(path, document);
-}
-
-void HomeWorkspace::clearGrid(FlowLayout* layout)
-{
-    if (!layout)
-        return;
-    while (QLayoutItem* item = layout->takeAt(0)) {
-        delete item->widget();
-        delete item;
-    }
 }
 
 void HomeWorkspace::rebuildRecent()
@@ -570,13 +711,40 @@ void HomeWorkspace::rebuildRecent()
 
 void HomeWorkspace::rebuildTemplates()
 {
-    clearGrid(m_templateLayout);
+    while (QLayoutItem* item = m_templateLayout->takeAt(0))
+        delete item;
+    for (QWidget* card : std::as_const(m_templateCards))
+        delete card;
+    m_templateCards.clear();
     QWidget* grid = m_templateLayout->parentWidget();
-    const auto& presets = NewDocumentDialog::sizePresets();
-    for (int index = 0; index < static_cast<int>(presets.size()); ++index) {
-        m_templateLayout->addWidget(new TemplateCard(
-            presets[index], [this, index]() { emit templateRequested(index); }, grid));
+    for (const SocialTemplatePreset& preset : socialTemplates()) {
+        auto* card = new TemplateCard(
+            preset,
+            [this, name = preset.name, width = preset.width, height = preset.height]() {
+                emit templateRequested(name, width, height);
+            },
+            grid);
+        m_templateCards.append(card);
     }
+    applyTemplateFilter(m_templatePlatform);
+}
+
+void HomeWorkspace::applyTemplateFilter(const QString& platform)
+{
+    m_templatePlatform = platform;
+
+    while (QLayoutItem* item = m_templateLayout->takeAt(0))
+        delete item;
+
+    for (QWidget* widget : std::as_const(m_templateCards)) {
+        auto* card = static_cast<TemplateCard*>(widget);
+        const bool visible = platform == QLatin1String("all")
+            || card->platform() == platform;
+        card->setVisible(visible);
+        if (visible)
+            m_templateLayout->addWidget(card);
+    }
+    m_templateLayout->invalidate();
 }
 
 void HomeWorkspace::applyThumbnail(const QString& path, const QImage& thumbnail,
@@ -610,6 +778,17 @@ void HomeWorkspace::applyTheme()
         "}"
         "#HomeSectionTabs::tab:selected { color: %8; border-bottom: 2px solid %9; }"
         "#HomeSectionTabs::tab:hover:!selected { color: %8; }"
+        "#HomeTemplatePage, #HomeTemplateFiltersScroll,"
+        "#HomeTemplateFiltersScroll > QWidget, #HomeTemplateFiltersContent {"
+        "  background: %16; border: none;"
+        "}"
+        "#HomeTemplateFilter { background: %10; color: %4;"
+        "  border: %2px solid %3; border-radius: 20px; padding: 0 %6px;"
+        "  font-size: %7px; font-weight: 500;"
+        "}"
+        "#HomeTemplateFilter:hover:!checked { background: %12; border-color: %13; color: %8; }"
+        "#HomeTemplateFilter:checked { background: %9; border-color: %9; color: %8; font-weight: 600; }"
+        "#HomeTemplateFilter:checked:hover { background: %17; border-color: %17; }"
         "#HomeGridScroll, #HomeGridScroll > QWidget, #HomeGridContent { background: %16; }"
         "#HomeRecentCard, #HomeTemplateCard { background: %10; border: %2px solid %3; border-radius: %11px; }"
         "#HomeRecentCard:hover, #HomeTemplateCard:hover { background: %12; border-color: %13; }"
@@ -630,5 +809,6 @@ void HomeWorkspace::applyTheme()
      .arg(theme->colorBorderFocus.name())
      .arg(theme->fontSizeMD)
      .arg(theme->fontSizeSM)
-     .arg(theme->colorPanelBackground.name()));
+     .arg(theme->colorPanelBackground.name())
+     .arg(theme->colorAccentHover.name()));
 }

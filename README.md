@@ -20,9 +20,11 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **GPU canvas** — OpenGL 3.3 viewport with tiled rendering, LOD mipmaps, and an
   FBO render cache for sub-millisecond re-renders of static content.
 - **Home workspace** — a permanent first tab with recent documents and the
-  built-in new-document templates. Recent cards share File → Open Recent's
-  history, show cached aspect-preserving previews, and can open, reveal, or
-  remove entries without touching the original files.
+  social-media template catalog. Platform filters provide common document
+  dimensions for Instagram, TikTok, YouTube, Facebook, LinkedIn, Pinterest,
+  and X. Recent cards share File → Open Recent's history, show cached
+  aspect-preserving previews, and can open, reveal, or remove entries without
+  touching the original files.
 - **Full tool set** — Move, Brush (advanced brush engine with smoothing,
   dynamics, dual/texture brushes), Eraser, Select, Shape (vector layers), Crop,
   Text, Fill Bucket, Gradient, Eyedropper, Zoom, and Hand.

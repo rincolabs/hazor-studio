@@ -398,7 +398,7 @@ private:
 
     void showNewDocumentDialog(const DocumentSettings* initialSettings = nullptr);
     void createDocumentFromSettings(const DocumentSettings& settings);
-    void onHomeTemplateRequested(int presetIndex);
+    void onHomeTemplateRequested(const QString& name, int width, int height);
     int tabWidgetIndexForDocument(int documentIndex) const;
     int documentIndexForTabWidget(int tabWidgetIndex) const;
     void onTabMoved(int from, int to);

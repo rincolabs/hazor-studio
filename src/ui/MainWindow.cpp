@@ -3620,18 +3620,16 @@ void MainWindow::onNewFile()
     showNewDocumentDialog();
 }
 
-void MainWindow::onHomeTemplateRequested(int presetIndex)
+void MainWindow::onHomeTemplateRequested(const QString& name, int width, int height)
 {
-    const auto& presets = NewDocumentDialog::sizePresets();
-    if (presetIndex < 0 || presetIndex >= static_cast<int>(presets.size()))
+    if (width <= 0 || height <= 0)
         return;
 
-    const DocumentSizePreset& preset = presets[presetIndex];
     DocumentSettings settings;
-    settings.name = preset.label;
-    settings.width = preset.width;
-    settings.height = preset.height;
-    settings.unit = preset.unit;
+    settings.name = name;
+    settings.width = width;
+    settings.height = height;
+    settings.unit = QStringLiteral("px");
     showNewDocumentDialog(&settings);
 }
 

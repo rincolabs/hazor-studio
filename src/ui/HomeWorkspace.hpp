@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QImage>
+#include <QList>
 #include <QSize>
 #include <QString>
 #include <QWidget>
@@ -27,7 +28,7 @@ public:
 signals:
     void newDocumentRequested();
     void recentDocumentRequested(const QString& path);
-    void templateRequested(int presetIndex);
+    void templateRequested(const QString& name, int width, int height);
 
 private slots:
     void rebuildRecent();
@@ -35,7 +36,7 @@ private slots:
     void applyTheme();
 
 private:
-    void clearGrid(FlowLayout* layout);
+    void applyTemplateFilter(const QString& platform);
     void applyThumbnail(const QString& path, const QImage& thumbnail,
                         const QSize& originalSize);
 
@@ -46,4 +47,6 @@ private:
     RecentThumbnailCache* m_thumbnails = nullptr;
     QHash<QString, QWidget*> m_recentCards;
     QWidget* m_recentEmptyState = nullptr;
+    QList<QWidget*> m_templateCards;
+    QString m_templatePlatform = QStringLiteral("all");
 };

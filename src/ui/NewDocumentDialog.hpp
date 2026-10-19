@@ -33,9 +33,8 @@ struct DocumentSettings {
     QString pixelAspect = "Square Pixels";
 };
 
-// Kept public because the Home workspace is another view over the exact same
-// document presets as this dialog. The dialog remains the only place that
-// creates documents; Home only pre-fills it.
+// Public descriptor for callers that need to reuse the dialog's built-in size
+// catalog without depending on its widgets or duplicating preset data.
 struct DocumentSizePreset {
     QString label;
     double width = 0.0;
