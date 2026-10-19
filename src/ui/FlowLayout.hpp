@@ -18,6 +18,7 @@ public:
     void addItem(QLayoutItem* item) override;
     int horizontalSpacing() const;
     int verticalSpacing() const;
+    void setRowAlignment(Qt::Alignment alignment);
     Qt::Orientations expandingDirections() const override;
     bool hasHeightForWidth() const override;
     int heightForWidth(int width) const override;
@@ -33,6 +34,7 @@ private:
     int smartSpacing(QStyle::PixelMetric pm) const;
 
     QList<QLayoutItem*> m_items;
+    Qt::Alignment m_rowAlignment = Qt::AlignLeft;
     int m_hSpace;
     int m_vSpace;
 };

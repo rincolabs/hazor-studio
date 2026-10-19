@@ -31,6 +31,7 @@
 #include "brush/BrushPresetManager.hpp"
 #include "ui/CustomShapesPanel.hpp"
 #include "ui/TitleBar.hpp"
+#include "ui/HomeWorkspace.hpp"
 #include "ui/NewDocumentDialog.hpp"
 #include "ui/ExportImageDialog.hpp"
 #include "ui/RawDevelopWindow.hpp"
@@ -123,6 +124,7 @@
 #include <QDesktopServices>
 #include <QFontDialog>
 #include <QMessageBox>
+#include <QOpenGLWidget>
 #include <QPushButton>
 #include <QLabel>
 #include <QPainter>
@@ -371,6 +373,16 @@ MainWindow::MainWindow(QWidget* parent)
         connect(m_titleBar, &TitleBar::maximizeClicked, this, &MainWindow::onMaximizeRestore);
         connect(m_titleBar, &TitleBar::closeClicked, this, &MainWindow::onCloseWindow);
     }
+
+    // Qt 6.4+ recreates an already-visible native window when its first
+    // QOpenGLWidget is added because the surface changes from RasterSurface to
+    // OpenGLSurface. Home deliberately starts without a document/CanvasView,
+    // so prime the widget hierarchy before MainWindow is shown. This hidden
+    // anchor owns no document and never initializes editor rendering resources.
+    auto* openGlSurfaceAnchor = new QOpenGLWidget(this);
+    openGlSurfaceAnchor->setObjectName(QStringLiteral("OpenGLSurfaceAnchor"));
+    openGlSurfaceAnchor->setFixedSize(0, 0);
+    openGlSurfaceAnchor->hide();
 
 
     // Build the main menu on a standalone QMenuBar. When the custom title bar is
@@ -1181,6 +1193,13 @@ MainWindow::MainWindow(QWidget* parent)
     m_tabWidget = new QTabWidget(centralHost);
     m_tabWidget->setTabsClosable(true);
     m_tabWidget->setMovable(true);
+    m_homeWorkspace = new HomeWorkspace(m_tabWidget);
+    const int homeIndex = m_tabWidget->addTab(m_homeWorkspace, tr("Home"));
+    m_tabWidget->setTabToolTip(homeIndex, tr("Home"));
+    // QTabWidget owns one close button policy for all pages; clear the Home
+    // button after adding it so the fixed welcome page can never be closed.
+    m_tabWidget->tabBar()->setTabButton(homeIndex, QTabBar::LeftSide, nullptr);
+    m_tabWidget->tabBar()->setTabButton(homeIndex, QTabBar::RightSide, nullptr);
     setupTabBg(m_tabWidget, thInit->colorPanelBackground);
     centralLayout->addWidget(m_tabWidget, 1);
 
@@ -1247,6 +1266,13 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(m_tabWidget, &QTabWidget::tabCloseRequested, this, &MainWindow::onTabCloseRequested);
     connect(m_tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
+    connect(m_tabWidget->tabBar(), &QTabBar::tabMoved, this, &MainWindow::onTabMoved);
+    connect(m_homeWorkspace, &HomeWorkspace::newDocumentRequested,
+            this, &MainWindow::onNewFile);
+    connect(m_homeWorkspace, &HomeWorkspace::recentDocumentRequested,
+            this, &MainWindow::onOpenRecentFile);
+    connect(m_homeWorkspace, &HomeWorkspace::templateRequested,
+            this, &MainWindow::onHomeTemplateRequested);
 
     // Minimal, stable docking config. GroupedDragging keeps the ability to drag
     // a floating panel onto another to group them as tabs. We deliberately do
@@ -3196,9 +3222,8 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
     // Window-scope delete handler via event filter (catches Delete even when LayerPanel has focus)
     qApp->installEventFilter(this);
 
-    int idx = m_tabWidget->addTab(page, tabLabel(name));
-    m_tabWidget->setTabToolTip(idx, name);
-    m_tabWidget->setCurrentIndex(idx);
+    const int tabWidgetIndex = m_tabWidget->addTab(page, tabLabel(name));
+    m_tabWidget->setTabToolTip(tabWidgetIndex, name);
 
     DocumentTab tab;
     tab.name = name;
@@ -3211,10 +3236,15 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
     tab.canvas = canvas;
     tab.controller = std::move(ctrl);
     m_tabs.push_back(std::move(tab));
-    m_activeTabIndex = idx;
+    m_activeTabIndex = static_cast<int>(m_tabs.size()) - 1;
     m_doc = m_tabs.back().document.get();
     m_canvas = m_tabs.back().canvas;
     m_ctrl = m_tabs.back().controller.get();
+
+    // Selecting the page emits currentChanged synchronously. Register its
+    // DocumentTab first so onTabChanged never observes the new canvas as a
+    // transient "no document" state and clears the surrounding workspace.
+    m_tabWidget->setCurrentIndex(tabWidgetIndex);
 
     m_toolExecutor->setController(m_ctrl);
     m_layerPanel->setController(m_ctrl);
@@ -3322,6 +3352,54 @@ void MainWindow::syncGenerativeFillPanelController()
         m_generativeFillPanel->setController(m_ctrl);
 }
 
+int MainWindow::tabWidgetIndexForDocument(int documentIndex) const
+{
+    return documentIndex < 0 ? -1 : documentIndex + 1;
+}
+
+int MainWindow::documentIndexForTabWidget(int tabWidgetIndex) const
+{
+    return tabWidgetIndex <= 0 ? -1 : tabWidgetIndex - 1;
+}
+
+void MainWindow::syncDocumentTabOrder()
+{
+    std::vector<DocumentTab> ordered;
+    ordered.reserve(m_tabs.size());
+    std::vector<bool> moved(m_tabs.size(), false);
+
+    for (int tabWidgetIndex = 1; tabWidgetIndex < m_tabWidget->count(); ++tabWidgetIndex) {
+        QWidget* page = m_tabWidget->widget(tabWidgetIndex);
+        for (int documentIndex = 0; documentIndex < static_cast<int>(m_tabs.size()); ++documentIndex) {
+            if (!moved[documentIndex] && m_tabs[documentIndex].page == page) {
+                ordered.push_back(std::move(m_tabs[documentIndex]));
+                moved[documentIndex] = true;
+                break;
+            }
+        }
+    }
+    if (ordered.size() == m_tabs.size())
+        m_tabs = std::move(ordered);
+}
+
+void MainWindow::onTabMoved(int from, int to)
+{
+    Q_UNUSED(from)
+    Q_UNUSED(to)
+    if (!m_tabWidget || !m_homeWorkspace || m_restoringHomeTab)
+        return;
+
+    const int homeIndex = m_tabWidget->indexOf(m_homeWorkspace);
+    if (homeIndex > 0) {
+        m_restoringHomeTab = true;
+        m_tabWidget->tabBar()->moveTab(homeIndex, 0);
+        m_restoringHomeTab = false;
+    }
+
+    syncDocumentTabOrder();
+    onTabChanged(m_tabWidget->currentIndex());
+}
+
 void MainWindow::onTabChanged(int index)
 {
     clearSelectRefinePreview();
@@ -3329,11 +3407,12 @@ void MainWindow::onTabChanged(int index)
         m_canvas->cancelFreeTransform();
     }
 
-    if (index >= 0 && index < static_cast<int>(m_tabs.size())) {
-        m_activeTabIndex = index;
-        m_doc = m_tabs[index].document.get();
-        m_canvas = m_tabs[index].canvas;
-        m_ctrl = m_tabs[index].controller.get();
+    const int documentIndex = documentIndexForTabWidget(index);
+    if (documentIndex >= 0 && documentIndex < static_cast<int>(m_tabs.size())) {
+        m_activeTabIndex = documentIndex;
+        m_doc = m_tabs[documentIndex].document.get();
+        m_canvas = m_tabs[documentIndex].canvas;
+        m_ctrl = m_tabs[documentIndex].controller.get();
 
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
@@ -3412,6 +3491,7 @@ void MainWindow::onTabChanged(int index)
 
 void MainWindow::onTabCloseRequested(int index)
 {
+    index = documentIndexForTabWidget(index);
     if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
 
     const auto container = m_tabs[index].container;
@@ -3467,7 +3547,8 @@ void MainWindow::closeTabAt(int index)
         tab.container->endEditSession(tab.docId);
     if (tab.canvas)
         tab.canvas->cleanupDocumentLayers();
-    QWidget* page = tab.page ? tab.page : m_tabWidget->widget(index);
+    const int tabWidgetIndex = tabWidgetIndexForDocument(index);
+    QWidget* page = tab.page ? tab.page : m_tabWidget->widget(tabWidgetIndex);
 
     bool activeTabRemoved = (index == m_activeTabIndex);
     if (m_activeTabIndex > index)
@@ -3485,7 +3566,7 @@ void MainWindow::closeTabAt(int index)
         m_propsPanel->setController(nullptr);
 
     m_tabWidget->blockSignals(true);
-    m_tabWidget->removeTab(index);
+    m_tabWidget->removeTab(tabWidgetIndex);
     m_tabWidget->blockSignals(false);
     delete page;
 
@@ -3507,10 +3588,13 @@ void MainWindow::closeTabAt(int index)
         }
         m_coordLabel->setText(tr("X: —  Y: —"));
         m_sizeLabel->setText(tr("Size: —"));
+        m_tabWidget->setCurrentIndex(0);
         updateDirtyUi();
     } else {
         if (activeTabRemoved)
-            m_activeTabIndex = m_tabWidget->currentIndex();
+            m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
+        if (m_activeTabIndex < 0)
+            m_activeTabIndex = 0;
         if (m_activeTabIndex >= static_cast<int>(m_tabs.size()))
             m_activeTabIndex = static_cast<int>(m_tabs.size()) - 1;
         m_doc = m_tabs[m_activeTabIndex].document.get();
@@ -3529,44 +3613,44 @@ void MainWindow::closeTabAt(int index)
 
 void MainWindow::createDefaultDocument()
 {
-    auto& tab = createTab(tr("Untitled"), QSize(1024, 768));
-    tab.controller->newLayer();
-    tab.controller->fillActiveLayer(Qt::white);
-    tab.isDirty = false;
-    tab.currentProjectPath.clear();
-    updateLayerMenuState();
-    updateStatusFromDocument();
-    updateDirtyUi();
-
-    QSettings settings;
-    tab.controller->history().setMaxSteps(settings.value("undoLimit", 500).toInt());
-
-    // Select a default brush from the library now that the canvas exists (it's
-    // created here via createTab, not in the constructor). Without this the canvas
-    // paints with the hard-coded BrushSettings defaults, which match no library
-    // item, so the Brushes panel shows nothing selected. Applying the first preset
-    // makes the active brush a real list item (highlighted in the panel) and syncs
-    // the canvas + toolbar + settings panel. switchToBrushTool=false keeps the
-    // initial tool (Move) unchanged.
-    if (BrushPresetManager* pm = m_toolBar ? m_toolBar->presetManager() : nullptr) {
-        const auto& presets = pm->presets();
-        if (m_canvas && !presets.empty())
-            applyBrushPreset(presets.front(), /*switchToBrushTool=*/false);
-    }
+    // Kept as the public startup hook for callers built against older versions.
+    // "Default" is now the permanent Home page, not an unsaved raster document.
+    if (m_tabWidget)
+        m_tabWidget->setCurrentIndex(0);
 }
 
 void MainWindow::onNewFile()
 {
-    m_tabWidget->setUpdatesEnabled(false);
-    NewDocumentDialog dlg(this);
+    showNewDocumentDialog();
+}
 
-    if (dlg.exec() != QDialog::Accepted) {
-        m_tabWidget->setUpdatesEnabled(true);
+void MainWindow::onHomeTemplateRequested(const QString& name, int width, int height)
+{
+    if (width <= 0 || height <= 0)
         return;
-    }
-    m_tabWidget->setUpdatesEnabled(true);
 
-    DocumentSettings s = dlg.settings();
+    DocumentSettings settings;
+    settings.name = name;
+    settings.width = width;
+    settings.height = height;
+    settings.unit = QStringLiteral("px");
+    showNewDocumentDialog(&settings);
+}
+
+void MainWindow::showNewDocumentDialog(const DocumentSettings* initialSettings)
+{
+    NewDocumentDialog dlg(this);
+    if (initialSettings)
+        dlg.setSettings(*initialSettings);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    createDocumentFromSettings(dlg.settings());
+}
+
+void MainWindow::createDocumentFromSettings(const DocumentSettings& s)
+{
 
     double ppi = (s.resolutionUnit.startsWith("Pixels/cm"))
                      ? s.resolution * 2.54
@@ -3617,8 +3701,9 @@ void MainWindow::onNewFile()
     tab.isDirty = false;
     tab.currentProjectPath.clear();
 
-    m_tabWidget->setTabText(m_activeTabIndex, tabLabel(s.name));
-    m_tabWidget->setTabToolTip(m_activeTabIndex, s.name);
+    const int tabWidgetIndex = tabWidgetIndexForDocument(m_activeTabIndex);
+    m_tabWidget->setTabText(tabWidgetIndex, tabLabel(s.name));
+    m_tabWidget->setTabToolTip(tabWidgetIndex, s.name);
     refreshLayerPanel();
     refreshPropertiesPanel();
     updateStatusFromDocument();
@@ -3677,7 +3762,7 @@ void MainWindow::onOpenRecentFile(const QString& path)
     const QString absolutePath = QFileInfo(path).absoluteFilePath();
     for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
         if (!m_tabs[i].sourcePath.isEmpty() && m_tabs[i].sourcePath == absolutePath) {
-            m_tabWidget->setCurrentIndex(i);
+            m_tabWidget->setCurrentIndex(tabWidgetIndexForDocument(i));
             return;
         }
     }
@@ -4296,9 +4381,10 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
         tab.sourcePath = QFileInfo(path).absoluteFilePath();
         RecentFilesManager::instance()->addFile(path);
     }
-    if (targetIndex < m_tabWidget->count()) {
-        m_tabWidget->setTabText(targetIndex, tabLabel(tab.name));
-        m_tabWidget->setTabToolTip(targetIndex, tab.name);
+    const int targetTabWidgetIndex = tabWidgetIndexForDocument(targetIndex);
+    if (targetTabWidgetIndex < m_tabWidget->count()) {
+        m_tabWidget->setTabText(targetTabWidgetIndex, tabLabel(tab.name));
+        m_tabWidget->setTabToolTip(targetTabWidgetIndex, tab.name);
     }
     // Other tabs of the same container were written along with it — but NOT a
     // content tab with uncommitted edits: those live in a working copy the save
@@ -4312,6 +4398,9 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
         other.isDirty = false;
     }
     updateDirtyUi();
+
+    if (m_homeWorkspace)
+        m_homeWorkspace->storeDocumentThumbnail(path, tab.document.get());
 
     // A project that other open projects LINK to just changed on disk. Their
     // instances have to re-render, and each of them is then unsaved in its own
@@ -4459,9 +4548,10 @@ void MainWindow::updateDirtyUi()
         if (baseName.isEmpty())
             baseName = tr("Untitled");
         const QString tabName = tab.isDirty ? tabLabel(baseName) + "*" : tabLabel(baseName);
-        if (i < m_tabWidget->count()) {
-            m_tabWidget->setTabText(i, tabName);
-            m_tabWidget->setTabToolTip(i, baseName);
+        const int tabWidgetIndex = tabWidgetIndexForDocument(i);
+        if (tabWidgetIndex < m_tabWidget->count()) {
+            m_tabWidget->setTabText(tabWidgetIndex, tabName);
+            m_tabWidget->setTabToolTip(tabWidgetIndex, baseName);
         }
         if (i == m_activeTabIndex)
             activeTitle = QStringLiteral("%1 - Hazor Studio").arg(tabName);
@@ -4489,7 +4579,7 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     // rule "Edit Contents" follows for an already-open Smart Object document.
     const int existingTab = tabIndexForDocument(container.get(), container->rootId());
     if (existingTab >= 0) {
-        m_tabWidget->setCurrentIndex(existingTab);
+        m_tabWidget->setCurrentIndex(tabWidgetIndexForDocument(existingTab));
         RecentFilesManager::instance()->addFile(path);
         return true;
     }
@@ -4516,7 +4606,7 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     tab.name = tabName;
     tab.isDirty = false;
     RecentFilesManager::instance()->addFile(path);
-    m_activeTabIndex = m_tabWidget->currentIndex();
+    m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
     m_doc = tab.document.get();
     m_ctrl = tab.controller.get();
     m_canvas = tab.canvas;
@@ -4528,6 +4618,8 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     updateLayerMenuState();
     updateStatusFromDocument();
     updateDirtyUi();
+    if (m_homeWorkspace)
+        m_homeWorkspace->storeDocumentThumbnail(path, tab.document.get());
     // Validates every Smart Object reference in the file (so a Linked target
     // that moved gets its broken badge) and re-renders only the genuinely stale
     // ones — a persisted render is trusted.
@@ -4795,8 +4887,9 @@ void MainWindow::onEditDocument()
     QSize newSize(wPx, hPx);
 
     m_doc->name = s.name;
-    if (m_activeTabIndex >= 0 && m_activeTabIndex < m_tabWidget->count())
-        m_tabWidget->setTabText(m_activeTabIndex, tabLabel(s.name));
+    const int tabWidgetIndex = tabWidgetIndexForDocument(m_activeTabIndex);
+    if (m_activeTabIndex >= 0 && tabWidgetIndex < m_tabWidget->count())
+        m_tabWidget->setTabText(tabWidgetIndex, tabLabel(s.name));
     m_doc->resolutionDpi = ppi;
     m_doc->colorMode = documentColorModeFromSetting(s.colorMode);
     m_doc->bitDepth = documentBitDepthFromSetting(s.colorMode);
@@ -7173,7 +7266,7 @@ void MainWindow::editSmartObjectContents(int flatIndex)
     // command histories, and an undo in either would surprise the other.
     const int existing = tabIndexForDocument(container.get(), data->docId);
     if (existing >= 0) {
-        m_tabWidget->setCurrentIndex(existing);
+        m_tabWidget->setCurrentIndex(tabWidgetIndexForDocument(existing));
         return;
     }
 
@@ -7190,7 +7283,7 @@ void MainWindow::editSmartObjectContents(int flatIndex)
     tab.currentProjectPath.clear();
     tab.sourcePath.clear();
     tab.isDirty = false;
-    m_activeTabIndex = m_tabWidget->currentIndex();
+    m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
     m_doc = tab.document.get();
     m_ctrl = tab.controller.get();
     m_canvas = tab.canvas;

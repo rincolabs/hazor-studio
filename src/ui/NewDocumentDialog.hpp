@@ -33,6 +33,15 @@ struct DocumentSettings {
     QString pixelAspect = "Square Pixels";
 };
 
+// Public descriptor for callers that need to reuse the dialog's built-in size
+// catalog without depending on its widgets or duplicating preset data.
+struct DocumentSizePreset {
+    QString label;
+    double width = 0.0;
+    double height = 0.0;
+    QString unit;
+};
+
 class NewDocumentDialog : public QDialog {
     Q_OBJECT
 
@@ -41,6 +50,7 @@ public:
 
     void setSettings(const DocumentSettings& s);
     DocumentSettings settings() const;
+    static const std::vector<DocumentSizePreset>& sizePresets();
 
 private slots:
     void onSizePresetChanged(int index);
@@ -83,11 +93,5 @@ private:
     QPushButton* m_savePresetBtn = nullptr;
     QPushButton* m_deletePresetBtn = nullptr;
 
-    struct SizePreset {
-        QString label;
-        double w;
-        double h;
-        QString unit;
-    };
-    std::vector<SizePreset> m_presets;
+    std::vector<DocumentSizePreset> m_presets;
 };

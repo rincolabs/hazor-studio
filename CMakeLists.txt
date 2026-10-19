@@ -800,6 +800,10 @@ add_executable(Hazor WIN32
     src/ui/AlignBar.hpp
     src/ui/FlowLayout.cpp
     src/ui/FlowLayout.hpp
+    src/ui/HomeWorkspace.cpp
+    src/ui/HomeWorkspace.hpp
+    src/ui/RecentThumbnailCache.cpp
+    src/ui/RecentThumbnailCache.hpp
     src/ui/ToolOptionsBar.cpp
     src/ui/ToolOptionsBar.hpp
     src/ui/PopupPanel.cpp

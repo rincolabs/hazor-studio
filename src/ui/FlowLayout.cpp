@@ -40,6 +40,14 @@ int FlowLayout::verticalSpacing() const
     return smartSpacing(QStyle::PM_LayoutVerticalSpacing);
 }
 
+void FlowLayout::setRowAlignment(Qt::Alignment alignment)
+{
+    m_rowAlignment = alignment & Qt::AlignHorizontal_Mask;
+    if (!m_rowAlignment)
+        m_rowAlignment = Qt::AlignLeft;
+    invalidate();
+}
+
 int FlowLayout::count() const
 {
     return m_items.size();
@@ -98,37 +106,65 @@ int FlowLayout::doLayout(const QRect& rect, bool testOnly) const
 {
     int left, top, right, bottom;
     getContentsMargins(&left, &top, &right, &bottom);
-    QRect effectiveRect = rect.adjusted(left, top, -right, -bottom);
-    int x = effectiveRect.x();
+    const QRect effectiveRect = rect.adjusted(left, top, -right, -bottom);
     int y = effectiveRect.y();
-    int lineHeight = 0;
 
-    for (QLayoutItem* item : m_items) {
-        const QWidget* wid = item->widget();
-        int spaceX = horizontalSpacing();
-        if (spaceX == -1)
-            spaceX = wid->style()->layoutSpacing(
-                QSizePolicy::PushButton, QSizePolicy::PushButton, Qt::Horizontal);
-        int spaceY = verticalSpacing();
-        if (spaceY == -1)
-            spaceY = wid->style()->layoutSpacing(
-                QSizePolicy::PushButton, QSizePolicy::PushButton, Qt::Vertical);
+    auto itemSpacing = [this](int index, Qt::Orientation orientation) {
+        const int configured = orientation == Qt::Horizontal
+            ? horizontalSpacing() : verticalSpacing();
+        if (configured >= 0)
+            return configured;
 
-        int nextX = x + item->sizeHint().width() + spaceX;
-        if (nextX - spaceX > effectiveRect.right() && lineHeight > 0) {
-            x = effectiveRect.x();
-            y = y + lineHeight + spaceY;
-            nextX = x + item->sizeHint().width() + spaceX;
-            lineHeight = 0;
+        const QWidget* widget = m_items[index]->widget();
+        return widget ? widget->style()->layoutSpacing(
+                            QSizePolicy::PushButton, QSizePolicy::PushButton, orientation)
+                      : 0;
+    };
+
+    auto layoutRow = [&](int first, int end, int rowWidth, int rowHeight) {
+        int x = effectiveRect.x();
+        const int remainingWidth = qMax(0, effectiveRect.width() - rowWidth);
+        if (m_rowAlignment.testFlag(Qt::AlignHCenter))
+            x += remainingWidth / 2;
+        else if (m_rowAlignment.testFlag(Qt::AlignRight))
+            x += remainingWidth;
+
+        if (!testOnly) {
+            for (int index = first; index < end; ++index) {
+                QLayoutItem* item = m_items[index];
+                item->setGeometry(QRect(QPoint(x, y), item->sizeHint()));
+                x += item->sizeHint().width();
+                if (index + 1 < end)
+                    x += itemSpacing(index, Qt::Horizontal);
+            }
         }
+        y += rowHeight;
+    };
 
-        if (!testOnly)
-            item->setGeometry(QRect(QPoint(x, y), item->sizeHint()));
+    int rowStart = 0;
+    int rowWidth = 0;
+    int rowHeight = 0;
+    for (int index = 0; index < m_items.size(); ++index) {
+        const QSize itemSize = m_items[index]->sizeHint();
+        const int gap = rowWidth > 0 ? itemSpacing(index - 1, Qt::Horizontal) : 0;
+        const int nextWidth = rowWidth + gap + itemSize.width();
 
-        x = nextX;
-        lineHeight = qMax(lineHeight, item->sizeHint().height());
+        if (rowWidth > 0 && nextWidth > effectiveRect.width()) {
+            layoutRow(rowStart, index, rowWidth, rowHeight);
+            y += itemSpacing(index, Qt::Vertical);
+            rowStart = index;
+            rowWidth = itemSize.width();
+            rowHeight = itemSize.height();
+        } else {
+            rowWidth = nextWidth;
+            rowHeight = qMax(rowHeight, itemSize.height());
+        }
     }
-    return y + lineHeight - rect.y() + bottom;
+
+    if (rowWidth > 0)
+        layoutRow(rowStart, m_items.size(), rowWidth, rowHeight);
+
+    return y - rect.y() + bottom;
 }
 
 int FlowLayout::smartSpacing(QStyle::PixelMetric pm) const
