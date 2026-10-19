@@ -50,6 +50,7 @@ class AppSettingsDialog;
 class ProgressDialog;
 class QTimer;
 class QDockWidget;
+class HomeWorkspace;
 
 class ImageController;
 class AgentController;
@@ -63,6 +64,7 @@ class ColorEngine;
 class GenerativeFillDialog;
 class AiObjectSelectionController;
 struct AiCompatibilityMessage;
+struct DocumentSettings;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -394,6 +396,14 @@ private:
     void execToolDialog(class ToolDialog* dlg, const QString& toolName,
                          const QVariantMap& defaultParams);
 
+    void showNewDocumentDialog(const DocumentSettings* initialSettings = nullptr);
+    void createDocumentFromSettings(const DocumentSettings& settings);
+    void onHomeTemplateRequested(int presetIndex);
+    int tabWidgetIndexForDocument(int documentIndex) const;
+    int documentIndexForTabWidget(int tabWidgetIndex) const;
+    void onTabMoved(int from, int to);
+    void syncDocumentTabOrder();
+
     DocumentTab& createTab(const QString& name, const QSize& size);
     // Opens an existing document of `container` in a new tab, sharing it rather
     // than copying it (Smart Object "Edit Contents", and the tail of createTab).
@@ -496,7 +506,9 @@ private:
     ImageController* activeController() const;
 
     QTabWidget* m_tabWidget = nullptr;
+    HomeWorkspace* m_homeWorkspace = nullptr;
     std::vector<DocumentTab> m_tabs;
+    bool m_restoringHomeTab = false;
 
     // ── Smart Object refresh debounce (see scheduleSmartObjectRefresh) ──
     QTimer* m_smartObjectRefreshTimer = nullptr;

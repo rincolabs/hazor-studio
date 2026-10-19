@@ -226,14 +226,11 @@ int main(int argc, char* argv[])
             projectFiles += fileOpenFilter->takePending();
 
             QTimer::singleShot(0, window.get(), [&window, projectFiles]() {
-                int opened = 0;
                 if (!projectFiles.isEmpty())
-                    opened = window->openProjectFiles(projectFiles);
-                // Only fall back to a blank document when nothing was opened from
-                // a file association; otherwise the requested project would sit
-                // behind a spurious "Untitled" tab.
-                if (opened == 0)
-                    window->createDefaultDocument();
+                    window->openProjectFiles(projectFiles);
+                // MainWindow starts on its permanent Home tab. A directly
+                // supplied project selects its document tab; no blank document
+                // is manufactured when startup has no file association.
             });
 
             if (!initialBrushImportFiles.isEmpty()) {

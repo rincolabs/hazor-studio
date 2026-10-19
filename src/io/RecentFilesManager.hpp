@@ -1,7 +1,14 @@
 #pragma once
 
 #include <QObject>
+#include <QDateTime>
+#include <QHash>
 #include <QStringList>
+
+struct RecentFileEntry {
+    QString path;
+    QDateTime lastOpened;
+};
 
 // Single source of truth for File > Open Recent, backed by QSettings so the
 // history survives restarts. Every open path (File > Open, OS file-open
@@ -17,6 +24,12 @@ public:
 
     // Most-recent-first, absolute paths.
     QStringList files() const { return m_files; }
+
+    // The same recent-file ordering with the last successful opening time.
+    // Existing installations only had the path list, so entries restored from
+    // that older setting use the file modification time until they are opened
+    // again and acquire an explicit timestamp.
+    QList<RecentFileEntry> entries() const;
 
     // Moves `path` to the front (inserting it if new), trims to kMaxEntries
     // and persists. Call only after a file has *successfully* opened.
@@ -34,4 +47,5 @@ private:
     void save() const;
 
     QStringList m_files;
+    QHash<QString, QDateTime> m_lastOpened;
 };

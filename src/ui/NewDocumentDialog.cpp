@@ -80,7 +80,16 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
 
 void NewDocumentDialog::setupPresets()
 {
-    m_presets = {
+    m_presets = sizePresets();
+
+    m_sizePresetCombo->addItem(tr("Custom"));
+    for (const auto& p : m_presets)
+        m_sizePresetCombo->addItem(p.label);
+}
+
+const std::vector<DocumentSizePreset>& NewDocumentDialog::sizePresets()
+{
+    static const std::vector<DocumentSizePreset> presets = {
         {"Landscape, 8 x 10 in",   10.0,   8.0,  "in"},
         {"Landscape, 16 x 20 in",  20.0,  16.0,  "in"},
         {"Portrait, 10 x 8 in",     8.0,  10.0,  "in"},
@@ -93,10 +102,7 @@ void NewDocumentDialog::setupPresets()
         {"3840 x 2160 px",       3840.0, 2160.0, "px"},
         {"1024 x 768 px",        1024.0,  768.0, "px"},
     };
-
-    m_sizePresetCombo->addItem(tr("Custom"));
-    for (const auto& p : m_presets)
-        m_sizePresetCombo->addItem(p.label);
+    return presets;
 }
 
 QWidget* NewDocumentDialog::createFormSection()
@@ -397,8 +403,8 @@ void NewDocumentDialog::onSizePresetChanged(int index)
     m_widthUnitCombo->blockSignals(true);
     m_heightUnitCombo->blockSignals(true);
 
-    m_widthSpin->setValue(p.w);
-    m_heightSpin->setValue(p.h);
+    m_widthSpin->setValue(p.width);
+    m_heightSpin->setValue(p.height);
 
     int unitIdx = m_widthUnitCombo->findText(p.unit, Qt::MatchContains);
     if (unitIdx >= 0) {
