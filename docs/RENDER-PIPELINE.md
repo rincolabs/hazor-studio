@@ -528,11 +528,16 @@ Two generation counters keep that cheap:
 | `compositionGeneration` | layer-stack edits | re-composite → new `m_baseImage` |
 | `channelViewGeneration` | eye toggles, overlay/ink settings, a painted dab | re-apply the view over the cached `m_baseImage` |
 
-A dab painted into a channel also records its rect
-(`Document::markChannelViewDirty`), so the update restores that rect from the
-base, re-applies the view there and pushes it with `glTexSubImage2D` — the
-painted area, not the canvas. `RenderCache` keys on `channelViewGeneration`
-too, or a cached screen frame would replay the previous view.
+Every re-apply starts from `m_baseImage`, because the transform is neither
+idempotent nor invertible: replicating Green over an already-grey Red view
+would show Red again, and a component a previous view zeroed could never come
+back. So the pixels about to be re-derived are restored from the base first —
+and `m_image` is only ever the base's private copy, never the previous view's
+result carried forward. A dab painted into a channel also records its rect
+(`Document::markChannelViewDirty`), so that restore + re-apply covers the
+dab's rect and is pushed with `glTexSubImage2D` — the painted area, not the
+canvas. `RenderCache` keys on `channelViewGeneration` too, or a cached screen
+frame would replay the previous view.
 
 The colour stage is a 3×3 matrix on the composite's straight RGB (identity for
 RGB, `diag(flags)` for a visible subset, replicate-one-component for the

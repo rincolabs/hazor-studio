@@ -195,10 +195,18 @@ struct ChannelState {
         colorSelected[0] = colorSelected[1] = colorSelected[2] = false;
     }
 
+    // Back to the RGB row: it is the composite's edit target AND its view, so
+    // this restores the components' visibility too. Visibility and arming stay
+    // independent properties everywhere else, but every caller here is either
+    // a click on the RGB row or the fallback taken when the last armed target
+    // disappears (a deleted channel, an un-armed component) — and those are
+    // reached from a state where the components are hidden, so leaving the
+    // visibility alone would arm the composite over a blank canvas.
     void selectComposite()
     {
         selectedChannels.clear();
         colorSelected[0] = colorSelected[1] = colorSelected[2] = true;
+        colorVisible[0] = colorVisible[1] = colorVisible[2] = true;
     }
 };
 

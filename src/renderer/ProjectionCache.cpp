@@ -160,13 +160,19 @@ void ProjectionCache::applyChannelView(Document* doc, bool full, const QRect& re
         // a private copy to transform into, leaving the base pristine.
         m_image = m_baseImage.copy();
         region = QRect();
-    } else if (!region.isEmpty()) {
-        // Partial update: the stale rect has the PREVIOUS view baked in, so it
-        // has to come back from the base before the new view is applied.
-        for (int y = region.top(); y <= region.bottom(); ++y) {
-            const uchar* src = m_baseImage.constScanLine(y) + region.left() * 4;
-            uchar* dst = m_image.scanLine(y) + region.left() * 4;
-            std::copy(src, src + static_cast<size_t>(region.width()) * 4, dst);
+    } else {
+        // m_image still holds the PREVIOUS view's result, and the transform is
+        // neither idempotent nor invertible: replicating Green over an
+        // already-grey Red view shows Red again, and a component the previous
+        // view zeroed can never come back. So every pixel about to be
+        // re-derived is restored from the base first — the dab's rect on a
+        // partial update, the whole canvas on a full one (which is also how a
+        // freshly composited m_baseImage reaches the screen).
+        const QRect restore = region.isEmpty() ? m_baseImage.rect() : region;
+        for (int y = restore.top(); y <= restore.bottom(); ++y) {
+            const uchar* src = m_baseImage.constScanLine(y) + restore.left() * 4;
+            uchar* dst = m_image.scanLine(y) + restore.left() * 4;
+            std::copy(src, src + static_cast<size_t>(restore.width()) * 4, dst);
         }
     }
 

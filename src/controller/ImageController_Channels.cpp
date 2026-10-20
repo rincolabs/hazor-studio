@@ -537,8 +537,9 @@ void ImageController::selectCompositeChannel()
     if (!m_doc)
         return;
     ChannelState& st = m_doc->channelState;
+    // selectComposite() restores the three components (arming + visibility);
+    // the extras are the panel's own rows, so hiding them belongs here.
     st.selectComposite();
-    st.colorVisible[0] = st.colorVisible[1] = st.colorVisible[2] = true;
     for (auto& ch : m_doc->channels)
         ch.visible = false;
     m_doc->invalidateChannelView();
