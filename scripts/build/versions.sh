@@ -52,6 +52,97 @@ readonly HAZOR_BIREFNET_FILE="model_fp16.onnx"
 readonly HAZOR_BIREFNET_REVISION="f82954f197e4671c1934c01d7dd85b9687c011b9"
 readonly HAZOR_BIREFNET_URL="https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/${HAZOR_BIREFNET_REVISION}/onnx/${HAZOR_BIREFNET_FILE}"
 readonly HAZOR_BIREFNET_SHA256="d39b897ceb16ae654c1731f3dba0cf9b368d9cae74b5a57459b455cc8bfec402"
+# The download cache is shared by every component and several Hugging Face repos
+# publish a file literally named model_fp16.onnx, so cache it under a name that
+# cannot collide with another model's blob.
+readonly HAZOR_BIREFNET_CACHE_FILE="birefnet-lite-${HAZOR_BIREFNET_REVISION:0:12}-${HAZOR_BIREFNET_FILE}"
+
+# Linux-hosted MinGW-w64 cross toolchain, built from source because Ubuntu
+# 22.04 only packages GCC 10 — whose libstdc++ ABI cannot consume Qt's
+# win64_mingw libraries — and the 24.04 packages need a newer glibc than this
+# host provides. The configuration mirrors the toolchain Qt published for its
+# own Windows binaries (download.qt.io/development_releases/prebuilt/mingw_64
+# ships MinGW-w64-x86_64-13.1.0-release-posix-seh-msvcrt-rt_v11-rev1):
+# GCC 13.1.0, posix threads, SEH exceptions, MSVCRT runtime, mingw-w64 rt v11.
+readonly HAZOR_MINGW_GCC_VERSION="13.1.0"
+readonly HAZOR_MINGW_BINUTILS_VERSION="2.41"
+readonly HAZOR_MINGW_W64_VERSION="11.0.1"
+readonly HAZOR_MINGW_CRT="msvcrt"
+readonly HAZOR_MINGW_TRIPLE="x86_64-w64-mingw32"
+
+readonly HAZOR_MINGW_BINUTILS_ARCHIVE="binutils-${HAZOR_MINGW_BINUTILS_VERSION}.tar.xz"
+readonly HAZOR_MINGW_BINUTILS_URL="https://ftp.gnu.org/gnu/binutils/${HAZOR_MINGW_BINUTILS_ARCHIVE}"
+readonly HAZOR_MINGW_BINUTILS_SHA256="ae9a5789e23459e59606e6714723f2d3ffc31c03174191ef0d015bdf06007450"
+
+readonly HAZOR_MINGW_GCC_ARCHIVE="gcc-${HAZOR_MINGW_GCC_VERSION}.tar.xz"
+readonly HAZOR_MINGW_GCC_URL="https://ftp.gnu.org/gnu/gcc/gcc-${HAZOR_MINGW_GCC_VERSION}/${HAZOR_MINGW_GCC_ARCHIVE}"
+# GPG-verified against the GCC release signature (Jakub Jelinek, 6C35B99309B5FA62).
+readonly HAZOR_MINGW_GCC_SHA256="61d684f0aa5e76ac6585ad8898a2427aade8979ed5e7f85492286c4dfc13ee86"
+
+readonly HAZOR_MINGW_W64_ARCHIVE="mingw-w64-v${HAZOR_MINGW_W64_VERSION}.tar.bz2"
+readonly HAZOR_MINGW_W64_URL="https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/${HAZOR_MINGW_W64_ARCHIVE}"
+readonly HAZOR_MINGW_W64_SHA256="3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10"
+
+# ── RawEngine dependencies ───────────────────────────────────────────────────
+# The nine libraries src/rawengine/ needs, pinned to the versions docs/BUILD.md
+# records for the native Linux tree. Cross targets build every one of them from
+# these sources; the pre-existing 3rdparty/rawengine/ tree is adopted as-is on
+# linux-x86_64 (migrate_legacy_linux) rather than rebuilt.
+#
+# Versions deliberately do not track Hazor's own zlib/OpenCV: RawEngine's
+# constraint is an exact, reproducible version per dependency.
+readonly HAZOR_RAWENGINE_JPEG_VERSION="3.2.0"
+readonly HAZOR_RAWENGINE_JPEG_URL="https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/${HAZOR_RAWENGINE_JPEG_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_JPEG_SHA256="980dd81f425082aa6d7c9e47fef27554ce7a9ffc8e2f6e863b97d263c5c50858"
+
+readonly HAZOR_RAWENGINE_PNG_VERSION="1.6.59"
+readonly HAZOR_RAWENGINE_PNG_URL="https://github.com/pnggroup/libpng/archive/refs/tags/v${HAZOR_RAWENGINE_PNG_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_PNG_SHA256="2540302a1844ad2b2b501977abecfa850f265f97b78f065a712ab4074a89f5b5"
+
+readonly HAZOR_RAWENGINE_TIFF_VERSION="4.7.2"
+readonly HAZOR_RAWENGINE_TIFF_URL="https://download.osgeo.org/libtiff/tiff-${HAZOR_RAWENGINE_TIFF_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_TIFF_SHA256="672bd7d10aee4606171afb864f3570b83340f6a33e2c186dc0512f7145ffdf6a"
+
+readonly HAZOR_RAWENGINE_EXPAT_VERSION="2.9.0"
+readonly HAZOR_RAWENGINE_EXPAT_URL="https://github.com/libexpat/libexpat/releases/download/R_2_9_0/expat-${HAZOR_RAWENGINE_EXPAT_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_EXPAT_SHA256="16afbb9cefead2aa278105cf27d9f597bde7fbf3dbb85015857ca7ca6a4e89ba"
+
+readonly HAZOR_RAWENGINE_LCMS2_VERSION="2.16"
+readonly HAZOR_RAWENGINE_LCMS2_URL="https://github.com/mm2/Little-CMS/releases/download/lcms${HAZOR_RAWENGINE_LCMS2_VERSION}/lcms2-${HAZOR_RAWENGINE_LCMS2_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_LCMS2_SHA256="d873d34ad8b9b4cea010631f1a6228d2087475e4dc5e763eb81acc23d9d45a51"
+
+readonly HAZOR_RAWENGINE_FFTW_VERSION="3.3.10"
+readonly HAZOR_RAWENGINE_FFTW_URL="https://www.fftw.org/fftw-${HAZOR_RAWENGINE_FFTW_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_FFTW_SHA256="56c932549852cddcfafdab3820b0200c7742675be92179e59e6215b340e26467"
+
+# Built from source on cross targets. The native Linux tree uses the upstream
+# prebuilt Linux release instead, which is why that one is not reproduced here.
+readonly HAZOR_RAWENGINE_EXIV2_VERSION="0.28.9"
+readonly HAZOR_RAWENGINE_EXIV2_URL="https://github.com/Exiv2/exiv2/archive/refs/tags/v${HAZOR_RAWENGINE_EXIV2_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_EXIV2_SHA256="700b76b97695b2fab4ef8c79619c68ae57d09e0c130724791cafbd39e0eb4aef"
+
+readonly HAZOR_RAWENGINE_LENSFUN_VERSION="0.3.4"
+readonly HAZOR_RAWENGINE_LENSFUN_URL="https://github.com/lensfun/lensfun/archive/refs/tags/v${HAZOR_RAWENGINE_LENSFUN_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_LENSFUN_SHA256="dafb39c08ef24a0e2abd00d05d7341b1bf1f0c38bfcd5a4c69cf5f0ecb6db112"
+
+# glib-2.0 is lensfun's only external dependency. Native builds take it from
+# the platform (Qt 6 links it too, so a second private copy in one process
+# would be the defect rather than an isolation win), but Windows has no
+# platform glib, so the cross target builds a minimal one — with its own two
+# dependencies, and NLS disabled so libintl is not a third.
+readonly HAZOR_RAWENGINE_LIBFFI_VERSION="3.4.6"
+readonly HAZOR_RAWENGINE_LIBFFI_URL="https://github.com/libffi/libffi/releases/download/v${HAZOR_RAWENGINE_LIBFFI_VERSION}/libffi-${HAZOR_RAWENGINE_LIBFFI_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_LIBFFI_SHA256="b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"
+
+readonly HAZOR_RAWENGINE_PCRE2_VERSION="10.44"
+readonly HAZOR_RAWENGINE_PCRE2_URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${HAZOR_RAWENGINE_PCRE2_VERSION}/pcre2-${HAZOR_RAWENGINE_PCRE2_VERSION}.tar.gz"
+readonly HAZOR_RAWENGINE_PCRE2_SHA256="86b9cb0aa3bcb7994faa88018292bc704cdbb708e785f7c74352ff6ea7d3175b"
+
+readonly HAZOR_RAWENGINE_GLIB_VERSION="2.82.5"
+readonly HAZOR_RAWENGINE_GLIB_URL="https://download.gnome.org/sources/glib/2.82/glib-${HAZOR_RAWENGINE_GLIB_VERSION}.tar.xz"
+readonly HAZOR_RAWENGINE_GLIB_SHA256="05c2031f9bdf6b5aba7a06ca84f0b4aced28b19bf1b50c6ab25cc675277cbc3f"
+
+readonly HAZOR_MESON_VERSION="1.6.1"
 
 readonly HAZOR_MATERIAL_ICONS_ARCHIVE="material-design-icons-${HAZOR_MATERIAL_ICONS_VERSION}.zip"
 readonly HAZOR_MATERIAL_ICONS_URL="https://github.com/google/material-design-icons/releases/download/${HAZOR_MATERIAL_ICONS_VERSION}/${HAZOR_MATERIAL_ICONS_ARCHIVE}"

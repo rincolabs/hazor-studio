@@ -20,6 +20,9 @@
 
 #include <stdio.h>
 #include "rtcompat/glib/fileio.hpp"
+// Windows-only code below converts UTF-8 paths with glib's
+// g_utf8_to_utf16()/g_free(); rtcompat supplies both.
+#include "rtcompat/glib/textconv.hpp"
 #include <iostream>
 #include "rtcompat/glib/misc.hpp"
 #include <set>

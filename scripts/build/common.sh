@@ -71,12 +71,6 @@ configure_target() {
             QT_TARGET_ARCH="mingw_64"
             TOOLCHAIN_FILE="$ROOT_DIR/cmake/toolchains/windows-mingw-x86_64.cmake"
             ;;
-        windows-x86)
-            TARGET_OS="windows"
-            TARGET_ARCH="x86"
-            QT_TARGET_ARCH="unsupported"
-            TOOLCHAIN_FILE="$ROOT_DIR/cmake/toolchains/windows-mingw-x86.cmake"
-            ;;
         macos-x86_64)
             TARGET_OS="macos"
             TARGET_ARCH="x86_64"
@@ -90,19 +84,36 @@ configure_target() {
             TOOLCHAIN_FILE="$ROOT_DIR/cmake/toolchains/macos-osxcross.cmake"
             ;;
         *)
-            die "unknown target '$TARGET' (expected linux-x86_64, windows-x86_64, windows-x86, macos-x86_64, or macos-arm64)"
+            die "unknown target '$TARGET' (expected linux-x86_64, windows-x86_64, macos-x86_64, or macos-arm64)"
             ;;
     esac
 
     TARGET_ROOT="$THIRD_PARTY_DIR/targets/$TARGET"
     QT_HOST_DIR="${QT_HOST_DIR:-$HAZOR_HOST_ROOT/qt/$HAZOR_QT_VERSION/gcc_64}"
     QT_TARGET_DIR="${QT_TARGET_DIR:-$TARGET_ROOT/qt/$HAZOR_QT_VERSION/$QT_TARGET_ARCH}"
+    # Qt publishes one universal (x86_64 + arm64) macOS package, so the two
+    # macOS targets resolve a single shared install through a per-target link
+    # instead of downloading the same archives twice.
+    QT_SHARED_DIR=""
+    if target_is_macos; then
+        QT_SHARED_DIR="$HAZOR_COMMON_ROOT/qt/$HAZOR_QT_VERSION/$QT_TARGET_ARCH"
+    fi
     OPENCV_PREFIX="${OPENCV_PREFIX:-$TARGET_ROOT/opencv/$HAZOR_OPENCV_VERSION}"
     ZLIB_PREFIX="${ZLIB_PREFIX:-$TARGET_ROOT/zlib/$HAZOR_ZLIB_VERSION}"
     RAWENGINE_DEPS_DIR="${RAWENGINE_DEPS_DIR:-$TARGET_ROOT/rawengine}"
     REALESRGAN_DIR="${REALESRGAN_DIR:-$TARGET_ROOT/realesrgan/$HAZOR_REALESRGAN_VERSION}"
-    REALESRGAN_MODELS_DIR="${REALESRGAN_MODELS_DIR:-$REALESRGAN_DIR/models}"
+    # Only the ncnn process executable (and its Windows DLLs) is platform
+    # specific; the .param/.bin weights are plain data shipped identically in
+    # every per-OS archive of the release, so one shared copy serves all targets.
+    REALESRGAN_MODELS_DIR="${REALESRGAN_MODELS_DIR:-$HAZOR_COMMON_ROOT/realesrgan/$HAZOR_REALESRGAN_VERSION/models}"
     ONNX_MODELS_DIR="${ONNX_MODELS_DIR:-$HAZOR_COMMON_ROOT/onnx/models}"
+    # A provisioned cross toolchain has to win over an older MinGW installed on
+    # the host, so it goes in front of PATH as soon as it exists.
+    MINGW_TOOLCHAIN_DIR="${MINGW_TOOLCHAIN_DIR:-$THIRD_PARTY_DIR/toolchains/mingw-w64-$HAZOR_MINGW_TRIPLE-gcc-$HAZOR_MINGW_GCC_VERSION-$HAZOR_MINGW_CRT}"
+    if [[ "$TARGET" == "windows-x86_64" && -d "$MINGW_TOOLCHAIN_DIR/bin" ]]; then
+        PATH="$MINGW_TOOLCHAIN_DIR/bin:$PATH"
+        export PATH
+    fi
 
     case "$TARGET" in
         linux-x86_64)
@@ -123,8 +134,34 @@ configure_target() {
     DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist/$TARGET}"
     ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT_DIR/artifacts/$TARGET}"
     export TARGET TARGET_OS TARGET_ARCH TARGET_ROOT QT_HOST_DIR QT_TARGET_DIR
+    export QT_SHARED_DIR
     export OPENCV_PREFIX ZLIB_PREFIX RAWENGINE_DEPS_DIR ONNXRUNTIME_DIR
     export ONNX_MODELS_DIR REALESRGAN_DIR REALESRGAN_MODELS_DIR TOOLCHAIN_FILE
+    export MINGW_TOOLCHAIN_DIR
+}
+
+# Needed by scripts/build.sh on every build, not only when dependencies are
+# prepared, so it lives here rather than in prepare.sh.
+validate_cross_toolchain() {
+    case "$TARGET" in
+        linux-x86_64)
+            require_command cc
+            require_command c++
+            ;;
+        windows-x86_64)
+            require_command x86_64-w64-mingw32-gcc
+            require_command x86_64-w64-mingw32-g++
+            local mingw_major
+            mingw_major="$(x86_64-w64-mingw32-g++ -dumpfullversion | cut -d. -f1)"
+            [[ "$mingw_major" == "13" ]] || die "Qt $HAZOR_QT_VERSION win64_mingw was built with MinGW-w64 GCC 13.1; found GCC $(x86_64-w64-mingw32-g++ -dumpfullversion). Install a target-compatible GCC 13 toolchain and put it first in PATH"
+            ;;
+        macos-*)
+            [[ -n "${OSXCROSS_TARGET_DIR:-}" ]] \
+                || die "OSXCROSS_TARGET_DIR is required and must point to an OSXCross installation built from a legally obtained macOS SDK"
+            require_dir "$OSXCROSS_TARGET_DIR/bin" "OSXCross bin"
+            require_file "$OSXCROSS_TARGET_DIR/toolchain.cmake" "OSXCross CMake toolchain"
+            ;;
+    esac
 }
 
 find_opencv_dir() {
@@ -136,13 +173,46 @@ find_opencv_dir() {
 
 find_zlib_library() {
     local name
-    for name in libz.a zlibstatic.lib libzlibstatic.a; do
+    # libzs.a is what zlib's own CMake installs on Windows: it appends an "s"
+    # to the static library name there.
+    for name in libz.a libzs.a zlibstatic.lib libzlibstatic.a; do
         if [[ -f "$ZLIB_PREFIX/lib/$name" ]]; then
             printf '%s\n' "$ZLIB_PREFIX/lib/$name"
             return 0
         fi
     done
     return 1
+}
+
+# Build a GNU import library for a DLL that only ships an MSVC .lib.
+#
+# This is a link-format problem, not an ABI one. The MinGW linker cannot read
+# MSVC's import libraries, but it can consume a .def built from the DLL's own
+# export table, and on x86-64 there is a single calling convention and no name
+# decoration, so the names in that table are the names the compiler emits.
+generate_mingw_import_library() {
+    local dll="$1"
+    local output="$2"
+    local objdump="$HAZOR_MINGW_TRIPLE-objdump"
+    local dlltool="$HAZOR_MINGW_TRIPLE-dlltool"
+    local definition="${output%.dll.a}.def"
+    require_command "$objdump"
+    require_command "$dlltool"
+    require_file "$dll" "DLL to generate an import library from"
+    mkdir -p "$(dirname "$output")"
+    {
+        printf 'LIBRARY %s\n' "$(basename "$dll")"
+        printf 'EXPORTS\n'
+        "$objdump" -p "$dll" | sed -n \
+            '/^\[Ordinal\/Name Pointer\] Table$/,/^$/ s/^[[:space:]]*\[[[:space:]]*[0-9]\{1,\}\][[:space:]]\{1,\}//p'
+    } > "$definition"
+    [[ "$(wc -l < "$definition")" -gt 2 ]] \
+        || die "no export table found in $(basename "$dll"); cannot build an import library"
+    "$dlltool" --machine i386:x86-64 \
+        --input-def "$definition" \
+        --dllname "$(basename "$dll")" \
+        --output-lib "$output"
+    require_file "$output" "generated import library"
 }
 
 write_provenance() {

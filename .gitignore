@@ -1,5 +1,6 @@
 # Build directory
 /build/
+/.flatpak-builder/
 /build-qt68/
 /cmake-build-*/
 /dist/
@@ -43,10 +44,18 @@ Thumbs.db
 Testing/Temporary/
 tmp/
 # Vendored third-party deps: track the skeleton folders (via .gitkeep), ignore
-# all downloaded contents. The directory re-include lets nested .gitkeep survive.
+# all downloaded contents.
+#
+# No "!/3rdparty/**/" re-include here: it un-ignores every directory in the
+# tree, so git descends into the dependency build trees and reports each one as
+# untracked. The .gitkeep files are already tracked, and .gitignore does not
+# apply to tracked files, so they survive without it. Adding a new skeleton
+# folder needs "git add -f 3rdparty/<dir>/.gitkeep" once.
 /3rdparty/**
-!/3rdparty/**/
 !/3rdparty/**/.gitkeep
+
+# aqtinstall writes its log into the working directory during --prepare.
+/aqtinstall.log
 
 # Shape SVGs are generated at build time (Material Design Icons): track the
 # folder (empty), ignore its contents.

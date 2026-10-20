@@ -34,8 +34,9 @@ require the user-supplied OSXCross/SDK setup described below.
 > [`src/raw/`](../src/raw/)'s `HAVE_RAWENGINE` support, same pattern as ONNX
 > Runtime above. See [`docs/RAW-ENGINE.md`](RAW-ENGINE.md) for the native API
 > surface and [`src/rawengine/PROVENANCE.md`](../src/rawengine/PROVENANCE.md)
-> for what is vendored and the current port status (Linux only — MSVC/Windows
-> not yet attempted).
+> for what is vendored and the current port status. Every target this
+> repository builds enables it; `ENABLE_RAWENGINE=OFF` is an escape hatch, not
+> a packaging default.
 
 ## Local target matrix
 
@@ -45,8 +46,7 @@ directories.
 | Target | Compiler / ABI | Package | Current boundary |
 |--------|----------------|---------|------------------|
 | `linux-x86_64` | native GCC/Clang, x86_64 ELF | AppImage + Flatpak | Configured; Flatpak explicitly excludes ONNX/RawEngine until those sandbox modules are added |
-| `windows-x86_64` | MinGW-w64 GCC 13, x86_64 PE | ZIP distribution | Qt 6.8.3 MinGW + source-built OpenCV; ONNX compile support is off because the workflow archive contains an MSVC import library |
-| `windows-x86` | MinGW-w64, x86 PE | blocked | Qt 6.8 supports Windows x86_64 and publishes no 32-bit Qt 6.8.3 target; the script never substitutes x64 |
+| `windows-x86_64` | MinGW-w64 GCC 13.1, x86_64 PE | ZIP distribution | Qt 6.8.3 MinGW + source-built OpenCV; the cross toolchain is provisioned from source (see below) because no distribution package matches both Qt's ABI and this host |
 | `macos-x86_64` | OSXCross + Apple SDK, Mach-O | unsigned `.app` ZIP | Requires an authorized SDK/OSXCross. Qt/OpenCV/plugins are deployed locally on Linux; signing, notarization and runtime validation require macOS |
 | `macos-arm64` | OSXCross + Apple SDK, arm64 Mach-O | unsigned `.app` ZIP | Same Apple boundary; ONNX Runtime 1.26.0 publishes macOS arm64 but not macOS x86_64 |
 
@@ -128,17 +128,111 @@ Signing, notarization and runtime validation remain explicit macOS-only steps.
 Both targets use macOS 12.0 as their deployment floor, matching Qt 6.8.
 
 Intel and Apple Silicon remain separate targets and separate artifacts; there
-is no target or merge step combining the two architectures.
+is no target or merge step combining the two architectures, and none is planned
+— a universal binary is explicitly out of scope.
 
-### Flatpak prerequisites and feature boundary
+Qt publishes one universal (x86_64 + arm64) macOS package, so both targets link
+a single shared install under `3rdparty/common/qt/` instead of downloading the
+same archives per architecture. Only that download is shared: compilation,
+deployment, bundle and ZIP stay per architecture.
+
+### Windows cross-toolchain
+
+Qt built its official `win64_mingw` libraries with the toolchain it publishes at
+[download.qt.io](https://download.qt.io/development_releases/prebuilt/mingw_64/):
+`MinGW-w64-x86_64-13.1.0-release-posix-seh-msvcrt-rt_v11-rev1` — GCC 13.1.0,
+posix threads, SEH exceptions, MSVCRT runtime. Linking Qt's libraries with a
+different GCC major version does not work: GCC 10's libstdc++ cannot satisfy
+what GCC 13 emitted.
+
+No distribution package provides that combination here. Ubuntu 22.04 packages
+MinGW GCC 10, and the Ubuntu 24.04 packages require glibc 2.38 while this host
+has 2.35, so they do not even start. `scripts/build/prepare.sh` therefore builds
+the cross toolchain from pinned sources into
+`3rdparty/toolchains/mingw-w64-x86_64-gcc-13.1.0-msvcrt/` and puts it in front
+of `PATH` for the Windows target, so an older host MinGW stops interfering
+without being uninstalled.
+
+| Component | Version | Source |
+|-----------|---------|--------|
+| binutils | 2.41 | [ftp.gnu.org](https://ftp.gnu.org/gnu/binutils/) |
+| GCC | 13.1.0 | [ftp.gnu.org](https://ftp.gnu.org/gnu/gcc/gcc-13.1.0/), GPG-verified against the GCC release signature |
+| mingw-w64 | 11.0.1 (`rt_v11`, matching Qt's toolchain) | [SourceForge](https://downloads.sourceforge.net/project/mingw-w64/) |
+
+Building GCC needs a few host packages that are not part of a normal desktop
+install:
+
+```bash
+sudo apt install flex bison texinfo libgmp-dev libmpfr-dev libmpc-dev
+./scripts/build.sh --target windows-x86_64 --prepare --package zip
+```
+
+The six bootstrap stages (binutils, mingw-w64 headers, GCC stage 1, CRT,
+winpthreads, GCC stage 2) each skip themselves when already installed, so an
+interrupted provisioning run resumes instead of restarting. Expect roughly an
+hour the first time; afterwards the toolchain is reused like any other
+dependency.
+
+### Flatpak prerequisites
 
 Install `flatpak`, `flatpak-builder`, `org.kde.Platform//6.8` and
 `org.kde.Sdk//6.8`. The manifest is
 [`packaging/flatpak/com.rincolabs.HazorStudio.yml`](../packaging/flatpak/com.rincolabs.HazorStudio.yml).
-It builds OpenCV 4.5.4 from its immutable commit inside the sandbox. Qt and zlib
-come from that KDE SDK/runtime, not the Linux host. The current Flatpak sets
-`ENABLE_ONNXRUNTIME=OFF` and `ENABLE_RAWENGINE=OFF`; this is an explicit package
-capability boundary.
+
+**The Flatpak ships the full feature set** — AI inference and the native RAW
+engine, Lens Corrections included. `ENABLE_ONNXRUNTIME`, `ENABLE_RAWENGINE` and
+`RAWENGINE_WITH_LENSFUN` are all `ON`.
+
+What the sandbox compiles itself, because the host copies under
+`3rdparty/targets/` and `3rdparty/rawengine/` were built against this machine's
+ABI and the KDE runtime is a different one:
+
+- **OpenCV 4.5.4**, from its immutable commit.
+- **The nine RawEngine libraries**, each at the version
+  [the table below](#rawengine-dependencies--optional) pins, installed into
+  `/app/rawengine/<lib>` — the layout `RAWENGINE_DEPS_DIR` expects, so no CMake
+  change is needed to consume them.
+
+Both set `builddir: true`: flatpak-builder configures in the source directory
+by default and OpenCV refuses in-source builds. OpenCV also needs
+`CMAKE_INSTALL_LIBDIR=lib`, and so does every RawEngine module — GNUInstallDirs
+resolves to `lib64` inside this SDK, Flatpak puts only `/app/lib` on the loader
+path, and `_rawengine_add_imported_lib()` only ever looks in `<prefix>/lib`.
+`PSD_BUILD_TESTS=OFF` is passed as well: `src/psd` has its own test option,
+defaulting to ON, whose tests need Boost — which the KDE runtime does not ship
+(and which strict host builds were silently taking from the host).
+
+What the sandbox takes as prebuilt bytes, staged out of the prepared host tree
+by `stage_flatpak_assets()` in
+[`scripts/build/package.sh`](../scripts/build/package.sh):
+
+- **ONNX Runtime 1.26.0**, the same manylinux release the AppImage ships, into
+  `/app/lib`. CPU, CUDA and TensorRT provider libraries all ship: they are
+  runtime execution providers chosen in Settings, never separate builds.
+- **Bundled models, the Real-ESRGAN ncnn process and its weights, and
+  RawEngine's `rtdata`**, into `/app/3rdparty` — where
+  `AppPaths::thirdPartyDir()` finds them, since it probes `<appdir>/../3rdparty`
+  and the binary lands in `/app/bin`. Staging reuses the AppImage's own
+  `copy_runtime_assets()` so the two packages cannot drift.
+
+This means **`--package flatpak` requires the Linux dependencies to have been
+prepared first** (`--target linux-x86_64 --prepare`), exactly as the AppImage
+does.
+
+Qt, zlib and `glib-2.0` come from the KDE SDK/runtime, not the Linux host. glib
+is deliberately the runtime's: lensfun links it, Qt 6 links it too, and a second
+private copy in one process would be the defect rather than an isolation win.
+
+The source copied into the sandbox excludes `3rdparty/`, `build/`, `dist/`,
+`artifacts/`, `tmp/` and `.git` — the sandbox build needs none of them — and
+`flatpak-builder` keeps its git mirrors and downloads in
+`build/flatpak-state/`, so repeated runs do not re-clone the sandbox sources.
+
+`package_flatpak()` probes whether `rofiles-fuse` can mount and passes
+`--disable-rofiles-fuse` when it cannot. Containers, CI runners and sandboxed
+shells routinely withhold `/dev/fuse`, and without the probe the failure
+surfaces several modules later as `Build directory ... not initialized`, which
+says nothing about FUSE.
 
 ## Dependency inventory and isolation
 
@@ -150,14 +244,14 @@ build trees under `3rdparty/build-deps/<target>/`, and installed prefixes under
 
 | Component | Version / source | ABI and transitive boundary | Distributed? |
 |-----------|------------------|-----------------------------|--------------|
-| Qt | 6.8.3 via aqt 3.3.0 | Separate Linux host tools and per-target libraries/plugins; Windows target requires MinGW 13.1 | Runtime libraries and required plugins |
+| Qt | 6.8.3 via aqt 3.3.0 | Separate Linux host tools and per-target libraries/plugins; Windows target requires MinGW 13.1; the universal macOS package is installed once and linked by both macOS targets | Runtime libraries and required plugins |
 | OpenCV | 4.5.4, commit `4223495e...` | Built per target with core/imgproc/imgcodecs; JPEG/PNG/TIFF/WebP come from the pinned OpenCV tree and zlib from the target prefix | Shared libraries/DLLs |
-| zlib | 1.3.2, commit `da607da7...` | Static per-target app dependency | Linked into Hazor |
-| ONNX Runtime | 1.26.0 | Linux GPU archive; macOS arm64 archive; Windows runtime-only; absent for x86/macOS x86_64 | Runtime/providers only where enabled |
-| RealESRGAN ncnn Vulkan | 20220424 / release 0.2.5.0 | Platform process executable and runtime siblings | Executable, DLLs and models |
+| zlib | 1.3.2, commit `da607da7...` | Static per-target app dependency, built position-independent so OpenCV's shared libraries can link it; RawEngine's vendored zlib of the same version is a non-PIC build and is not reused here | Linked into Hazor |
+| ONNX Runtime | 1.26.0 | Linux GPU archive; Windows GPU archive linked through a GNU import library generated from the DLL's export table; macOS arm64 archive | Runtime and all execution providers |
+| RealESRGAN ncnn Vulkan | 20220424 / release 0.2.5.0 | Per-platform process executable and runtime siblings; the `.param`/`.bin` weights are plain data and shared by every target | Executable, DLLs and models |
 | Mobile SAM | 20230629 at immutable HF revision | Platform-neutral ONNX encoder/decoder | Model files + metadata |
 | BiRefNet Lite | 20240101 at revision `f82954f...` | Platform-neutral FP16 ONNX model | Model + metadata |
-| RawEngine libraries | versions below | Prepared for Linux only; strict builds disable lensfun by default so GLib cannot leak from the host | Static; `rtdata` is packaged |
+| RawEngine libraries | versions below | Linux adopts the pre-existing vendored tree; cross targets build all nine from pinned sources into `3rdparty/targets/<target>/rawengine/`. Windows also builds a private glib-2.0 for lensfun, since it has no platform one | Static, except exiv2 (shared); `rtdata` is packaged |
 | OS ABI | target SDK/sysroot | Linux libc/OpenGL/window ABI, Windows system DLLs, or Apple frameworks | Supplied by target OS/runtime |
 
 Strict target builds pass exact Qt, OpenCV, zlib and target-root paths to CMake.
@@ -167,6 +261,31 @@ resolved through the target prefix/sysroot. Packaged builds also omit the
 development-only absolute source fallback. `CMakePresets.json` mirrors the
 Release configurations for manual inspection; `scripts/build.sh` remains the
 supported interface.
+
+## Artifact verification
+
+Every target build ends in `scripts/build/verify.sh` unless `--no-verify` is
+given. It checks the binary's real format for the target (ELF/PE/Mach-O and
+architecture) and that `Qt6_DIR`, `OpenCV_DIR` and `ZLIB_INCLUDE_DIR` in the
+CMake cache resolve under `3rdparty/targets/<target>/`.
+
+Packaged trees are then scanned for references to the local checkout. The two
+kinds are not equivalent, so they are not treated alike:
+
+| Kind | Verdict |
+|------|---------|
+| `RPATH`/`RUNPATH` entry, symlink, script or config naming the local tree | fatal, with the offending file named |
+| The path left inside a compiled binary's diagnostic strings | reported, not fatal |
+
+Only the first kind can send another machine back to this checkout. The second
+is build-path residue, and the build removes what it can at the source:
+`-ffile-prefix-map` keeps `__FILE__` out of Hazor and its dependencies,
+`CMAKE_SKIP_INSTALL_RPATH` keeps the local prefix out of the OpenCV libraries,
+and OpenCV's `cv::getBuildInformation()` dump — which embeds the whole compiler
+command line — is replaced with a one-line provenance string. What remains is
+OpenCV's own `OPENCV_INSTALL_PREFIX`/`OPENCV_BUILD_DIR`, which it generates with
+no option to disable and only uses for `cv::samples::findFile`; Hazor never
+calls it.
 
 ## Dependency downloads
 
@@ -187,8 +306,10 @@ Installed via [`aqtinstall`](https://github.com/miurahr/aqtinstall) (the
 | Windows local cross-target | `windows` / `win64_mingw` + Linux Qt host tools |
 | macOS cross-target | `mac` / `clang_64` + Linux Qt host tools; user-supplied OSXCross SDK |
 
-Qt 6.8's supported Windows desktop architecture is x86_64. There is no official
-Qt 6.8.3 Windows x86 target package.
+Qt 6.8's supported Windows desktop architecture is x86_64 and there is no
+official Qt 6.8.3 Windows x86 package, so 32-bit Windows is out of scope: no
+target, directory or code path exists for it. ONNX Runtime and Real-ESRGAN do
+not publish x86 builds either.
 
 ### ONNX Runtime 1.26.0 (GPU) — *optional*
 
@@ -254,9 +375,48 @@ upstream publishes one, built from source into that same layout otherwise:
 | fftw3f | 3.3.10 | Built from [source](https://www.fftw.org/fftw-3.3.10.tar.gz): `./configure --prefix=.../fftw3f --enable-float --enable-threads --disable-shared --enable-static --with-pic && make install` |
 | lensfun | 0.3.4 | Built from [source](https://github.com/lensfun/lensfun/archive/refs/tags/v0.3.4.tar.gz) (CMake): `-DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DBUILD_DOC=OFF -DINSTALL_PYTHON_MODULE=OFF`; also needs `glib-2.0` (system) |
 
-`RAWENGINE_WITH_LENSFUN=OFF` drops the lensfun requirement (Lens Corrections
-becomes unavailable, nothing else is affected) if the above proves awkward on
-a given platform — see the plan's risk notes.
+#### Where each target's copies come from
+
+`linux-x86_64` adopts the pre-existing `3rdparty/rawengine/` tree wholesale
+(`migrate_legacy_linux()` links it into the target prefix), so the table above
+is a record of how it was produced rather than a recipe that runs.
+
+Every other target builds all nine from those same pinned sources —
+`prepare_rawengine()` in [`prepare.sh`](../scripts/build/prepare.sh) — into
+`3rdparty/targets/<target>/rawengine/<lib>/{include,lib}`. The Flatpak builds
+them a third time, inside its own sandbox, for the same ABI reason.
+
+#### lensfun and glib-2.0
+
+RAW development is a shipped feature and Lens Corrections is part of it, so
+`RAWENGINE_WITH_LENSFUN` is `ON` everywhere.
+
+lensfun links `glib-2.0` unconditionally, and the three kinds of build resolve
+it differently:
+
+| Build | glib-2.0 comes from |
+|-------|---------------------|
+| Native Linux (`./scripts/build.sh`, AppImage) | the host/platform — Qt 6 links it too, so a second private copy in one process would be the defect rather than an isolation win. The same OS/runtime-ABI exemption that covers libc, libGL and libX11 |
+| Flatpak | the KDE runtime, for exactly that reason |
+| `windows-x86_64` | a private build, because Windows has no platform glib. `prepare_rawengine_glib()` cross-builds glib 2.82.5 with meson, plus libffi and pcre2, into `3rdparty/targets/windows-x86_64/rawengine/glib/`. NLS is disabled so libintl does not become a fourth dependency; lensfun never asks glib to translate |
+
+`scripts/build.sh` points `PKG_CONFIG_LIBDIR` at that vendored prefix when it
+exists and falls back to the platform otherwise. It deliberately does **not**
+set `PKG_CONFIG_SYSROOT_DIR`: those `.pc` files come from our own cross build
+and already carry absolute paths inside the target prefix, so a sysroot would
+be prepended a second time and every `-I`/`-L` would point at a path that does
+not exist.
+
+`RAWENGINE_WITH_LENSFUN=OFF` is meant to drop the requirement (Lens Corrections
+becomes unavailable, nothing else is affected), but **it does not build today**
+and is not used by any target:
+[`rtlensfun.h`](../src/rawengine/rtengine/rtlensfun.h) includes `<lensfun.h>`
+with no guard and is pulled in by `init.cc`, `iptransform.cc` and
+`rawimagesource.cc`, while `rtengine/rtlensfun.cc` stays in the source list, so
+`init.cc` fails with `fatal error: lensfun.h: No such file or directory`.
+Fixing that is a prerequisite for ever offering a lensfun-free build;
+`HAZOR_ENABLE_RAWENGINE=OFF` remains the only working way to leave the engine
+out, and it is an escape hatch, not a packaging default.
 
 ### Bundled ONNX models (optional, cross-platform)
 
@@ -276,9 +436,31 @@ Libraries with different ABIs never share an install prefix. Platform-neutral
 models live once under `common/`; Linux tools such as `moc`, `rcc`, `uic`, aqt
 and AppImage utilities live under `host/`.
 
+Nothing is downloaded twice. What is fetched once and reused by every target:
+
+| Payload | Stored at | Why it is shared |
+|---------|-----------|------------------|
+| ONNX models (Mobile SAM, BiRefNet Lite) | `common/onnx/models/` | Model files are platform-neutral data |
+| RealESRGAN ncnn weights | `common/realesrgan/<version>/models/` | The per-OS archives ship identical `.param`/`.bin` files |
+| macOS Qt | `common/qt/<version>/macos/` | The official package is a universal x86_64 + arm64 build |
+| Release archives and pinned git sources | `downloads/` | Checksum/commit verified once, extracted or built per target |
+| Host Qt tools, aqt, AppImage utilities | `host/linux-x86_64/` | They run on the build machine, not on the target |
+
+Targets reach shared payloads through a symlink inside their own prefix, so
+`HAZOR_STRICT_DEPENDENCIES` still resolves every path under
+`3rdparty/targets/<target>/`, and packaging copies the real files
+(never the links) into the artifact. A model already installed anywhere under
+`common/onnx/models/` — including a pre-existing install adopted by
+`--migrate-only` — is detected and reused rather than downloaded again; the
+model registry scans that whole tree, so a second copy would also list the
+model twice in the UI.
+
 ```
 3rdparty/
-├── common/onnx/models/                            # platform-neutral models
+├── common/
+│   ├── onnx/models/                               # platform-neutral models
+│   ├── realesrgan/20220424/models/                # platform-neutral weights
+│   └── qt/6.8.3/macos/                            # universal macOS Qt
 ├── downloads/                                     # archives + pinned sources
 ├── host/linux-x86_64/
 │   ├── aqt/3.3.0/
@@ -286,7 +468,6 @@ and AppImage utilities live under `host/`.
 │   └── qt/6.8.3/gcc_64/                           # host moc/rcc/uic
 ├── targets/
 │   ├── linux-x86_64/
-│   ├── windows-x86/
 │   ├── windows-x86_64/
 │   ├── macos-x86_64/
 │   └── macos-arm64/
@@ -297,7 +478,8 @@ and AppImage utilities live under `host/`.
 │       ├── realesrgan/20220424/
 │       └── rawengine/                             # supported targets only
 ├── sysroots/                                      # externally supplied SDKs
-├── toolchains/                                    # externally supplied compilers
+├── toolchains/                                    # provisioned or supplied compilers
+│   └── mingw-w64-x86_64-gcc-13.1.0-msvcrt/        # built by --prepare
 └── build-deps/<target>/                           # reusable dependency builds
 ```
 
@@ -320,6 +502,10 @@ Main overrides are:
 | `QT_HOST_DIR` / `QT_TARGET_DIR` | selected from target |
 | `OPENCV_PREFIX`, `ZLIB_PREFIX`, `ONNXRUNTIME_DIR` | selected from target |
 | `RAWENGINE_DEPS_DIR`, `REALESRGAN_DIR` | selected from target |
+| `ONNX_MODELS_DIR` | `$HAZOR_COMMON_ROOT/onnx/models` (shared) |
+| `REALESRGAN_MODELS_DIR` | `$HAZOR_COMMON_ROOT/realesrgan/<version>/models` (shared) |
+| `HAZOR_ENABLE_RAWENGINE` | `AUTO` (`OFF` leaves the RAW engine out of a target build) |
+| `MINGW_TOOLCHAIN_DIR` | `$THIRD_PARTY_DIR/toolchains/mingw-w64-x86_64-gcc-<ver>-msvcrt` |
 | `JOBS` | host CPU count |
 
 ## Quick compatibility build (Linux)

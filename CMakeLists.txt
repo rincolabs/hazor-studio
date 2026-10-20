@@ -133,10 +133,14 @@ set(RAWENGINE_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/rawengine" CACHE PA
 # under RAWENGINE_DEPS_DIR rather than whatever version the system/Hazor's own
 # OpenCV happen to have — RawEngine's only real constraint here is exact,
 # reproducible dependency versions, not where the files physically live.
+# `libname` is a list, because the same library does not always install under
+# the same name: zlib's own CMake appends an "s" to the static library on
+# Windows, so the MinGW cross target has libzs.a where every other platform
+# has libz.a.
 function(_rawengine_add_imported_lib target header libname subdir)
     find_path(${target}_INCLUDE_DIR "${header}"
         HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/include" ${_HAZOR_FIND_ONLY_PATH})
-    find_library(${target}_LIBRARY NAMES "${libname}"
+    find_library(${target}_LIBRARY NAMES ${libname}
         HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/lib" ${_HAZOR_FIND_ONLY_PATH})
     if(${target}_INCLUDE_DIR AND ${target}_LIBRARY AND NOT TARGET ${target})
         add_library(${target} STATIC IMPORTED)
@@ -150,7 +154,7 @@ set(RAWENGINE_FOUND OFF)
 if(ENABLE_RAWENGINE)
     find_package(Threads)
 
-    _rawengine_add_imported_lib(Rawengine::ZLIB zlib.h z zlib)
+    _rawengine_add_imported_lib(Rawengine::ZLIB zlib.h "z;zs" zlib)
     _rawengine_add_imported_lib(Rawengine::JPEG jpeglib.h jpeg libjpeg-turbo)
     _rawengine_add_imported_lib(Rawengine::PNG png.h png libpng)
     _rawengine_add_imported_lib(Rawengine::TIFF tiff.h tiff libtiff)
@@ -200,6 +204,16 @@ if(ENABLE_RAWENGINE)
         if(PkgConfig_FOUND)
             pkg_check_modules(GLIB2 glib-2.0)
         endif()
+        # GLIB2_LIBRARIES holds bare "-l" names, with the search paths kept
+        # separately in GLIB2_LIBRARY_DIRS; linking the names alone only works
+        # where glib already sits on the default linker path. It does not on
+        # the Windows cross target, whose glib is a private build under
+        # RAWENGINE_DEPS_DIR. GLIB2_LINK_LIBRARIES is that same list already
+        # resolved to absolute paths, so it needs no -L at all.
+        set(HAZOR_GLIB2_LIBRARIES "${GLIB2_LIBRARIES}")
+        if(GLIB2_LINK_LIBRARIES)
+            set(HAZOR_GLIB2_LIBRARIES "${GLIB2_LINK_LIBRARIES}")
+        endif()
         # rtlensfun.h does `#include <lensfun.h>` (no subdirectory) and
         # `#include <glib.h>` transitively through it — the layout real
         # distro packages install (lensfun's own build system flattens
@@ -220,7 +234,17 @@ if(ENABLE_RAWENGINE)
                 set_target_properties(Lensfun::Lensfun PROPERTIES
                     IMPORTED_LOCATION "${LENSFUN_LIBRARY}"
                     INTERFACE_INCLUDE_DIRECTORIES "${LENSFUN_INCLUDE_DIR};${LENSFUN_INCLUDE_DIR}/lensfun;${GLIB2_INCLUDE_DIRS}"
-                    INTERFACE_LINK_LIBRARIES "${GLIB2_LIBRARIES}")
+                    INTERFACE_LINK_LIBRARIES "${HAZOR_GLIB2_LIBRARIES}")
+                # Where the C runtime has no POSIX regex — MSVCRT — lensfun
+                # builds the TRE implementation it bundles into a library of
+                # its own and leaves regcomp/regexec/regfree in liblensfun.a
+                # for it to satisfy.
+                find_library(LENSFUN_REGEX_LIBRARY NAMES tre_regex
+                    HINTS "${RAWENGINE_DEPS_DIR}/lensfun/lib" ${_HAZOR_FIND_ONLY_PATH})
+                if(LENSFUN_REGEX_LIBRARY)
+                    set_property(TARGET Lensfun::Lensfun APPEND PROPERTY
+                        INTERFACE_LINK_LIBRARIES "${LENSFUN_REGEX_LIBRARY}")
+                endif()
             endif()
 
             # Mirrors RawTherapee's own cmake/Dependencies.cmake check: lensfun
@@ -229,7 +253,17 @@ if(ENABLE_RAWENGINE)
             # available. Our vendored lensfun 0.3.4 has it.
             include(CheckCXXSourceCompiles)
             set(CMAKE_REQUIRED_INCLUDES "${LENSFUN_INCLUDE_DIR};${LENSFUN_INCLUDE_DIR}/lensfun;${GLIB2_INCLUDE_DIRS}")
-            set(CMAKE_REQUIRED_LIBRARIES "${LENSFUN_LIBRARY};${GLIB2_LIBRARIES}")
+            set(CMAKE_REQUIRED_LIBRARIES "${LENSFUN_LIBRARY};${HAZOR_GLIB2_LIBRARIES}")
+            # This asks whether the header *declares* LoadDirectory, so stop
+            # the probe after compiling. Letting it link makes it a test of
+            # something else entirely: a static lensfun plus a static glib pull
+            # in Windows system libraries this snippet does not name, so the
+            # cross target answered "no" for a method that is right there in
+            # the header — and then failed to build rtlensfun.cc's GLib
+            # directory-scan fallback, which needs a real glib rtcompat does
+            # not provide.
+            set(_hazor_saved_try_compile_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
             check_cxx_source_compiles(
                 "
                 #include <lensfun.h>
@@ -242,6 +276,8 @@ if(ENABLE_RAWENGINE)
                 "
                 RAWENGINE_LENSFUN_HAS_LOAD_DIRECTORY
             )
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_hazor_saved_try_compile_type}")
+            unset(_hazor_saved_try_compile_type)
             unset(CMAKE_REQUIRED_INCLUDES)
             unset(CMAKE_REQUIRED_LIBRARIES)
         endif()
@@ -985,6 +1021,15 @@ target_include_directories(Hazor PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
     ${OpenCV_INCLUDE_DIRS}
 )
+
+# AUTORCC runs the *host* rcc (QT_HOST_PATH), and rcc bakes a call to
+# qResourceFeatureZstd() into the generated resource unit when the Qt it came
+# from supports zstd. Whether that symbol exists is decided by the *target*
+# Qt6Core, and Qt's win64_mingw package is built without zstd — so the Linux
+# host tool's default emits a resource file the cross link cannot resolve.
+if(NOT QT_FEATURE_zstd)
+    set_property(TARGET Hazor APPEND PROPERTY AUTORCC_OPTIONS "--no-zstd")
+endif()
 
 # ── AI compatibility layer config ────────────────────────────
 # HAZOR_SOURCE_DIR lets AppPaths::thirdPartyDir() resolve the read-only 3rdparty

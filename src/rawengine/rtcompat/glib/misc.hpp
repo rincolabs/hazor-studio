@@ -20,6 +20,28 @@
 #include "rtcompat/glib/fileio.hpp"
 #include "rtcompat/glib/ustring.hpp"
 
+// <winbase.h> and <fileapi.h> define THREAD_PRIORITY_NORMAL and
+// FILE_TYPE_UNKNOWN as plain integer macros, and dcraw.cc reaches them
+// through winutils.h/leanwindows.h before including this header. The
+// enumerators below carry the names real glibmm/giomm use, which rtengine's
+// own call sites spell out (Glib::THREAD_PRIORITY_NORMAL,
+// Gio::FILE_TYPE_DIRECTORY), so the macros have to go rather than the names:
+// left in place they expand mid-enum and the declaration fails to parse.
+//
+// Nothing in rtengine calls SetThreadPriority() or GetFileType(), which are
+// the only reason those macros exist.
+#ifdef _WIN32
+#undef THREAD_PRIORITY_LOW
+#undef THREAD_PRIORITY_NORMAL
+#undef THREAD_PRIORITY_HIGH
+#undef THREAD_PRIORITY_URGENT
+#undef FILE_TYPE_UNKNOWN
+#undef FILE_TYPE_REGULAR
+#undef FILE_TYPE_DIRECTORY
+#undef FILE_TYPE_SYMBOLIC_LINK
+#undef FILE_TYPE_SPECIAL
+#endif
+
 namespace Glib {
 
 // --- Error hierarchy -------------------------------------------------

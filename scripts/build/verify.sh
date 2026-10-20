@@ -68,11 +68,58 @@ verify_build() {
     log "build verification passed for $TARGET"
 }
 
+# A packaged file may not send the target machine back to this checkout. What
+# breaks there is a loader path, a symlink or a script/config that still names
+# the local tree; a build path left inside a compiled binary's diagnostic
+# strings cannot, so it is reported rather than fatal (a locally built OpenCV
+# always carries its own install prefix for cv::samples::findFile, which Hazor
+# never calls).
+verify_no_local_paths() {
+    [[ -d "$DIST_DIR" ]] || return 0
+    # PE and Mach-O binaries get the same treatment as ELF. Without their mime
+    # types here they fell through to the catch-all below, which greps the file
+    # as if it were text and fails on any hit — so a Windows .exe was rejected
+    # for the assert() strings libstdc++, winpthreads and the mingw CRT carry
+    # from the toolchain build, exactly the "diagnostic strings only" case this
+    # function is documented to report rather than reject.
+    local path target mime failed=0
+    while IFS= read -r -d '' path; do
+        target="$(readlink "$path")"
+        if [[ "$target" == "$ROOT_DIR"* ]]; then
+            printf '[hazor-build] local path in a packaged symlink: %s -> %s\n' "$path" "$target" >&2
+            failed=1
+        fi
+    done < <(find "$DIST_DIR" -type l -print0)
+
+    while IFS= read -r -d '' path; do
+        mime="$(file -b --mime-type "$path")"
+        case "$mime" in
+            application/x-sharedlib|application/x-executable|application/x-pie-executable|application/x-object|\
+            application/vnd.microsoft.portable-executable|application/x-dosexec|\
+            application/x-mach-binary)
+                if readelf -d "$path" 2>/dev/null | grep -E 'RPATH|RUNPATH' | grep -qF "$ROOT_DIR"; then
+                    printf '[hazor-build] local path in a runtime library path: %s\n' "$path" >&2
+                    failed=1
+                elif strings -a "$path" 2>/dev/null | grep -qF "$ROOT_DIR"; then
+                    log "note: $(basename "$path") embeds the local build path in diagnostic strings only"
+                fi
+                ;;
+            *)
+                if grep -qF "$ROOT_DIR" "$path" 2>/dev/null; then
+                    printf '[hazor-build] local path in a packaged file: %s\n' "$path" >&2
+                    failed=1
+                fi
+                ;;
+        esac
+    done < <(find "$DIST_DIR" -type f -print0)
+
+    [[ "$failed" -eq 0 ]] || die "packaged files reference the local source path: $ROOT_DIR"
+}
+
 verify_package() {
     [[ "$PACKAGE_FORMAT" != "none" ]] || return
-    if [[ -d "$DIST_DIR" ]] && rg -a -F "$ROOT_DIR" "$DIST_DIR" >/dev/null 2>&1; then
-        die "packaged files contain the local source path: $ROOT_DIR"
-    fi
+    require_command strings
+    verify_no_local_paths
     case "$PACKAGE_FORMAT" in
         appimage)
             require_file "$ARTIFACT_DIR/HazorStudio-linux-x86_64.AppImage" AppImage

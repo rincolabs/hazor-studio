@@ -23,18 +23,40 @@ reset_package_directory() {
     mkdir -p "$path"
 }
 
+rawengine_was_built() {
+    [[ -f "$BUILD_DIR/CMakeCache.txt" ]] || return 1
+    [[ "$(sed -n 's|^ENABLE_RAWENGINE:[^=]*=||p' "$BUILD_DIR/CMakeCache.txt" | tail -n 1)" == "ON" ]]
+}
+
+# $2 ("on"/"off", optional) overrides the CMake-cache probe for packages whose
+# RAW engine state is decided by a packaging manifest rather than by this
+# build directory — the Flatpak builds its own copy inside the sandbox.
 copy_runtime_assets() {
     local thirdparty_out="$1"
+    local rawengine_state="${2:-}"
+    if [[ -z "$rawengine_state" ]]; then
+        if rawengine_was_built; then rawengine_state=on; else rawengine_state=off; fi
+    fi
     mkdir -p "$thirdparty_out/onnx/models" "$thirdparty_out/realesrgan/models"
+    # -L: shared and migrated dependency trees are reached through symlinks, so
+    # the package must receive the real files instead of links into 3rdparty.
     if [[ -d "$ONNX_MODELS_DIR" ]]; then
-        cp -a "$ONNX_MODELS_DIR/." "$thirdparty_out/onnx/models/"
+        cp -aL "$ONNX_MODELS_DIR/." "$thirdparty_out/onnx/models/"
     fi
     if [[ -d "$REALESRGAN_DIR" ]]; then
-        cp -a "$REALESRGAN_DIR/." "$thirdparty_out/realesrgan/"
+        cp -aL "$REALESRGAN_DIR/." "$thirdparty_out/realesrgan/"
     fi
-    if [[ -d "$RAWENGINE_DEPS_DIR/rtdata" ]]; then
+    # The ncnn weights are shared between targets and live outside the
+    # per-target RealESRGAN prefix.
+    if [[ -d "$REALESRGAN_MODELS_DIR" ]]; then
+        cp -aL "$REALESRGAN_MODELS_DIR/." "$thirdparty_out/realesrgan/models/"
+    fi
+    # rtdata is only readable by the RAW engine, so a build that left the engine
+    # out must not ship it: the CMake cache is the authoritative record of what
+    # was actually built.
+    if [[ "$rawengine_state" == "on" && -d "$RAWENGINE_DEPS_DIR/rtdata" ]]; then
         mkdir -p "$thirdparty_out/rawengine"
-        cp -a "$RAWENGINE_DEPS_DIR/rtdata" "$thirdparty_out/rawengine/"
+        cp -aL "$RAWENGINE_DEPS_DIR/rtdata" "$thirdparty_out/rawengine/"
     fi
 }
 
@@ -43,7 +65,7 @@ write_runtime_notices() {
     mkdir -p "$destination"
     printf '# Qt\n\nVersion: %s\nSource: https://www.qt.io\nLicense: LGPL-3.0 (Qt Open Source)\n' \
         "$HAZOR_QT_VERSION" > "$destination/QT-NOTICE.md"
-    if [[ "$TARGET" != "windows-x86_64" && -d "$ONNXRUNTIME_DIR/lib" ]]; then
+    if [[ -d "$ONNXRUNTIME_DIR/lib" ]]; then
         printf '# ONNX Runtime\n\nVersion: %s\nSource: https://github.com/microsoft/onnxruntime\nLicense: MIT\n' \
             "$HAZOR_ONNXRUNTIME_VERSION" > "$destination/ONNXRUNTIME-NOTICE.md"
     fi
@@ -57,19 +79,21 @@ write_runtime_notices() {
         "$HAZOR_BIREFNET_VERSION" > "$destination/BIREFNET-LITE-NOTICE.md"
 
     local notice
-    if [[ "$TARGET" != "windows-x86_64" ]]; then
-        for notice in LICENSE LICENSE.txt NOTICE NOTICE.md; do
-            if [[ -f "$ONNXRUNTIME_DIR/$notice" ]]; then
-                cp -f "$ONNXRUNTIME_DIR/$notice" "$destination/ONNXRUNTIME-$notice"
-            fi
-        done
-    fi
+    for notice in LICENSE LICENSE.txt NOTICE NOTICE.md; do
+        if [[ -f "$ONNXRUNTIME_DIR/$notice" ]]; then
+            cp -f "$ONNXRUNTIME_DIR/$notice" "$destination/ONNXRUNTIME-$notice"
+        fi
+    done
     if [[ -f "$ONNX_MODELS_DIR/segmenters/sam-mobile/NOTICE.md" ]]; then
         cp -f "$ONNX_MODELS_DIR/segmenters/sam-mobile/NOTICE.md" \
             "$destination/SAM-MOBILE-NOTICE.md"
     fi
     if [[ -f "$ROOT_DIR/src/resources/shapes/LICENSES/material-icons.txt" ]]; then
         cp -f "$ROOT_DIR/src/resources/shapes/LICENSES/material-icons.txt" \
+            "$destination/MATERIAL-ICONS-LICENSE.txt"
+    elif [[ -f "$ROOT_DIR/src/resources/shapes/material/LICENSE" ]]; then
+        # Fallback for a checkout where only the prepared archive copy exists.
+        cp -f "$ROOT_DIR/src/resources/shapes/material/LICENSE" \
             "$destination/MATERIAL-ICONS-LICENSE.txt"
     fi
 }
@@ -121,7 +145,9 @@ package_appimage() {
     write_runtime_notices "$appdir/usr/share/licenses/hazor-studio"
     if [[ -d "$ONNXRUNTIME_DIR" ]]; then
         mkdir -p "$appdir/3rdparty/onnx/runtime"
-        cp -a "$ONNXRUNTIME_DIR" "$appdir/3rdparty/onnx/runtime/"
+        # -L: a migrated legacy install is a symlink, and the rpath above must
+        # resolve inside the AppImage, not back into this machine's 3rdparty.
+        cp -aL "$ONNXRUNTIME_DIR" "$appdir/3rdparty/onnx/runtime/"
     fi
     local packaged_binary="$appdir/usr/bin/Hazor"
     require_file "$packaged_binary" "packaged Hazor executable"
@@ -140,6 +166,58 @@ package_appimage() {
     log "AppImage created: $output"
 }
 
+# The sandbox compiles Qt-, OpenCV- and RawEngine-linked code itself, but the
+# platform-neutral payloads are the very same bytes the AppImage ships, and the
+# ONNX Runtime release is a manylinux build that the KDE runtime can load as
+# is. Staging them out of the prepared host tree keeps one definition of the
+# runtime layout — copy_runtime_assets() — instead of a second one written in
+# YAML that could drift from it.
+stage_flatpak_assets() {
+    local stage="$ROOT_DIR/build/flatpak-assets"
+    require_dir "$ONNXRUNTIME_DIR" "prepared ONNX Runtime"
+    require_dir "$RAWENGINE_DEPS_DIR/rtdata" "prepared RawEngine rtdata"
+    # Re-staging identical bytes still rewrites the directory flatpak-builder
+    # hashes, which invalidates this module and every module after it — an
+    # hour of recompiling OpenCV and Hazor for no change at all. The marker
+    # records what was staged so a genuine dependency change still restages.
+    local marker="$stage/.hazor-staged"
+    local signature="$HAZOR_ORT_LINUX_PACKAGE $HAZOR_REALESRGAN_VERSION $HAZOR_SAM_VERSION $HAZOR_BIREFNET_VERSION"
+    if [[ -f "$marker" && "$(cat "$marker")" == "$signature" ]]; then
+        log "reusing staged Flatpak runtime assets: $stage"
+        return
+    fi
+    reset_package_directory "$stage"
+    mkdir -p "$stage/onnxruntime" "$stage/runtime/3rdparty"
+    # Resolve the prefix itself (a migrated legacy install is a symlink) but
+    # keep the libonnxruntime.so -> .so.1 -> .so.1.26.0 chain intact, so /app/lib
+    # gets one 26 MB library and two links rather than three copies.
+    cp -a "$(real_path "$ONNXRUNTIME_DIR")/." "$stage/onnxruntime/"
+    # ENABLE_RAWENGINE is ON in the manifest unconditionally, so rtdata always
+    # belongs in the bundle regardless of what this host's build dir says.
+    copy_runtime_assets "$stage/runtime/3rdparty" on
+    write_runtime_notices "$stage/runtime/licenses"
+    printf '%s' "$signature" > "$marker"
+    log "staged Flatpak runtime assets: $stage"
+}
+
+# flatpak-builder mounts each module's prefix through rofiles-fuse to catch
+# writes outside it. That needs /dev/fuse, which containers, CI runners and
+# sandboxed shells routinely withhold — and when it is missing the failure
+# surfaces several modules in as "Build directory ... not initialized", which
+# says nothing about FUSE. Probe once and tell flatpak-builder up front.
+flatpak_rofiles_fuse_works() {
+    command -v rofiles-fuse >/dev/null 2>&1 || return 1
+    local source mount status=1
+    source="$(mktemp -d)"
+    mount="$(mktemp -d)"
+    if rofiles-fuse "$source" "$mount" >/dev/null 2>&1; then
+        status=0
+        fusermount3 -u "$mount" >/dev/null 2>&1 || fusermount -u "$mount" >/dev/null 2>&1 || true
+    fi
+    rmdir "$mount" "$source" 2>/dev/null || true
+    return "$status"
+}
+
 package_flatpak() {
     [[ "$TARGET" == "linux-x86_64" ]] || die "Flatpak packaging is available only for linux-x86_64"
     require_command flatpak-builder
@@ -147,23 +225,49 @@ package_flatpak() {
     local build_root="$ROOT_DIR/build/flatpak-x86_64"
     local repo="$DIST_DIR/flatpak-repo"
     local output="$ARTIFACT_DIR/HazorStudio-linux-x86_64.flatpak"
+    # Without an explicit state dir, flatpak-builder caches its git mirrors and
+    # downloads in the caller's working directory, so the sandbox sources are
+    # re-fetched whenever the script runs from somewhere else.
+    local state_dir="$ROOT_DIR/build/flatpak-state"
+    # The app branch, which is not the runtime version: passing the runtime's
+    # "6.8" here asked build-bundle for a ref flatpak-builder never wrote (it
+    # defaults to "master"), and the whole build failed at the very last step.
+    # One variable drives both commands so they cannot disagree again.
+    local branch="stable"
     if [[ -e "$build_root" ]]; then
         safe_remove_tree "$build_root" "$ROOT_DIR"
     fi
     reset_package_directory "$DIST_DIR"
-    mkdir -p "$ARTIFACT_DIR"
-    flatpak-builder --force-clean --repo="$repo" \
+    mkdir -p "$ARTIFACT_DIR" "$state_dir"
+    stage_flatpak_assets
+    local -a builder_args=(
+        --force-clean --state-dir "$state_dir" --repo="$repo"
+        --default-branch="$branch"
+    )
+    if ! flatpak_rofiles_fuse_works; then
+        log "rofiles-fuse cannot mount here; building without it"
+        builder_args+=(--disable-rofiles-fuse)
+    fi
+    flatpak-builder "${builder_args[@]}" \
         "$build_root" "$ROOT_DIR/packaging/flatpak/com.rincolabs.HazorStudio.yml"
-    flatpak build-bundle "$repo" "$output" com.rincolabs.HazorStudio 6.8
+    flatpak build-bundle "$repo" "$output" com.rincolabs.HazorStudio "$branch"
     log "Flatpak bundle created: $output"
 }
 
 copy_mingw_runtime() {
     local destination="$1"
-    local compiler="x86_64-w64-mingw32-g++"
-    local runtime path
+    local compiler="$HAZOR_MINGW_TRIPLE-g++"
+    local runtime path sysroot
+    sysroot="$("$compiler" -print-sysroot 2>/dev/null || true)"
     for runtime in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-        path="$($compiler -print-file-name="$runtime")"
+        # -print-file-name searches GCC's library directories and returns the
+        # name unchanged when it finds nothing. libstdc++ and libgcc do live
+        # there, but the winpthreads DLL is installed under the target's bin/,
+        # so that one needs the sysroot sweep below.
+        path="$("$compiler" -print-file-name="$runtime")"
+        if [[ ! -f "$path" && -n "$sysroot" ]]; then
+            path="$(find "$sysroot" -name "$runtime" -print -quit 2>/dev/null || true)"
+        fi
         [[ -f "$path" ]] || die "MinGW runtime not found: $runtime"
         cp -f "$path" "$destination/"
     done
@@ -190,9 +294,44 @@ package_windows_zip() {
     done
     find "$OPENCV_PREFIX" -type f -name 'opencv*.dll' -exec cp -f {} "$DIST_DIR/" \;
     copy_mingw_runtime "$DIST_DIR"
+
+    # Windows resolves a DLL from the executable's own directory, so the AI
+    # runtime and the one shared RawEngine dependency go beside Hazor.exe
+    # rather than under 3rdparty/. The CUDA and TensorRT provider DLLs ship
+    # too: they are runtime execution providers selected in Settings, never a
+    # separate build (AGENTS.md invariant 10).
+    if [[ -d "$ONNXRUNTIME_DIR/lib" ]]; then
+        find "$ONNXRUNTIME_DIR/lib" -maxdepth 1 -type f -name 'onnxruntime*.dll' \
+            -exec cp -f {} "$DIST_DIR/" \;
+        require_file "$DIST_DIR/onnxruntime.dll" "packaged ONNX Runtime DLL"
+    fi
+    if rawengine_was_built; then
+        find "$RAWENGINE_DEPS_DIR/exiv2/bin" "$RAWENGINE_DEPS_DIR/exiv2/lib" \
+            -maxdepth 1 -type f -name 'libexiv2*.dll' -exec cp -f {} "$DIST_DIR/" \; 2>/dev/null || true
+        find "$DIST_DIR" -maxdepth 1 -name 'libexiv2*.dll' -print -quit | grep -q . \
+            || die "RawEngine was built but its exiv2 DLL was not found under $RAWENGINE_DEPS_DIR/exiv2"
+        # Lens Corrections needs lensfun's camera/lens database at runtime.
+        # rtengine leaves lensfunDbDirectory empty, so LFDatabase::init() falls
+        # back to lensfun's own search, which on Windows is relative to the
+        # module — i.e. share/lensfun beside the executable.
+        require_dir "$RAWENGINE_DEPS_DIR/lensfun/share/lensfun" "lensfun database"
+        mkdir -p "$DIST_DIR/share"
+        cp -aL "$RAWENGINE_DEPS_DIR/lensfun/share/lensfun" "$DIST_DIR/share/"
+    fi
+
     copy_runtime_assets "$DIST_DIR/3rdparty"
     write_runtime_notices "$DIST_DIR/licenses"
     require_file "$DIST_DIR/platforms/qwindows.dll" "Qt Windows platform plugin"
+
+    # Debug sections carry the build machine's directory layout — not from
+    # Hazor's own sources (-ffile-prefix-map already covers those) but from
+    # the libgcc and mingw-w64 CRT objects every PE links, which were compiled
+    # when prepare.sh built the cross toolchain. A distribution build has no
+    # use for them either way.
+    local binary
+    while IFS= read -r -d '' binary; do
+        "$HAZOR_MINGW_TRIPLE-strip" --strip-all "$binary" 2>/dev/null || true
+    done < <(find "$DIST_DIR" -maxdepth 2 -type f \( -name '*.exe' -o -name '*.dll' \) -print0)
 
     local output="$ARTIFACT_DIR/HazorStudio-Windows-x64.zip"
     if [[ -f "$output" ]]; then

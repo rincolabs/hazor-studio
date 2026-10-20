@@ -25,6 +25,10 @@
 #include "rtcompat/glib/fileutils.hpp"
 #include "rtcompat/glib/fileutils.hpp"
 #include "rtcompat/glib/fileio.hpp"
+// get_RT_gamma_slope() below reaches for g_utf16_to_utf8()/g_free() under
+// `#if __SIZEOF_WCHAR_T__ == 2`, i.e. only on Windows — wchar_t is 4 bytes on
+// Linux, so that branch had never been compiled before this target existed.
+#include "rtcompat/glib/textconv.hpp"
 
 #ifdef _WIN32
 #include <winsock2.h>
