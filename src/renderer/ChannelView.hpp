@@ -84,6 +84,15 @@ struct View {
     // 0 when no colour component is visible: the layer stack contributes
     // nothing and only the extras below are drawn.
     float colorAlpha = 1.0f;
+    // True while a SUBSET of the colour components is on display. A colour
+    // component is an opaque grayscale plane — transparency is not one of its
+    // values — so the composite's alpha is matted against paper white before
+    // the matrix and the result is opaque. Without it the canvas showed the
+    // checkerboard through a component view while the panel's thumbnail for
+    // the same component (which has always matted on white) showed paper, and
+    // the two disagreed on every document with transparency. Never set for the
+    // identity (RGB) view, which keeps the document's own alpha.
+    bool matteOnWhite = false;
     std::vector<Extra> extras;
 
     bool isIdentity() const

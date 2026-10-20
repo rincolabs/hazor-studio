@@ -549,7 +549,12 @@ frame would replay the previous view.
 
 The colour stage is a 3×3 matrix on the composite's straight RGB (identity for
 RGB, `diag(flags)` for a visible subset, replicate-one-component for the
-single-channel grey view). The extras are an ordered list: an alpha channel
+single-channel grey view). A component subset also mattes the composite's alpha
+against paper white and renders opaque (`View::matteOnWhite`): a colour
+component is a grayscale plane with no transparency of its own, and the panel's
+component thumbnails have always shown it that way, so without the matte the
+canvas and the thumbnail disagreed on every document with transparency. The RGB
+identity view keeps the document's real alpha. The extras are an ordered list: an alpha channel
 blends its overlay colour by `opacity × coverage`, a spot channel multiplies by
 its ink for the transparent fraction and covers with it for the solid fraction
 (`solidity` splits the two and never touches the stored coverage). Panel order

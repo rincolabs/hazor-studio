@@ -82,12 +82,16 @@ View resolve(const Document* doc)
         // separation. "Show Channels in Color" is the opt-out.
         const int component = st.colorVisible[0] ? 0 : (st.colorVisible[1] ? 1 : 2);
         setReplicate(view.colorMatrix, component);
+        view.matteOnWhite = true;
     } else if (visibleColors < 3) {
         // Two visible components, or one with Show Channels in Color: keep
         // each in its own hue and let them composite.
         setDiagonal(view.colorMatrix, st.colorVisible);
+        view.matteOnWhite = true;
     }
-    // visibleColors == 3 keeps the identity matrix the View was built with.
+    // visibleColors == 3 keeps the identity matrix the View was built with —
+    // and its alpha, since the RGB row IS the document and its transparency is
+    // real. Only a component subset mattes (see View::matteOnWhite).
 
     // Extras in panel order. The first visible one becomes the grey base when
     // the layer stack contributes nothing, so a lone alpha/spot channel shows
@@ -186,6 +190,16 @@ void apply(QImage& image, const View& view, const QRect& region)
             }
 
             if (!colorIsIdentity) {
+                if (view.matteOnWhite && a < 1.0f) {
+                    // Paper, not a hole: a component's values are opaque, so
+                    // the matte happens in STRAIGHT space before the matrix —
+                    // matting afterwards would tint the paper with whichever
+                    // components are visible.
+                    rgb[0] += (1.0f - rgb[0]) * (1.0f - a);
+                    rgb[1] += (1.0f - rgb[1]) * (1.0f - a);
+                    rgb[2] += (1.0f - rgb[2]) * (1.0f - a);
+                    a = 1.0f;
+                }
                 const float r = m[0] * rgb[0] + m[1] * rgb[1] + m[2] * rgb[2];
                 const float g = m[3] * rgb[0] + m[4] * rgb[1] + m[5] * rgb[2];
                 const float b = m[6] * rgb[0] + m[7] * rgb[1] + m[8] * rgb[2];
