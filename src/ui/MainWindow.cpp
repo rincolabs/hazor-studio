@@ -2982,6 +2982,15 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
         m_toolBar->setTextLeading(ps.lineHeight);
     });
     connect(canvas, &CanvasView::zoomChanged, this, &MainWindow::onZoomChanged);
+    // The Channels panel builds its RGB / R-G-B thumbnails from this canvas'
+    // CPU projection, which is composited off thread and therefore lands after
+    // the imageChanged() that triggered it. Without this the thumbnails stayed
+    // one edit behind until the next composition change. Only the active tab's
+    // canvas feeds the panel.
+    connect(canvas, &CanvasView::projectionUpdated, this, [this, canvas]() {
+        if (canvas == m_canvas && m_channelsPanel)
+            m_channelsPanel->refresh();
+    });
     connect(canvas, &CanvasView::brushSizeChanged, this, [this](float size) {
         if (m_toolBar)
             m_toolBar->setBrushSize(qRound(size));

@@ -264,6 +264,18 @@ void ChannelsPanel::rebuildRows()
     const bool wantThumbs = boxPixels > 0;
     const int components = std::min(3, doc->colorChannelCount());
 
+    // The composite behind the RGB and R/G/B rows, identified by its BUFFER
+    // rather than by doc->compositionGeneration: it is composited off thread,
+    // so at any moment the available projection may still be the previous
+    // generation's. Keying on the generation tagged a thumbnail with pixels
+    // that had not landed yet and froze it one edit behind until the next
+    // composition change; the buffer's cacheKey changes exactly when there is
+    // something new to draw. Zero while thumbnails are off, which also keeps
+    // the rows from being rebuilt for composites nothing displays.
+    const QImage composite = (wantThumbs && m_canvas) ? m_canvas->documentCompositeImage()
+                                                      : QImage();
+    const qint64 compositeKey = composite.isNull() ? 0 : composite.cacheKey();
+
     // Skip the rebuild when nothing on display moved. refresh() is wired to
     // imageChanged(), which fires on every painted dab, and recreating the
     // rows (and their thumbnails) each time was pure waste.
@@ -271,7 +283,7 @@ void ChannelsPanel::rebuildRows()
     signature.reserve(128);
     signature += QString::number(boxPixels) + QLatin1Char('|')
                + QString::number(components) + QLatin1Char('|')
-               + QString::number(doc->compositionGeneration) + QLatin1Char('|')
+               + QString::number(compositeKey) + QLatin1Char('|')
                + QString::number(doc->channelViewGeneration) + QLatin1Char('|')
                + (st.compositeIsEditTarget() ? QLatin1Char('C') : QLatin1Char('-'));
     for (int c = 0; c < components; ++c) {
@@ -291,21 +303,20 @@ void ChannelsPanel::rebuildRows()
         return;
     m_rowSignature = signature;
 
-    // Composite + component thumbnails, derived once per composite generation.
+    // Composite + component thumbnails, derived once per composite buffer.
     if (wantThumbs) {
-        const QImage composite = m_canvas ? m_canvas->documentCompositeImage() : QImage();
         if (composite.isNull()) {
             m_compositeThumb = QImage();
             for (auto& thumb : m_componentThumbs)
                 thumb = QImage();
-            m_compositeThumbGen = ~0ull;
-        } else if (m_compositeThumbGen != doc->compositionGeneration
+            m_compositeThumbKey = 0;
+        } else if (m_compositeThumbKey != compositeKey
                    || m_compositeThumbSize != boxPixels
                    || m_compositeThumb.isNull()) {
             m_compositeThumb = downscaleForThumbnail(composite, boxPixels);
             for (int c = 0; c < 3; ++c)
                 m_componentThumbs[c] = componentThumbnail(m_compositeThumb, c);
-            m_compositeThumbGen = doc->compositionGeneration;
+            m_compositeThumbKey = compositeKey;
             m_compositeThumbSize = boxPixels;
         }
     }

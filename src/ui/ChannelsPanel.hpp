@@ -90,7 +90,9 @@ private:
     // pixels behind these do, and a full-resolution rescale per refresh was
     // the one expensive thing in here.
     QImage m_compositeThumb;          // RGB row, downscaled once per composite
-    uint64_t m_compositeThumbGen = ~0ull;
+    // QImage::cacheKey() of the composite the two caches below were built
+    // from — see rebuildRows() for why this is not a generation counter.
+    qint64 m_compositeThumbKey = 0;
     int m_compositeThumbSize = -1;
     QImage m_componentThumbs[3];
     // Signature of the last rebuild: rows are only recreated when something

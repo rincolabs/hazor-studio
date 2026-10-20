@@ -404,6 +404,12 @@ signals:
     void brushSizeChanged(float size);
     void brushHardnessChanged(float hardness);
     void contextMenuRequested(QPoint globalPos);
+    // A freshly composited CPU projection became available. It is built off
+    // thread, so it lands AFTER the imageChanged() that caused it: anything
+    // deriving pixels from documentCompositeImage() (the Channels panel's
+    // composite and component thumbnails) needs this to know the buffer it
+    // drew from has been superseded.
+    void projectionUpdated();
 
 protected:
     void initializeGL() override;
