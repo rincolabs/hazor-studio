@@ -1356,6 +1356,18 @@ render paths display the same pixels:
   `ProjectionCache` rebuilds the CPU projection on a worker thread → canvas
   switches from Path B to Path A without visual difference.
 
+Which of those three a dab reaches is decided before it is rasterised, and
+only one can be armed: `ImageController::claimEditTarget` drops the others
+whenever the mask edit or a channel selection is claimed, on the central path
+(`setEditingMask`, the channel selectors) so the panels, the shortcuts and the
+tool surface agree. Every paint path tests the mask first, so without that
+exclusion a channel armed in the panel could be displayed as the target while
+the stroke went into the layer mask. Dropping a target moves the arming only —
+a channel's visibility is a separate property and stays as the user left it.
+Quick Mask is deliberately outside the exclusion: its mode flag is still
+duplicated between `CanvasView` and `Document::quickMask`, and its exit path
+carries undo bookkeeping that lives in the canvas.
+
 `flushLayerToCpuImage` (ImageController) flattens tiles + cpuImage when a
 destructive operation needs a positioned full-size snapshot.
 

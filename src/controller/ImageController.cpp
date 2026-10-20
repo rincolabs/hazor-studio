@@ -5732,10 +5732,42 @@ bool ImageController::isLayerMaskEnabled(int flatIndex) const
     return node && node->layer && node->layer->maskVisible && !node->layer->maskImage.isNull();
 }
 
+void ImageController::claimEditTarget(EditTarget target)
+{
+    if (target != EditTarget::LayerMask && m_editingMask) {
+        // Assigned here instead of through setEditingMask(), which is the
+        // caller claiming LayerMask — going back through it would recurse.
+        m_editingMask = false;
+        // Every panel that shows the mask as the target listens to this (the
+        // Layers panel's mask highlight, the canvas' own flag, the histogram
+        // source), so the UI follows from the one assignment.
+        emit maskEditingChanged(false);
+    }
+
+    if (target != EditTarget::Channel && m_doc
+        && !m_doc->channelState.compositeIsEditTarget()) {
+        // Back to the composite, which is the target the layer and mask tools
+        // write through. Only the arming moves: selectComposite() re-arms the
+        // three colour components and no channel's eye is touched, so a
+        // visible alpha overlay stays visible — an edit target and a
+        // visibility are different properties.
+        m_doc->channelState.selectComposite();
+        m_doc->invalidateChannelView();
+        emit channelsChanged();
+        emit imageChanged();
+    }
+}
+
 void ImageController::setEditingMask(bool editing)
 {
     if (m_editingMask == editing) return;
+    // Flag first, then the claim: the channels it disarms notify through
+    // channelsChanged/imageChanged, and those listeners should already see the
+    // mask as the target. maskEditingChanged stays last so the canvas and the
+    // Layers panel get the final, settled state.
     m_editingMask = editing;
+    if (editing)
+        claimEditTarget(EditTarget::LayerMask);
     emit maskEditingChanged(editing);
 }
 

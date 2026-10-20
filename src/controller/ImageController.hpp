@@ -302,6 +302,25 @@ public:
     void setEditingMask(bool editing);
     bool isEditingMask() const { return m_editingMask; }
 
+    // ── The one active edit target ───────────────────────────
+    //
+    // Exactly one destination receives a stroke: the active layer's PIXELS,
+    // that layer's MASK, or a CHANNEL (an extra channel, or a subset of the
+    // colour components). The three are stored in different places —
+    // m_editingMask here, Document::channelState on the document — so nothing
+    // structural stopped two of them from being armed at once, and when that
+    // happened the panels lied: the Channels panel showed Red armed while the
+    // brush still wrote into the layer mask, because every paint path tests
+    // the mask first.
+    //
+    // claimEditTarget() is the mutual exclusion, and it lives on the central
+    // path every caller already passes through — setEditingMask() and the
+    // channel selectors — rather than in the panels' click handlers, so the
+    // keyboard shortcuts and the tool/MCP surface cannot behave differently.
+    // Dropping a target changes only the ARMING: what is visible stays as the
+    // user left it (§3.3 of the channels model keeps those independent).
+    enum class EditTarget { LayerPixels, LayerMask, Channel };
+
     // ── Channels ─────────────────────────────────────────────
     // Creation. Both return the new channel's index, or -1 when the channel
     // cap is reached. newSpotChannel fills the active selection with full ink
@@ -750,6 +769,9 @@ private:
     // Newest jobGeneration already committed per key, so a result built from a
     // state the document has already moved past is dropped instead of shown.
     QHash<SmartObjectRenderKey, std::uint64_t> m_committedSmartObjectGenerations;
+
+    // Drops every edit target except `target`. See EditTarget above.
+    void claimEditTarget(EditTarget target);
 
     Document* m_doc = nullptr;
     CommandHistory m_history;

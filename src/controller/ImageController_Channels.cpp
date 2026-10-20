@@ -536,6 +536,9 @@ void ImageController::selectCompositeChannel()
 {
     if (!m_doc)
         return;
+    // The RGB row IS the layer-pixel target, so it ends a layer-mask edit the
+    // same way picking a channel does.
+    claimEditTarget(EditTarget::LayerPixels);
     ChannelState& st = m_doc->channelState;
     // selectComposite() restores the three components (arming + visibility);
     // the extras are the panel's own rows, so hiding them belongs here.
@@ -551,6 +554,7 @@ void ImageController::selectColorComponent(int component, bool additive)
 {
     if (!m_doc || component < 0 || component > 2)
         return;
+    claimEditTarget(EditTarget::Channel);
     ChannelState& st = m_doc->channelState;
 
     if (!additive) {
@@ -578,6 +582,7 @@ void ImageController::selectChannelAt(int index, bool additive)
 {
     if (!m_doc || index < 0 || index >= static_cast<int>(m_doc->channels.size()))
         return;
+    claimEditTarget(EditTarget::Channel);
     ChannelState& st = m_doc->channelState;
     const uint64_t id = m_doc->channels[static_cast<size_t>(index)].id;
 
