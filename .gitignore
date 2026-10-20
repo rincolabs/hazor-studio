@@ -1,7 +1,9 @@
 # Build directory
-build/
-build-qt68/
-cmake-build-*/
+/build/
+/build-qt68/
+/cmake-build-*/
+/dist/
+/artifacts/
 
 # IDE / editors
 .idea/

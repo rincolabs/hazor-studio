@@ -10,6 +10,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
+option(HAZOR_STRICT_DEPENDENCIES
+    "Reject Qt/OpenCV/zlib/ONNX/RawEngine libraries outside HAZOR_DEPENDENCY_ROOT" OFF)
+option(HAZOR_DEVELOPMENT_PATHS
+    "Embed the source checkout as a development-only resource fallback" ON)
+set(HAZOR_DEPENDENCY_ROOT "" CACHE PATH
+    "Target-specific 3rdparty prefix accepted by strict dependency checks")
+
+if(HAZOR_STRICT_DEPENDENCIES AND NOT HAZOR_DEPENDENCY_ROOT)
+    message(FATAL_ERROR
+        "HAZOR_STRICT_DEPENDENCIES=ON requires HAZOR_DEPENDENCY_ROOT. "
+        "Use scripts/build.sh --target <target> after preparing dependencies.")
+endif()
+
+set(_HAZOR_FIND_ONLY_PATH)
+if(HAZOR_STRICT_DEPENDENCIES)
+    list(APPEND _HAZOR_FIND_ONLY_PATH NO_DEFAULT_PATH)
+endif()
+
 if(MSVC)
     # /utf-8: source/exec charset. /bigobj: large TUs (CanvasView.cpp, MainWindow.cpp)
     # exceed the COFF section limit otherwise (fatal error C1128).
@@ -36,21 +54,58 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 # ZIP entries (.bundle). Available everywhere OpenCV/Qt already pull it in.
 find_package(ZLIB REQUIRED)
 
+function(_hazor_require_dependency_path label path)
+    if(NOT path)
+        message(FATAL_ERROR "Strict dependency check: ${label} did not report a path")
+    endif()
+    get_filename_component(_hazor_dep_root "${HAZOR_DEPENDENCY_ROOT}" ABSOLUTE)
+    get_filename_component(_hazor_dep_path "${path}" ABSOLUTE)
+    file(TO_CMAKE_PATH "${_hazor_dep_root}/" _hazor_dep_root)
+    file(TO_CMAKE_PATH "${_hazor_dep_path}/" _hazor_dep_path)
+    string(FIND "${_hazor_dep_path}" "${_hazor_dep_root}" _hazor_dep_prefix)
+    if(NOT _hazor_dep_prefix EQUAL 0)
+        message(FATAL_ERROR
+            "Strict dependency check: ${label} resolved outside the target prefix.\n"
+            "  resolved: ${path}\n"
+            "  allowed:  ${HAZOR_DEPENDENCY_ROOT}\n"
+            "Prepare the dependency for this target instead of using a host fallback.")
+    endif()
+    message(STATUS "${label}: ${path}")
+endfunction()
+
+if(HAZOR_STRICT_DEPENDENCIES)
+    _hazor_require_dependency_path("Qt 6 package" "${Qt6_DIR}")
+    _hazor_require_dependency_path("OpenCV package" "${OpenCV_DIR}")
+    _hazor_require_dependency_path("zlib headers" "${ZLIB_INCLUDE_DIRS}")
+    if(ZLIB_LIBRARY)
+        _hazor_require_dependency_path("zlib library" "${ZLIB_LIBRARY}")
+    elseif(ZLIB_LIBRARY_RELEASE)
+        _hazor_require_dependency_path("zlib library" "${ZLIB_LIBRARY_RELEASE}")
+    else()
+        message(FATAL_ERROR "Strict dependency check: zlib did not report a library path")
+    endif()
+endif()
+
 # ── ONNX Runtime (optional) ──────────────────────────────────
 # Single editor build; CPU/CUDA/TensorRT/etc. are runtime Execution Providers
 # chosen in Settings, never separate builds. When the runtime is not found the
 # editor still builds and runs — the AI layer simply reports it as unavailable.
 option(ENABLE_ONNXRUNTIME "Build with ONNX Runtime AI inference support" ON)
-    # CACHE PATH "Root of the vendored ONNX Runtime distribution (include/ + lib/)")
+set(HAZOR_ORT_RUNTIME_DIR "" CACHE STRING
+    "Packaged ONNX Runtime directory name used only for relative install RPATH")
 
 set(ONNXRUNTIME_FOUND OFF)
 if(ENABLE_ONNXRUNTIME)
     find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
-        HINTS "${ONNXRUNTIME_ROOT}/include")
+        HINTS "${ONNXRUNTIME_ROOT}/include" ${_HAZOR_FIND_ONLY_PATH})
     find_library(ONNXRUNTIME_LIBRARY NAMES onnxruntime
-        HINTS "${ONNXRUNTIME_ROOT}/lib")
+        HINTS "${ONNXRUNTIME_ROOT}/lib" ${_HAZOR_FIND_ONLY_PATH})
     if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
         set(ONNXRUNTIME_FOUND ON)
+        if(HAZOR_STRICT_DEPENDENCIES)
+            _hazor_require_dependency_path("ONNX Runtime headers" "${ONNXRUNTIME_INCLUDE_DIR}")
+            _hazor_require_dependency_path("ONNX Runtime library" "${ONNXRUNTIME_LIBRARY}")
+        endif()
         get_filename_component(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
         message(STATUS "ONNX Runtime: ${ONNXRUNTIME_LIBRARY}")
     else()
@@ -79,8 +134,10 @@ set(RAWENGINE_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/rawengine" CACHE PA
 # OpenCV happen to have — RawEngine's only real constraint here is exact,
 # reproducible dependency versions, not where the files physically live.
 function(_rawengine_add_imported_lib target header libname subdir)
-    find_path(${target}_INCLUDE_DIR "${header}" HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/include")
-    find_library(${target}_LIBRARY NAMES "${libname}" HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/lib")
+    find_path(${target}_INCLUDE_DIR "${header}"
+        HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/include" ${_HAZOR_FIND_ONLY_PATH})
+    find_library(${target}_LIBRARY NAMES "${libname}"
+        HINTS "${RAWENGINE_DEPS_DIR}/${subdir}/lib" ${_HAZOR_FIND_ONLY_PATH})
     if(${target}_INCLUDE_DIR AND ${target}_LIBRARY AND NOT TARGET ${target})
         add_library(${target} STATIC IMPORTED)
         set_target_properties(${target} PROPERTIES
@@ -105,8 +162,10 @@ if(ENABLE_RAWENGINE)
         set_property(TARGET Rawengine::TIFF APPEND PROPERTY INTERFACE_LINK_LIBRARIES Rawengine::ZLIB Rawengine::JPEG)
     endif()
 
-    find_path(LCMS2_INCLUDE_DIR lcms2.h HINTS "${RAWENGINE_DEPS_DIR}/lcms2/include")
-    find_library(LCMS2_LIBRARY NAMES lcms2 HINTS "${RAWENGINE_DEPS_DIR}/lcms2/lib")
+    find_path(LCMS2_INCLUDE_DIR lcms2.h
+        HINTS "${RAWENGINE_DEPS_DIR}/lcms2/include" ${_HAZOR_FIND_ONLY_PATH})
+    find_library(LCMS2_LIBRARY NAMES lcms2
+        HINTS "${RAWENGINE_DEPS_DIR}/lcms2/lib" ${_HAZOR_FIND_ONLY_PATH})
     if(LCMS2_INCLUDE_DIR AND LCMS2_LIBRARY AND NOT TARGET LCMS2::LCMS2)
         add_library(LCMS2::LCMS2 STATIC IMPORTED)
         set_target_properties(LCMS2::LCMS2 PROPERTIES
@@ -114,9 +173,12 @@ if(ENABLE_RAWENGINE)
             INTERFACE_INCLUDE_DIRECTORIES "${LCMS2_INCLUDE_DIR}")
     endif()
 
-    find_path(FFTW3F_INCLUDE_DIR fftw3.h HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/include")
-    find_library(FFTW3F_LIBRARY NAMES fftw3f HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/lib")
-    find_library(FFTW3F_THREADS_LIBRARY NAMES fftw3f_threads HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/lib")
+    find_path(FFTW3F_INCLUDE_DIR fftw3.h
+        HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/include" ${_HAZOR_FIND_ONLY_PATH})
+    find_library(FFTW3F_LIBRARY NAMES fftw3f
+        HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/lib" ${_HAZOR_FIND_ONLY_PATH})
+    find_library(FFTW3F_THREADS_LIBRARY NAMES fftw3f_threads
+        HINTS "${RAWENGINE_DEPS_DIR}/fftw3f/lib" ${_HAZOR_FIND_ONLY_PATH})
     if(FFTW3F_INCLUDE_DIR AND FFTW3F_LIBRARY AND FFTW3F_THREADS_LIBRARY AND NOT TARGET FFTW3F::FFTW3F)
         add_library(FFTW3F::FFTW3F STATIC IMPORTED)
         set_target_properties(FFTW3F::FFTW3F PROPERTIES
@@ -147,8 +209,10 @@ if(ENABLE_RAWENGINE)
         # subdirectory and glib-2.0's split include dirs (glib.h lives
         # under one, glibconfig.h under the other) need to be added
         # explicitly.
-        find_path(LENSFUN_INCLUDE_DIR lensfun/lensfun.h HINTS "${RAWENGINE_DEPS_DIR}/lensfun/include")
-        find_library(LENSFUN_LIBRARY NAMES lensfun HINTS "${RAWENGINE_DEPS_DIR}/lensfun/lib")
+        find_path(LENSFUN_INCLUDE_DIR lensfun/lensfun.h
+            HINTS "${RAWENGINE_DEPS_DIR}/lensfun/include" ${_HAZOR_FIND_ONLY_PATH})
+        find_library(LENSFUN_LIBRARY NAMES lensfun
+            HINTS "${RAWENGINE_DEPS_DIR}/lensfun/lib" ${_HAZOR_FIND_ONLY_PATH})
         if(LENSFUN_INCLUDE_DIR AND LENSFUN_LIBRARY AND GLIB2_FOUND)
             set(LENSFUN_FOUND ON)
             if(NOT TARGET Lensfun::Lensfun)
@@ -208,7 +272,7 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/generated/core/Version.hpp
     @ONLY)
 
-add_executable(Hazor WIN32
+add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/main.cpp
 
     src/core/Tile.hpp
@@ -902,7 +966,9 @@ if(WIN32)
     # main() instead of requiring a WinMain / Qt6::EntryPoint: /ENTRY:mainCRTStartup
     # uses the CRT entry that sets up argc/argv and calls main() under the
     # WINDOWS subsystem.
-    target_link_options(Hazor PRIVATE /ENTRY:mainCRTStartup)
+    if(MSVC)
+        target_link_options(Hazor PRIVATE /ENTRY:mainCRTStartup)
+    endif()
     # Embed the application icon into Hazor.exe (shows in Explorer, taskbar,
     # alt-tab). The .ico is pre-generated from app-icon.png by
     # tools/generate_app_icon_ico.py and versioned in the repo, so the build does
@@ -929,9 +995,10 @@ target_include_directories(Hazor PRIVATE
 if(NOT DEFINED HAZOR_ONNX_CUDA_MAJOR)
     set(HAZOR_ONNX_CUDA_MAJOR 12)
 endif()
-target_compile_definitions(Hazor PRIVATE
-    HAZOR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-    HAZOR_ONNX_CUDA_MAJOR=${HAZOR_ONNX_CUDA_MAJOR})
+target_compile_definitions(Hazor PRIVATE HAZOR_ONNX_CUDA_MAJOR=${HAZOR_ONNX_CUDA_MAJOR})
+if(HAZOR_DEVELOPMENT_PATHS)
+    target_compile_definitions(Hazor PRIVATE HAZOR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 
 # ── ONNX Runtime link + headers + rpath ──────────────────────
 if(ONNXRUNTIME_FOUND)
@@ -940,9 +1007,39 @@ if(ONNXRUNTIME_FOUND)
     target_link_libraries(Hazor PRIVATE ${ONNXRUNTIME_LIBRARY})
     # Locate libonnxruntime.so and its provider_shared/cuda/tensorrt siblings at
     # runtime without a separate build or install step (dev convenience).
-    set_target_properties(Hazor PROPERTIES
-        BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
-        INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}")
+    if(HAZOR_DEVELOPMENT_PATHS)
+        set_target_properties(Hazor PROPERTIES BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}")
+    endif()
+    if(APPLE)
+        set_target_properties(Hazor PROPERTIES INSTALL_RPATH "@executable_path/../Frameworks")
+    elseif(UNIX)
+        set(_hazor_install_rpath "$ORIGIN/../lib")
+        if(HAZOR_ORT_RUNTIME_DIR)
+            list(APPEND _hazor_install_rpath
+                "$ORIGIN/../../3rdparty/onnx/runtime/${HAZOR_ORT_RUNTIME_DIR}/lib")
+        endif()
+        set_target_properties(Hazor PROPERTIES INSTALL_RPATH "${_hazor_install_rpath}")
+    endif()
+endif()
+
+set_target_properties(Hazor PROPERTIES
+    MACOSX_BUNDLE_BUNDLE_NAME "Hazor Studio"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "com.rincolabs.HazorStudio"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+
+include(GNUInstallDirs)
+install(TARGETS Hazor
+    BUNDLE DESTINATION .
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(UNIX AND NOT APPLE)
+    install(FILES packaging/linux/com.rincolabs.HazorStudio.desktop
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
+    install(FILES packaging/linux/com.rincolabs.HazorStudio.metainfo.xml
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo")
+    install(FILES src/resources/icons/app-icon.png
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps"
+        RENAME com.rincolabs.HazorStudio.png)
 endif()
 
 # ── RawEngine link ────────────────────────────────────────────

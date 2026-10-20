@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.rincolabs.HazorStudio</id>
+  <name>Hazor Studio</name>
+  <summary>GPU-accelerated raster image editor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <description>
+    <p>Hazor Studio is a native raster image editor with layers and integrated AI tools.</p>
+  </description>
+  <launchable type="desktop-id">com.rincolabs.HazorStudio.desktop</launchable>
+  <provides>
+    <binary>Hazor</binary>
+  </provides>
+</component>

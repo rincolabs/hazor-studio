@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hazor Studio
+Comment=GPU-accelerated raster image editor
+Exec=Hazor %F
+Icon=com.rincolabs.HazorStudio
+Categories=Graphics;Photography;RasterGraphics;
+MimeType=image/png;image/jpeg;image/tiff;image/webp;
+Terminal=false
+StartupNotify=true

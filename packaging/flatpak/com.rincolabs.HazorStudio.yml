@@ -1,0 +1,56 @@
+app-id: com.rincolabs.HazorStudio
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: Hazor
+
+finish-args:
+  - --device=dri
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --filesystem=home
+
+modules:
+  - name: opencv
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_LIST=core,imgproc,imgcodecs
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_JPEG=ON
+      - -DBUILD_PNG=ON
+      - -DBUILD_TIFF=ON
+      - -DBUILD_WEBP=ON
+      - -DBUILD_TESTS=OFF
+      - -DBUILD_PERF_TESTS=OFF
+      - -DBUILD_EXAMPLES=OFF
+      - -DBUILD_opencv_apps=OFF
+      - -DBUILD_JAVA=OFF
+      - -DBUILD_opencv_python2=OFF
+      - -DBUILD_opencv_python3=OFF
+      - -DWITH_OPENEXR=OFF
+      - -DWITH_JASPER=OFF
+      - -DWITH_OPENJPEG=OFF
+      - -DWITH_FFMPEG=OFF
+      - -DWITH_GSTREAMER=OFF
+      - -DWITH_GTK=OFF
+      - -DWITH_QT=OFF
+    sources:
+      - type: git
+        url: https://github.com/opencv/opencv.git
+        commit: 4223495e6cd67011f86b8ecd9be1fa105018f3b1
+
+  - name: hazor-studio
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_TESTS=OFF
+      - -DHAZOR_DEVELOPMENT_PATHS=OFF
+      - -DENABLE_ONNXRUNTIME=OFF
+      - -DENABLE_RAWENGINE=OFF
+      - -DOpenCV_DIR=/app/lib/cmake/opencv4
+    sources:
+      - type: dir
+        path: ../..
