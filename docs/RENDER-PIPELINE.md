@@ -1364,9 +1364,40 @@ tool surface agree. Every paint path tests the mask first, so without that
 exclusion a channel armed in the panel could be displayed as the target while
 the stroke went into the layer mask. Dropping a target moves the arming only —
 a channel's visibility is a separate property and stays as the user left it.
-Quick Mask is deliberately outside the exclusion: its mode flag is still
-duplicated between `CanvasView` and `Document::quickMask`, and its exit path
-carries undo bookkeeping that lives in the canvas.
+**Quick Mask is still outside that exclusion, and should not stay out.** It is
+the channel-shaped target for the live selection, so entering it while a layer
+mask is being edited reproduces exactly the bug above: the panel lists Quick
+Mask as armed, the overlay is on screen, and the stroke goes into the mask.
+Folding it in means repairing four things first, in this order — they are
+entangled, which is why `claimEditTarget` does not name it yet:
+
+1. **One flag.** The mode lives twice: `CanvasView::m_quickMaskMode`
+   ([CanvasView.hpp](../src/renderer/CanvasView.hpp), next to
+   `m_quickMaskDabbed`) and `Document::quickMask.active`. The canvas copy is
+   read by `RenderParams::quickMaskMode` and by the Esc/deselect guard in
+   `mousePressEvent`; `beginGrayscaleStroke` already reads the document one.
+   Let the canvas read the document and delete the member — until then the
+   controller cannot turn the mode off without desyncing the copy.
+2. **An entry/exit signal.** Add `quickMaskChanged(bool)` next to
+   `maskEditingChanged` and move the entry work onto it (switch to Brush when
+   the active tool cannot paint, `markSelectMaskDirty`, repaint), so every
+   entry path gets it — today that work only happens when the Q shortcut is
+   what flipped the mode, not when the panel or the tool surface does.
+3. **The duplicated undo entry.** `beginGrayscaleStroke` overwrites
+   `m_quickMaskBefore` for every stroke and `endGrayscaleStroke` pushes that
+   stroke's `SelectionCommand` — so the second one `toggleQuickMask` pushes on
+   the way out carries the *last stroke's* before-image and is a copy of an
+   entry already in the history (leaving the mode after painting then costs two
+   undos to get past one stroke). Drop it: entering and leaving is an edit
+   TARGET change, not an edit, the same rule the channel view state follows.
+4. **The exit gate.** `toggleQuickMask` returns early unless the selection is
+   active and non-empty, in both directions. Since `endGrayscaleStroke` sets
+   `setActive(!isEmpty())`, painting the selection away leaves the mode
+   un-leavable. Gate entry only.
+
+With those done, `setQuickMaskActive(true)` claims the target and
+`claimEditTarget` gains a fourth case that switches the mode off, and the
+invariant covers all four destinations.
 
 `flushLayerToCpuImage` (ImageController) flattens tiles + cpuImage when a
 destructive operation needs a positioned full-size snapshot.
