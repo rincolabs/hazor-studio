@@ -10,6 +10,8 @@
 #include "renderer/CanvasView.hpp"
 #include "ui/AppMessageDialog.hpp"
 #include "ui/LayerPanel.hpp"
+#include "ui/ChannelsPanel.hpp"
+#include "ui/dialogs/ChannelDialogs.hpp"
 #include "ui/LayerStylesDialog.hpp"
 #include "ui/PropertiesPanel.hpp"
 #include "ui/CurvesEditorWidget.hpp"
@@ -913,6 +915,26 @@ MainWindow::MainWindow(QWidget* parent)
     ShortcutManager::instance()->registerAction("image.remove_bg", m_removeBgAction);
     connect(m_removeBgAction, &QAction::triggered, this, &MainWindow::onImageRemoveBg);
 
+    // Select: the selection ↔ channel round trip. New menu rather than extra
+    // Edit entries — these commands belong with the selection, and the panel
+    // buttons open the very same dialogs.
+    auto* selectMenu = mainMenuBar->addMenu(tr("&Select"));
+    auto* saveSelectionAction = selectMenu->addAction(tr("&Save Selection..."));
+    connect(saveSelectionAction, &QAction::triggered,
+            this, &MainWindow::showSaveSelectionDialog);
+    auto* loadSelectionAction = selectMenu->addAction(tr("&Load Selection..."));
+    connect(loadSelectionAction, &QAction::triggered,
+            this, &MainWindow::showLoadSelectionDialog);
+    selectMenu->addSeparator();
+    // No shortcut registered here on purpose: Q already reaches
+    // CanvasView::toggleQuickMask through the ShortcutManager dispatcher
+    // (canvas.quick_mask), and binding it to this QAction too would toggle the
+    // mode twice per press.
+    auto* quickMaskAction = selectMenu->addAction(tr("Edit in &Quick Mask Mode"));
+    connect(quickMaskAction, &QAction::triggered, this, [this]() {
+        if (m_canvas) m_canvas->toggleQuickMask();
+    });
+
     auto* viewMenu = mainMenuBar->addMenu(tr("&View"));
     auto* zoomInAction = viewMenu->addAction(tr("Zoom &In"));
     ShortcutManager::instance()->registerAction("view.zoom_in", zoomInAction);
@@ -1299,6 +1321,7 @@ MainWindow::MainWindow(QWidget* parent)
     addDockWidget(Qt::LeftDockWidgetArea, toolsDock);
 
     m_historyPanel = new HistoryPanel(this);
+    m_channelsPanel = new ChannelsPanel(this);
     m_agentPanel = new AgentPanel(m_agentController, this);
     m_propsPanel = new PropertiesPanel(this);
     m_histogramPanel = new HistogramPanel(this);
@@ -1349,6 +1372,18 @@ MainWindow::MainWindow(QWidget* parent)
     m_propsDock     = makePanelDock(tr("Properties"), QStringLiteral("PropertiesDock"), m_propsPanel);
     m_colorDock     = makePanelDock(tr("Color"),      QStringLiteral("ColorDock"),      m_colorMixerPanel);
     m_swatchesDock  = makePanelDock(tr("Swatches"),   QStringLiteral("SwatchesDock"),   m_swatchesPanel);
+    m_channelsDock  = makePanelDock(tr("Channels"),   QStringLiteral("ChannelsDock"),   m_channelsPanel);
+
+    connect(m_channelsPanel, &ChannelsPanel::splitChannelsRequested,
+            this, &MainWindow::splitChannelsIntoDocuments);
+    connect(m_channelsPanel, &ChannelsPanel::mergeChannelsRequested,
+            this, &MainWindow::mergeChannelsFromDocuments);
+    connect(m_channelsPanel, &ChannelsPanel::duplicateChannelRequested,
+            this, &MainWindow::duplicateChannelWithDialog);
+    connect(m_channelsPanel, &ChannelsPanel::saveSelectionDialogRequested,
+            this, &MainWindow::showSaveSelectionDialog);
+    connect(m_channelsPanel, &ChannelsPanel::loadSelectionDialogRequested,
+            this, &MainWindow::showLoadSelectionDialog);
     m_historyDock   = makePanelDock(tr("History"),    QStringLiteral("HistoryDock"),    m_historyPanel);
 
     connect(m_propsPanel, &PropertiesPanel::maskDensityChanged, this, [this](float density) {
@@ -1606,7 +1641,8 @@ MainWindow::MainWindow(QWidget* parent)
     // floating group) so they can never be re-merged into a crash.
     for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock, m_generativeFillDock,
                             m_layersDock, m_agentDock, m_histogramDock, m_propsDock,
-                            m_colorDock, m_swatchesDock, m_historyDock }) {
+                            m_colorDock, m_swatchesDock, m_historyDock,
+                            m_channelsDock }) {
         // connect(d, &QDockWidget::topLevelChanged, this, [this](bool) { scheduleDockMaintenance(); });
         // connect(d, &QDockWidget::visibilityChanged, this, [this](bool) { scheduleDockMaintenance(); });
     }
@@ -3248,6 +3284,7 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
 
     m_toolExecutor->setController(m_ctrl);
     m_layerPanel->setController(m_ctrl);
+    syncChannelsPanel();
     m_propsPanel->setController(m_ctrl);
     m_histogramPanel->setController(m_ctrl);
     syncGenerativeFillPanelController();
@@ -3416,6 +3453,7 @@ void MainWindow::onTabChanged(int index)
 
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
+        syncChannelsPanel();
         m_histogramPanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
 
@@ -3473,6 +3511,7 @@ void MainWindow::onTabChanged(int index)
 
         m_toolExecutor->setController(nullptr);
         m_layerPanel->setController(nullptr);
+        syncChannelsPanel();
         m_histogramPanel->setController(nullptr);
         m_propsPanel->setController(nullptr);
         syncGenerativeFillPanelController();
@@ -3561,6 +3600,7 @@ void MainWindow::closeTabAt(int index)
     // detach them here too so they never touch the destroyed controller.
     m_toolExecutor->setController(nullptr);
     m_layerPanel->setController(nullptr);
+    syncChannelsPanel();
     m_histogramPanel->setController(nullptr);
     if (m_propsPanel)
         m_propsPanel->setController(nullptr);
@@ -3579,6 +3619,7 @@ void MainWindow::closeTabAt(int index)
         m_ctrl = nullptr;
         m_toolExecutor->setController(nullptr);
         m_layerPanel->setController(nullptr);
+        syncChannelsPanel();
         m_histogramPanel->setController(nullptr);
         syncGenerativeFillPanelController();
         m_propsPanel->clear();
@@ -3602,6 +3643,7 @@ void MainWindow::closeTabAt(int index)
         m_ctrl = m_tabs[m_activeTabIndex].controller.get();
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
+        syncChannelsPanel();
         m_histogramPanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
         refreshPropertiesPanel();
@@ -4054,6 +4096,12 @@ void MainWindow::openPsdFileAsNewTab(const QString& path)
             m_doc->setProfileSource(imp.profileSource);
             m_doc->guideManager.setGuides(std::move(imp.guides));
             m_doc->selection.resize(imp.canvasSize.width(), imp.canvasSize.height());
+            // addChannel() rather than a plain assignment: it allocates the
+            // ids, sizes each buffer to the canvas and keeps the document's id
+            // counter ahead of them, so a channel created after the import
+            // cannot collide with an imported one.
+            for (auto& channel : imp.channels)
+                m_doc->addChannel(std::move(channel));
             m_doc->roots = std::move(imp.roots);
             m_doc->activeFlatIndex = m_doc->roots.empty() ? -1 : 0;
             m_doc->selectedFlatIndices.clear();
@@ -4704,6 +4752,25 @@ void MainWindow::runImageExport(const QString& format, const QString& suggestedB
 void MainWindow::onExportFile()
 {
     if (!m_doc) return;
+
+    // A raster export is the flattened colour composite: it carries no extra
+    // channels, and it deliberately does not promote an alpha channel to the
+    // image's transparency (a saved selection is not the image's alpha). Say
+    // so before the file is written instead of dropping them silently — the
+    // document keeps its channels either way, and .hazor preserves them.
+    if (!m_doc->channels.empty()) {
+        const QString text = tr("This document has %n extra channel(s), which "
+                                "image formats cannot store. They stay in the "
+                                "document; the exported file will contain the "
+                                "colour composite only.",
+                                nullptr, static_cast<int>(m_doc->channels.size()));
+        const int answer = AppMessageDialog::choice(
+            this, tr("Export"), text, AppMessageDialog::Icon::Warning,
+            {{tr("Export Anyway"), QMessageBox::AcceptRole},
+             {tr("Cancel"), QMessageBox::RejectRole}}, 0);
+        if (answer != 0)
+            return;
+    }
 
     ExportImageDialog dlg(m_doc, this);
     if (dlg.exec() != QDialog::Accepted) return;
@@ -5792,7 +5859,7 @@ void MainWindow::resetDockLayout()
     // after tabification so it only appears when opened from Window.
     const QList<QDockWidget*> panels = {
         m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
-        m_historyDock, m_layersDock, m_agentDock
+        m_historyDock, m_layersDock, m_channelsDock, m_agentDock
     };
     for (QDockWidget* d : panels) {
         addDockWidget(Qt::RightDockWidgetArea, d);
@@ -5809,6 +5876,9 @@ void MainWindow::resetDockLayout()
     tabifyDockWidget(m_propsDock, m_colorDock);
     tabifyDockWidget(m_colorDock, m_swatchesDock);
     tabifyDockWidget(m_swatchesDock, m_historyDock);
+    // Channels sits with Layers: they are the two views of the same document
+    // and the user switches between them constantly.
+    tabifyDockWidget(m_layersDock, m_channelsDock);
     tabifyDockWidget(m_layersDock, m_agentDock);
 
     resizeDocks({m_histogramDock, m_layersDock}, {3, 7}, Qt::Vertical);
@@ -5829,6 +5899,7 @@ void MainWindow::resetDockLayout()
         updateDockTitleBar(m_colorDock);
         updateDockTitleBar(m_swatchesDock);
         updateDockTitleBar(m_historyDock);
+        updateDockTitleBar(m_channelsDock);
         updateDockTitleBar(m_layersDock);
         updateDockTitleBar(m_agentDock);
 
@@ -6191,6 +6262,383 @@ void MainWindow::refreshLayerPanel()
 {
     if (m_layerPanel)
         m_layerPanel->refresh();
+}
+
+void MainWindow::syncChannelsPanel()
+{
+    if (!m_channelsPanel)
+        return;
+    // Canvas first: the panel reads the composite through it, and a refresh
+    // triggered by setController would otherwise build its thumbnails against
+    // the previous tab's canvas.
+    m_channelsPanel->setCanvas(m_canvas);
+    m_channelsPanel->setController(m_ctrl);
+}
+
+// ── Channels commands that span documents ──────────────────────
+//
+// The Channels panel owns everything that happens inside one document; these
+// four need more than that — a new tab, another tab's document, or a dialog
+// listing the open documents — which only MainWindow can provide. They still
+// end in ImageController, so the undo entry and the data model are the same
+// ones the panel's own commands produce.
+
+namespace {
+
+// Display label for a document in the channel dialogs' document combos.
+QString documentComboLabel(const QString& name, bool dirty)
+{
+    return dirty ? name + QStringLiteral(" *") : name;
+}
+
+std::vector<QString> channelLabelsFor(const Document* doc)
+{
+    std::vector<QString> labels;
+    if (!doc)
+        return labels;
+    for (const auto& ch : doc->channels)
+        labels.push_back(ch.name);
+    return labels;
+}
+
+} // namespace
+
+std::vector<QString> MainWindow::openDocumentLabels() const
+{
+    std::vector<QString> labels;
+    for (const auto& tab : m_tabs)
+        labels.push_back(documentComboLabel(tab.name, tab.isDirty));
+    return labels;
+}
+
+void MainWindow::splitChannelsIntoDocuments()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    // Splitting consumes a flattened image, so it is only offered for a
+    // document whose channels are the colour components alone; anything else
+    // would silently drop the extra channels.
+    if (!m_doc->channels.empty()) {
+        AppMessageDialog::warning(this, tr("Split Channels"),
+            tr("Split Channels works on the colour channels only. Delete or "
+               "merge the document's alpha and spot channels first."));
+        return;
+    }
+    const std::vector<QImage> planes = m_ctrl->splitColorChannels();
+    if (planes.empty()) {
+        AppMessageDialog::warning(this, tr("Split Channels"),
+            tr("This document has nothing to split."));
+        return;
+    }
+
+    static const char* kComponentSuffix[3] = {"Red", "Green", "Blue"};
+    const QString baseName = QFileInfo(m_doc->name).completeBaseName().isEmpty()
+        ? m_doc->name : QFileInfo(m_doc->name).completeBaseName();
+
+    for (int i = 0; i < static_cast<int>(planes.size()); ++i) {
+        const QImage& plane = planes[static_cast<size_t>(i)];
+        const QString name = QStringLiteral("%1.%2").arg(baseName)
+            .arg(tr(kComponentSuffix[std::min(i, 2)]));
+        auto& tab = createTab(name, plane.size());
+        if (!tab.document)
+            continue;
+        tab.document->colorMode = QStringLiteral("Grayscale");
+
+        // One flattened layer per component, which is what a split produces:
+        // the separation is an image in its own right, not a channel of one.
+        auto node = std::make_unique<LayerTreeNode>();
+        node->type = LayerTreeNode::Type::Layer;
+        node->name = tr("Background");
+        node->layer = std::make_shared<Layer>();
+        node->layer->name = node->name;
+        node->layer->cpuImage = plane.convertToFormat(QImage::Format_RGBA8888);
+        node->layer->owner = node.get();
+        node->layer->textureOutdated = true;
+        tab.document->roots.push_back(std::move(node));
+        tab.document->activeFlatIndex = 0;
+        tab.document->selectedFlatIndices = {0};
+        ++tab.document->compositionGeneration;
+        tab.isDirty = true;
+        if (tab.canvas) {
+            tab.canvas->syncLayersToGpu();
+            tab.canvas->update();
+        }
+    }
+    updateDirtyUi();
+    refreshLayerPanel();
+    syncChannelsPanel();
+}
+
+void MainWindow::mergeChannelsFromDocuments()
+{
+    if (m_tabs.size() < 3) {
+        AppMessageDialog::warning(this, tr("Merge Channels"),
+            tr("Merging channels needs at least three open grayscale documents, "
+               "one per colour component."));
+        return;
+    }
+
+    MergeChannelsDialog dialog(openDocumentLabels(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const std::vector<int> sources = dialog.componentSources();
+    std::vector<QImage> planes;
+    QSize size;
+    for (int index : sources) {
+        if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+            return;
+        auto* doc = m_tabs[static_cast<size_t>(index)].document.get();
+        auto* ctrl = m_tabs[static_cast<size_t>(index)].controller.get();
+        if (!doc || !ctrl)
+            return;
+        const std::vector<QImage> split = ctrl->splitColorChannels();
+        if (split.empty())
+            return;
+        // A grayscale source has identical components, so taking the first is
+        // the same as taking its luminance — and it keeps a colour document
+        // from contributing only part of itself without saying so.
+        if (size.isValid() && split.front().size() != size) {
+            AppMessageDialog::warning(this, tr("Merge Channels"),
+                tr("The selected documents must all have the same pixel "
+                   "dimensions."));
+            return;
+        }
+        size = split.front().size();
+        planes.push_back(split.front());
+    }
+
+    const QImage merged = ImageController::mergeColorChannels(planes);
+    if (merged.isNull()) {
+        AppMessageDialog::warning(this, tr("Merge Channels"),
+            tr("The selected documents could not be merged."));
+        return;
+    }
+
+    auto& tab = createTab(tr("Merged"), merged.size());
+    if (!tab.document)
+        return;
+    auto node = std::make_unique<LayerTreeNode>();
+    node->type = LayerTreeNode::Type::Layer;
+    node->name = tr("Background");
+    node->layer = std::make_shared<Layer>();
+    node->layer->name = node->name;
+    node->layer->cpuImage = merged;
+    node->layer->owner = node.get();
+    node->layer->textureOutdated = true;
+    tab.document->roots.push_back(std::move(node));
+    tab.document->activeFlatIndex = 0;
+    tab.document->selectedFlatIndices = {0};
+    ++tab.document->compositionGeneration;
+    tab.isDirty = true;
+    if (tab.canvas) {
+        tab.canvas->syncLayersToGpu();
+        tab.canvas->update();
+    }
+    updateDirtyUi();
+    refreshLayerPanel();
+    syncChannelsPanel();
+}
+
+void MainWindow::duplicateChannelWithDialog(int channelIndex)
+{
+    if (!m_ctrl || !m_doc || channelIndex < 0
+        || channelIndex >= static_cast<int>(m_doc->channels.size()))
+        return;
+
+    const DocumentChannel& source = m_doc->channels[static_cast<size_t>(channelIndex)];
+    DuplicateChannelDialog dialog(
+        m_doc->uniqueChannelName(source.kind) , openDocumentLabels(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int destination = dialog.destinationIndex();
+    if (destination < 0) {
+        // "New": a fresh grayscale document holding the channel's coverage, so
+        // the duplicate is editable on its own instead of landing nowhere.
+        QImage plane = m_doc->channelCoverageMask(channelIndex);
+        if (plane.isNull())
+            return;
+        if (dialog.invertContents()) {
+            for (int y = 0; y < plane.height(); ++y) {
+                uchar* row = plane.scanLine(y);
+                for (int x = 0; x < plane.width(); ++x)
+                    row[x] = static_cast<uchar>(255 - row[x]);
+            }
+        }
+        auto& tab = createTab(dialog.channelName().isEmpty() ? source.name
+                                                             : dialog.channelName(),
+                              plane.size());
+        if (!tab.document)
+            return;
+        tab.document->colorMode = QStringLiteral("Grayscale");
+        auto node = std::make_unique<LayerTreeNode>();
+        node->type = LayerTreeNode::Type::Layer;
+        node->name = tr("Background");
+        node->layer = std::make_shared<Layer>();
+        node->layer->name = node->name;
+        node->layer->cpuImage = plane.convertToFormat(QImage::Format_RGBA8888);
+        node->layer->owner = node.get();
+        node->layer->textureOutdated = true;
+        tab.document->roots.push_back(std::move(node));
+        tab.document->activeFlatIndex = 0;
+        tab.document->selectedFlatIndices = {0};
+        ++tab.document->compositionGeneration;
+        tab.isDirty = true;
+        if (tab.canvas) {
+            tab.canvas->syncLayersToGpu();
+            tab.canvas->update();
+        }
+        updateDirtyUi();
+        return;
+    }
+
+    Document* target = m_doc;
+    int targetTab = m_activeTabIndex;
+    if (destination < static_cast<int>(m_tabs.size())) {
+        target = m_tabs[static_cast<size_t>(destination)].document.get();
+        targetTab = destination;
+    }
+    const int created = m_ctrl->duplicateChannel(channelIndex, dialog.channelName(),
+                                                 dialog.invertContents(), target);
+    if (created >= 0 && target != m_doc && targetTab >= 0
+        && targetTab < static_cast<int>(m_tabs.size())) {
+        // The destination document changed, so ITS tab is the dirty one.
+        m_tabs[static_cast<size_t>(targetTab)].isDirty = true;
+        updateDirtyUi();
+    }
+    syncChannelsPanel();
+}
+
+void MainWindow::showSaveSelectionDialog()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    if (!m_doc->selection.active() || m_doc->selection.isEmpty()) {
+        AppMessageDialog::warning(this, tr("Save Selection"),
+            tr("There is no active selection to save."));
+        return;
+    }
+
+    SaveSelectionDialog dialog(openDocumentLabels(),
+                               channelLabelsFor(m_doc),
+                               m_doc->uniqueChannelName(ChannelKind::Alpha), this);
+    // Only documents with the same pixel dimensions can receive the mask; the
+    // combo lists them all and the operation validates on accept.
+    connect(&dialog, &SaveSelectionDialog::destinationDocumentChanged,
+            this, [this, &dialog](int index) {
+        const Document* target = (index >= 0 && index < static_cast<int>(m_tabs.size()))
+            ? m_tabs[static_cast<size_t>(index)].document.get() : nullptr;
+        dialog.setChannelLabels(channelLabelsFor(target));
+    });
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int docIndex = dialog.destinationDocumentIndex();
+    Document* target = (docIndex >= 0 && docIndex < static_cast<int>(m_tabs.size()))
+        ? m_tabs[static_cast<size_t>(docIndex)].document.get() : m_doc;
+    ImageController* targetCtrl = (docIndex >= 0
+                                   && docIndex < static_cast<int>(m_tabs.size()))
+        ? m_tabs[static_cast<size_t>(docIndex)].controller.get() : m_ctrl;
+    if (!target || !targetCtrl)
+        return;
+    if (target->size != m_doc->size) {
+        AppMessageDialog::warning(this, tr("Save Selection"),
+            tr("The destination document must have the same pixel dimensions."));
+        return;
+    }
+
+    const int channelIndex = dialog.destinationChannelIndex();
+    if (target == m_doc) {
+        if (channelIndex < 0)
+            m_ctrl->saveSelectionAsChannel(dialog.channelName());
+        else
+            m_ctrl->saveSelectionIntoChannel(channelIndex, dialog.combineMode());
+    } else {
+        // Across documents the mask is carried over by hand: the destination's
+        // own controller owns the change and its own history records it.
+        DocumentChannel ch;
+        ch.kind = ChannelKind::Alpha;
+        ch.name = dialog.channelName().isEmpty()
+            ? target->uniqueChannelName(ChannelKind::Alpha) : dialog.channelName();
+        ch.data = m_doc->selection.image()
+            .convertToFormat(QImage::Format_Grayscale8).copy();
+        if (channelIndex < 0) {
+            target->addChannel(std::move(ch));
+        } else {
+            // Combining into an existing channel of another document reuses the
+            // destination controller so the rule (and the history entry) is the
+            // destination's.
+            const QImage saved = target->selection.image();
+            const bool savedActive = target->selection.active();
+            target->selection.resize(target->size.width(), target->size.height());
+            target->selection.image() = ch.data;
+            target->selection.setActive(true);
+            targetCtrl->saveSelectionIntoChannel(channelIndex, dialog.combineMode());
+            target->selection.image() = saved;
+            target->selection.setActive(savedActive);
+        }
+        if (docIndex >= 0 && docIndex < static_cast<int>(m_tabs.size()))
+            m_tabs[static_cast<size_t>(docIndex)].isDirty = true;
+        updateDirtyUi();
+    }
+    syncChannelsPanel();
+}
+
+void MainWindow::showLoadSelectionDialog()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+
+    LoadSelectionDialog dialog(openDocumentLabels(),
+                               channelLabelsFor(m_doc),
+                               m_doc->selection.active() && !m_doc->selection.isEmpty(),
+                               this);
+    connect(&dialog, &LoadSelectionDialog::sourceDocumentChanged,
+            this, [this, &dialog](int index) {
+        const Document* source = (index >= 0 && index < static_cast<int>(m_tabs.size()))
+            ? m_tabs[static_cast<size_t>(index)].document.get() : nullptr;
+        dialog.setChannelLabels(channelLabelsFor(source));
+    });
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int docIndex = dialog.sourceDocumentIndex();
+    const int channelIndex = dialog.sourceChannelIndex();
+    if (channelIndex < 0) {
+        AppMessageDialog::warning(this, tr("Load Selection"),
+            tr("The selected document has no channel to load."));
+        return;
+    }
+    Document* source = (docIndex >= 0 && docIndex < static_cast<int>(m_tabs.size()))
+        ? m_tabs[static_cast<size_t>(docIndex)].document.get() : m_doc;
+    if (!source)
+        return;
+
+    if (source == m_doc) {
+        m_ctrl->loadChannelAsSelection(channelIndex, dialog.combineMode(),
+                                       dialog.invert());
+    } else {
+        if (source->size != m_doc->size) {
+            AppMessageDialog::warning(this, tr("Load Selection"),
+                tr("The source document must have the same pixel dimensions."));
+            return;
+        }
+        // Copy the channel in, then load it from here, so the result lands in
+        // THIS document's selection and history.
+        DocumentChannel ch = source->channels[static_cast<size_t>(channelIndex)];
+        ch.id = 0;
+        ch.visible = false;
+        ch.data = ch.data.copy();
+        const int temp = m_doc->addChannel(std::move(ch));
+        if (temp < 0)
+            return;
+        m_ctrl->loadChannelAsSelection(temp, dialog.combineMode(), dialog.invert());
+        m_doc->deleteChannel(temp);
+    }
+    syncChannelsPanel();
+    if (m_canvas)
+        m_canvas->update();
 }
 
 namespace {

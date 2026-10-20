@@ -2,6 +2,7 @@
 
 #include "CommandHistory.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentChannel.hpp"
 #include "color/ColorProfile.hpp"
 #include "core/GuideTypes.hpp"
 #include "core/Layer.hpp"
@@ -1685,6 +1686,11 @@ struct ResizeDocumentState {
     QImage selectionMask;
     bool selectionActive = false;
     std::vector<Guide> guides;
+    // Extra channels ride along with the rest of the document-space state:
+    // a crop, a canvas resize or an image resize moves them, the selection,
+    // the masks and the guides onto the same new frame, so they have to be
+    // restored together or undo would leave them on the old one.
+    std::vector<DocumentChannel> channels;
 };
 
 class ResizeDocumentCommand : public Command {
@@ -1771,6 +1777,13 @@ private:
         m_doc->selection.image() = state.selectionMask.copy();
         m_doc->selection.setActive(state.selectionActive);
         m_doc->guideManager.setGuides(state.guides);
+        m_doc->channels = state.channels;
+        for (auto& ch : m_doc->channels) {
+            ch.data = ch.data.copy();
+            ch.thumbDirty = true;
+        }
+        m_doc->ensureChannelBuffers();
+        m_doc->invalidateChannelView();
         ++m_doc->compositionGeneration;
     }
 

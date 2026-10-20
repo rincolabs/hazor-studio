@@ -1916,3 +1916,96 @@ void BrushRenderer::drawMaskDab(Layer* layer, const BrushInputState& state,
 
     glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
 }
+
+// ── Channel dab (CPU, document space) ──────────────────────────
+//
+// A channel is document-space grayscale data with no layer transform and no GL
+// texture, so this is the one dab producer with no GPU half: it rasterizes the
+// shared sprite and writes straight into the channel buffers. The composite
+// rule is the mask shader's — dst = mix(dst, target, coverage) — so the same
+// preset lays down the same values whether it is painting a layer mask or a
+// channel.
+void BrushRenderer::drawChannelDab(ChannelPaintTarget& target,
+                                   const BrushInputState& state,
+                                   const DynamicDabParams& params,
+                                   const BrushSettings& settings,
+                                   const QImage* selectMaskImage)
+{
+    if (target.buffers.empty())
+        return;
+
+    const float radius = std::max(0.5f, params.effectiveSize);
+    const int pad = 2;
+    const int left = static_cast<int>(std::floor(state.imagePos.x() - radius - pad));
+    const int top = static_cast<int>(std::floor(state.imagePos.y() - radius - pad));
+    const int side = static_cast<int>(std::ceil(radius * 2.0f + pad * 2.0f));
+    if (side <= 0)
+        return;
+
+    const float cx = static_cast<float>(state.imagePos.x() - left);
+    const float cy = static_cast<float>(state.imagePos.y() - top);
+
+    if (settings.tipSource == BrushTipSource::Image && !settings.tipImage.isNull()) {
+        const qint64 key = settings.tipImage.cacheKey();
+        if (m_rasterTipSide != side || m_rasterTipKey != key) {
+            m_rasterTipScaled = settings.tipImage.scaled(side, side,
+                Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                .convertToFormat(QImage::Format_RGBA8888);
+            m_rasterTipSide = side;
+            m_rasterTipKey = key;
+        }
+    }
+
+    // The dab already lives in document pixels, so the selection mask needs no
+    // remapping — identity, unlike the layer paths.
+    const QImage dab = BrushDab::rasterize(params, settings, params.effectiveColor,
+                                           left, top, cx, cy, side,
+                                           settings.textureConfig.enabled ? m_texStampImage : QImage(),
+                                           selectMaskImage, QTransform(),
+                                           m_rasterTipScaled, &m_dabScratch,
+                                           m_texStrokeOffsetX, m_texStrokeOffsetY);
+    if (dab.isNull())
+        return;
+
+    // Same value rule as drawMaskDab: the brush colour's luminance, flipped for
+    // the Eraser so it lifts coverage instead of adding it.
+    const bool erasing = settings.mode == BrushMode::Erase;
+    const float luminance = 0.299f * params.effectiveColor.redF()
+                          + 0.587f * params.effectiveColor.greenF()
+                          + 0.114f * params.effectiveColor.blueF();
+    const float targetValue = std::clamp(erasing ? 1.0f - luminance : luminance,
+                                         0.0f, 1.0f);
+    const int targetByte = static_cast<int>(std::lround(targetValue * 255.0f));
+
+    QRect touched;
+    for (QImage* buffer : target.buffers) {
+        if (!buffer || buffer->isNull())
+            continue;
+        if (buffer->format() != QImage::Format_Grayscale8)
+            *buffer = buffer->convertToFormat(QImage::Format_Grayscale8);
+
+        const QRect rect = QRect(left, top, side, side).intersected(buffer->rect());
+        if (rect.isEmpty())
+            continue;
+
+        for (int y = rect.top(); y <= rect.bottom(); ++y) {
+            const uchar* srcRow = dab.constScanLine(y - top);
+            uchar* dstRow = buffer->scanLine(y);
+            for (int x = rect.left(); x <= rect.right(); ++x) {
+                // Alpha is byte 3 in both layouts rasterize can return.
+                const int a = srcRow[(x - left) * 4 + 3];
+                if (a == 0)
+                    continue;
+                const int dst = dstRow[x];
+                // Rounded lerp in 8-bit: +127 keeps a long low-flow stroke from
+                // stalling one value short of the target.
+                dstRow[x] = static_cast<uchar>(
+                    dst + ((targetByte - dst) * a + (targetByte >= dst ? 127 : -127)) / 255);
+            }
+        }
+        touched = touched.isNull() ? rect : touched.united(rect);
+    }
+
+    if (!touched.isNull())
+        target.dirty = target.dirty.isNull() ? touched : target.dirty.united(touched);
+}

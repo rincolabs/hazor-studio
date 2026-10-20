@@ -83,7 +83,7 @@ Scripts that exist but that agents must not use on their own initiative:
 ```
 src/
 ├── core/          Data model: Document, Layer, LayerTreeNode, tiles, selection,
-│                  adjustments, effects, guides, swatches, render scheduling
+│                  channels, adjustments, effects, guides, swatches, render scheduling
 ├── controller/    ImageController (app-level operations) + CommandHistory/Commands
 │                  (undo/redo). Every destructive edit goes through a command.
 ├── renderer/      Render pipeline: GPUViewport, LayerCompositor (GPU),
@@ -256,6 +256,7 @@ Update docs in the same change as the code:
 | Canvas looks wrong / blurry / stale | [`GPUViewport.cpp`](src/renderer/GPUViewport.cpp), [`GPUViewport_Shaders.cpp`](src/renderer/GPUViewport_Shaders.cpp), [`DocumentCompositor.cpp`](src/renderer/DocumentCompositor.cpp), [`ProjectionCache.cpp`](src/renderer/ProjectionCache.cpp) |
 | Zoom / pan / input mapping | [`CanvasView.cpp`](src/renderer/CanvasView.cpp), [`ViewportCamera.cpp`](src/core/ViewportCamera.cpp), [`CanvasInputMapper.hpp`](src/renderer/CanvasInputMapper.hpp) |
 | Blend mode / opacity / mask semantics | [`BlendRules.hpp`](src/renderer/BlendRules.hpp) + [`BlendMath.hpp`](src/renderer/BlendMath.hpp) + [`BlendShaderLib.hpp`](src/renderer/BlendShaderLib.hpp) |
+| Channels panel, channel view, channel editing | [`DocumentChannel.hpp`](src/core/DocumentChannel.hpp), [`ChannelView.cpp`](src/renderer/ChannelView.cpp), [`ImageController_Channels.cpp`](src/controller/ImageController_Channels.cpp), [`ChannelsPanel.cpp`](src/ui/ChannelsPanel.cpp) |
 | Layer tree, groups, adjustments, effects | [`LayerTreeNode.hpp`](src/core/LayerTreeNode.hpp), [`Layer.hpp`](src/core/Layer.hpp), [`LayerEffect.cpp`](src/core/LayerEffect.cpp) |
 | Undo/redo, merge, flatten, destructive ops | [`ImageController.cpp`](src/controller/ImageController.cpp), [`CommandHistory.cpp`](src/controller/CommandHistory.cpp) |
 | Brush behaviour | [`BrushRenderer.cpp`](src/brush/BrushRenderer.cpp), [`BrushEngine.cpp`](src/brush/BrushEngine.cpp), [`DynamicsEvaluator.cpp`](src/brush/DynamicsEvaluator.cpp) |

@@ -29,6 +29,7 @@
 #include <span>
 #include <vector>
 
+#include "core/DocumentChannel.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerEffect.hpp"
 
@@ -233,5 +234,14 @@ EmbeddedPsdSource importEmbeddedSmartObjectDocument(std::span<const uint8_t> byt
 // out to be rotated/skewed and the mask was resampled through it here.
 bool tryBuildText(const psd::LayerRecord& rec, Context& ctx, const QString& layerName,
                   LayerTreeNode& node, bool& maskApplied);
+
+// The document's extra channels (Alpha + Spot) from the merged Image Data
+// Section's extra planes plus the alpha-metadata image resources. Implemented
+// in PsdImportService_Common.cpp; see the comment there for which PSD
+// structures are read and what is deliberately NOT treated as a document
+// channel.
+std::vector<DocumentChannel> importDocumentChannels(const psd::PsdFile& file,
+                                                     const QSize& canvasSize,
+                                                     QStringList& warnings);
 
 } // namespace psdimport

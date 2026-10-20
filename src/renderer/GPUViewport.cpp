@@ -1,4 +1,5 @@
 #include "GPUViewport.hpp"
+#include "ChannelView.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
@@ -2066,9 +2067,17 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
 // blend/opacity/mask/effect (see DocumentCompositor). Mirrors how a
 // full-canvas, identity-transform layer is drawn, so orientation matches the
 // per-layer path exactly.
-bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMvp)
+bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMvp,
+                                 bool allowStale)
 {
-    const unsigned int tex = m_projection.update(p.doc);
+    unsigned int tex = m_projection.update(p.doc);
+    if (!tex && allowStale && m_projection.texture() != 0
+        && m_projection.size() == p.doc->size) {
+        // The projection for this generation is still being composited. Show
+        // the previous one rather than returning false: the fallback path has
+        // no channel view, so a frame of it would flash the plain composite.
+        tex = m_projection.texture();
+    }
     if (!tex) return false;
 
     const float hx = p.canvasHalfExtents.x();
@@ -2297,12 +2306,21 @@ void GPUViewport::render(const RenderParams& p)
     // per-layer GPU compositor below — this is intentional (keeping the active
     // layer on the GPU); the two paths share blend semantics
     // via renderer/BlendRules.hpp. Overlays are always drawn on top afterwards.
+    // A non-default channel view (a hidden colour component, a visible alpha
+    // or spot channel, Quick Mask) is applied by ProjectionCache as a CPU
+    // post-pass in document space — see renderer/ChannelView.hpp for why it
+    // lives there and not in a screen-space shader. The canvas therefore stays
+    // on the projection for those frames, including live ones: falling back to
+    // the per-layer compositor would drop the channel view mid-stroke and show
+    // the full-colour composite instead.
+    const bool channelView = !channelview::isDefaultView(p.doc);
     const bool useProjection = m_useProjectionDisplay
-                            && !p.liveEdit
-                            && !p.editingMask
                             && !p.grayscaleMaskView
                             && !p.hasPreview
-                            && !p.showMaskOverlay;
+                            && (channelView
+                                || (!p.liveEdit
+                                    && !p.editingMask
+                                    && !p.showMaskOverlay));
 
     // Color-managed display (final stage): the document composite — projection
     // OR live per-layer — is rendered into the scene FBO, then resolved to screen
@@ -2328,7 +2346,7 @@ void GPUViewport::render(const RenderParams& p)
                           && ensureDisplayLut(p)
                           && beginManagedComposite(p);
 
-        if (useProjection && drawProjection(p, m_cachedViewMvp)) {
+        if (useProjection && drawProjection(p, m_cachedViewMvp, channelView)) {
             // Scissor stays clipped to the canvas; blend stays on so transparent
             // projection pixels reveal the checkerboard drawn underneath.
             projectionShown = true;

@@ -14,6 +14,7 @@
 #include "shape/ShapeCommands.hpp"
 #include "shape/ShapePresetFactory.hpp"
 #include "shape/SvgShapeConverter.hpp"
+#include "gradient/GradientRenderer.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include <opencv2/core.hpp>
@@ -3834,6 +3835,13 @@ void CanvasView::toggleQuickMask()
             m_doc, m_quickMaskBefore, after,
             true, afterActive, "quick_mask_edit"));
     }
+    // The flag also lives on the document so the Channels panel can list the
+    // temporary channel and the renderer can draw its overlay — one state, read
+    // by three places, instead of a copy each. The temporary channel is NEVER
+    // promoted to a stored Alpha: leaving the mode converts it back to a
+    // selection, and keeping it takes an explicit Save Selection.
+    if (m_controller)
+        m_controller->setQuickMaskActive(m_quickMaskMode);
     markSelectMaskDirty();
     update();
 }
@@ -4664,6 +4672,18 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         return;
     }
 
+    // Text and Shape create vector LAYERS; a channel is grayscale document
+    // data with no layer behind it, so there is nothing for them to write to.
+    // Rejecting the press with a reason beats quietly adding a layer the user
+    // did not ask for while they were editing a channel.
+    if ((tool == Tool::Text || tool == Tool::Shape)
+        && m_controller && m_controller->hasArmedChannels()) {
+        m_controller->reportOperationBlocked(
+            tr("This tool cannot edit a channel. Select the composite channel "
+               "in the Channels panel first."));
+        return;
+    }
+
     if (tool == Tool::Text) {
         if (m_textToolState == TextToolState::Editing) {
             int hitIndex = pickLayerAtScreenPos(e->position());
@@ -5136,6 +5156,16 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
     else if (tool == Tool::Brush || tool == Tool::Eraser
              || isCloneOrHealingTool()) {
         if (isCloneOrHealingTool()) {
+            // Clone and Healing sample and write LAYER pixels (RGBA, through
+            // the layer's own transform); they have no meaning on a grayscale
+            // channel, so the press is refused instead of silently landing on
+            // the layer the user left selected in the Layers panel.
+            if (m_controller && m_controller->hasArmedChannels()) {
+                m_controller->reportOperationBlocked(
+                    tr("This tool cannot edit a channel. Select the composite "
+                       "channel in the Channels panel first."));
+                return;
+            }
             const QPointF docPos = screenToDocument(e->position());
             if (e->modifiers() & Qt::AltModifier) {
                 setCloneSource(docPos);
@@ -5162,32 +5192,15 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         // Eyedropper override (see resolveTemporaryOverride()), so the press is
         // dispatched to the real Eyedropper branch below — which honours the
         // eyedropper sample-mode/size and Ctrl/right → background-colour rules.
-        if (m_quickMaskMode) {
-            // Paint on selection mask in Quick Mask mode
-            QPointF docPos = screenToDocument(e->position());
-            int cx = static_cast<int>(docPos.x());
-            int cy = static_cast<int>(docPos.y());
-            float radius = m_brushSettings.size * 0.5f;
-            if (radius < 1.0f) radius = 1.0f;
-            bool erasing = (tool == Tool::Eraser);
-
-            int mw = m_doc->selection.width();
-            int mh = m_doc->selection.height();
-            int r = static_cast<int>(radius);
-
-            for (int y = std::max(0, cy - r); y <= std::min(mh - 1, cy + r); ++y) {
-                uchar* row = m_doc->selection.image().scanLine(y);
-                for (int x = std::max(0, cx - r); x <= std::min(mw - 1, cx + r); ++x) {
-                    float dist = std::sqrt(static_cast<float>((x - cx) * (x - cx) + (y - cy) * (y - cy)));
-                    if (dist <= radius) {
-                        row[x] = erasing ? 0 : 255;
-                    }
-                }
-            }
-            m_doc->selection.setActive(!m_doc->selection.isEmpty());
-            markSelectMaskDirty();
-            m_quickMaskDabbed = true;
-            update();
+        if (grayscaleStrokeTarget()) {
+            // Quick Mask or armed channels: the real brush engine paints
+            // coverage into the document-space buffer, so pressure, flow,
+            // spacing, texture and the tip shape all behave as they do
+            // anywhere else. beginBrushStroke dispatches.
+            if (m_inputState.shouldIgnoreSyntheticMouse()) return;
+            BrushInputState input;
+            input.imagePos = screenToDocument(e->position());
+            beginBrushStroke(input, e->position());
         } else if (m_editingMask) {
             auto* layer = m_doc->activeLayer();
             if (!layer || layer->maskImage.isNull()) {
@@ -5230,6 +5243,16 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         // Requires an existing layer + mask; never auto-creates a pixel layer.
         // Bypasses checkDestructiveOp (a mask edit is not a pixel edit, and a
         // text/shape layer's mask is still fillable).
+        // Armed channels first: the bucket floods the channel's coverage, so
+        // it needs no pixel layer and must not auto-create one.
+        if (m_controller && m_controller->hasArmedChannels()) {
+            const QPointF docPos = screenToDocument(e->position());
+            m_controller->applyFillBucketToChannels(
+                QPoint(static_cast<int>(std::floor(docPos.x())),
+                       static_cast<int>(std::floor(docPos.y()))),
+                m_fillBucketColor, m_fillBucketTolerance / 255.0f);
+            return;
+        }
         {
             auto* node = m_doc->activeNode();
             auto* layer = m_doc->activeLayer();
@@ -5745,32 +5768,6 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         update();
     }
 
-    if (m_quickMaskMode && (e->buttons() & Qt::LeftButton)
-        && (tool == Tool::Brush || tool == Tool::Eraser)) {
-        bool erasing = (tool == Tool::Eraser);
-        QPointF docPos = screenToDocument(e->position());
-        int cx = static_cast<int>(docPos.x());
-        int cy = static_cast<int>(docPos.y());
-        float radius = m_brushSettings.size * 0.5f;
-        if (radius < 1.0f) radius = 1.0f;
-        int r = static_cast<int>(radius);
-        int mw = m_doc->selection.width();
-        int mh = m_doc->selection.height();
-        for (int y = std::max(0, cy - r); y <= std::min(mh - 1, cy + r); ++y) {
-            uchar* row = m_doc->selection.image().scanLine(y);
-            for (int x = std::max(0, cx - r); x <= std::min(mw - 1, cx + r); ++x) {
-                float dist = std::sqrt(static_cast<float>((x - cx)*(x - cx) + (y - cy)*(y - cy)));
-                if (dist <= radius)
-                    row[x] = erasing ? 0 : 255;
-            }
-        }
-        m_doc->selection.setActive(!m_doc->selection.isEmpty());
-        markSelectMaskDirty();
-        m_quickMaskDabbed = true;
-        update();
-        return;
-    }
-
     if (m_brushDrawing) {
         // Ignore the synthetic mouse-move twin of a pen move (the pen already
         // advanced the stroke via tabletEvent); otherwise the dab would be applied
@@ -5781,10 +5778,16 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         float dt = m_brushStrokeTimer.nsecsElapsed() / 1e9f;
         m_brushStrokeTimer.start();
 
-        auto* brushLayer = m_doc->activeLayer();
-        if (!brushLayer) { m_brushDrawing = false; return; }
         BrushInputState input;
-        input.imagePos = screenToImage(screenPos, brushLayer);
+        if (m_grayscaleStrokeActive) {
+            // A channel / Quick Mask stroke has no layer; its coordinates are
+            // the document's.
+            input.imagePos = screenToDocument(screenPos);
+        } else {
+            auto* brushLayer = m_doc->activeLayer();
+            if (!brushLayer) { m_brushDrawing = false; return; }
+            input.imagePos = screenToImage(screenPos, brushLayer);
+        }
 
         if (dt > 0.0f) {
             QPointF delta = screenPos - m_brushScreenLastPos;
@@ -6754,6 +6757,15 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
         m_brushScreenLastPos = ev.widgetPos;
         m_brushStrokeTimer.start();
         if (isCloneOrHealingTool()) {
+            // Same gate as the mouse path: these tools write layer pixels and
+            // have no channel equivalent.
+            if (m_controller && m_controller->hasArmedChannels()) {
+                m_controller->reportOperationBlocked(
+                    tr("This tool cannot edit a channel. Select the composite "
+                       "channel in the Channels panel first."));
+                updateBrushCursorFromPointer(ev);
+                break;
+            }
             if (!m_cloneSourceDefined) {
                 m_cloneNeedsSourceFeedback = true;
                 update();
@@ -6769,6 +6781,15 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
             // pen's eraser tip — is excluded: there is nothing to erase on a fresh
             // empty layer, so it only strokes when a layer already exists.
             const bool isEraser = (effectiveTool() == Tool::Eraser) || forceErase;
+            if (grayscaleStrokeTarget()) {
+                // Channels / Quick Mask need no pixel layer at all — creating
+                // one here would leave an empty layer behind after every
+                // channel stroke.
+                input.imagePos = screenToDocument(ev.widgetPos);
+                beginBrushStroke(input, ev.widgetPos);
+                updateBrushCursorFromPointer(ev);
+                break;
+            }
             const bool ready = isEraser ? (m_doc->activeLayer() != nullptr)
                                         : ensurePaintTargetLayer(tr("Brush Stroke"));
             if (ready) {
@@ -6795,6 +6816,8 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
                 input.direction = std::atan2(delta.y(), delta.x());
             }
             m_brushScreenLastPos = ev.widgetPos;
+            if (m_grayscaleStrokeActive)
+                input.imagePos = screenToDocument(ev.widgetPos);
             if (isCloneOrHealingTool())
                 continueCloneStampStroke(input, ev.widgetPos, ev.canvasPos);
             else
@@ -7300,6 +7323,15 @@ void CanvasView::continueCloneStampStroke(const BrushInputState& input,
 void CanvasView::beginBrushStroke(const BrushInputState& input,
                                   QPointF screenPos)
 {
+    // Channels / Quick Mask first: the target is a document-space grayscale
+    // buffer, so none of the layer machinery below (locks, raster tiles, GPU
+    // mask FBO, expansion) applies. Dispatching here instead of at each call
+    // site keeps mouse, pen and the airbrush timer on one path.
+    if (grayscaleStrokeTarget()) {
+        beginGrayscaleStroke(input, screenPos);
+        return;
+    }
+
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
@@ -7325,11 +7357,33 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
             return;
         }
     }
+    // A colour-component edit target (the Channels panel has a subset of
+    // R/G/B armed) paints normally and then keeps only the armed components:
+    // the unarmed ones and the ALPHA are restored from this snapshot in
+    // endBrushStroke. That is what makes the edit land in the real editable
+    // layer — not in a flattened raster — and what keeps the layer's
+    // transparency intact, since a component edit must not create new opaque
+    // pixels. Expansion is suppressed below for the same reason: nothing can
+    // appear outside the pixels the layer already has.
+    m_componentStrokeActive = false;
+    if (!m_editingMask && m_controller && m_controller->hasArmedColorSubset()
+        && !layer->cpuImage.isNull()) {
+        m_componentStrokeActive = true;
+        for (int c = 0; c < 3; ++c)
+            m_componentStrokeMask[c] = m_doc->channelState.colorSelected[c];
+        m_componentStrokeBefore =
+            layer->cpuImage.convertToFormat(QImage::Format_RGBA8888);
+    }
+
     // Painting on a distort layer forfeits its re-editability (pixels diverge
     // from the source warp), so drop the distort metadata before the stroke.
     if (!m_editingMask && layer->isDistortLayer())
         layer->distortData.reset();
-    if (!m_editingMask && layer->hasDirectlyEditablePixels()) {
+    // A component stroke stays off the raster-tile path: the merge at the end
+    // needs one canvas-aligned buffer, and the tile storage reports its content
+    // bounds rather than the layer grid.
+    if (!m_editingMask && !m_componentStrokeActive
+        && layer->hasDirectlyEditablePixels()) {
         layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
         m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
         if (m_brushUsingRasterTiles)
@@ -7368,7 +7422,7 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
         doneCurrent();
     }
 
-    if (!m_brushUsingRasterTiles)
+    if (!m_brushUsingRasterTiles && !m_componentStrokeActive)
         expandLayer(input.imagePos);
     layer = m_doc->activeLayer();
     if (!layer) return;
@@ -7478,10 +7532,15 @@ void CanvasView::previewBakedMaskEdit(Layer* layer)
 void CanvasView::continueBrushStroke(const BrushInputState& input,
                                      QPointF screenPos)
 {
+    if (m_grayscaleStrokeActive) {
+        continueGrayscaleStroke(input, screenPos);
+        return;
+    }
+
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
-    if (!m_brushUsingRasterTiles)
+    if (!m_brushUsingRasterTiles && !m_componentStrokeActive)
         expandLayer(input.imagePos);
     layer = m_doc->activeLayer();
     if (!layer) return;
@@ -7529,6 +7588,11 @@ void CanvasView::continueBrushStroke(const BrushInputState& input,
 
 void CanvasView::endBrushStroke()
 {
+    if (m_grayscaleStrokeActive) {
+        endGrayscaleStroke();
+        return;
+    }
+
     m_brushDrawing = false;
     if (m_airbrushTimer)
         m_airbrushTimer->stop();
@@ -7588,6 +7652,13 @@ void CanvasView::endBrushStroke()
             layer->dirtyRegion.clear();
         }
 
+        // Colour-component target: keep only the armed components, restore the
+        // rest and the alpha. Done once, at the end of the stroke, so the dabs
+        // themselves still go through the one brush rasterizer rather than a
+        // second component-aware dab path.
+        if (m_componentStrokeActive)
+            restoreUnarmedColorComponents(layer);
+
         clearSnapBoundsCache();
         invalidateMultiOutlineCache();
         if (m_doc) ++m_doc->compositionGeneration;
@@ -7628,7 +7699,46 @@ void CanvasView::endBrushStroke()
         m_controller->history().endMacro();
     }
     m_brushUsingRasterTiles = false;
+    m_componentStrokeActive = false;
+    m_componentStrokeBefore = QImage();
     m_cloneStrokeContext = CloneStampContext();
+}
+
+// Keeps a colour-component stroke inside the components the Channels panel has
+// armed. The stroke painted all three (plus alpha) through the normal brush
+// path; this puts the others back from the pre-stroke snapshot, which is what
+// §5.1's "other components must be preserved" and "the layer's transparency is
+// still respected" come down to in pixels.
+void CanvasView::restoreUnarmedColorComponents(Layer* layer)
+{
+    if (!layer || m_componentStrokeBefore.isNull())
+        return;
+
+    if (layer->cpuImage.format() != QImage::Format_RGBA8888)
+        layer->cpuImage = layer->cpuImage.convertToFormat(QImage::Format_RGBA8888);
+    if (layer->cpuImage.size() != m_componentStrokeBefore.size())
+        return;  // geometry moved under us; leave the stroke as painted
+
+    const int w = layer->cpuImage.width();
+    for (int y = 0; y < layer->cpuImage.height(); ++y) {
+        const uchar* before = m_componentStrokeBefore.constScanLine(y);
+        uchar* dst = layer->cpuImage.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            uchar* px = dst + x * 4;
+            const uchar* bp = before + x * 4;
+            for (int c = 0; c < 3; ++c) {
+                if (!m_componentStrokeMask[c])
+                    px[c] = bp[c];
+            }
+            px[3] = bp[3];
+        }
+    }
+    layer->textureOutdated = true;
+    layer->pendingGpuUpload = true;
+    if (layer->owner) {
+        layer->owner->invalidateEffects();
+        layer->owner->thumbnailDirty = true;
+    }
 }
 
 QPointF CanvasView::constrainedGradientPoint(QPointF start, QPointF current,
@@ -7712,6 +7822,48 @@ void CanvasView::endGradientDrag(QPointF screenPos, Qt::KeyboardModifiers modifi
     m_gradientDragging = false;
     if (m_gradientOverlay)
         m_gradientOverlay->finish();
+
+    // Armed channels take the gradient instead of a layer: the ramp is
+    // rendered once in document space and written as grayscale coverage, so no
+    // pixel layer is created and none is touched.
+    if (screenDist >= 1.0 && m_controller->hasArmedChannels()) {
+        QPointF startDoc = screenToDocument(m_gradientStartScreen);
+        QPointF endDoc = screenToDocument(constrainedScreen);
+        if ((modifiers & Qt::AltModifier)
+            && (m_gradientDefinition.kind == GradientKind::Linear
+                || m_gradientDefinition.kind == GradientKind::Reflected)) {
+            startDoc = startDoc - (endDoc - startDoc);
+        }
+        if (std::hypot(endDoc.x() - startDoc.x(), endDoc.y() - startDoc.y()) >= 1.0) {
+            GradientRenderRequest request;
+            request.definition = m_gradientDefinition;
+            request.definition.normalize();
+            request.targetSize = m_doc->size;
+            request.startPoint = startDoc;
+            request.endPoint = endDoc;
+            request.opacity = 1.0;
+            const QImage ramp = GradientRenderer::renderGradientToImage(request);
+            if (!ramp.isNull()) {
+                const QImage rgba = ramp.convertToFormat(QImage::Format_RGBA8888);
+                QImage coverage(rgba.size(), QImage::Format_Grayscale8);
+                for (int y = 0; y < rgba.height(); ++y) {
+                    const uchar* src = rgba.constScanLine(y);
+                    uchar* dst = coverage.scanLine(y);
+                    for (int x = 0; x < rgba.width(); ++x) {
+                        // Luminance, scaled by the ramp's own alpha so a
+                        // transparent stop reads as "no change" rather than
+                        // as black.
+                        const int lum = (src[x * 4] * 299 + src[x * 4 + 1] * 587
+                                         + src[x * 4 + 2] * 114) / 1000;
+                        dst[x] = static_cast<uchar>(lum * src[x * 4 + 3] / 255);
+                    }
+                }
+                m_controller->applyGradientToArmedChannels(coverage, tr("Gradient"));
+            }
+        }
+        update();
+        return;
+    }
 
     if (screenDist >= 1.0 && ensurePaintTargetLayer(tr("Gradient"))) {
         // Recompute both endpoints against the layer that is active now (the
@@ -7891,6 +8043,21 @@ void CanvasView::fillBucket(QPointF screenPos)
 void CanvasView::onAirbrushTick()
 {
     if (!m_brushDrawing) return;
+
+    if (m_grayscaleStrokeActive) {
+        BrushInputState s = m_airbrushLastState;
+        s.imagePos = m_airbrushLastPos;
+        s.velocity = 0.0f;
+        const QImage* selImage = (m_doc->selection.active()
+                                  && !m_doc->selection.isEmpty())
+            ? &m_doc->selection.image() : nullptr;
+        m_brushEngine.airbrushDab(s, m_brushSettings, m_brushRenderer, nullptr,
+                                  0, 0, 0, selImage);
+        flushGrayscaleStrokeDamage();
+        update();
+        return;
+    }
+
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
@@ -7927,6 +8094,203 @@ void CanvasView::onAirbrushTick()
     }
 
     update();
+}
+
+
+// ── Grayscale strokes: channels and Quick Mask ─────────────────
+//
+// One path for both, because they are the same operation on different buffers:
+// coverage painted into a document-space 8-bit plane. Quick Mask's plane is the
+// live selection (there is only one quick-mask model in the app); a channel's
+// is its own data. Neither touches the layer that happens to be selected in the
+// Layers panel — that separation is the whole point of the Channels edit
+// target.
+//
+// Values are written LITERALLY: the brush colour's luminance, flipped for the
+// Eraser (BrushRenderer::drawChannelDab). An Alpha channel's Masked/Selected
+// Areas setting changes which side the overlay tints and nothing else, so
+// switching it cannot invert a stored selection.
+
+QImage CanvasView::documentCompositeImage() const
+{
+    return m_gpuViewport ? m_gpuViewport->projectionBaseImage() : QImage();
+}
+
+bool CanvasView::grayscaleStrokeTarget() const
+{
+    if (!m_doc || !m_controller)
+        return false;
+    // A layer-mask edit keeps its own (GPU) path; it is a layer's mask, not a
+    // document channel.
+    if (m_editingMask)
+        return false;
+    if (m_doc->quickMask.active)
+        return true;
+    return !m_doc->channelState.selectedChannels.empty();
+}
+
+void CanvasView::beginGrayscaleStroke(const BrushInputState& input,
+                                      QPointF screenPos)
+{
+    if (!m_doc || !m_controller)
+        return;
+
+    m_grayscalePaint = ChannelPaintTarget();
+    m_grayscaleStrokeChannels.clear();
+    m_grayscaleStrokeBefore.clear();
+    m_grayscaleStrokeIsQuickMask = m_doc->quickMask.active;
+
+    if (m_grayscaleStrokeIsQuickMask) {
+        if (m_doc->selection.image().isNull()
+            || m_doc->selection.image().size() != m_doc->size)
+            m_doc->selection.resize(m_doc->size.width(), m_doc->size.height());
+        if (m_doc->selection.image().format() != QImage::Format_Grayscale8) {
+            m_doc->selection.image() =
+                m_doc->selection.image().convertToFormat(QImage::Format_Grayscale8);
+        }
+        m_quickMaskBefore = m_doc->selection.image().copy();
+        m_grayscalePaint.buffers.push_back(&m_doc->selection.image());
+    } else {
+        for (uint64_t id : m_doc->channelState.selectedChannels) {
+            const int index = m_doc->channelIndexById(id);
+            if (index < 0)
+                continue;
+            DocumentChannel& ch = m_doc->channels[static_cast<size_t>(index)];
+            if (ch.data.isNull() || ch.data.size() != m_doc->size)
+                m_doc->ensureChannelBuffers();
+            if (ch.data.format() != QImage::Format_Grayscale8)
+                ch.data = ch.data.convertToFormat(QImage::Format_Grayscale8);
+            m_grayscaleStrokeChannels.push_back(index);
+            m_grayscaleStrokeBefore.push_back(ch.data.copy());
+            m_grayscalePaint.buffers.push_back(&ch.data);
+        }
+    }
+
+    if (m_grayscalePaint.buffers.empty())
+        return;
+
+    BrushInputState state = input;
+    // Document space: a channel has no layer transform to map through.
+    state.imagePos = screenToDocument(screenPos);
+
+    m_brushRenderer.updateStamp(m_brushSettings);
+    m_brushRenderer.beginStroke();
+    m_brushEngine.beginChannelStroke(state, &m_grayscalePaint);
+
+    const QImage* selImage = (m_doc->selection.active() && !m_grayscaleStrokeIsQuickMask
+                              && !m_doc->selection.isEmpty())
+        ? &m_doc->selection.image() : nullptr;
+    m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, nullptr,
+                           0, 0, 0, selImage);
+    flushGrayscaleStrokeDamage();
+
+    m_grayscaleStrokeActive = true;
+    m_brushDrawing = true;
+    m_brushScreenLastPos = screenPos;
+    m_airbrushLastPos = state.imagePos;
+    m_airbrushLastState = state;
+    m_brushStrokeTimer.start();
+
+    if (m_brushSettings.airbrush) {
+        if (!m_airbrushTimer) {
+            m_airbrushTimer = new QTimer(this);
+            connect(m_airbrushTimer, &QTimer::timeout, this, &CanvasView::onAirbrushTick);
+        }
+        m_airbrushTimer->start(std::max(5,
+            static_cast<int>(std::lround(1000.0f / std::max(1.0f, m_brushSettings.airbrushRate)))));
+    }
+
+    update();
+}
+
+void CanvasView::continueGrayscaleStroke(const BrushInputState& input,
+                                         QPointF screenPos)
+{
+    if (!m_doc || m_grayscalePaint.buffers.empty())
+        return;
+
+    BrushInputState state = input;
+    state.imagePos = screenToDocument(screenPos);
+    m_airbrushLastPos = state.imagePos;
+    m_airbrushLastState = state;
+
+    const QImage* selImage = (m_doc->selection.active() && !m_grayscaleStrokeIsQuickMask
+                              && !m_doc->selection.isEmpty())
+        ? &m_doc->selection.image() : nullptr;
+    m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, nullptr,
+                           0, 0, 0, selImage);
+    flushGrayscaleStrokeDamage();
+    update();
+}
+
+void CanvasView::endGrayscaleStroke()
+{
+    m_brushDrawing = false;
+    m_grayscaleStrokeActive = false;
+    if (m_airbrushTimer)
+        m_airbrushTimer->stop();
+    m_brushEngine.endStroke();
+    m_brushRenderer.endStroke();
+    flushGrayscaleStrokeDamage();
+
+    if (m_controller) {
+        if (m_grayscaleStrokeIsQuickMask) {
+            // Quick Mask edits the live selection, so its undo entry is the
+            // selection's — the same command the mask stays in when the mode is
+            // switched off, which is what keeps one quick-mask model.
+            m_doc->selection.image();   // drop the cached isEmpty()/bounds
+            m_doc->selection.setActive(!m_doc->selection.isEmpty());
+            markSelectMaskDirty();
+            m_controller->pushCommand(std::make_unique<SelectionCommand>(
+                m_doc, m_quickMaskBefore, m_doc->selection.image().copy(),
+                true, m_doc->selection.active(), "quick_mask_edit"));
+            m_quickMaskDabbed = true;
+        } else {
+            // One entry per channel, grouped when several were armed: the user
+            // made one stroke.
+            const bool group = m_grayscaleStrokeChannels.size() > 1;
+            if (group)
+                m_controller->history().beginMacro(tr("Brush Stroke"));
+            for (size_t i = 0; i < m_grayscaleStrokeChannels.size(); ++i) {
+                m_controller->pushChannelPixelSnapshot(
+                    m_grayscaleStrokeChannels[i], m_grayscaleStrokeBefore[i],
+                    QStringLiteral("brush_stroke"));
+            }
+            if (group)
+                m_controller->history().endMacro();
+        }
+    }
+
+    m_grayscalePaint = ChannelPaintTarget();
+    m_grayscaleStrokeChannels.clear();
+    m_grayscaleStrokeBefore.clear();
+    m_quickMaskBefore = QImage();
+    update();
+}
+
+void CanvasView::flushGrayscaleStrokeDamage()
+{
+    if (!m_doc || m_grayscalePaint.dirty.isNull())
+        return;
+    const QRect dirty = m_grayscalePaint.dirty;
+    m_grayscalePaint.dirty = QRect();
+
+    if (m_grayscaleStrokeIsQuickMask) {
+        // The dabs wrote straight into the mask buffer, bypassing the mutating
+        // accessors, so SelectionMask's cached isEmpty()/bounds has to be
+        // dropped before it is read again. The non-const image() does that.
+        m_doc->selection.image();
+        m_doc->selection.setActive(!m_doc->selection.isEmpty());
+        markSelectMaskDirty(dirty);
+    } else {
+        for (int index : m_grayscaleStrokeChannels) {
+            if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+                m_doc->channels[static_cast<size_t>(index)].thumbDirty = true;
+        }
+    }
+    // Only the painted rect is re-derived from the cached base composite; the
+    // layer stack did not change, so nothing recomposites.
+    m_doc->markChannelViewDirty(dirty);
 }
 
 // ── Selection Methods ────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 #include "BrushTypes.hpp"
 #include "BrushInputState.hpp"
+#include "ChannelPaintTarget.hpp"
 #include "DynamicsEvaluator.hpp"
 #include <QImage>
 #include <QElapsedTimer>
@@ -14,6 +15,9 @@ class BrushEngine {
 public:
     void beginStroke(const BrushInputState& state);
     void beginStroke(const BrushInputState& state, bool targetMask);
+    // Channel stroke: every dab goes into `target`'s grayscale buffers instead
+    // of a layer or a layer mask. `target` must outlive the stroke.
+    void beginChannelStroke(const BrushInputState& state, ChannelPaintTarget* target);
     void strokeTo(const BrushInputState& state, const BrushSettings& settings,
                   BrushRenderer& renderer, Layer* layer,
                   unsigned int selectMaskTex, int selectMaskW, int selectMaskH,
@@ -69,6 +73,7 @@ private:
 
     bool m_active = false;
     bool m_targetMask = false;
+    ChannelPaintTarget* m_channelTarget = nullptr;
     StrokeState m_state;
 
     // Spacing accumulator: dabs are emitted only when the travelled distance

@@ -104,6 +104,20 @@ public:
     void toggleQuickMask();      // Q: needs an active, non-empty selection
     void toggleMaskRubylith();   // "\": needs the active layer to have a mask
 
+    // ── Grayscale strokes (channels and Quick Mask) ───────────
+    // True when the pixel tools must write grayscale coverage into a
+    // DOCUMENT-space buffer instead of into a layer: the Channels panel has
+    // extra channels armed, or Quick Mask is on. The brush entry points below
+    // dispatch on it, so every input path (mouse, pen, airbrush timer) follows
+    // without a branch of its own.
+    // Last CPU composite of this document, before any channel view.
+    // The Channels panel reads it for the RGB and R/G/B thumbnails;
+    // null until the first projection has been built.
+    QImage documentCompositeImage() const;
+
+    bool grayscaleStrokeTarget() const;
+    bool grayscaleStrokeActive() const { return m_grayscaleStrokeActive; }
+
     // Fit the document inside the viewport (used when opening an image so large
     // images aren't shown at an over-zoomed 100%). Never upscales past 100%.
     // If the widget has no valid size yet, the fit is deferred to the first
@@ -911,6 +925,31 @@ private:
     bool m_quickMaskMode = false;
     bool m_quickMaskDabbed = false;
     QImage m_quickMaskBefore;
+
+    // ── Grayscale stroke state (channels / Quick Mask) ────────
+    void beginGrayscaleStroke(const BrushInputState& input, QPointF screenPos);
+    void continueGrayscaleStroke(const BrushInputState& input, QPointF screenPos);
+    void endGrayscaleStroke();
+    // Turns the dabs' accumulated rect into channel-view damage so the canvas
+    // re-derives only the painted area, then clears it for the next dab.
+    void flushGrayscaleStrokeDamage();
+
+    ChannelPaintTarget m_grayscalePaint;
+    bool m_grayscaleStrokeActive = false;
+    bool m_grayscaleStrokeIsQuickMask = false;
+    // Channel indices and their pre-stroke buffers, so the whole stroke lands
+    // as ONE history entry per channel instead of one per dab.
+    std::vector<int> m_grayscaleStrokeChannels;
+    std::vector<QImage> m_grayscaleStrokeBefore;
+
+    // Colour-component stroke: the armed R/G/B subset, plus the layer's
+    // pre-stroke pixels. The stroke paints normally and the unarmed components
+    // (and the alpha) are restored from this snapshot when it ends — see
+    // endBrushStroke.
+    bool m_componentStrokeActive = false;
+    bool m_componentStrokeMask[3] = {false, false, false};
+    QImage m_componentStrokeBefore;
+    void restoreUnarmedColorComponents(Layer* layer);
 
     bool m_hasPreview = false;
     QImage m_previewImage;

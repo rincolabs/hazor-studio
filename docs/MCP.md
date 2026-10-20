@@ -184,8 +184,8 @@ small and static, so the full list is always returned in one response.
 ```
 
 `dev.hazor/category` is a vendor-prefixed `_meta` extension (one of `Layer`,
-`Selection`, `Filter`, `Paint`, `Adjust`, `Transform`, `Document`, `Text`,
-`Viewport`, `AI`) — purely informational grouping, not part of core MCP.
+`Channels`, `Selection`, `Filter`, `Paint`, `Adjust`, `Transform`, `Document`,
+`Text`, `Viewport`, `AI`) — purely informational grouping, not part of core MCP.
 
 #### Smart Object tools (category `Layer`)
 
@@ -205,6 +205,31 @@ and the render it triggers are **asynchronous** — the call returns once the
 render is scheduled, and the result lands on the canvas when it completes.
 
 See [SMART-OBJECTS.md](SMART-OBJECTS.md) for the model behind these.
+
+#### Channel tools (category `Channels`)
+
+| Tool | Arguments | Effect |
+|---|---|---|
+| `channel_new` | `name`, `selected_areas`, `opacity` | Creates an empty (black) alpha channel |
+| `channel_new_spot` | `name`, `solidity` | Creates a spot channel, inked inside the active selection |
+| `channel_duplicate` | `index`, `name`, `invert` | Duplicates a channel in this document |
+| `channel_delete` | `index` | Deletes a channel. Affects no other channel and no layer |
+| `channel_rename` | `index`, `name` | Renames a channel without touching its pixels |
+| `channel_reorder` | `from`, `to` | Moves a channel in the panel order, which is also the spot overprint order |
+| `channel_set_visible` | `index`, `visible` | Shows or hides a channel. A view change, so it records no history entry |
+| `channel_select` | `index` (`-1` = the RGB composite), `add` | Arms a channel as the edit target for the pixel tools |
+| `channel_invert` | `index` | Inverts a channel's contents, honouring the active selection's coverage |
+| `channel_fill` | `value` (0 = black, 1 = white) | Fills the armed channels, honouring the active selection's coverage |
+| `channel_merge_spot` | `index` | Bakes a spot's ink into the colour channels. Destructive: it flattens the image |
+| `channel_save_selection` | `index`, `mode` | Combines the active selection into an existing channel (replace/add/subtract/intersect) |
+| `select_save_channel` | `name` | Saves the active selection as a new alpha channel |
+| `select_load_channel` | `index`, `mode`, `invert` | Loads a channel as the selection. A spot's ink coverage is what gets selected |
+
+With a channel armed, the grayscale-compatible filters and adjustments
+(`gaussian_blur`, `adjust_brightness`, `posterize`, …) apply to that channel
+instead of to the active layer. Split Channels and Merge Channels have no tool:
+they create and consume documents (tabs), which is a UI operation rather than a
+document one.
 
 ### `tools/call`
 

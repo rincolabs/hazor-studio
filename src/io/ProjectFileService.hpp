@@ -24,6 +24,7 @@ struct ProjectLoadResult {
     float zoom = 1.0f;
     QPointF panOffset = QPointF(0.0, 0.0);
     std::vector<Guide> guides;
+    std::vector<DocumentChannel> channels;
     ColorProfile colorProfile = ColorProfile::sRgb();
     ColorProfileSource profileSource = ColorProfileSource::GeneratedDefault;
 };

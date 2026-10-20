@@ -96,14 +96,50 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   the same tool paints on it from the next stroke on.
 - **PSD/PSB import** — open PSD/PSB documents (File → Open) straight into a
   native Hazor document: layers, groups, masks, text, shapes, Smart Objects,
-  adjustment layers, layer styles, blend modes and document properties are
-  converted to their Hazor equivalent where one exists. Conversion runs in
+  adjustment layers, layer styles, blend modes, the document's alpha and spot
+  channels, and document properties are converted to their Hazor equivalent
+  where one exists. Conversion runs in
   the background behind a progress dialog, and a Compatibility Report lists
   anything that had no Hazor equivalent and could not be carried over.
   Saving stays in Hazor's native `.hazor` format.
 - **Selections** — Rectangular, elliptical, lasso, magic wand, quick select, and
-  magnetic lasso, with feather/grow/shrink refinement, saved alpha channels, and
-  quick mask.
+  magnetic lasso, with feather/grow/shrink refinement, **Select ▸ Save/Load
+  Selection** (replace, add, subtract, intersect — across open documents of the
+  same size), and quick mask.
+- **Channels** — a Channels panel (**Window ▸ Channels**) with the document's
+  RGB composite row, its Red/Green/Blue components, and any number of extra
+  **Alpha** and **Spot** channels. Clicking a row picks it as the edit target
+  and shows it; the eye is a separate, independent toggle, and shift-click arms
+  several channels at once. A lone colour component renders as grey (or in its
+  own hue with **Show Channels in Color**), two or more composite together, and
+  hiding one never changes its data. Painting a colour component edits that
+  component of the real editable layer and leaves the others — and the layer's
+  transparency — exactly as they were.
+
+  An **alpha channel** is reusable selection storage: black is unselected,
+  white selected, grey partial, so feathered edges survive the round trip.
+  It shows as a configurable colour overlay (colour, opacity, Masked or
+  Selected Areas) when the image is visible with it, and as plain grey on its
+  own. The overlay is display only — it never reaches the composite or an
+  exported file.
+
+  A **spot channel** is an ink separation with the opposite polarity (black is
+  full ink) and its own ink colour, **Solidity**, and overprint order. Solidity
+  drives the on-screen ink simulation and nothing else: the stored coverage is
+  what a separation would print. **Merge Spot Channel** bakes it into the
+  colour channels when you explicitly ask, and says first that doing so
+  flattens the image.
+
+  Channels are document data, not panel decoration: the brush, eraser,
+  gradient, fill bucket, Invert, copy/paste and the grayscale-compatible
+  filters all write to the armed channel with their full settings (pressure,
+  flow, opacity, texture, dual brush); every operation is one undo step (a
+  stroke, not a dab); crop, canvas resize and image resize carry them along
+  with the right neutral value for new canvas area; `.hazor` saves and restores
+  them; and PSD import reads a file's alpha and spot channels with their
+  names, identifiers, colours and solidity. New/Duplicate/Rename/Reorder/
+  Delete, Channel Options, Split Channels and Merge Channels are all in the
+  panel's menus.
 - **Filters & adjustments** — brightness/contrast/saturation/hue, blur, sharpen,
   edge detection, posterize, threshold, background removal, and more — all with
   live on-canvas preview and selection-aware application.

@@ -35,6 +35,7 @@ class HistogramPanel;
 class BrushDynamicsPanel;
 class BrushPanel;
 class CustomShapesPanel;
+class ChannelsPanel;
 class HistoryPanel;
 class TitleBar;
 class QLabel;
@@ -351,6 +352,18 @@ private:
     void applyCanvasResolutionEdit(double dpi);
     void applyCanvasOrientation(bool portrait);          // swap W/H (resize canvas)
     void refreshHistoryPanel();
+    // Points the Channels panel at the active tab's controller AND canvas
+    // (the canvas supplies the composite its RGB/R/G/B thumbnails need).
+    void syncChannelsPanel();
+    // Channels commands that need more than one document: Split/Merge
+    // Channels create and consume tabs, Duplicate Channel can target
+    // another open document, and Save/Load Selection can cross documents.
+    void splitChannelsIntoDocuments();
+    void mergeChannelsFromDocuments();
+    void duplicateChannelWithDialog(int channelIndex);
+    std::vector<QString> openDocumentLabels() const;
+    void showSaveSelectionDialog();
+    void showLoadSelectionDialog();
     void updateStatusFromDocument();
     void updateDirtyUi();
     void markActiveTabDirty(bool dirty = true);
@@ -537,6 +550,7 @@ private:
     LayerPanel* m_layerPanel = nullptr;
     PropertiesPanel* m_propsPanel = nullptr;
     HistogramPanel* m_histogramPanel = nullptr;
+    ChannelsPanel* m_channelsPanel = nullptr;
     HistoryPanel* m_historyPanel = nullptr;
     ToolOptionsBar* m_toolBar = nullptr;
     ToolsPanel* m_toolsPanel = nullptr;
@@ -574,6 +588,7 @@ private:
     QDockWidget* m_propsDock = nullptr;
     QDockWidget* m_colorDock = nullptr;
     QDockWidget* m_swatchesDock = nullptr;
+    QDockWidget* m_channelsDock = nullptr;
     QDockWidget* m_historyDock = nullptr;
     QDockWidget* m_brushSettingsDock = nullptr;
 

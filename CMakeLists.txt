@@ -248,7 +248,7 @@ add_executable(Hazor WIN32
     src/core/GuideManager.cpp
     src/core/GuideManager.hpp
     src/core/PerformanceConfig.hpp
-    src/core/AlphaChannel.hpp
+    src/core/DocumentChannel.hpp
     src/core/ShapeTypes.hpp
     src/core/Clipboard.cpp
     src/core/Clipboard.hpp
@@ -280,9 +280,11 @@ add_executable(Hazor WIN32
     src/controller/ImageController.cpp
     src/controller/ImageController_Tools.cpp
     src/controller/ImageController_SmartObjects.cpp
+    src/controller/ImageController_Channels.cpp
     src/controller/ImageController.hpp
     src/controller/CommandHistory.cpp
     src/controller/CommandHistory.hpp
+    src/controller/ChannelCommands.hpp
 
     src/tools/ToolCall.hpp
     src/shape/ShapePresetFactory.cpp
@@ -542,6 +544,7 @@ add_executable(Hazor WIN32
     src/brush/BrushRenderer.cpp
     src/brush/BrushRenderer.hpp
     src/brush/BrushEngine.cpp
+    src/brush/ChannelPaintTarget.hpp
     src/brush/BrushEngine.hpp
     src/brush/BrushInputState.hpp
     src/brush/DynamicsConfig.hpp
@@ -597,6 +600,8 @@ add_executable(Hazor WIN32
     src/renderer/BlendShaderLib.hpp
     src/renderer/SamplingShaderLib.hpp
     src/renderer/ProjectionCache.hpp
+    src/renderer/ChannelView.cpp
+    src/renderer/ChannelView.hpp
     src/renderer/ProjectionCache.cpp
     src/renderer/AsyncProjectionBuilder.hpp
     src/renderer/AsyncProjectionBuilder.cpp
@@ -637,6 +642,10 @@ add_executable(Hazor WIN32
 
     src/resources/resources.qrc
 
+    src/ui/ChannelsPanel.cpp
+    src/ui/ChannelsPanel.hpp
+    src/ui/ChannelItemDelegate.cpp
+    src/ui/ChannelItemDelegate.hpp
     src/ui/LayerPanel.cpp
     src/ui/LayerItemDelegate.cpp
     src/ui/LayerItemDelegate.hpp
@@ -818,6 +827,8 @@ add_executable(Hazor WIN32
     src/ui/ImageSizeDialog.hpp
     src/ui/CanvasSizeDialog.cpp
     src/ui/CanvasSizeDialog.hpp
+    src/ui/dialogs/ChannelDialogs.cpp
+    src/ui/dialogs/ChannelDialogs.hpp
     src/ui/dialogs/ToolDialog.cpp
     src/ui/dialogs/ToolDialog.hpp
     src/ui/dialogs/ParamRow.cpp

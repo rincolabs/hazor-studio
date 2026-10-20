@@ -17,6 +17,7 @@
 #include "core/Document.hpp"
 #include "core/Clipboard.hpp"
 #include "core/LayerEffect.hpp"
+#include "controller/ChannelCommands.hpp"
 #include "controller/CommandHistory.hpp"
 #include "text/TextTypes.hpp"
 #include "core/ShapeTypes.hpp"
@@ -301,6 +302,102 @@ public:
     void setEditingMask(bool editing);
     bool isEditingMask() const { return m_editingMask; }
 
+    // ── Channels ─────────────────────────────────────────────
+    // Creation. Both return the new channel's index, or -1 when the channel
+    // cap is reached. newSpotChannel fills the active selection with full ink
+    // (nothing when there is no selection), matching the panel command.
+    int newAlphaChannel(const QString& name,
+                        ChannelMaskRepresentation representation,
+                        const QColor& overlayColor, float overlayOpacity);
+    int newSpotChannel(const QString& name, const QColor& inkColor,
+                       float solidity, const QString& inkBook = QString());
+    // `invert` duplicates the channel with its coverage flipped. A null
+    // `targetDoc` duplicates inside this document.
+    int duplicateChannel(int index, const QString& newName, bool invert,
+                         Document* targetDoc = nullptr);
+    void deleteChannelAt(int index);
+    void renameChannel(int index, const QString& name);
+    void setChannelSettings(int index, const ChannelSettings& settings);
+    void reorderChannel(int fromIndex, int toIndex);
+    // Bakes a spot separation into the colour channels and drops the channel.
+    // Destructive: like the reference behaviour it flattens the layer stack,
+    // because the ink has to land in real pixels somewhere and the spot belongs
+    // to the document rather than to any one layer. Returns false when the
+    // index is not a spot channel.
+    bool mergeSpotChannel(int index);
+
+    // ── Channels ▸ selections ────────────────────────────────
+    // Save Selection as Channel. Creates "Alpha N" when `name` is empty.
+    int saveSelectionAsChannel(const QString& name = QString());
+    // Combines the live selection into an EXISTING channel's coverage.
+    void saveSelectionIntoChannel(int index, SelectMode mode);
+    void loadChannelAsSelection(int index, SelectMode mode, bool invert = false);
+    // Same, for a colour component: its intensity becomes the coverage.
+    void loadColorComponentAsSelection(int component, SelectMode mode,
+                                       bool invert = false);
+
+    // ── Channels ▸ view and edit state ───────────────────────
+    // View state only: none of these is a pixel edit, so none records history.
+    void setChannelVisible(int index, bool visible);
+    void setColorChannelVisible(int component, bool visible);
+    void setShowChannelsInColor(bool enabled);
+    // Clicking a row. `additive` is the Shift+click form, which extends the
+    // armed set instead of replacing it. Selecting a row also makes exactly
+    // that set visible, as the reference panel does; the eye can then be
+    // toggled independently.
+    void selectCompositeChannel();
+    void selectColorComponent(int component, bool additive);
+    void selectChannelAt(int index, bool additive);
+
+    // ── Channels ▸ pixels ────────────────────────────────────
+    // The buffers the pixel tools must write to right now: the armed extra
+    // channels. Empty means the tools work on layers as usual.
+    std::vector<QImage*> armedChannelBuffers();
+    bool hasArmedChannels() const;
+    // True when a colour-component subset is armed — painting then touches
+    // only those components of the active layer.
+    bool hasArmedColorSubset() const;
+    // Records one history entry for a finished channel edit (a brush stroke, a
+    // gradient, a fill, a filter): `before` is the pre-edit buffer, the
+    // channel's current data is the result.
+    void pushChannelPixelSnapshot(int index, const QImage& before,
+                                  const QString& commandName);
+    void invertChannelAt(int index);
+    // Fills the armed channels with `value` (0..1), honouring the selection.
+    void fillArmedChannels(float value, const QString& commandName);
+    void applyGradientToArmedChannels(const QImage& gradientCoverage,
+                                      const QString& commandName);
+    // Fill Bucket with a channel as the target: floods in channel space,
+    // or blends into an active selection by its coverage.
+    bool applyFillBucketToChannels(const QPoint& docPos, const QColor& color,
+                                   float tolerance);
+    // Copy/Paste with a channel as the target. Both return false when no
+    // channel is armed, which is the caller's signal to fall through to the
+    // layer behaviour.
+    bool copyArmedChannel();
+    bool pasteIntoArmedChannels();
+    // Reports a blocked operation from outside the controller (the canvas's
+    // tool gates), so every "you cannot do that here" message reaches the user
+    // through the same status path.
+    void reportOperationBlocked(const QString& reason) { emit operationBlocked(reason); }
+    // Filters/adjustments on a channel: `op` receives the grayscale buffer and
+    // rewrites it in place. Wrapped in one history entry.
+    void applyToArmedChannels(const std::function<void(QImage&)>& op,
+                              const QString& commandName);
+
+    // ── Channels ▸ split and merge ───────────────────────────
+    // One grayscale image per colour component of the flattened document, in
+    // component order. Empty when the document cannot be split.
+    std::vector<QImage> splitColorChannels() const;
+    // Builds an RGB composite from one grayscale image per component.
+    static QImage mergeColorChannels(const std::vector<QImage>& planes);
+
+    // ── Quick Mask ───────────────────────────────────────────
+    void setQuickMaskActive(bool active);
+    bool isQuickMaskActive() const;
+    void setQuickMaskSettings(ChannelMaskRepresentation representation,
+                              const QColor& color, float opacity);
+
     // ── Mask overlay (rubylith) — per-document view state ──
     void setMaskOverlayVisible(bool visible);
     void toggleMaskOverlay();
@@ -502,6 +599,12 @@ signals:
     // Toggles the canvas live-edit render path during an adjustment-param drag.
     void adjustmentLiveEditChanged(bool active);
     void maskEditingChanged(bool editing);
+    // The Channels panel needs a repaint: a channel was created, deleted,
+    // renamed, reordered, re-armed, shown or hidden. Carries no dirty-state
+    // meaning of its own — the structural operations push a history entry,
+    // and that is what marks the document modified; arming or hiding a
+    // channel deliberately does neither.
+    void channelsChanged();
     void maskOverlayChanged();
     void guidesChanged();
     void operationBlocked(const QString& reason);

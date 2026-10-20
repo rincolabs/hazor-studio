@@ -399,3 +399,268 @@ QImage decodeLayerRgba(const psd::LayerRecord& rec, const psd::PsdFile& file, Co
 }
 
 } // namespace psdimport
+
+// ── Document channels (Alpha + Spot) ───────────────────────────
+//
+// The document's extra channels live in the MERGED Image Data Section, after
+// the colour planes and after the merged transparency plane when there is one.
+// Their metadata comes from the image resources, and the three that matter
+// have to be read together because they are three parallel arrays indexed by
+// the same channel position:
+//
+//   1006  alpha channel names, as Pascal strings
+//   1045  the same names as Unicode, which wins when present
+//   1053  alpha identifiers, preserved so a re-import re-associates them
+//   1077  DisplayInfo: colour space + colour + opacity + mode per channel
+//   1007  the obsolete DisplayInfo layout, read only when 1077 is absent
+//
+// Two things this must NOT do. It must not treat a LAYER's channels as
+// document channels: a layer record's negative channel ids (-1 transparency,
+// -2/-3 user and vector mask) are per-layer data and have nothing to do with
+// this list. And it must not let a mismatch between the metadata arrays and
+// the plane count shift the association — every lookup is bounds-checked per
+// channel index, so a file with, say, fewer names than planes still imports
+// every plane with the right colour and mode.
+
+namespace psdimport {
+
+namespace {
+
+// One DisplayInfo record: what distinguishes a spot separation from a stored
+// selection, and what carries a spot's ink colour.
+struct ChannelDisplayInfo {
+    uint16_t colorSpace = 0;
+    std::array<uint16_t, 4> components{};
+    uint16_t opacity = 100;
+    uint8_t mode = 1;
+};
+
+// DisplayInfo mode values. 2 is a spot separation; 0 and 1 are stored
+// selections differing in which side the overlay marks.
+constexpr uint8_t kModeAlphaSelected = 0;
+constexpr uint8_t kModeAlphaProtected = 1;
+constexpr uint8_t kModeSpot = 2;
+
+uint16_t readU16(std::span<const uint8_t> d, size_t at)
+{
+    if (at + 2 > d.size())
+        return 0;
+    return static_cast<uint16_t>((static_cast<uint16_t>(d[at]) << 8) | d[at + 1]);
+}
+
+uint32_t readU32(std::span<const uint8_t> d, size_t at)
+{
+    if (at + 4 > d.size())
+        return 0;
+    return (static_cast<uint32_t>(d[at]) << 24) | (static_cast<uint32_t>(d[at + 1]) << 16)
+         | (static_cast<uint32_t>(d[at + 2]) << 8) | static_cast<uint32_t>(d[at + 3]);
+}
+
+std::vector<ChannelDisplayInfo> parseDisplayInfo(std::span<const uint8_t> d, bool modern)
+{
+    std::vector<ChannelDisplayInfo> out;
+    // The modern record (1077) is prefixed by a 4-byte version and each entry
+    // is 13 bytes; the obsolete one (1007) has no version and pads each entry
+    // to 14 bytes.
+    size_t at = modern ? 4 : 0;
+    const size_t stride = modern ? 13 : 14;
+    while (at + stride <= d.size()) {
+        ChannelDisplayInfo info;
+        info.colorSpace = readU16(d, at);
+        for (int c = 0; c < 4; ++c)
+            info.components[static_cast<size_t>(c)] = readU16(d, at + 2 + c * 2);
+        info.opacity = readU16(d, at + 10);
+        info.mode = d[at + 12];
+        out.push_back(info);
+        at += stride;
+    }
+    return out;
+}
+
+// Pascal strings, back to back (resource 1006).
+std::vector<QString> parsePascalNames(std::span<const uint8_t> d)
+{
+    std::vector<QString> out;
+    size_t at = 0;
+    while (at < d.size()) {
+        const size_t len = d[at];
+        if (at + 1 + len > d.size())
+            break;
+        out.push_back(QString::fromLatin1(
+            reinterpret_cast<const char*>(d.data() + at + 1), static_cast<int>(len)));
+        at += 1 + len;
+    }
+    return out;
+}
+
+// Unicode strings, each a 4-byte character count followed by UTF-16BE
+// (resource 1045). These win over 1006 so a non-Latin channel name survives.
+std::vector<QString> parseUnicodeNames(std::span<const uint8_t> d)
+{
+    std::vector<QString> out;
+    size_t at = 0;
+    while (at + 4 <= d.size()) {
+        const uint32_t count = readU32(d, at);
+        at += 4;
+        if (count == 0 || static_cast<uint64_t>(count) * 2 > d.size() - at) {
+            if (count == 0)
+                out.push_back(QString());
+            break;
+        }
+        QString name;
+        name.reserve(static_cast<int>(count));
+        for (uint32_t i = 0; i < count; ++i) {
+            const ushort unit = readU16(d, at + static_cast<size_t>(i) * 2);
+            if (unit == 0)
+                continue;  // trailing NUL the writer includes in the count
+            name.append(QChar(unit));
+        }
+        at += static_cast<size_t>(count) * 2;
+        out.push_back(name);
+    }
+    return out;
+}
+
+std::vector<int> parseAlphaIdentifiers(std::span<const uint8_t> d)
+{
+    std::vector<int> out;
+    for (size_t at = 0; at + 4 <= d.size(); at += 4)
+        out.push_back(static_cast<int>(readU32(d, at)));
+    return out;
+}
+
+// 16-bit DisplayInfo components → a QColor. Only RGB (colour space 0) maps
+// directly; anything else is approximated from the first three components and
+// reported, rather than silently importing a wrong ink.
+QColor displayInfoColor(const ChannelDisplayInfo& info, bool* exact)
+{
+    const auto to8 = [](uint16_t v) { return static_cast<int>(v >> 8); };
+    if (exact)
+        *exact = info.colorSpace == 0;
+    return QColor(to8(info.components[0]), to8(info.components[1]),
+                  to8(info.components[2]));
+}
+
+} // namespace
+
+std::vector<DocumentChannel> importDocumentChannels(const psd::PsdFile& file,
+                                                     const QSize& canvasSize,
+                                                     QStringList& warnings)
+{
+    std::vector<DocumentChannel> channels;
+    const psd::Header& header = file.header;
+    const int colorChannels = header.colorMode.colorChannels().value_or(0);
+    if (colorChannels <= 0 || canvasSize.isEmpty())
+        return channels;
+
+    // Plane order in the merged image: colour channels, the merged
+    // transparency channel when the file has one, then the extra channels.
+    const int extraStart = colorChannels + (file.mergedHasAlpha() ? 1 : 0);
+    const int extraCount = static_cast<int>(header.channels) - extraStart;
+    if (extraCount <= 0)
+        return channels;
+
+    const auto merged = file.decodeMerged();
+    if (!merged.hasValue()) {
+        warnings.append(QCoreApplication::translate("PsdImportService",
+            "The document's alpha and spot channels could not be read."));
+        return channels;
+    }
+    const std::vector<uint8_t>& planes = merged.value();
+
+    const size_t rowBytes = header.rowBytes();
+    const size_t planeBytes = rowBytes * header.height;
+    if (planeBytes == 0
+        || planes.size() < static_cast<size_t>(extraStart + extraCount) * planeBytes) {
+        warnings.append(QCoreApplication::translate("PsdImportService",
+            "The document's alpha and spot channel data was incomplete and was "
+            "not imported."));
+        return channels;
+    }
+
+    std::vector<QString> names;
+    if (const auto* unicodeRes = file.resource(1045))
+        names = parseUnicodeNames(unicodeRes->data);
+    if (names.empty()) {
+        if (const auto* pascalRes = file.resource(1006))
+            names = parsePascalNames(pascalRes->data);
+    }
+
+    std::vector<int> identifiers;
+    if (const auto* idRes = file.resource(1053))
+        identifiers = parseAlphaIdentifiers(idRes->data);
+
+    std::vector<ChannelDisplayInfo> display;
+    if (const auto* modern = file.resource(1077))
+        display = parseDisplayInfo(modern->data, /*modern=*/true);
+    else if (const auto* legacy = file.resource(1007))
+        display = parseDisplayInfo(legacy->data, /*modern=*/false);
+
+    bool reportedColorSpace = false;
+    const int width = canvasSize.width();
+    const int height = canvasSize.height();
+    const bool sixteenBit = header.depth == 16;
+
+    for (int i = 0; i < extraCount; ++i) {
+        const size_t planeOffset = static_cast<size_t>(extraStart + i) * planeBytes;
+
+        QImage buffer(width, height, QImage::Format_Grayscale8);
+        for (int y = 0; y < height; ++y) {
+            const uint8_t* src = planes.data() + planeOffset
+                               + static_cast<size_t>(y) * rowBytes;
+            uint8_t* dst = buffer.scanLine(y);
+            for (int x = 0; x < width; ++x) {
+                // 16-bit planes are big-endian; the high byte is the 8-bit
+                // value, which is the precision the channel model carries.
+                dst[x] = sixteenBit ? src[static_cast<size_t>(x) * 2] : src[x];
+            }
+        }
+
+        DocumentChannel channel;
+        channel.data = std::move(buffer);
+        channel.visible = false;
+        if (i < static_cast<int>(names.size()) && !names[static_cast<size_t>(i)].isEmpty())
+            channel.name = names[static_cast<size_t>(i)];
+        if (i < static_cast<int>(identifiers.size()))
+            channel.externalId = identifiers[static_cast<size_t>(i)];
+
+        if (i < static_cast<int>(display.size())) {
+            const ChannelDisplayInfo& info = display[static_cast<size_t>(i)];
+            bool exact = true;
+            const QColor color = displayInfoColor(info, &exact);
+            if (!exact && !reportedColorSpace) {
+                warnings.append(QCoreApplication::translate("PsdImportService",
+                    "A channel's colour was defined in a colour space Hazor Studio "
+                    "does not support; it was approximated as RGB."));
+                reportedColorSpace = true;
+            }
+            const float opacity = std::clamp(info.opacity / 100.0f, 0.0f, 1.0f);
+            if (info.mode == kModeSpot) {
+                channel.kind = ChannelKind::Spot;
+                channel.inkColor = color;
+                // The format stores a spot's solidity in the DisplayInfo
+                // opacity field; it is a preview property, never the ink
+                // coverage, which stays in the plane above.
+                channel.solidity = opacity;
+            } else {
+                channel.kind = ChannelKind::Alpha;
+                channel.overlayColor = color;
+                channel.overlayOpacity = opacity;
+                channel.representation = info.mode == kModeAlphaSelected
+                    ? ChannelMaskRepresentation::SelectedAreas
+                    : ChannelMaskRepresentation::MaskedAreas;
+                Q_UNUSED(kModeAlphaProtected);
+            }
+        }
+        if (channel.name.isEmpty()) {
+            channel.name = channel.isSpot()
+                ? QCoreApplication::translate("PsdImportService", "Spot Color %1").arg(i + 1)
+                : QCoreApplication::translate("PsdImportService", "Alpha %1").arg(i + 1);
+        }
+        channels.push_back(std::move(channel));
+    }
+
+    return channels;
+}
+
+} // namespace psdimport

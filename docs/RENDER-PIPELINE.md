@@ -45,6 +45,7 @@ render(RenderParams)
  ├─ valid RenderCache?  ──yes──►  replay cached frame (post color management)
  ├─ beginManagedComposite()            scene FBO for display color management (3D LUT)
  ├─ useProjection && drawProjection()  ──►  PATH A (CPU projection displayed by GPU)
+ │        forced on by a non-default CHANNEL VIEW (§3.5), stale frame allowed
  ├─ otherwise LayerCompositor::composite() ──►  PATH B (per-layer GPU compositor)
  │        (or renderGrayscaleMaskView for mask view)
  ├─ endManagedComposite()              resolve scene → screen via LUT
@@ -492,6 +493,54 @@ is then all that is left, so the instance keeps displaying it, is marked
 again. That is a fallback for a reference that cannot be resolved — not a second
 source of truth. It is also the only reason the render is persisted in the
 `.hazor` at all. See [SMART-OBJECTS.md](SMART-OBJECTS.md).
+
+---
+
+### 3.5 Channel view — a display transform over the projection
+
+Files: [src/renderer/ChannelView.cpp](../src/renderer/ChannelView.cpp),
+[src/renderer/ProjectionCache.cpp](../src/renderer/ProjectionCache.cpp)
+
+The Channels panel's visibility state (a hidden colour component, a visible
+alpha or spot channel, Quick Mask) changes what the canvas *shows*, never what
+the document *is*. It is applied as a post-pass over the finished composite, in
+document space, on the CPU:
+
+```
+DocumentCompositor::composite()   →  m_baseImage   (pristine, what Export gets)
+         channelview::resolve(doc) →  View          (mat3 + N extras)
+         channelview::apply()      →  m_image       (what the canvas shows)
+```
+
+**It has no GLSL mirror, and that is deliberate.** The transform samples N
+channel buffers in *document* space; a screen-space shader pass over the scene
+FBO would have to re-sample them through the inverse view mapping and could not
+reproduce the CPU result bit for bit — which is exactly the divergence §4
+exists to prevent. So the canvas stays on the projection (PATH A) for every
+frame with a non-default channel view, including live ones:
+`drawProjection(..., allowStale=true)` shows the previous projection rather
+than letting PATH B flash the plain composite.
+
+Two generation counters keep that cheap:
+
+| Counter | Bumped by | Effect |
+|---|---|---|
+| `compositionGeneration` | layer-stack edits | re-composite → new `m_baseImage` |
+| `channelViewGeneration` | eye toggles, overlay/ink settings, a painted dab | re-apply the view over the cached `m_baseImage` |
+
+A dab painted into a channel also records its rect
+(`Document::markChannelViewDirty`), so the update restores that rect from the
+base, re-applies the view there and pushes it with `glTexSubImage2D` — the
+painted area, not the canvas. `RenderCache` keys on `channelViewGeneration`
+too, or a cached screen frame would replay the previous view.
+
+The colour stage is a 3×3 matrix on the composite's straight RGB (identity for
+RGB, `diag(flags)` for a visible subset, replicate-one-component for the
+single-channel grey view). The extras are an ordered list: an alpha channel
+blends its overlay colour by `opacity × coverage`, a spot channel multiplies by
+its ink for the transparent fraction and covers with it for the solid fraction
+(`solidity` splits the two and never touches the stored coverage). Panel order
+is overprint order.
 
 ---
 
@@ -1276,6 +1325,15 @@ render paths display the same pixels:
   (with the *layer* blend via blend shader when ≠ Normal).
 - **Mask dabs:** painted via GL into the layer `maskFbo` (GPU is the truth during
   the stroke) and read back (`syncLayerMaskFromGpu`).
+- **Channel and Quick Mask dabs:** `drawChannelDab` writes straight into the
+  document-space grayscale buffers named by `ChannelPaintTarget` — the armed
+  channels, or the live selection in Quick Mask. CPU-only and with no GL half:
+  a channel has no layer transform and no texture of its own. It rasterizes the
+  *same* `BrushDab::rasterize` sprite as every other dab producer and composites
+  it with the mask shader's rule (`dst = mix(dst, target, coverage)`), so one
+  preset lays down the same values on a layer mask and on a channel. The stroke
+  reports its rect as channel-view damage (§3.5) instead of advancing
+  `compositionGeneration` — the layer stack did not change.
 - At the end of the stroke, `compositionGeneration` advances →
   `ProjectionCache` rebuilds the CPU projection on a worker thread → canvas
   switches from Path B to Path A without visual difference.
@@ -1310,6 +1368,7 @@ through the normal CPU path.
 | GPU compositor | `renderer/LayerCompositor.cpp`, `renderer/TileRenderer.cpp`, `renderer/MipmapCache.cpp` |
 | CPU compositor | `renderer/DocumentCompositor.cpp`, `renderer/RenderContext.hpp` |
 | Projection | `renderer/ProjectionCache.*`, `renderer/AsyncProjectionBuilder.*` |
+| Channel view (§3.5) | `renderer/ChannelView.*`, `core/DocumentChannel.hpp`, `controller/ImageController_Channels.cpp`, `ui/ChannelsPanel.*` |
 | Async layer-style bake | `renderer/StyleBakePool.*`, `renderer/AsyncStyleBaker.*` (§2.4.1) |
 | Shared specification | `renderer/BlendRules.hpp`, `renderer/BlendMath.hpp`, `renderer/BlendShaderLib.hpp`, `renderer/SamplingShaderLib.hpp`, `renderer/ShaderCompat.hpp`; group compositing model (§4.5), clipping-mask predicates (§4.6) and the Fill Opacity accessors (§4.7) in `core/LayerTreeNode.hpp` |
 | Resampling outside the compositors | `engine/ImageEngine.*` (`premultiplyInPlace`, `warpAffinePremultiplied`, `resizePremultiplied` — §4.3) |
@@ -1318,7 +1377,7 @@ through the normal CPU path.
 | Smart Objects (§3.4) | `smartobject/SmartObjectData.hpp`, `smartobject/SmartObjectRenderService.*`, `smartobject/DocumentContainer.*`, `smartobject/ContainerRegistry.*`, `controller/ImageController_SmartObjects.cpp` — **nothing under `renderer/`** |
 | Adjustments | `core/AdjustmentTypes.*`, `core/CurvesData.*`, `core/ColorBalanceData.*`, `core/HueSaturationData.*`, `core/SolidColorData.hpp` |
 | Effects | `core/LayerEffect.*` (`applyOver` — the content/shape split Fill needs, §4.7), `core/LayerTreeNode.hpp` (`applyEffectStack`, shared by layers and groups) |
-| Brush | `brush/BrushRenderer.*`, `brush/BrushEngine.*`, `brush/DynamicsEvaluator.*` |
+| Brush | `brush/BrushRenderer.*`, `brush/BrushEngine.*`, `brush/DynamicsEvaluator.*`, `brush/ChannelPaintTarget.hpp` |
 | Merges / operations | `controller/ImageController.cpp` (`applyMerge*State`, `mergeDownTargetFlat`, `runDocumentStateOperationAsync`) |
 | Export | `io/ImageIO.cpp` |
 | Color management | `color/ColorManagementService.*`, `color/DisplayProfileService.*` (3D LUT in the `display` shader) |

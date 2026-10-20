@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "color/ColorProfile.hpp"
+#include "core/DocumentChannel.hpp"
 #include "core/GuideTypes.hpp"
 #include "smartobject/SmartObjectData.hpp"
 
@@ -37,6 +38,11 @@ struct PsdImportResult {
 
     std::vector<std::unique_ptr<LayerTreeNode>> roots;
     std::vector<Guide> guides;
+    // The document's extra channels (Alpha + Spot), in file order. Built from
+    // the merged Image Data Section's extra planes plus the alpha-metadata
+    // resources; layer transparency and layer masks are NOT in here (see
+    // PsdImportService.cpp).
+    std::vector<DocumentChannel> channels;
     // Content documents for the Smart Object layers found among `roots`
     // (keyed by the docId their layer's SmartObjectData::docId points at).
     // The caller must register each of these in whatever DocumentContainer

@@ -43,6 +43,9 @@ public:
     void setProjectionDisplayEnabled(bool e) { m_useProjectionDisplay = e; }
     bool projectionDisplayEnabled() const { return m_useProjectionDisplay; }
     void invalidateProjection() { m_projection.invalidate(); }
+    // Last CPU composite, before the channel view. Null until one has
+    // been built.
+    const QImage& projectionBaseImage() const { return m_projection.baseImage(); }
 
     // Host repaint hook for the async projection (Fase C). When an off-thread
     // composite finishes, the render cache is invalidated (so the next frame
@@ -397,7 +400,11 @@ private:
     // Returns true if the projection was displayed; false if unavailable
     // (e.g. document exceeds GL_MAX_TEXTURE_SIZE) so the caller falls back to
     // the per-layer compositor.
-    bool drawProjection(const RenderParams& p, const QMatrix4x4& viewMvp);
+    // allowStale displays the previous projection when the one for the
+    // current generation is not composited yet — used while a channel view
+    // is active, where the per-layer fallback would show the wrong image.
+    bool drawProjection(const RenderParams& p, const QMatrix4x4& viewMvp,
+                        bool allowStale = false);
 
     // ── Cached view MVP (computed in render, used by LayerCompositor) ──
     QMatrix4x4 m_cachedViewMvp;

@@ -35,11 +35,15 @@ constexpr quint32 kMagic = 0x485A5331; // "HZS1"
 // "rawData" node field + its blobs. Version 3 adds Smart Objects: the
 // "smartObjectData" node field, the root document's "docId" +
 // "embeddedDocuments" block, and "docs/<docId>/"-prefixed blobs for embedded
-// documents.
+// documents. Version 4 adds the document's extra channels: the "channels"
+// array and its "<prefix>channels/<n>" blobs.
 //
-// The loader accepts 1..3; the saver writes the LOWEST version the document
-// actually needs (see documentHasRawLayer()/documentHasSmartObject()), so a
-// document with neither feature still opens in older Hazor builds.
+// The loader accepts 1..4; the saver writes the LOWEST version the document
+// actually needs (see documentHasRawLayer()/documentHasSmartObject()/
+// documentHasChannels()), so a document with none of those features still
+// opens in older Hazor builds. A file written before version 4 simply has no
+// "channels" key and loads with an empty channel list, which is exactly what
+// it had.
 //
 // Compatibility is one-directional, and deliberately so: an older build
 // rejects a v3 file at the header check below with "Unsupported project
@@ -48,7 +52,7 @@ constexpr quint32 kMagic = 0x485A5331; // "HZS1"
 // round-tripping: this build opens v1/v2 unchanged, and a document without
 // Smart Objects keeps saving in the older format byte-for-byte (same blob keys,
 // same JSON shape).
-constexpr quint32 kMaxFormatVersion = 3;
+constexpr quint32 kMaxFormatVersion = 4;
 
 QString nodeTypeToString(LayerTreeNode::Type type)
 {
@@ -1030,6 +1034,101 @@ std::unique_ptr<LayerTreeNode> nodeFromJson(const QJsonObject& o,
 
 // Gates the format-version bump (see kMaxFormatVersion): a document with no
 // RAW Layer still saves as version 1 so it keeps opening in older builds.
+QString channelKindToString(ChannelKind kind)
+{
+    return kind == ChannelKind::Spot ? QStringLiteral("spot") : QStringLiteral("alpha");
+}
+
+ChannelKind channelKindFromString(const QString& value)
+{
+    return value == QLatin1String("spot") ? ChannelKind::Spot : ChannelKind::Alpha;
+}
+
+// Channel buffers are stored as PNG like every other pixel blob here. A
+// grayscale PNG keeps the 8-bit plane exactly — the values ARE the data (a
+// selection's partial coverage, a spot's ink density), so a lossy codec is not
+// an option.
+QJsonArray channelsToJson(const std::vector<DocumentChannel>& channels,
+                          QMap<QString, QByteArray>& blobs,
+                          const QString& blobPrefix)
+{
+    QJsonArray array;
+    int slot = 0;
+    for (const DocumentChannel& ch : channels) {
+        QJsonObject o;
+        o["id"] = QString::number(ch.id);
+        o["kind"] = channelKindToString(ch.kind);
+        o["name"] = ch.name;
+        o["visible"] = ch.visible;
+        o["representation"] =
+            ch.representation == ChannelMaskRepresentation::SelectedAreas
+                ? QStringLiteral("selected") : QStringLiteral("masked");
+        o["overlayColor"] = colorToJson(ch.overlayColor);
+        o["overlayOpacity"] = ch.overlayOpacity;
+        o["inkColor"] = colorToJson(ch.inkColor);
+        o["solidity"] = ch.solidity;
+        if (!ch.inkBook.isEmpty())
+            o["inkBook"] = ch.inkBook;
+        if (ch.externalId != 0)
+            o["externalId"] = ch.externalId;
+
+        if (!ch.data.isNull()) {
+            const QString key = QStringLiteral("%1channels/%2")
+                .arg(blobPrefix).arg(slot);
+            blobs.insert(key, encodePng(
+                ch.data.format() == QImage::Format_Grayscale8
+                    ? ch.data
+                    : ch.data.convertToFormat(QImage::Format_Grayscale8)));
+            o["source"] = key;
+        }
+        ++slot;
+        array.push_back(o);
+    }
+    return array;
+}
+
+void channelsFromJson(const QJsonArray& array,
+                      const QMap<QString, QByteArray>& blobs,
+                      Document& out)
+{
+    out.channels.clear();
+    for (const auto value : array) {
+        if (!value.isObject())
+            continue;
+        const QJsonObject o = value.toObject();
+        DocumentChannel ch;
+        ch.id = o.value("id").toString().toULongLong();
+        ch.kind = channelKindFromString(o.value("kind").toString());
+        ch.name = o.value("name").toString();
+        ch.visible = o.value("visible").toBool(false);
+        ch.representation = o.value("representation").toString()
+                == QLatin1String("selected")
+            ? ChannelMaskRepresentation::SelectedAreas
+            : ChannelMaskRepresentation::MaskedAreas;
+        ch.overlayColor = colorFromJson(o.value("overlayColor"), QColor(255, 0, 0));
+        ch.overlayOpacity = static_cast<float>(o.value("overlayOpacity").toDouble(0.5));
+        ch.inkColor = colorFromJson(o.value("inkColor"), QColor(255, 0, 255));
+        ch.solidity = static_cast<float>(o.value("solidity").toDouble(1.0));
+        ch.inkBook = o.value("inkBook").toString();
+        ch.externalId = o.value("externalId").toInt(0);
+
+        const QString source = o.value("source").toString();
+        if (!source.isEmpty() && blobs.contains(source)) {
+            ch.data = decodePng(blobs.value(source))
+                .convertToFormat(QImage::Format_Grayscale8);
+        }
+        // addChannel sizes the buffer to the canvas and keeps m_lastChannelId
+        // ahead of every restored id, so a channel created after the load
+        // cannot collide with one from the file.
+        out.addChannel(std::move(ch));
+    }
+}
+
+bool documentHasChannels(const Document& doc)
+{
+    return !doc.channels.empty();
+}
+
 bool documentHasRawLayer(const std::vector<std::unique_ptr<LayerTreeNode>>& nodes)
 {
     for (const auto& n : nodes) {
@@ -1068,8 +1167,9 @@ bool documentHasSmartObject(const std::vector<std::unique_ptr<LayerTreeNode>>& n
 // Smart-Object-free document's blob keys byte-identical to pre-v3 files.
 //
 // What documentFromJson deliberately does NOT restore, because saving never
-// wrote it: `selection` (only resized + cleared here), `channels`,
-// `perfConfig`, `scheduler`, and the mask-overlay view state
+// wrote it: `selection` (only resized + cleared here), `perfConfig`,
+// `scheduler`, the channel VIEW state (which channel is armed or visible — an
+// editor state, like the mask overlay below) and the mask-overlay view state
 // (maskOverlayVisible/maskOverlayOpacity — explicitly non-persisted, see
 // Document.hpp). For an embedded document that is not a gap but the correct
 // behaviour: it has no view of its own until a tab opens it.
@@ -1105,6 +1205,9 @@ QJsonObject documentToJson(const Document& doc,
         guides.push_back(g);
     }
     root["guides"] = guides;
+
+    if (!doc.channels.empty())
+        root["channels"] = channelsToJson(doc.channels, blobs, blobPrefix);
 
     QJsonArray roots;
     for (const auto& n : doc.roots)
@@ -1185,6 +1288,12 @@ bool documentFromJson(const QJsonObject& root,
     out.selection.resize(w, h);
     out.selection.clear();
     out.selection.setActive(false);
+    // Channels load after the canvas size is known, so addChannel() can size
+    // every buffer to it. A pre-v4 file has no "channels" key and lands here
+    // with an empty list.
+    channelsFromJson(root.value("channels").toArray(), blobs, out);
+    out.channelState = ChannelState();
+    out.invalidateChannelView();
     return true;
 }
 
@@ -1332,8 +1441,10 @@ bool ProjectFileService::saveProject(const Document& doc, const QString& path, Q
         return false;
     }
 
-    const quint32 formatVersion = documentHasSmartObject(doc.roots)
-        ? 3u : (documentHasRawLayer(doc.roots) ? 2u : 1u);
+    const quint32 formatVersion = documentHasChannels(doc)
+        ? 4u
+        : (documentHasSmartObject(doc.roots)
+               ? 3u : (documentHasRawLayer(doc.roots) ? 2u : 1u));
 
     QMap<QString, QByteArray> blobs;
     int nextId = 1;
@@ -1375,6 +1486,7 @@ ProjectLoadResult ProjectFileService::loadProject(const QString& path)
     result.colorProfile = doc.colorProfile();
     result.profileSource = doc.profileSource();
     result.guides = doc.guideManager.guides();
+    result.channels = std::move(doc.channels);
     result.roots = std::move(doc.roots);
     result.ok = true;
     return result;
@@ -1411,6 +1523,7 @@ bool ProjectFileService::saveContainer(const DocumentContainer& container,
 
     bool hasSmartObject = documentHasSmartObject(rootDoc->roots);
     bool hasRaw = documentHasRawLayer(rootDoc->roots);
+    bool hasChannels = documentHasChannels(*rootDoc);
 
     QJsonArray embedded;
     for (const SmartObjectDocId& id : persisted) {
@@ -1426,6 +1539,7 @@ bool ProjectFileService::saveContainer(const DocumentContainer& container,
         embedded.push_back(entry);
         hasSmartObject = hasSmartObject || documentHasSmartObject(doc->roots);
         hasRaw = hasRaw || documentHasRawLayer(doc->roots);
+        hasChannels = hasChannels || documentHasChannels(*doc);
     }
     if (!embedded.isEmpty())
         root["embeddedDocuments"] = embedded;
@@ -1434,7 +1548,8 @@ bool ProjectFileService::saveContainer(const DocumentContainer& container,
     // `embedded` being non-empty already implies a Smart Object somewhere; the
     // explicit check also catches a Linked-only project, which has no embedded
     // documents at all but still needs v3 to carry its payload.
-    const quint32 formatVersion = hasSmartObject ? 3u : (hasRaw ? 2u : 1u);
+    const quint32 formatVersion = hasChannels
+        ? 4u : (hasSmartObject ? 3u : (hasRaw ? 2u : 1u));
     return writeArchive(path, formatVersion, root, blobs, error);
 }
 

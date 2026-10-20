@@ -2,6 +2,7 @@
 
 #include <QSize>
 #include <QPointF>
+#include <QRect>
 #include <QString>
 #include <QTransform>
 #include <memory>
@@ -9,7 +10,7 @@
 #include <vector>
 #include "LayerTreeNode.hpp"
 #include "SelectionMask.hpp"
-#include "AlphaChannel.hpp"
+#include "DocumentChannel.hpp"
 #include "RenderScheduler.hpp"
 #include "PerformanceConfig.hpp"
 #include "GuideManager.hpp"
@@ -34,8 +35,65 @@ public:
     QPointF panOffset;
 
     SelectionMask selection;
-    std::vector<AlphaChannel> channels;
     GuideManager guideManager;
+
+    // ── Channels ─────────────────────────────────────────────
+    // The document's extra channels (Alpha + Spot) in PANEL ROW ORDER, top
+    // first — index 0 is the row directly under the last colour component.
+    // That order is also the spot overprint order: a later row prints over an
+    // earlier one, which is what channelview::resolve composites.
+    //
+    // The RGB composite row and the R/G/B components are NOT stored here: they
+    // are views of the layer stack, not independent buffers, so inventing rows
+    // for them would create a second, divergent copy of the image.
+    std::vector<DocumentChannel> channels;
+    ChannelState channelState;
+    QuickMaskState quickMask;
+
+    // Bumped by anything that changes how the channels are DISPLAYED or what
+    // their buffers hold: visibility, overlay/ink settings, a painted dab, a
+    // created or deleted channel. Separate from compositionGeneration because
+    // none of that re-composites the layer stack — ProjectionCache reuses its
+    // cached base composite and only re-applies the channel view.
+    uint64_t channelViewGeneration = 0;
+
+    // Region of the canvas whose channel-view result went stale, in document
+    // pixels. A dab painted into a channel records its own rect so the display
+    // image is re-derived only there; a visibility or overlay-settings change
+    // marks the whole canvas instead.
+    QRect channelViewDirtyRect;
+    bool channelViewFullDirty = true;
+
+    void invalidateChannelView()
+    {
+        ++channelViewGeneration;
+        channelViewFullDirty = true;
+        channelViewDirtyRect = QRect();
+    }
+
+    void markChannelViewDirty(const QRect& rect)
+    {
+        ++channelViewGeneration;
+        if (rect.isNull() || rect.isEmpty()) {
+            channelViewFullDirty = true;
+            channelViewDirtyRect = QRect();
+            return;
+        }
+        if (channelViewFullDirty)
+            return;  // already repainting everything
+        channelViewDirtyRect = channelViewDirtyRect.isNull()
+            ? rect : channelViewDirtyRect.united(rect);
+    }
+
+    // Hands the accumulated damage to the renderer and clears it. `full` means
+    // the whole canvas; otherwise `rect` is the union of the painted rects.
+    void consumeChannelViewDirty(QRect& rect, bool& full)
+    {
+        full = channelViewFullDirty;
+        rect = channelViewDirtyRect;
+        channelViewFullDirty = false;
+        channelViewDirtyRect = QRect();
+    }
 
     // ── Performance ──────────────────────────────────────────
     PerformanceConfig perfConfig;
@@ -54,9 +112,39 @@ public:
     bool maskOverlayVisible = false;
     float maskOverlayOpacity = 0.5f;  // 0..1, default 50%
 
+    // ── Channel model ────────────────────────────────────────
+    // The hard cap on channels an image may carry, colour components
+    // included. 56 is the format limit, so the extra block tops out at 53 in
+    // an RGB document.
+    static constexpr int kMaxImageChannels = 56;
+
+    int colorChannelCount() const;
+    bool canAddChannel() const
+    {
+        return colorChannelCount() + static_cast<int>(channels.size())
+             < kMaxImageChannels;
+    }
+
+    uint64_t allocateChannelId() { return ++m_lastChannelId; }
+    DocumentChannel* channelById(uint64_t id);
+    const DocumentChannel* channelById(uint64_t id) const;
+    int channelIndexById(uint64_t id) const;
+    // "Alpha 1", "Spot Color 1", ... skipping names already taken.
+    QString uniqueChannelName(ChannelKind kind) const;
+    // Appends (index < 0) or inserts at `index`; assigns an id when the
+    // channel carries none and sizes its buffer to the canvas. Returns the
+    // resulting index, or -1 when the channel cap is reached.
+    int addChannel(DocumentChannel channel, int index = -1);
+    void deleteChannel(int index);
+    // Grows/pads every channel buffer to the canvas, so a channel created
+    // before a geometry change can never be read out of bounds.
+    void ensureChannelBuffers();
+    // Presence of channel `index` at canvas resolution, polarity resolved
+    // (255 = fully selected for Alpha, fully inked for Spot).
+    QImage channelCoverageMask(int index) const;
+
     void saveSelectionToChannel(const QString& name);
     void loadChannelToSelection(int index, SelectMode mode);
-    void deleteChannel(int index);
     cv::Mat selectionMaskForLayer(int layerWidth, int layerHeight,
                                   const QTransform& layerTransform) const;
 
@@ -360,6 +448,11 @@ public:
     }
 
 private:
+    // Monotonic channel ids. Never reused, so a command that re-inserts a
+    // deleted channel can restore its identity without colliding with one
+    // created in the meantime.
+    uint64_t m_lastChannelId = 0;
+
     ColorProfile m_colorProfile = ColorProfile::sRgb();
     ColorProfileSource m_profileSource = ColorProfileSource::GeneratedDefault;
     SoftProofSettings m_softProof;

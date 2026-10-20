@@ -639,7 +639,7 @@ add_executable(test-history-controller
     ${CMAKE_SOURCE_DIR}/src/tools/ToolCall.hpp
     ${CMAKE_SOURCE_DIR}/src/core/Clipboard.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Clipboard.hpp
-    ${CMAKE_SOURCE_DIR}/src/core/AlphaChannel.hpp
+    ${CMAKE_SOURCE_DIR}/src/core/DocumentChannel.hpp
     ${CMAKE_SOURCE_DIR}/src/text/TextRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/text/TextRenderer.hpp
     ${CMAKE_SOURCE_DIR}/src/text/TextLayoutEngine.cpp

@@ -930,6 +930,9 @@ static ResizeDocumentState captureResizeState(const Document* doc)
     snapshot.selectionMask = doc->selection.image().copy();
     snapshot.selectionActive = doc->selection.active();
     snapshot.guides = doc->guideManager.guides();
+    snapshot.channels = doc->channels;
+    for (auto& ch : snapshot.channels)
+        ch.data = ch.data.copy();
     return snapshot;
 }
 
@@ -958,6 +961,9 @@ static ResizeDocumentState captureResizeStateShared(const Document* doc)
     snapshot.selectionMask = doc->selection.image().copy();
     snapshot.selectionActive = doc->selection.active();
     snapshot.guides = doc->guideManager.guides();
+    // Channel buffers are shared, not copied: the async op works on its own
+    // localDoc and anything that later writes these detaches by COW.
+    snapshot.channels = doc->channels;
     return snapshot;
 }
 
@@ -975,6 +981,8 @@ static Document documentFromResizeState(const ResizeDocumentState& state)
     doc.selection.image() = state.selectionMask.copy();
     doc.selection.setActive(state.selectionActive);
     doc.guideManager.setGuides(state.guides);
+    doc.channels = state.channels;
+    doc.ensureChannelBuffers();
     return doc;
 }
 
@@ -4234,6 +4242,17 @@ static bool applyResizeImageState(Document* doc, const ImageResizeOptions& optio
             doc->selection.image(), targetSize, options.interpolation);
         doc->selection.resize(targetSize.width(), targetSize.height());
 
+        // Channels resample with the canvas, through the same coverage-safe
+        // mask path the selection and the layer masks use: a channel carries
+        // partial coverage, and a nearest-neighbour resize would turn its soft
+        // edges into staircases.
+        for (auto& channel : doc->channels) {
+            channel.data = resampleMaskImage(channel.data, targetSize,
+                                             options.interpolation);
+            channel.thumbDirty = true;
+        }
+        doc->invalidateChannelView();
+
         auto guides = doc->guideManager.guides();
         for (auto& guide : guides) {
             if (guide.orientation == GuideOrientation::Vertical) {
@@ -4317,6 +4336,37 @@ static QImage reframeDocSpaceMask(const QImage& maskIn, const QPoint& origin,
     return out;
 }
 
+// Same re-frame for a channel buffer, with one difference that matters: the
+// value outside the old buffer is the CHANNEL's neutral one — 0 for an Alpha
+// (nothing selected there) and 255 for a Spot (no ink there) — not a mask's
+// 255. Padding a spot with 0 would print solid ink across every pixel the
+// canvas just gained.
+static QImage reframeChannelBuffer(const DocumentChannel& channel,
+                                   const QRect& srcRect)
+{
+    const QImage src = channel.data.format() == QImage::Format_Grayscale8
+        ? channel.data
+        : channel.data.convertToFormat(QImage::Format_Grayscale8);
+
+    QImage out(srcRect.size(), QImage::Format_Grayscale8);
+    out.fill(channel.neutralValue());
+    if (src.isNull())
+        return out;
+    for (int y = 0; y < srcRect.height(); ++y) {
+        const int sy = srcRect.y() + y;
+        if (sy < 0 || sy >= src.height())
+            continue;
+        const uchar* in = src.constScanLine(sy);
+        uchar* dst = out.scanLine(y);
+        for (int x = 0; x < srcRect.width(); ++x) {
+            const int sx = srcRect.x() + x;
+            if (sx >= 0 && sx < src.width())
+                dst[x] = in[sx];
+        }
+    }
+    return out;
+}
+
 // Moves every piece of document-space state onto a new canvas frame. Shared by
 // crop and canvas resize: both leave the layer pixels alone and only re-frame
 // the canvas around them. `docRemap` maps old document NDC to new document NDC;
@@ -4342,17 +4392,11 @@ static QImage reframeDocSpaceMask(const QImage& maskIn, const QPoint& origin,
 // (Single Layer Mode) adjustments hold their mask in the parent layer's pixel
 // space, which a canvas re-frame never touches.
 //
-// KNOWN GAP — saved alpha channels (`doc->channels`) are document-space masks
-// and are deliberately NOT re-framed here. They would belong in this function
-// (crop: take the `srcRect` slice; grow: pad with 0 = unselected), but the
-// channels feature is still partial — nothing re-frames, resamples or even
-// resizes them today — so fixing only this half would leave the data model
-// inconsistent with the rest of the channels surface.
-// Document::loadChannelToSelection absorbs the mismatch in the meantime by
-// stretching a stale channel onto the current canvas, which is wrong after a
-// crop (it distorts instead of cropping) but neither crashes nor loads as a
-// misaligned top-left block.
-// Re-frame them here as part of completing the channels feature.
+// Extra channels ARE re-framed here, by reframeChannelBuffer below: they are
+// document-space data, so a crop slices them and a grow pads them with the
+// kind's neutral value. Anything that reads a channel can therefore assume it
+// is canvas-aligned, which is what lets loadChannelToSelection copy it
+// straight across instead of stretching a stale buffer onto the new canvas.
 static void reframeDocumentSpaceState(Document* doc, const QTransform& docRemap,
                                       const QRect& srcRect)
 {
@@ -4391,6 +4435,12 @@ static void reframeDocumentSpaceState(Document* doc, const QTransform& docRemap,
         layer->cpuImage = QImage(srcRect.size(), QImage::Format_RGBA8888);
         layer->cpuImage.fill(Qt::transparent);
     }
+
+    for (auto& channel : doc->channels) {
+        channel.data = reframeChannelBuffer(channel, srcRect);
+        channel.thumbDirty = true;
+    }
+    doc->invalidateChannelView();
 
     auto guides = doc->guideManager.guides();
     for (auto& guide : guides) {
@@ -6955,6 +7005,11 @@ bool ImageController::applyAiRemoveResult(const AiRemoveApplyRequest& request)
 void ImageController::copy()
 {
     if (!m_doc) return;
+    // A channel armed in the Channels panel is the edit target, so it is also
+    // what Copy reads — reaching for the active layer's pixels here would copy
+    // something the user is not looking at.
+    if (copyArmedChannel())
+        return;
     auto& clip = ClipboardManager::instance();
 
     if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
@@ -7159,6 +7214,8 @@ static QImage decodeClipboardImage(const QMimeData* mime)
 void ImageController::paste()
 {
     if (!m_doc) return;
+    if (pasteIntoArmedChannels())
+        return;
     auto& clip = ClipboardManager::instance();
 
     // ── Resolve the paste source: system clipboard first ────────────────────

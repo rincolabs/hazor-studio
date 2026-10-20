@@ -474,6 +474,13 @@ PsdImportResult importDocument(const psd::PsdFile& file, int smartObjectDepth)
         }
     }
 
+    // Document channels come from the merged image's extra planes, which are
+    // independent of the layer stack — so they are imported whether or not the
+    // layer records were readable, and they are never derived from a layer's
+    // transparency or mask (see importDocumentChannels).
+    result.channels = psdimport::importDocumentChannels(file, result.canvasSize,
+                                                         ctx.warnings);
+
     result.ok = true;
     result.warnings = ctx.warnings;
     result.embeddedSmartObjects = std::move(ctx.embeddedDocs);

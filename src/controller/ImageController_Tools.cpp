@@ -182,6 +182,49 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         "threshold", "remove_background",
         "rotate", "flip_horizontal", "flip_vertical", "resize_layer", "crop"
     };
+    // Channels take the grayscale-compatible filters and adjustments: with a
+    // channel armed, the edit target is its 8-bit plane, not the active
+    // layer's pixels. The filter runs on an RGBA view of the plane and the
+    // result comes back as luminance, so the one FilterProcessor
+    // implementation is reused instead of growing a grayscale twin.
+    static const std::unordered_set<std::string> kChannelFilterTools = {
+        "adjust_brightness", "adjust_contrast", "adjust_color",
+        "gaussian_blur", "median_blur", "box_blur", "bilateral_blur",
+        "motion_blur", "radial_blur", "zoom_blur",
+        "sharpen", "edge_detect", "noise_reduce", "posterize", "threshold",
+        "invert_colors"
+    };
+    if (hasArmedChannels() && kChannelFilterTools.count(toolName)) {
+        QVariantMap filterParams;
+        for (const auto& [key, value] : params) {
+            if (std::holds_alternative<double>(value))
+                filterParams[QString::fromStdString(key)] = std::get<double>(value);
+            else if (std::holds_alternative<std::string>(value))
+                filterParams[QString::fromStdString(key)] =
+                    QString::fromStdString(std::get<std::string>(value));
+        }
+        const std::string filterName = toolName;
+        applyToArmedChannels([&filterName, filterParams](QImage& buffer) {
+            const QImage rgba = buffer.convertToFormat(QImage::Format_RGBA8888);
+            const QImage filtered = processing::FilterProcessor::processFull(rgba, filterName,
+                                                                  filterParams);
+            if (filtered.isNull())
+                return;
+            const QImage out = filtered.convertToFormat(QImage::Format_RGBA8888);
+            for (int y = 0; y < buffer.height() && y < out.height(); ++y) {
+                const uchar* src = out.constScanLine(y);
+                uchar* dst = buffer.scanLine(y);
+                for (int x = 0; x < buffer.width() && x < out.width(); ++x) {
+                    dst[x] = static_cast<uchar>(
+                        (src[x * 4] * 299 + src[x * 4 + 1] * 587
+                         + src[x * 4 + 2] * 114) / 1000);
+                }
+            }
+        }, QString::fromStdString(toolName));
+        emit toolExecuted(QString::fromStdString(toolName), true);
+        return true;
+    }
+
     if (toolName == "set_clone_source") {
         emit cloneSourceRequested(QPointF(get("x"), get("y")));
         emit toolExecuted(QString::fromStdString(toolName), true);
@@ -1399,33 +1442,98 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         } else { success = false; }
     }
     else if (toolName == "select_save_channel") {
-        QString name = QString::fromStdString(getStr("name", "Channel"));
-        if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
-            QImage before = m_doc->selection.image().copy();
-            bool beforeActive = m_doc->selection.active();
-            m_doc->saveSelectionToChannel(name);
-            m_history.push(std::make_unique<SelectionCommand>(
-                m_doc, before, m_doc->selection.image().copy(),
-                beforeActive, m_doc->selection.active(),
-                "select_save_channel"));
-            emit selectionChanged();
-            emit imageChanged();
-        } else { success = false; }
+        // Routed through saveSelectionAsChannel so the undo entry is the
+        // channel's creation. It used to push a SelectionCommand, which undid
+        // the (unchanged) selection and left the new channel behind.
+        success = saveSelectionAsChannel(
+            QString::fromStdString(getStr("name", ""))) >= 0;
     }
     else if (toolName == "select_load_channel") {
-        int index = getInt("index", 0);
-        SelectMode mode = static_cast<SelectMode>(getInt("mode", 0));
+        const int index = getInt("index", 0);
         if (index >= 0 && index < static_cast<int>(m_doc->channels.size())) {
-            QImage before = m_doc->selection.image().copy();
-            bool beforeActive = m_doc->selection.active();
-            m_doc->loadChannelToSelection(index, mode);
-            m_history.push(std::make_unique<SelectionCommand>(
-                m_doc, before, m_doc->selection.image().copy(),
-                beforeActive, m_doc->selection.active(),
-                "select_load_channel"));
-            emit selectionChanged();
-            emit imageChanged();
-        }
+            loadChannelAsSelection(index, static_cast<SelectMode>(getInt("mode", 0)),
+                                   getInt("invert", 0) != 0);
+        } else { success = false; }
+    }
+    // Channels. Each one forwards to the same ImageController entry point the
+    // panel uses, so the automation surface and the UI share one
+    // implementation and one history entry per operation.
+    else if (toolName == "channel_new") {
+        success = newAlphaChannel(
+            QString::fromStdString(getStr("name", "")),
+            getInt("selected_areas", 0) != 0
+                ? ChannelMaskRepresentation::SelectedAreas
+                : ChannelMaskRepresentation::MaskedAreas,
+            QColor(255, 0, 0),
+            static_cast<float>(get("opacity", 0.5))) >= 0;
+    }
+    else if (toolName == "channel_new_spot") {
+        success = newSpotChannel(QString::fromStdString(getStr("name", "")),
+                                 QColor(255, 0, 255),
+                                 static_cast<float>(get("solidity", 0.0))) >= 0;
+    }
+    else if (toolName == "channel_duplicate") {
+        success = duplicateChannel(getInt("index", 0),
+                                   QString::fromStdString(getStr("name", "")),
+                                   getInt("invert", 0) != 0) >= 0;
+    }
+    else if (toolName == "channel_delete") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            deleteChannelAt(index);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_rename") {
+        const int index = getInt("index", 0);
+        const QString name = QString::fromStdString(getStr("name", ""));
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size())
+            && !name.isEmpty())
+            renameChannel(index, name);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_reorder") {
+        reorderChannel(getInt("from", 0), getInt("to", 0));
+    }
+    else if (toolName == "channel_set_visible") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            setChannelVisible(index, getInt("visible", 1) != 0);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_select") {
+        const int index = getInt("index", -1);
+        if (index < 0)
+            selectCompositeChannel();
+        else if (index < static_cast<int>(m_doc->channels.size()))
+            selectChannelAt(index, getInt("add", 0) != 0);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_invert") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            invertChannelAt(index);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_fill") {
+        if (hasArmedChannels())
+            fillArmedChannels(static_cast<float>(get("value", 1.0)), tr("Fill"));
+        else
+            success = false;
+    }
+    else if (toolName == "channel_merge_spot") {
+        success = mergeSpotChannel(getInt("index", 0));
+    }
+    else if (toolName == "channel_save_selection") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            saveSelectionIntoChannel(index, static_cast<SelectMode>(getInt("mode", 0)));
+        else
+            success = false;
     }
     else if (toolName == "set_group_pass_through") {
         int idx = getInt("index", m_doc->activeFlatIndex);
