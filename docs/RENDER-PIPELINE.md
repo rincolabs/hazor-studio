@@ -521,6 +521,14 @@ frame with a non-default channel view, including live ones:
 `drawProjection(..., allowStale=true)` shows the previous projection rather
 than letting PATH B flash the plain composite.
 
+Three kinds of frame still cannot show it, all because the projection is not
+what reaches the screen: a document past `GL_MAX_TEXTURE_SIZE` (no projection
+texture can exist, so `ProjectionCache::update` returns 0 and PATH B owns the
+canvas), a live filter preview (`hasPreview`), and the grayscale mask view.
+The first is a hardware limit; the other two are view modes that outrank this
+one. The channel *state* is untouched in all three — an armed channel still
+takes its dabs, only the preview of them is missing.
+
 Two generation counters keep that cheap:
 
 | Counter | Bumped by | Effect |

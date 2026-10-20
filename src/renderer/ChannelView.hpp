@@ -33,6 +33,20 @@ class Document;
 // Cost is kept off the full-frame path by applying only over a region: a dab
 // painted into a channel re-derives the display image for the dab's rect from
 // the cached base composite, not for the whole canvas.
+//
+// Three kinds of frame cannot show it, all for the same reason — the
+// projection is not what is on screen:
+//
+//   * a document past GL_MAX_TEXTURE_SIZE, where no projection texture can
+//     exist at all (ProjectionCache::update returns 0 forever and the canvas
+//     stays on the per-layer compositor). A hardware limit, not a policy.
+//   * a live filter preview (RenderParams::hasPreview),
+//   * the grayscale mask view (RenderParams::grayscaleMaskView).
+//
+// The last two are other view modes outranking this one. In none of the three
+// does the channel STATE change: an armed channel still receives its dabs and
+// the panel still shows what is armed — what is missing is only the preview of
+// it, which is why nothing here can silently corrupt a channel's buffer.
 // ─────────────────────────────────────────────────────────────────────────
 
 namespace channelview {
