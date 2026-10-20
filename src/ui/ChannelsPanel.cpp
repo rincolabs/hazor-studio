@@ -39,13 +39,6 @@ const char* componentName(int component)
     }
 }
 
-QKeySequence componentShortcut(int component)
-{
-    // Ctrl+3/4/5 for the components and Ctrl+2 for the composite, the
-    // long-standing shortcuts for this panel.
-    return QKeySequence(Qt::CTRL | static_cast<Qt::Key>(Qt::Key_3 + component));
-}
-
 // Grayscale view of one component, taken from the ALREADY DOWNSCALED
 // composite so the per-pixel pass costs the thumbnail's area and not the
 // document's. Equal weights, like the canvas channel view: the thumbnail has

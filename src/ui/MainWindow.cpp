@@ -2425,6 +2425,22 @@ MainWindow::MainWindow(QWidget* parent)
     shortcuts->registerCallback(QStringLiteral("selection.crop_to_selection"), [this]() {
         if (m_ctrl) m_ctrl->executeTool("crop_to_selection", {});
     });
+    // Channel edit target. The panel's row click and these go through the same
+    // controller calls, so the keys and the mouse cannot drift apart; a plain
+    // click/key selects AND shows that channel, which is why no visibility
+    // handling lives here.
+    shortcuts->registerCallback(QStringLiteral("channel.select.composite"), [this]() {
+        if (m_ctrl) m_ctrl->selectCompositeChannel();
+    });
+    const char* const kComponentShortcutIds[3] = {"channel.select.red",
+                                                  "channel.select.green",
+                                                  "channel.select.blue"};
+    for (int component = 0; component < 3; ++component) {
+        shortcuts->registerCallback(QString::fromLatin1(kComponentShortcutIds[component]),
+                                    [this, component]() {
+            if (m_ctrl) m_ctrl->selectColorComponent(component, false);
+        });
+    }
     shortcuts->registerCallback(QStringLiteral("panel.brush_settings.toggle"), [this]() {
         showBrushSettingsPanel();
     });
