@@ -2361,6 +2361,7 @@ void GPUViewport::render(const RenderParams& p)
                 compositor.composite(p.doc, m_cachedViewMvp, p.canvasHalfExtents,
                                      p.editingMask, p.grayscaleMaskView,
                                      p.hasPreview, p.previewTexture,
+                                     p.previewLayerRect,
                                      paintToolActive,
                                      p.showMaskOverlay, p.maskOverlayOpacity,
                                      this);

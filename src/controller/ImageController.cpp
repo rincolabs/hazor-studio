@@ -33,6 +33,7 @@
 #include "raw/RawLayerData.hpp"
 
 #include <QImage>
+#include <QMargins>
 #include <QPainter>
 #include <QClipboard>
 #include <QGuiApplication>
@@ -6111,6 +6112,156 @@ void ImageController::applyLayerMaskToCvImage(Layer* layer,
     }
 }
 
+// ── Growing a layer so a filter is not cropped by its own bounds ─────────────
+
+// Hard ceiling on the growth a single filter may ask for, per side, in layer
+// pixels. The reach is already bounded by the filter parameters; this only keeps
+// a pathological combination (a huge layer shrunk to a few canvas pixels) from
+// turning one blur into a multi-gigabyte buffer.
+static constexpr int kMaxFilterGrowthPx = 4096;
+
+// The document's canvas rect expressed in this layer's pixel grid. Same
+// layer-pixel → document-pixel affine the selection warps use
+// (Document::selectionMaskForLayer), inverted, so a rotated or scaled layer
+// still reports the region of its own buffer the canvas can show.
+static QRect documentRectInLayerPixels(const Document* doc, const Layer* layer,
+                                       const QSize& imageSize)
+{
+    if (!doc || !layer) return {};
+    const double dw = doc->size.width();
+    const double dh = doc->size.height();
+    const int lw = imageSize.width();
+    const int lh = imageSize.height();
+    if (dw <= 0.0 || dh <= 0.0 || lw <= 0 || lh <= 0) return {};
+
+    const QTransform tf = layer->owner ? layer->owner->accumulatedTransform()
+                                       : QTransform();
+    const double a00 = dw * tf.m11() / lw;
+    const double a01 = -dw * tf.m21() / lh;
+    const double a02 = dw * 0.5 * (1.0 - tf.m11() + tf.m21() + tf.m31());
+    const double a10 = -dh * tf.m12() / lw;
+    const double a11 = dh * tf.m22() / lh;
+    const double a12 = dh * 0.5 * (1.0 + tf.m12() - tf.m22() - tf.m32());
+
+    // QTransform maps (x,y) → (m11·x + m21·y + m31, m12·x + m22·y + m32).
+    const QTransform layerToDoc(a00, a10, 0.0,
+                                a01, a11, 0.0,
+                                a02, a12, 1.0);
+    bool invertible = false;
+    const QTransform docToLayer = layerToDoc.inverted(&invertible);
+    if (!invertible) return {};
+
+    const QRectF mapped = docToLayer.mapRect(QRectF(0.0, 0.0, dw, dh));
+    if (!std::isfinite(mapped.left()) || !std::isfinite(mapped.top())
+        || !std::isfinite(mapped.width()) || !std::isfinite(mapped.height()))
+        return {};
+    // A near-degenerate transform (a big layer shrunk to a couple of canvas
+    // pixels) maps the canvas far outside int range, where toAlignedRect() is
+    // not defined. The result is only ever intersected with a rect a few
+    // thousand pixels wide, so clamping generously costs nothing; a layer that
+    // falls entirely outside the clamp reports nothing and simply does not grow.
+    constexpr double kCoordLimit = 1e7;
+    const QRectF clamped = mapped.intersected(
+        QRectF(-kCoordLimit, -kCoordLimit, 2.0 * kCoordLimit, 2.0 * kCoordLimit));
+    return clamped.isEmpty() ? QRect() : clamped.toAlignedRect();
+}
+
+QRect ImageController::filterTargetRect(const Layer* layer,
+                                        const QSize& imageSize,
+                                        const QRect& contentBounds,
+                                        const std::string& toolName,
+                                        const QVariantMap& params) const
+{
+    const QRect current(QPoint(0, 0), imageSize);
+    if (!layer || !m_doc || imageSize.isEmpty())
+        return current;
+
+    QMargins reach = processing::FilterProcessor::outwardReach(
+        toolName, params, imageSize, contentBounds);
+    if (reach.isNull())
+        return current;
+
+    reach = QMargins(std::min(reach.left(),   kMaxFilterGrowthPx),
+                     std::min(reach.top(),    kMaxFilterGrowthPx),
+                     std::min(reach.right(),  kMaxFilterGrowthPx),
+                     std::min(reach.bottom(), kMaxFilterGrowthPx));
+
+    // Grow only as far as the effect could ever be seen in this document. That
+    // keeps the common "blur the whole photo" case byte-identical (a layer that
+    // already covers the canvas has nowhere to grow, so it keeps the
+    // BORDER_REPLICATE edges it has today) while a pasted, placed or
+    // scaled-down layer — where the crop is visible as a straight line across
+    // the canvas — gets the room its streaks need.
+    const QRect allowed = current.united(
+        documentRectInLayerPixels(m_doc, layer, imageSize));
+    return current.marginsAdded(reach).intersected(allowed);
+}
+
+bool ImageController::growLayerForFilter(Layer* layer, const QRect& targetRect,
+                                         QPoint* outOffset)
+{
+    if (outOffset) *outOffset = QPoint(0, 0);
+    if (!layer || layer->cpuImage.isNull() || targetRect.isEmpty())
+        return false;
+
+    const QRect current(0, 0, layer->cpuImage.width(), layer->cpuImage.height());
+    if (current.contains(targetRect))
+        return false;
+
+    // ensureWritableRect anchors the union of both rects at (0,0), so content
+    // shifts by however far the target reaches into negative coordinates.
+    const QPoint offset(std::max(0, -targetRect.left()),
+                        std::max(0, -targetRect.top()));
+
+    QTransform adjust;
+    if (!layer->ensureWritableRect(targetRect, &adjust))
+        return false;
+
+    const int newW = layer->cpuImage.width();
+    const int newH = layer->cpuImage.height();
+
+    if (layer->tiledSystem) {
+        layer->tileManager.resize(newW, newH);
+        layer->tileManager.markAllDirty();
+        layer->pendingGpuUpload = true;
+    }
+    if (layer->owner && !adjust.isIdentity())
+        layer->owner->transform = adjust * layer->owner->transform;
+
+    // The mask is addressed in layer pixels, so it has to follow the pixels it
+    // masks; the revealed border is fully visible (255), as in every other layer
+    // growth path (CanvasView::expandLayerToRect).
+    // The CPU maskImage is authoritative here, so there is no GPU readback: this
+    // runs from a tool dispatch, and any mask stroke was already synced GPU→CPU
+    // when it ended (see CanvasView::growMaskToTiledLayer).
+    if (!layer->maskImage.isNull()) {
+        QImage grownMask(newW, newH, QImage::Format_Grayscale8);
+        grownMask.fill(255);
+        {
+            QPainter mp(&grownMask);
+            mp.drawImage(layer->maskOrigin + offset, layer->maskImage);
+        }
+        layer->maskImage = grownMask;
+        layer->maskOrigin = QPoint(0, 0);
+        layer->maskThumbDirty = true;
+        syncLayerMaskToGpu(layer);
+    }
+
+    layer->invalidateContentBounds();
+    layer->textureOutdated = true;
+    // The layer's footprint changed, not just its pixels: anything keyed to the
+    // old geometry (the display projection, a baked layer-style texture, the
+    // thumbnail) has to be rebuilt, including for the frames drawn while an
+    // async filter is still running on the grown buffer.
+    if (layer->owner) {
+        layer->owner->invalidateEffects();
+        layer->owner->thumbnailDirty = true;
+    }
+    if (m_doc) ++m_doc->compositionGeneration;
+    if (outOffset) *outOffset = offset;
+    return true;
+}
+
 void ImageController::applyFilterWithSelection(Layer* layer,
     const std::string& toolName,
     const std::function<cv::Mat(const cv::Mat&)>& filter)
@@ -6299,11 +6450,17 @@ void ImageController::onAsyncJobCompleted(uint64_t jobId)
     emit imageChanged();
 
     QTransform afterT = node->transform;
-    m_history.push(std::make_unique<FilterCommand>(
+    auto command = std::make_unique<FilterCommand>(
         m_doc, job->targetFlatIndex,
         std::move(job->beforeImage), job->beforeTransform,
         layer->cpuImage.copy(), afterT,
-        QString::fromStdString(job->toolName)));
+        QString::fromStdString(job->toolName));
+    // The dispatch grew the layer for a filter that reaches past its bounds, so
+    // the mask was shifted/grown with the pixels and has to be restorable too.
+    if (!job->beforeMask.isNull())
+        command->setMaskSnapshots(std::move(job->beforeMask), job->beforeMaskOrigin,
+                                  layer->maskImage, layer->maskOrigin);
+    m_history.push(std::move(command));
 
     emit toolExecuted(QString::fromStdString(job->toolName), true);
     emit progressOperationProgressChanged(jobId, 100);

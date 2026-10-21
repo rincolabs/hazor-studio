@@ -32,7 +32,9 @@
 #include "ai/tool/AiObjectSelectionController.hpp"
 #include "ai/tool/AiRemoveObjectController.hpp"
 #include "io/ImageCodec.hpp"
+#include "processing/FilterProcessor.hpp"
 
+#include <QMargins>
 #include <QMatrix4x4>
 #include <QWheelEvent>
 #include <QMouseEvent>
@@ -1210,8 +1212,59 @@ void CanvasView::showPreview(const QString& toolName, const QVariantMap& params)
     QImage source = node->layer->compositeImage().convertToFormat(QImage::Format_RGBA8888);
     if (source.isNull()) { return; }
 
+    QVariantMap previewParams = params;
+    QRect previewRect;   // layer-pixel quad; stays empty unless `source` is padded
+
+    // ── Room for an effect that reaches past the layer bounds ──
+    // Applying the filter grows the layer so zoom/radial/motion blur and the
+    // convolution blurs are not cropped by the layer's own bounds
+    // (ImageController::growLayerForFilter). Pad the preview source to the same
+    // rect — the compositor then draws it on the matching, wider quad — or the
+    // preview would keep showing a crop the result does not have. Only where the
+    // committed filter would grow too: with a selection active the selection is
+    // the clip the user asked for, and a text/shape/RAW/Smart Object layer is
+    // refused outright (ImageController::checkDestructiveOp).
+    const bool selectionActive = m_doc->selection.active() && !m_doc->selection.isEmpty();
+    if (m_controller && !selectionActive
+        && node->layer->hasDirectlyEditablePixels()) {
+        const QRect base(QPoint(0, 0), source.size());
+        // Cheap reject before the content-bounds alpha scan — this runs on every
+        // slider tick: the reach measured from the whole image rect is an upper
+        // bound for any tighter content, so a null one settles it outright.
+        const bool mayReachOutside = !processing::FilterProcessor::outwardReach(
+            toolName.toStdString(), params, source.size(), QRect()).isNull();
+        // Tile-granular content bounds for a dab layer (its cpuImage is the
+        // stale base, so cpuContentBounds() would not describe `source`); the
+        // committed path scans the flushed composite and can only ask for less.
+        const QRect content = !mayReachOutside ? base
+            : node->layer->rasterStorage.isEnabled()
+                ? node->layer->contentImageBounds().toAlignedRect()
+                : node->layer->cpuContentBounds();
+        const QRect target = mayReachOutside
+            ? m_controller->filterTargetRect(node->layer.get(), source.size(), content,
+                                             toolName.toStdString(), params)
+            : base;
+        if (target != base && target.contains(base)) {
+            QImage padded(target.size(), QImage::Format_RGBA8888);
+            padded.fill(Qt::transparent);
+            {
+                QPainter p(&padded);
+                p.drawImage(-target.topLeft(), source);
+            }
+            previewParams = processing::FilterProcessor::paramsForGrownImage(
+                toolName.toStdString(), params, source.size(),
+                QMargins(-target.left(), -target.top(),
+                         target.left() + target.width() - source.width(),
+                         target.top() + target.height() - source.height()));
+            source = padded;
+            previewRect = target;
+        }
+    }
+
     m_previewSourceNode = node;
-    m_previewRenderer->generatePreview(source, toolName.toStdString(), params, size());
+    m_previewPendingLayerRect = previewRect;
+    m_previewRenderer->generatePreview(source, toolName.toStdString(),
+                                       previewParams, size());
 }
 
 void CanvasView::onPreviewReady(const QImage& previewImage)
@@ -1247,6 +1300,7 @@ void CanvasView::onPreviewReady(const QImage& previewImage)
     }
 
     m_previewImage = result;
+    m_previewLayerRect = m_previewPendingLayerRect;
     makeCurrent();
     if (m_previewTexture == 0)
         glGenTextures(1, &m_previewTexture);
@@ -1268,6 +1322,8 @@ void CanvasView::clearPreview()
 {
     m_previewRenderer->cancel();
     m_previewSourceNode = nullptr;
+    m_previewLayerRect = QRect();
+    m_previewPendingLayerRect = QRect();
 
     if (!m_hasPreview) return;
 
@@ -3342,6 +3398,7 @@ void CanvasView::paintGL()
 
     p.hasPreview      = m_hasPreview;
     p.previewTexture  = m_previewTexture;
+    p.previewLayerRect = m_previewLayerRect;
 
     p.selectType          = static_cast<int>(m_selectType);
     p.selectStart         = m_selectStart;

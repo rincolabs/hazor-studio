@@ -12,6 +12,7 @@
 #include "raw/RawLayerData.hpp"
 
 #include <QImage>
+#include <QMargins>
 #include <QPainter>
 #include <QImageReader>
 #include <QFileInfo>
@@ -451,9 +452,51 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             job->targetFlatIndex = m_doc->activeFlatIndex;
             job->beforeImage = layer->cpuImage.copy();
             job->beforeTransform = n->transform;
-            job->sourceImage = layer->cpuImage.copy();
             job->weakLayer = layer;
             job->retileRasterStorage = flushedRaster;
+
+            for (const auto& [k, v] : params) {
+                if (std::holds_alternative<double>(v))
+                    job->params[QString::fromStdString(k)] = QVariant(std::get<double>(v));
+                else if (std::holds_alternative<std::string>(v))
+                    job->params[QString::fromStdString(k)] = QVariant(QString::fromStdString(std::get<std::string>(v)));
+            }
+
+            // ── Room for the effect ──
+            // A filter that displaces or spreads pixels (zoom/radial/motion
+            // blur, every convolution blur) writes outside the layer's current
+            // image rect, and that part of its output is simply cropped — the
+            // effect ends in a straight line at the old layer bounds instead of
+            // falling off past them. Grow the buffer first, then re-normalize
+            // the parameters that are relative to the image (the blur centre) so
+            // the effect still pivots on the same pixel. The before snapshot is
+            // already captured above and FilterCommand restores the transform
+            // with the pixels, so undo puts the smaller layer back.
+            const QSize preGrowSize = layer->cpuImage.size();
+            // Cheap reject before the content-bounds alpha scan: the reach
+            // measured from the whole image rect is an upper bound for any
+            // tighter content, so a null one settles it for every point filter.
+            const bool mayReachOutside = !processing::FilterProcessor::outwardReach(
+                toolName, job->params, preGrowSize, QRect()).isNull();
+            const QRect grownTo = mayReachOutside
+                ? filterTargetRect(layer, preGrowSize, layer->cpuContentBounds(),
+                                   toolName, job->params)
+                : QRect(QPoint(0, 0), preGrowSize);
+            const QImage preGrowMask = layer->maskImage;
+            const QPoint preGrowMaskOrigin = layer->maskOrigin;
+            QPoint growOffset;
+            const bool grew = growLayerForFilter(layer, grownTo, &growOffset);
+            if (grew) {
+                job->params = processing::FilterProcessor::paramsForGrownImage(
+                    toolName, job->params, preGrowSize,
+                    QMargins(growOffset.x(), growOffset.y(),
+                             layer->cpuImage.width()  - preGrowSize.width()  - growOffset.x(),
+                             layer->cpuImage.height() - preGrowSize.height() - growOffset.y()));
+                job->beforeMask = preGrowMask;
+                job->beforeMaskOrigin = preGrowMaskOrigin;
+            }
+
+            job->sourceImage = layer->cpuImage.copy();
             if (toolName == "delete_selected") {
                 auto countOpaque = [](const QImage& img) -> int {
                     if (img.isNull()) return -1;
@@ -490,13 +533,6 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 }
             }
 
-            for (const auto& [k, v] : params) {
-                if (std::holds_alternative<double>(v))
-                    job->params[QString::fromStdString(k)] = QVariant(std::get<double>(v));
-                else if (std::holds_alternative<std::string>(v))
-                    job->params[QString::fromStdString(k)] = QVariant(QString::fromStdString(std::get<std::string>(v)));
-            }
-
             // delete_selected must NOT use the progressive tile path: that path
             // runs applyImageEngine() per tile, which has no delete_selected
             // case and ignores job->maskImage — clearing the whole layer (or
@@ -510,7 +546,10 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             {
                 job->type = AsyncJobType::FilterApplyProgressive;
                 QRect dirty = layer->dirtyRegion.boundingRect();
-                if (dirty.isEmpty())
+                // A buffer that just grew has no meaningful dirty region: the
+                // filter has to cover the new border too, or the room it was
+                // given stays empty and the crop is back.
+                if (dirty.isEmpty() || grew)
                     dirty = QRect(0, 0, layer->cpuImage.width(), layer->cpuImage.height());
                 auto tiles = layer->tileManager.visibleTiles(dirty);
                 job->tileRects.clear();
@@ -786,6 +825,9 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         // Sync fallback path: reached when a selection is active or the layer is
         // not tiled (the no-selection async path is handled above). radial/zoom
         // are non-tileable globals, so they always land here when sync.
+        // No layer growth here (unlike the async dispatch): with a selection
+        // active the selection IS the clip the user asked for, so there is
+        // nothing to make room for outside the layer.
         if (!layer) { success = false; }
         else if (canApplyTiled(layer, toolName)) {
             applyFilterTiled(layer, toolName, params);

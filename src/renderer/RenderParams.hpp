@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QPointF>
+#include <QRect>
 #include <QRectF>
 #include <QElapsedTimer>
 #include <vector>
@@ -35,6 +36,11 @@ struct RenderParams {
     // ── Preview ─────────────────────────────────────────────
     bool        hasPreview       = false;
     unsigned int previewTexture  = 0;
+    // Layer-pixel rect previewTexture covers. Wider than the layer's base rect
+    // when the previewed filter reaches past the layer bounds — the committed
+    // filter grows the layer for that, so the preview is drawn on the same
+    // larger quad. See CanvasView::showPreview.
+    QRect       previewLayerRect;
 
     // ── Selection ───────────────────────────────────────────
     int          selectType          = 0;

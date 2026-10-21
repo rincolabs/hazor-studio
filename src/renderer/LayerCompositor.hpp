@@ -2,6 +2,7 @@
 
 #include <QMatrix4x4>
 #include <QPointF>
+#include <QRect>
 #include <QTransform>
 #include <vector>
 #include <memory>
@@ -24,6 +25,13 @@ public:
                    bool grayscaleMaskView,
                    bool hasPreview,
                    unsigned int previewTexture,
+                   // Layer-pixel rect the preview texture covers. Larger than the
+                   // layer's base rect when the filter being previewed reaches
+                   // past the layer bounds and the committed version will grow
+                   // the layer for it (ImageController::growLayerForFilter), so
+                   // the preview has to be placed on the same, larger quad.
+                   // Empty/base-sized => plain base-rect preview.
+                   const QRect& previewLayerRect,
                    bool forceFullResLod,
                    bool showMaskOverlay,
                    float maskOverlayOpacity,
@@ -50,6 +58,7 @@ private:
                      bool editingMask,
                      bool hasPreview,
                      unsigned int previewTexture,
+                     const QRect& previewLayerRect,
                      bool forceFullResLod,
                      bool showMaskOverlay,
                      float maskOverlayOpacity,
@@ -69,5 +78,6 @@ private:
                                Document* doc,
                                GPUViewport* gpu,
                                bool hasPreview = false,
-                               unsigned int previewTexture = 0);
+                               unsigned int previewTexture = 0,
+                               const QRect& previewLayerRect = QRect());
 };

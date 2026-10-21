@@ -73,10 +73,15 @@ static QMatrix4x4 layerRectSubMatrix(const QRect& bounds, const QSize& baseSize)
     return m;
 }
 
+// `quad` overrides the layer rect the mask is aligned to. It is only passed for
+// a padded filter preview, whose quad covers more than the layer's own base rect
+// (see the preview block in renderNodes); everything else asks for the layer's
+// mask target bounds by leaving it null.
 static bool maskOverlayGeometry(const Layer* layer,
                                 QMatrix4x4* mvpSubMatrix,
                                 QVector2D* maskUvOffset,
-                                QVector2D* maskUvScale)
+                                QVector2D* maskUvScale,
+                                const QRect& quad = QRect())
 {
     if (!layer || !mvpSubMatrix || !maskUvOffset || !maskUvScale)
         return false;
@@ -91,7 +96,7 @@ static bool maskOverlayGeometry(const Layer* layer,
         return mW > 0 && mH > 0;
     }
 
-    const QRect bounds = layer->maskTargetBounds();
+    const QRect bounds = quad.isEmpty() ? layer->maskTargetBounds() : quad;
     if (base.width() <= 0 || base.height() <= 0 || mW <= 0 || mH <= 0 || bounds.isEmpty())
         return false;
 
@@ -110,6 +115,7 @@ void LayerCompositor::composite(Document* doc,
                                  bool grayscaleMaskView,
                                  bool hasPreview,
                                  unsigned int previewTexture,
+                                 const QRect& previewLayerRect,
                                  bool forceFullResLod,
                                  bool showMaskOverlay,
                                  float maskOverlayOpacity,
@@ -133,7 +139,8 @@ void LayerCompositor::composite(Document* doc,
     if (!isolate) {
         // Empty document: nothing needs the canvas FBO.
         renderNodes(doc->roots, doc, viewMvp, canvasHalfExtents,
-                    editingMask, hasPreview, previewTexture, forceFullResLod,
+                    editingMask, hasPreview, previewTexture, previewLayerRect,
+                    forceFullResLod,
                     showMaskOverlay, maskOverlayOpacity, gpu,
                     false, identity, identity);
         return;
@@ -146,7 +153,8 @@ void LayerCompositor::composite(Document* doc,
     // each layer directly through the screen viewport transform.
     gpu->pushGroupFbo(doc->size.width(), doc->size.height());
     renderNodes(doc->roots, doc, viewMvp, canvasHalfExtents,
-                editingMask, hasPreview, previewTexture, forceFullResLod,
+                editingMask, hasPreview, previewTexture, previewLayerRect,
+                forceFullResLod,
                 showMaskOverlay, maskOverlayOpacity, gpu,
                 true, identity, identity);
 
@@ -168,6 +176,7 @@ void LayerCompositor::renderNodes(
     bool editingMask,
     bool hasPreview,
     unsigned int previewTexture,
+    const QRect& previewLayerRect,
     bool forceFullResLod,
     bool showMaskOverlay,
     float maskOverlayOpacity,
@@ -445,7 +454,8 @@ void LayerCompositor::renderNodes(
                                   /*seedFromTarget=*/true);
                 const QTransform identity;
                 renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                            editingMask, hasPreview, previewTexture, forceFullResLod,
+                            editingMask, hasPreview, previewTexture, previewLayerRect,
+                            forceFullResLod,
                             showMaskOverlay, maskOverlayOpacity, gpu,
                             true, identity, identity);
                 gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask,
@@ -458,7 +468,8 @@ void LayerCompositor::renderNodes(
                 // the whole mechanism — it is what lets an inner blend mode
                 // read the layers below the group.
                 renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                            editingMask, hasPreview, previewTexture, forceFullResLod,
+                            editingMask, hasPreview, previewTexture, previewLayerRect,
+                            forceFullResLod,
                             showMaskOverlay, maskOverlayOpacity, gpu,
                             hasTargetAccum, targetAccum, invTargetAccum);
             } else {
@@ -481,7 +492,8 @@ void LayerCompositor::renderNodes(
                 gpu->pushGroupFbo(doc->size.width(), doc->size.height());
                 const QTransform identity;
                 renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                            editingMask, hasPreview, previewTexture, forceFullResLod,
+                            editingMask, hasPreview, previewTexture, previewLayerRect,
+                            forceFullResLod,
                             showMaskOverlay, maskOverlayOpacity, gpu,
                             true, identity, identity);
                 gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask);
@@ -542,7 +554,8 @@ void LayerCompositor::renderNodes(
                                                   doc->size.height(), base)) {
                     const QTransform identity;
                     renderNodes(nodes, doc, viewMvp, canvasHalfExtents, editingMask,
-                                hasPreview, previewTexture, forceFullResLod,
+                                hasPreview, previewTexture, previewLayerRect,
+                                forceFullResLod,
                                 /*showMaskOverlay=*/false, maskOverlayOpacity, gpu,
                                 /*hasTargetAccum=*/true, identity, identity,
                                 /*soleNode=*/base);
@@ -587,13 +600,15 @@ void LayerCompositor::renderNodes(
             const bool previewThisLayer = hasPreview && previewTexture
                 && node == doc->activeNode();
             gpu->pushGroupFbo(doc->size.width(), doc->size.height());
-            drawLayerBaseIsolated(node, doc, gpu, previewThisLayer, previewTexture);
+            drawLayerBaseIsolated(node, doc, gpu, previewThisLayer, previewTexture,
+                                  previewLayerRect);
             // Clipped adjustments draw over the isolated base in canvas-NDC, the
             // same target convention group children use (hasTargetAccum=true);
             // the adjustment branch maps each adjustment's mask in this layer's
             // pixel space (see the Type::Adjustment handling above).
             renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                        editingMask, /*hasPreview*/false, 0, forceFullResLod,
+                        editingMask, /*hasPreview*/false, 0, QRect(),
+                        forceFullResLod,
                         showMaskOverlay, maskOverlayOpacity, gpu,
                         /*hasTargetAccum*/true, identity, identity);
             // The clip belongs to the composite-back, not to the passes inside
@@ -709,6 +724,21 @@ void LayerCompositor::renderNodes(
         if (shapeSpriteActive) {
             baseTextureSize = node->layer->shapeCache.image.size();
         }
+
+        // ── Padded filter preview ──
+        // A filter whose effect reaches past the layer bounds is previewed on a
+        // source padded to the rect the committed filter will grow the layer to
+        // (CanvasView::showPreview + ImageController::growLayerForFilter), so the
+        // preview is drawn on that same, larger quad — otherwise the preview
+        // keeps showing the crop the applied result no longer has. The mask is
+        // aligned to the wider quad below for the same reason.
+        const bool previewQuadExpanded = usePreview
+            && baseTextureSize.width() > 0 && baseTextureSize.height() > 0
+            && !previewLayerRect.isEmpty()
+            && previewLayerRect != QRect(QPoint(0, 0), baseTextureSize);
+        const QRect maskQuad = previewQuadExpanded ? previewLayerRect : QRect();
+        if (previewQuadExpanded)
+            mvp = mvp * layerRectSubMatrix(previewLayerRect, baseTextureSize);
 
         bool shapeEffectTransformApplied = false;
         if (hasEffects && shapeSpriteActive
@@ -943,7 +973,8 @@ void LayerCompositor::renderNodes(
             QVector2D maskScl(1.0f, 1.0f);
             if (hasMask) {
                 QMatrix4x4 maskSub;
-                maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl);
+                maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl,
+                                    maskQuad);
             }
             gpu->drawShaderBlend(texId,
                                  hasMask ? node->layer->maskTextureId : 0,
@@ -1003,13 +1034,17 @@ void LayerCompositor::renderNodes(
                 QMatrix4x4 maskSub;
                 QVector2D maskOff;
                 QVector2D maskScl;
-                if (maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl))
+                if (maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl,
+                                        maskQuad))
                     gpu->setMaskUVUniforms(maskScl, maskOff);
                 gl->glActiveTexture(GL_TEXTURE1);
                 gl->glBindTexture(GL_TEXTURE_2D, node->layer->maskTextureId);
             }
 
-            if (node->layer->tiledSystem) {
+            // The tile instances are placed inside `mvp` and carry UVs relative
+            // to the base rect, so a widened preview quad has to be drawn as the
+            // single quad it is.
+            if (node->layer->tiledSystem && !previewQuadExpanded) {
                 // Tiled draw
                 if (node->layer->pendingGpuUpload) {
                     gpu->uploadDirtyTiles(node->layer.get());
@@ -1073,7 +1108,8 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
                                             Document* doc,
                                             GPUViewport* gpu,
                                             bool hasPreview,
-                                            unsigned int previewTexture)
+                                            unsigned int previewTexture,
+                                            const QRect& previewLayerRect)
 {
     QOpenGLFunctions* gl = QOpenGLContext::currentContext()
                                ? QOpenGLContext::currentContext()->functions()
@@ -1104,19 +1140,33 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
         // Same construction as the generic non-tiled base draw below: the base
         // quad stays at `mvp`; the (possibly larger) mask buffer is aligned to it
         // via the mask UV scale/offset rather than by transforming the quad.
+        // The one exception is a padded preview — a filter that reaches past the
+        // layer bounds previews on a source grown to the rect the committed
+        // filter will grow the layer to, so the quad has to widen with it (see
+        // the matching block in renderNodes).
         const bool hasMask = layer->maskVisible
             && layer->maskTextureId != 0
             && !layer->maskImage.isNull();
+        const QSize baseSize = shapeSpriteActive
+            ? layer->shapeCache.image.size()
+            : layer->rasterBaseSize();
+        const bool previewQuadExpanded = !baseSize.isEmpty()
+            && !previewLayerRect.isEmpty()
+            && previewLayerRect != QRect(QPoint(0, 0), baseSize);
+        const QMatrix4x4 previewMvp = previewQuadExpanded
+            ? mvp * layerRectSubMatrix(previewLayerRect, baseSize)
+            : mvp;
         QMatrix4x4 maskSub;
         QVector2D maskOff(0.0f, 0.0f);
         QVector2D maskScl(1.0f, 1.0f);
         if (hasMask)
-            maskOverlayGeometry(layer, &maskSub, &maskOff, &maskScl);
+            maskOverlayGeometry(layer, &maskSub, &maskOff, &maskScl,
+                                previewQuadExpanded ? previewLayerRect : QRect());
 
         gpu->applyFixedBlend(static_cast<int>(BlendMode::Normal));
         gpu->mainProgram()->bind();
         gpu->bindMainVao();
-        gpu->setMainUniforms(mvp, 1.0f, hasMask, layer->maskDensity);
+        gpu->setMainUniforms(previewMvp, 1.0f, hasMask, layer->maskDensity);
         gpu->setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
         gpu->setMaskUVUniforms(maskScl, maskOff);
         if (hasMask) {

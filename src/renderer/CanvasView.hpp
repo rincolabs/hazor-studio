@@ -962,6 +962,11 @@ private:
     unsigned int m_previewTexture = 0;
     processing::PreviewRenderer* m_previewRenderer = nullptr;
     LayerTreeNode* m_previewSourceNode = nullptr;
+    // Layer-pixel rect the preview covers; wider than the layer's base rect when
+    // the previewed filter reaches past the layer bounds (showPreview). Pending
+    // until the matching preview image arrives, since the render is async.
+    QRect m_previewLayerRect;
+    QRect m_previewPendingLayerRect;
 
     bool m_editingMask = false;
     bool m_grayscaleMaskView = false;

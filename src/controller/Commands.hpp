@@ -301,22 +301,42 @@ public:
     {}
 
     void execute() override {
-        apply(m_after, m_afterTransform);
+        apply(m_after, m_afterTransform, /*undoing=*/false);
     }
 
     void undo() override {
-        apply(m_before, m_beforeTransform);
+        apply(m_before, m_beforeTransform, /*undoing=*/true);
     }
 
     QString name() const override { return m_name; }
 
+    // Set when the filter grew the layer buffer to make room for an effect that
+    // reaches past the layer bounds (ImageController::growLayerForFilter): the
+    // mask moved with the pixels, and restoring the image and transform alone
+    // would leave it offset by the growth. Masks are only touched when this is
+    // called — every other filter leaves them alone.
+    void setMaskSnapshots(QImage before, QPoint beforeOrigin,
+                          QImage after, QPoint afterOrigin) {
+        m_beforeMask = std::move(before);
+        m_beforeMaskOrigin = beforeOrigin;
+        m_afterMask = std::move(after);
+        m_afterMaskOrigin = afterOrigin;
+        m_hasMaskSnapshots = true;
+    }
+
 private:
-    void apply(const QImage& img, const QTransform& t) {
+    void apply(const QImage& img, const QTransform& t, bool undoing) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (node && node->type == LayerTreeNode::Type::Layer && node->layer) {
             auto* l = node->layer.get();
             node->layer->cpuImage = img;
             node->transform = t;
+            if (m_hasMaskSnapshots && !l->maskImage.isNull()) {
+                l->maskImage = undoing ? m_beforeMask : m_afterMask;
+                l->maskOrigin = undoing ? m_beforeMaskOrigin : m_afterMaskOrigin;
+                l->maskTextureOutdated = true;
+                l->maskThumbDirty = true;
+            }
             // The before/after snapshots are full flat images (every creator
             // flushes tiles into cpuImage first), so the pixel state is fully
             // defined by `img` in both representations. If the layer currently
@@ -349,6 +369,11 @@ private:
     QImage m_after;
     QTransform m_afterTransform;
     QString m_name;
+    QImage m_beforeMask;
+    QPoint m_beforeMaskOrigin;
+    QImage m_afterMask;
+    QPoint m_afterMaskOrigin;
+    bool m_hasMaskSnapshots = false;
 };
 
 class RasterTileCommand : public Command {

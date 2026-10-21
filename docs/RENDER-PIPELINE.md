@@ -1432,6 +1432,47 @@ layer in the GPU path (`usePreview` in `LayerCompositor`, including inside the
 isolated Single-Layer-Mode). The commit runs the filter at full resolution
 through the normal CPU path.
 
+### 7.1 Filters that reach past the layer bounds
+
+A layer image is a bounded buffer, so a filter that *moves* pixels outward
+(zoom / radial / motion blur) or spreads them through the alpha channel
+(gaussian / box / median / bilateral blur, all premultiplied) has the part of
+its output that lands outside the image rect cropped — the effect ends in a
+straight line at the layer's old bounds instead of falling off past them.
+
+[`FilterProcessor::outwardReach()`](../src/processing/FilterProcessor.hpp)
+measures that reach per filter, from the layer's *content* bounds, and
+[`ImageController::filterTargetRect()`](../src/controller/ImageController.hpp)
+turns it into the rect the buffer has to cover. Two deliberate limits:
+
+- **Clamped to the document.** The target rect is intersected with the canvas
+  rect mapped into layer space, so a layer that already covers the canvas never
+  grows and keeps its exact current result (including its `BORDER_REPLICATE`
+  edges), while a pasted, placed or scaled-down layer — the case where the crop
+  is visible as a straight line across the canvas — gets the room it needs.
+- **Not with an active selection.** The selection is the clip the user asked
+  for, so the synchronous selection path does not grow the layer.
+
+`ImageController::growLayerForFilter()` does the growth through the shared
+`Layer::ensureWritableRect()` primitive: the node transform, the tile grid and
+the layer mask all follow the shifted pixels, and `FilterCommand` carries the
+pre-growth mask so undo restores the smaller layer whole. Parameters expressed
+in normalized image coordinates (the blur centre) are re-normalized for the
+grown buffer by `FilterProcessor::paramsForGrownImage()`.
+
+The preview mirrors it: `CanvasView::showPreview()` pads the preview source to
+the same rect and `LayerCompositor` draws the preview on that wider quad
+(`previewQuadExpanded`, `RenderParams::previewLayerRect`), aligning the mask to
+it — otherwise the preview would keep showing a crop the committed result does
+not have.
+
+`sharpen` and `noise_reduce` are excluded: they run BGR-only
+(`ImageEngine::processBgrOnly`) and leave alpha untouched, so nothing of them
+can land outside the pixels they started from. `edge_detect` is excluded because
+its Canny output replaces alpha with an opaque rectangle. The non-destructive
+effect pipeline pads its own source independently — see `stylePadding()` in
+[`LayerEffect.cpp`](../src/core/LayerEffect.cpp).
+
 ---
 
 ## 8. File index

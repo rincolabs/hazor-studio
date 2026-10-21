@@ -438,6 +438,17 @@ public:
                      float radius, float opacity, QColor color, bool eraser);
     void expandLayer(Layer* layer, QPointF imagePos, float brushRadius,
                      int margin = 20);
+    // The rect, in layer pixels, the layer buffer must cover for `toolName` not
+    // to crop its own output — see FilterProcessor::outwardReach. Clamped to the
+    // part of layer space this document can ever show, so a canvas-sized layer
+    // keeps its exact current result while a smaller or scaled-down one gets the
+    // room the effect needs. Returns the current image rect when nothing has to
+    // grow. `imageSize`/`contentBounds` describe the pixels the filter will run
+    // on (the flushed composite for a dab layer), not necessarily cpuImage.
+    QRect filterTargetRect(const Layer* layer, const QSize& imageSize,
+                           const QRect& contentBounds,
+                           const std::string& toolName,
+                           const QVariantMap& params) const;
     void syncLayerToGpu(Layer* layer);
     void syncLayerFromGpu(Layer* layer);
     void syncLayerMaskToGpu(Layer* layer);
@@ -690,6 +701,14 @@ private:
 
     void applyFilterWithSelection(Layer* layer, const std::string& toolName,
                                    const std::function<cv::Mat(const cv::Mat&)>& filter);
+    // Grows the layer buffer to `targetRect` (from filterTargetRect) so a
+    // spreading filter is not cropped by the layer's own bounds, carrying the
+    // node transform, the tile grid and the layer mask along with the shifted
+    // pixels. Returns true when the buffer actually grew; *outOffset receives
+    // the pixel offset existing content moved by. Must run on a flat cpuImage
+    // (rasterStorage flushed), like every other caller of ensureWritableRect.
+    bool growLayerForFilter(Layer* layer, const QRect& targetRect,
+                            QPoint* outOffset = nullptr);
     void applyFilterTiled(Layer* layer, const std::string& toolName,
                           const JsonMap& params);
     bool canApplyTiled(Layer* layer, const std::string& toolName) const;
