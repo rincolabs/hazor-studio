@@ -548,6 +548,32 @@ private:
     // ViewportCamera::clampPan. Single enforcement point: called after every
     // pan/zoom/fit/resize/overscroll change and once per frame in paintGL().
     void clampPanOffset();
+    // Same clamp, applied to an arbitrary value instead of m_doc->panOffset —
+    // lets the wheel-pan ease target stay valid without touching the live pan.
+    QPointF clampedPanOffset(const QPointF& pan) const;
+    // Eases m_doc->panOffset toward m_panAnimTarget by one frame's worth, paced
+    // by actual elapsed time. Called from paintGL() — riding the widget's own
+    // repaint cadence instead of a wall-clock timer, so the glide never asks
+    // for frames faster than they can actually be produced. Returns whether it
+    // moved panOffset (false once settled or when there is nothing to ease).
+    bool advancePanAnimation();
+    // Stops any in-flight wheel-pan ease, so a direct pan/zoom/reset never
+    // fights a leftover glide on the next frame.
+    void cancelPanAnimation();
+    // Eases m_doc->zoom toward m_zoomAnimTarget by one frame's worth, in LOG
+    // space (see the definition for why), holding the document point recorded
+    // in m_zoomAnchorCanvas still under the cursor as it goes. Shares the pan
+    // glide's shape: driven from paintGL(), paced by real elapsed time, returns
+    // whether it moved zoom.
+    bool advanceZoomAnimation();
+    // Stops any in-flight zoom ease and parks zoomTarget back on the live zoom.
+    void cancelZoomAnimation();
+    // Walks `steps` entries along the zoom ladder from the glide's DESTINATION
+    // (not the live zoom) and eases toward the result, so a fast wheel spin
+    // still lands exactly `steps` entries away instead of short of it.
+    // anchorWidgetPos is the widget-space point to pin; nullopt pivots about the
+    // canvas centre, which is what the menu/keyboard zoom has always done.
+    void stepZoomAnimated(int steps, const std::optional<QPointF>& anchorWidgetPos);
     // Viewport + on-screen canvas size in screen pixels. Returns false when the
     // widget/document is not measurable yet (so callers can no-op).
     bool viewportCanvasMetrics(double& vw, double& vh,
@@ -851,6 +877,28 @@ private:
     QScrollBar* m_hScrollBar = nullptr;
     QScrollBar* m_vScrollBar = nullptr;
     bool m_updatingScrollBars = false;
+
+    // Wheel-pan ease-out: each wheel tick nudges m_panAnimTarget (clamped, so
+    // the glide can never aim outside the valid pan range); while m_panAnimating
+    // is set, paintGL() eases panOffset toward it a little more each frame and
+    // clears it once they match.
+    QPointF m_panAnimTarget;
+    QElapsedTimer m_panAnimClock;
+    bool m_panAnimating = false;
+
+    // Zoom ease-out — same shape as the pan glide above. Ladder steps accumulate
+    // into m_zoomAnimTarget and paintGL() eases m_doc->zoom toward it.
+    // m_zoomAnchorCanvas is the point to hold still, in canvas-normalised
+    // coordinates: that is image space, so it stays valid while both zoom and
+    // pan move under it. m_wheelZoomAccum banks sub-notch wheel deltas, because
+    // high-resolution wheels and trackpads send far less than 120 units per
+    // event and one ladder step per event would make a single gesture fly
+    // across the whole zoom range.
+    float m_zoomAnimTarget = 1.0f;
+    QPointF m_zoomAnchorCanvas;
+    QElapsedTimer m_zoomAnimClock;
+    bool m_zoomAnimating = false;
+    double m_wheelZoomAccum = 0.0;
 
     // ── Selection state ──
     SelectType m_selectType = SelectType::Rectangular;

@@ -2022,7 +2022,13 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
         bool shapeChanged = cache.dirty
             || !cache.shapeSnapshot
             || !ShapeVectorRenderer::sameShapeData(*cache.shapeSnapshot, *layer->shapeData);
-        bool zoomChanged = std::abs(cache.zoom - doc->zoom) > 0.0001f;
+        // zoomTarget, not zoom: keying on the live zoom would redo this CPU
+        // rasterization (plus a texture upload and an effects invalidation) on
+        // every frame of an animated zoom. Keying on the destination does it
+        // once, at the resolution the glide ends on — and spriteTransform is
+        // built from the shape's NDC bounds alone, independent of zoom, so the
+        // sprite stays correctly placed while the viewport eases there.
+        bool zoomChanged = std::abs(cache.zoom - doc->zoomTarget) > 0.0001f;
         bool docChanged = cache.documentSize != doc->size;
         bool transformChanged = cache.transformSnapshot != accum;
         bool scaleChanged = std::abs(cache.scaleX - curSx) > 0.0001f
@@ -2035,7 +2041,7 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
             *layer->shapeData,
             accum,
             doc->size,
-            doc->zoom,
+            doc->zoomTarget,
             p.canvasHalfExtents,
             p.viewportW,
             p.viewportH);
@@ -2044,7 +2050,7 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
             cache.image = sprite.image;
             cache.spriteTransform = sprite.spriteTransform;
             cache.dirty = false;
-            cache.zoom = doc->zoom;
+            cache.zoom = doc->zoomTarget;
             cache.documentSize = doc->size;
             cache.transformSnapshot = accum;
             cache.scaleX = curSx;

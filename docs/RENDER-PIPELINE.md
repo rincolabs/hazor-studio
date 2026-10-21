@@ -142,6 +142,17 @@ which is the backdrop untouched for every mode.
 - `syncLayersToGpu` uploads: base texture (or shape sprite), mask (R8),
   `effectedTexture` (bake of effects/clipped adjustments),
   `styledBaseTexture` (base with style for live Single Layer Mode).
+- `refreshShapeLayerSprites` re-rasterizes a shape layer whenever the zoom it
+  was rasterized for changed, and that re-raster also marks the texture
+  outdated and invalidates the node's effects. It keys on `doc->zoomTarget`,
+  **not** `doc->zoom`: the view eases zoom over several frames
+  (`CanvasView::advanceZoomAnimation`), and keying on the live value would run
+  the whole CPU path once per frame of every zoom gesture. `zoomTarget` is the
+  zoom the glide is heading for, and equals `doc->zoom` outside a glide —
+  `CanvasView::paintGL` enforces that once per frame, which is sound because it
+  is the only caller of `GPUViewport::render`. Rasterizing for the destination
+  is safe because `spriteTransform` comes from the shape's NDC bounds alone;
+  zoom only picks the sprite's pixel resolution, never its placement.
 
 There are **two tile systems, and they cull differently.** `TileManager`
 ([src/core/TileManager.hpp](../src/core/TileManager.hpp)) is a dense grid over a

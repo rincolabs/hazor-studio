@@ -32,6 +32,13 @@ public:
     std::set<int> selectedFlatIndices;
 
     float zoom = 1.0f;
+    // The zoom an animated zoom is easing toward; equal to `zoom` whenever the
+    // view is not mid-glide, which CanvasView::paintGL enforces once per frame
+    // so no zoom writer has to maintain it. Content-resolution decisions key on
+    // this rather than on `zoom` so an animated zoom only moves the viewport
+    // transform: a shape layer is rasterized once, at the resolution the gesture
+    // ends on, instead of once per eased frame.
+    float zoomTarget = 1.0f;
     QPointF panOffset;
 
     SelectionMask selection;

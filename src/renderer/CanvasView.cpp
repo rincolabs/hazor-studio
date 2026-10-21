@@ -3171,18 +3171,25 @@ bool CanvasView::viewportCanvasMetrics(double& vw, double& vh,
     return true;
 }
 
-void CanvasView::clampPanOffset()
+// Exponential ease-out time constant shared by the pan and zoom glides, so a
+// scroll and a zoom settle with the same weight. An exponential has no hard
+// end, so this is not the duration: it reaches 63% in one constant and the
+// half-pixel settle tests below cut it off at roughly three, i.e. ~165ms of
+// visible motion — short enough to read as responsive rather than inertial.
+static constexpr double kViewEaseTimeConstant = 0.055;
+
+QPointF CanvasView::clampedPanOffset(const QPointF& pan) const
 {
     double vw, vh, cw, ch;
     if (!viewportCanvasMetrics(vw, vh, cw, ch))
-        return;
+        return pan;
 
     // panOffset is stored in viewport NDC: it is the clip-space position of the
     // canvas CENTRE (vertex 0,0 maps to clip = panOffset). Convert it to the
     // clampPan() convention (screen-pixel position of the canvas TOP-LEFT),
     // remembering screen Y grows downward while NDC Y grows upward.
-    const double specX = (m_doc->panOffset.x() + 1.0) * 0.5 * vw - cw * 0.5;
-    const double specY = (1.0 - m_doc->panOffset.y()) * 0.5 * vh - ch * 0.5;
+    const double specX = (pan.x() + 1.0) * 0.5 * vw - cw * 0.5;
+    const double specY = (1.0 - pan.y()) * 0.5 * vh - ch * 0.5;
 
     const QPointF clamped = core::ViewportCamera::clampPan(
         QPointF(specX, specY), QSizeF(vw, vh), QSizeF(cw, ch), m_overscrollEnabled);
@@ -3207,7 +3214,13 @@ void CanvasView::clampPanOffset()
     const double newPanX = (snappedX + cw * 0.5) * 2.0 / vw - 1.0;
     const double newPanY = 1.0 - (snappedY + ch * 0.5) * 2.0 / vh;
 
-    m_doc->panOffset = QPointF(newPanX, newPanY);
+    return QPointF(newPanX, newPanY);
+}
+
+void CanvasView::clampPanOffset()
+{
+    if (!m_doc) return;
+    m_doc->panOffset = clampedPanOffset(m_doc->panOffset);
 }
 
 void CanvasView::updateScrollBars()
@@ -3274,6 +3287,8 @@ void CanvasView::onScrollBarMoved()
     if (m_updatingScrollBars)
         return;
 
+    cancelPanAnimation();
+
     double vw, vh, cw, ch;
     if (!viewportCanvasMetrics(vw, vh, cw, ch))
         return;
@@ -3307,12 +3322,28 @@ void CanvasView::setOverscrollEnabled(bool enabled)
 void CanvasView::paintGL()
 {
     updateCanvasRect();
+    // Ease both glides by one frame's worth before anything reads zoom/pan.
+    // Riding paintGL()'s own cadence (rather than a wall-clock timer) means
+    // they never ask for frames faster than they can actually be produced.
+    // Zoom goes first: its cursor-anchor correction is a pan delta, and the pan
+    // ease below should run from the already-corrected value.
+    const bool zoomAnimated = advanceZoomAnimation();
+    const bool panAnimated = advancePanAnimation();
     // Single enforcement net: keeps panOffset valid no matter which path moved
     // it (interactive pan/zoom, viewport resize, document switch, controller
     // reset_view/zoom, project load) before anything reads it this frame.
     clampPanOffset();
+    if (panAnimated || zoomAnimated)
+        reprojectSelectionDragOverlay();
 
     if (!m_gpuViewport || !m_doc) return;
+    // The same kind of net for zoomTarget: outside a glide, the zoom that
+    // content resolution is chosen for is simply the live zoom. Holding that
+    // true here is why the zoom combo, the controller's zoom tool and project
+    // load need no bookkeeping of their own — this is the only place the
+    // document is rendered from, so the invariant cannot be observed stale.
+    if (!m_zoomAnimating)
+        m_doc->zoomTarget = m_doc->zoom;
     if (snapDebugEnabled()) {
         qInfo().noquote()
             << "[Snap][canvas-paintGL]"
@@ -3453,6 +3484,11 @@ void CanvasView::paintGL()
         updateDistortOverlay();
 
     updateBrushPreviewOverlay();
+
+    // Still easing: ask for the next frame now rather than waiting on another
+    // external event to trigger it.
+    if (m_panAnimating || m_zoomAnimating)
+        update();
 }
 
 void CanvasView::resizeGL(int w, int h)
@@ -3486,6 +3522,9 @@ void CanvasView::fitToView()
     if (!m_doc || m_doc->size.isEmpty())
         return;
 
+    cancelPanAnimation();
+    cancelZoomAnimation();
+
     const int vpW = width();
     const int vpH = height();
     if (vpW <= 0 || vpH <= 0) {
@@ -3505,6 +3544,7 @@ void CanvasView::fitToView()
     zoom = std::clamp(zoom, 0.01f, 100.0f);
 
     m_doc->zoom = zoom;
+    m_doc->zoomTarget = zoom;
     m_doc->panOffset = QPointF(0.0f, 0.0f);
     m_pendingFit = false;
 
@@ -3517,7 +3557,10 @@ void CanvasView::fitToView()
 void CanvasView::zoomToOriginal()
 {
     if (!m_doc) return;
+    cancelPanAnimation();
+    cancelZoomAnimation();
     m_doc->zoom = std::clamp(1.0f, 0.01f, 100.0f);
+    m_doc->zoomTarget = m_doc->zoom;
     m_doc->panOffset = QPointF(0.0f, 0.0f);
     updateCanvasRect();
     clampPanOffset();
@@ -3529,11 +3572,19 @@ void CanvasView::setZoom(float zoom)
 {
     if (!m_doc) return;
 
+    // Absolute setter (zoom combo, controller, project load). It wins over a
+    // glide outright rather than becoming its new destination — and it does so
+    // before the early-out, so setting the zoom to wherever a glide currently
+    // sits still means "stop here". Single enforcement point: this is why
+    // view.zoom_in/out from the menu no longer need their own cancel.
+    cancelZoomAnimation();
+
     const float clampedZoom = std::clamp(zoom, 0.01f, 100.0f);
     if (std::abs(m_doc->zoom - clampedZoom) < 0.0001f)
         return;
 
     m_doc->zoom = clampedZoom;
+    m_doc->zoomTarget = clampedZoom;
     updateCanvasRect();
     // Re-clamp against the new on-screen canvas size so the pan stays valid (and
     // re-centres when overscroll-off zoom makes the canvas smaller than the view).
@@ -3583,16 +3634,117 @@ static float steppedZoom(float current, bool zoomIn)
     return kZoomPresets[0];
 }
 
+void CanvasView::stepZoomAnimated(int steps, const std::optional<QPointF>& anchorWidgetPos)
+{
+    if (!m_doc || steps == 0) return;
+
+    // Step from the glide's DESTINATION, not from the live zoom: mid-glide
+    // m_doc->zoom is a partially eased value sitting between two ladder
+    // entries, and stepping off that would make a fast wheel spin land short of
+    // the n entries actually asked for (and off-ladder, which is the one thing
+    // the preset table exists to prevent).
+    const float from = m_zoomAnimating ? m_zoomAnimTarget : m_doc->zoom;
+    float target = from;
+    for (int i = std::abs(steps); i > 0; --i)
+        target = steppedZoom(target, steps > 0);
+    target = std::clamp(target, 0.01f, 100.0f);
+    if (std::abs(target - from) < 0.0001f)
+        return;                     // already parked on the end of the ladder
+
+    // Pivot, captured in canvas-normalised (image) coordinates so it stays the
+    // same image point for the whole glide while zoom and pan both move under
+    // it. The canvas centre is the no-op pivot — the correction in
+    // advanceZoomAnimation() is exactly zero there, which is the behaviour the
+    // menu and keyboard zoom have always had.
+    m_zoomAnchorCanvas = (anchorWidgetPos && width() > 0 && height() > 0)
+        ? screenToCanvasNdc(*anchorWidgetPos)
+        : QPointF(0.0, 0.0);
+
+    m_zoomAnimTarget = target;
+    m_doc->zoomTarget = target;
+    if (!m_zoomAnimating) {
+        m_zoomAnimClock.start();
+        m_zoomAnimating = true;
+        update();
+    }
+    // Report the commanded zoom rather than the eased value: the readout should
+    // show where the gesture is going, and this keeps the signal at one emit per
+    // step — the same rate the instant zoom had, instead of one per frame.
+    emit zoomChanged(target);
+}
+
+bool CanvasView::advanceZoomAnimation()
+{
+    if (!m_zoomAnimating || !m_doc) return false;
+
+    double vw, vh, cw, ch;
+    if (!viewportCanvasMetrics(vw, vh, cw, ch)) {
+        cancelZoomAnimation();
+        return false;
+    }
+
+    const double dt = std::clamp(m_zoomAnimClock.restart() / 1000.0, 0.0, 0.05);
+    const double alpha = 1.0 - std::exp(-dt / kViewEaseTimeConstant);
+
+    // Ease in LOG space. The ladder is multiplicative (…1/2, 2/3, 1, 3/2, 2…),
+    // so interpolating log(zoom) gives every step the same duration and the
+    // same apparent speed, where interpolating zoom itself would crawl through
+    // the fractions near 1% and lurch between the whole multiples near 100x.
+    const double logTarget = std::log(static_cast<double>(m_zoomAnimTarget));
+    const double logFrom   = std::log(static_cast<double>(m_doc->zoom));
+    double logNext = logFrom + (logTarget - logFrom) * alpha;
+
+    // The on-screen canvas size is zoom * docSize, so its derivative with
+    // respect to log(zoom) is that size itself: this is the same "within half a
+    // pixel at the canvas edge" settle test the pan glide uses, written in log
+    // space, and it stops the ease asymptotically crawling forever.
+    const bool settled = std::abs(logTarget - logNext) * std::max(cw, ch) * 0.5 < 0.5;
+    const float nextZoom = settled
+        ? m_zoomAnimTarget
+        : std::clamp(static_cast<float>(std::exp(logNext)), 0.01f, 100.0f);
+
+    // Cursor anchor. With
+    //     clip = panOffset + zoom * canvasHalfExtents * canvasPoint
+    // holding an image point's clip position fixed across a zoom change is a
+    // pure pan delta, independent of where the pan currently is. That is what
+    // lets this compose with a pan glide instead of fighting it: the very same
+    // delta is handed to that glide's destination below, so the scroll keeps
+    // heading where it was aimed while the zoom pivots under it.
+    const double dz = static_cast<double>(nextZoom) - static_cast<double>(m_doc->zoom);
+    const QPointF panDelta(-dz * m_canvasHalfExtents.x() * m_zoomAnchorCanvas.x(),
+                           -dz * m_canvasHalfExtents.y() * m_zoomAnchorCanvas.y());
+
+    m_doc->zoom = nextZoom;
+    m_doc->panOffset += panDelta;
+    if (m_panAnimating)
+        m_panAnimTarget = clampedPanOffset(m_panAnimTarget + panDelta);
+
+    if (settled) {
+        m_zoomAnimating = false;
+        m_doc->zoomTarget = m_doc->zoom;
+    }
+    return true;
+}
+
+void CanvasView::cancelZoomAnimation()
+{
+    m_zoomAnimating = false;
+    m_wheelZoomAccum = 0.0;
+    // Park the content-resolution key on what is actually on screen, so an
+    // abandoned destination never leaves shape sprites rasterized for a zoom
+    // the view never reached.
+    if (m_doc)
+        m_doc->zoomTarget = m_doc->zoom;
+}
+
 void CanvasView::zoomIn()
 {
-    if (!m_doc) return;
-    setZoom(steppedZoom(m_doc->zoom, true));
+    stepZoomAnimated(1, std::nullopt);
 }
 
 void CanvasView::zoomOut()
 {
-    if (!m_doc) return;
-    setZoom(steppedZoom(m_doc->zoom, false));
+    stepZoomAnimated(-1, std::nullopt);
 }
 
 void CanvasView::resizeEvent(QResizeEvent* e)
@@ -3672,18 +3824,98 @@ void CanvasView::wheelEvent(QWheelEvent* e)
 {
     if (!m_doc) return;
 
-    // One ladder step per notch (same as the zoom buttons and GIMP's wheel
-    // binding), so wheel zooming also stops on exact ratios instead of drifting
-    // onto arbitrary 1.1^n factors that force a resample at every level.
-    if (e->angleDelta().y() > 0)
-        zoomIn();
-    else
-        zoomOut();
+    if (e->modifiers().testFlag(Qt::ControlModifier)) {
+        // One ladder step per notch (same as the zoom buttons and GIMP's wheel
+        // binding), so wheel zooming also stops on exact ratios instead of drifting
+        // onto arbitrary 1.1^n factors that force a resample at every level.
+        //
+        // Bank the deltas and spend whole notches rather than stepping once per
+        // event: angleDelta is in eighths of a degree and only a classic
+        // detented wheel sends a full 120 per event, so a high-resolution wheel
+        // or a trackpad would otherwise fire a dozen-plus steps per gesture and
+        // cross the entire ladder. Banking also absorbs a horizontal-only wheel
+        // (y == 0 contributes nothing) instead of reading it as a step.
+        const double notchDelta = e->angleDelta().y();
+        if (notchDelta != 0.0 && (notchDelta < 0.0) != (m_wheelZoomAccum < 0.0))
+            m_wheelZoomAccum = 0.0;   // direction reversed: drop the stale bank
+        m_wheelZoomAccum += notchDelta;
+        const int notches = static_cast<int>(m_wheelZoomAccum / 120.0);
+        m_wheelZoomAccum -= notches * 120.0;
+        // The pan glide is deliberately left running: the anchor correction in
+        // advanceZoomAnimation() is applied to its destination too, so the two
+        // compose and a zoom no longer throws away scroll distance in flight.
+        if (notches != 0)
+            stepZoomAnimated(notches, e->position());
+        return;
+    }
 
-    // The selection drag overlays store screen points; a mid-gesture zoom
-    // would otherwise leave the preview displaced from the real (doc-space)
-    // path until the next mouse move.
-    reprojectSelectionDragOverlay();
+    // Plain scroll pans the canvas like any other scrollable view (Ctrl is
+    // the zoom modifier instead); Shift redirects a vertical-only wheel to
+    // the horizontal axis for mice without a horizontal wheel.
+    constexpr qreal kPixelsPerNotch = 40.0;
+    const QPoint pixels  = e->pixelDelta();
+    const QPoint degrees = e->angleDelta();
+    QPointF delta = pixels.isNull()
+        ? QPointF(degrees.x() / 120.0 * kPixelsPerNotch, degrees.y() / 120.0 * kPixelsPerNotch)
+        : QPointF(pixels);
+
+    if (delta.x() == 0.0 && delta.y() != 0.0 && e->modifiers().testFlag(Qt::ShiftModifier))
+        delta = QPointF(delta.y(), 0.0);
+
+    // Screen Y grows downward while panOffset is stored in clip-space NDC
+    // (Y up), so the two axes pick up panOffset with opposite sign.
+    const QPointF ndcDelta(2.0 * delta.x() / width(), -2.0 * delta.y() / height());
+
+    // Extend the running glide's destination rather than restarting it, so a
+    // steady stream of wheel ticks reads as one continuous slide. paintGL()
+    // drives the actual easing (see advancePanAnimation()); kick it off here
+    // only when nothing is animating yet, instead of forcing a repaint on
+    // every single tick.
+    if (!m_panAnimating) {
+        m_panAnimTarget = m_doc->panOffset;
+        m_panAnimClock.start();
+        m_panAnimating = true;
+        update();
+    }
+    m_panAnimTarget = clampedPanOffset(m_panAnimTarget + ndcDelta);
+}
+
+bool CanvasView::advancePanAnimation()
+{
+    if (!m_panAnimating || !m_doc) return false;
+
+    double vw, vh, cw, ch;
+    if (!viewportCanvasMetrics(vw, vh, cw, ch)) {
+        m_panAnimating = false;
+        return false;
+    }
+
+    // The target was clamped against the geometry at the time it was set;
+    // re-clamp against the current one so a zoom/resize mid-glide can never
+    // aim it out of range.
+    m_panAnimTarget = clampedPanOffset(m_panAnimTarget);
+
+    const double dt = std::clamp(m_panAnimClock.restart() / 1000.0, 0.0, 0.05);
+    const double alpha = 1.0 - std::exp(-dt / kViewEaseTimeConstant);
+
+    QPointF pan = m_doc->panOffset + (m_panAnimTarget - m_doc->panOffset) * alpha;
+
+    // Half a device pixel is imperceptible at any window size — settle there
+    // instead of asymptotically crawling toward the target forever.
+    const bool settled = std::abs(m_panAnimTarget.x() - pan.x()) * vw * 0.5 < 0.5
+                       && std::abs(m_panAnimTarget.y() - pan.y()) * vh * 0.5 < 0.5;
+    if (settled) {
+        pan = m_panAnimTarget;
+        m_panAnimating = false;
+    }
+
+    m_doc->panOffset = pan;
+    return true;
+}
+
+void CanvasView::cancelPanAnimation()
+{
+    m_panAnimating = false;
 }
 
 void CanvasView::leaveEvent(QEvent* e)
@@ -4583,6 +4815,9 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         PointerInputEvent me = CanvasInputMapper::fromMouseEvent(e, PointerPhase::Press);
         m_inputState.noteMouseEvent(me);
     }
+    // A new interaction takes over from a leftover wheel-pan glide immediately,
+    // the same way touching a surface stops inertial scrolling elsewhere.
+    cancelPanAnimation();
     // Space-bar temporary Hand: while Space is held, a left-drag pans the view
     // regardless of the active tool — without switching tools, so a crop /
     // transform / text session in progress is preserved. The generic m_panning
@@ -4684,11 +4919,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         return;
 
     if (tool == Tool::Zoom) {
-        // Ladder step (Alt = out), matching the wheel and the zoom buttons.
-        if (e->modifiers() & Qt::AltModifier)
-            zoomOut();
-        else
-            zoomIn();
+        // Ladder step (Alt = out), matching the wheel and the zoom buttons —
+        // anchored on the click, since picking the spot to magnify is the whole
+        // point of clicking with this tool.
+        stepZoomAnimated((e->modifiers() & Qt::AltModifier) ? -1 : 1, e->position());
         return;
     }
 
