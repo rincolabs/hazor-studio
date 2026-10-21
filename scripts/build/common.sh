@@ -108,9 +108,17 @@ configure_target() {
     REALESRGAN_MODELS_DIR="${REALESRGAN_MODELS_DIR:-$HAZOR_COMMON_ROOT/realesrgan/$HAZOR_REALESRGAN_VERSION/models}"
     ONNX_MODELS_DIR="${ONNX_MODELS_DIR:-$HAZOR_COMMON_ROOT/onnx/models}"
     # A provisioned cross toolchain has to win over an older MinGW installed on
-    # the host, so it goes in front of PATH as soon as it exists.
+    # the host, so it goes in front of PATH.
+    #
+    # Deliberately not gated on the directory existing: this runs before
+    # prepare_mingw_toolchain() builds it, so testing for it made a
+    # from-scratch run provision the toolchain and then validate the host's
+    # GCC anyway, failing the version check with the right compiler sitting
+    # unused on disk. PATH lookups are resolved per command, so naming a
+    # directory that does not exist yet costs nothing and starts resolving the
+    # moment the toolchain lands.
     MINGW_TOOLCHAIN_DIR="${MINGW_TOOLCHAIN_DIR:-$THIRD_PARTY_DIR/toolchains/mingw-w64-$HAZOR_MINGW_TRIPLE-gcc-$HAZOR_MINGW_GCC_VERSION-$HAZOR_MINGW_CRT}"
-    if [[ "$TARGET" == "windows-x86_64" && -d "$MINGW_TOOLCHAIN_DIR/bin" ]]; then
+    if [[ "$TARGET" == "windows-x86_64" ]]; then
         PATH="$MINGW_TOOLCHAIN_DIR/bin:$PATH"
         export PATH
     fi
