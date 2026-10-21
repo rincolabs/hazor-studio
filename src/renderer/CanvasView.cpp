@@ -83,17 +83,6 @@ static bool isPenSyntheticMouse(const QMouseEvent* e)
         || t == QPointingDevice::PointerType::Eraser;
 }
 
-static bool pointInsideMaskBounds(const Layer* layer, const QPointF& imagePos)
-{
-    if (!layer || layer->maskImage.isNull())
-        return false;
-    const QRectF bounds(QPointF(layer->maskOrigin), QSizeF(layer->maskImage.size()));
-    return imagePos.x() >= bounds.left()
-        && imagePos.y() >= bounds.top()
-        && imagePos.x() < bounds.right()
-        && imagePos.y() < bounds.bottom();
-}
-
 static QTransform unitRectToCanvasTransform(const QRectF& canvasBounds)
 {
     QTransform xf;
@@ -7433,9 +7422,14 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     BrushInputState state = input;
     state.imagePos = screenToImage(screenPos, layer);
 
-    if (m_editingMask && !pointInsideMaskBounds(layer, state.imagePos)) {
+    // A mask stroke needs a mask buffer to write into; the cursor's position is
+    // NOT a gate. A dab centred past the mask edge still covers mask pixels with
+    // the rest of its footprint, so drawMaskDab clips it to the buffer instead of
+    // dropping it — the same rule the raster-tile and channel dabs already
+    // follow. Refusing the press by position is what used to force the user to
+    // keep the cursor inside the canvas to paint its border.
+    if (m_editingMask && layer->maskImage.isNull())
         return;
-    }
 
     makeCurrent();
     if (!m_editingMask || layer->maskImage.isNull()) {
@@ -7551,11 +7545,12 @@ void CanvasView::continueBrushStroke(const BrushInputState& input,
     BrushInputState state = input;
     state.imagePos = screenToImage(screenPos, layer);
 
-    if (m_editingMask) {
-        if (!pointInsideMaskBounds(layer, state.imagePos)) {
-            return;
-        }
-    }
+    // No position gate here either (see beginBrushStroke). Returning early while
+    // the cursor is off the mask also skipped the engine's spacing and last-point
+    // bookkeeping, so a stroke leaving and re-entering the canvas resumed with a
+    // straight jump instead of continuing along the path the user drew.
+    if (m_editingMask && layer->maskImage.isNull())
+        return;
 
     m_airbrushLastPos = state.imagePos;
     m_airbrushLastState = state;
@@ -7666,7 +7661,19 @@ void CanvasView::endBrushStroke()
         invalidateMultiOutlineCache();
         if (m_doc) ++m_doc->compositionGeneration;
 
-        if (m_editingMask && !layer->maskImage.isNull()) {
+        // A mask stroke whose dabs were all clipped away (the cursor never came
+        // close enough to the mask for any of its footprint to land, zero
+        // pressure throughout) changed nothing, and must not leave an undo entry
+        // behind — the raster-tile branch below already skips an empty change
+        // set the same way.
+        const bool maskUntouched = m_editingMask
+            && m_brushBeforeOrigin == layer->maskOrigin
+            && m_brushBeforeImage == layer->maskImage
+            // ...and the layer image did not grow under the stroke — restoring
+            // its size is what the composite entry below carries.
+            && (m_maskStrokeBeforeCpu.isNull()
+                || m_maskStrokeBeforeCpu.size() == layer->cpuImage.size());
+        if (m_editingMask && !layer->maskImage.isNull() && !maskUntouched) {
             // If a flat-image layer was expanded during the stroke, include the layer
             // image restoration in the undo so the layer size is fully reverted.
             if (!m_maskStrokeBeforeCpu.isNull() &&
@@ -7689,6 +7696,8 @@ void CanvasView::endBrushStroke()
                     m_doc->activeFlatIndex, m_brushBeforeImage,
                     m_brushBeforeOrigin, layer->maskOrigin);
             }
+        } else if (m_editingMask) {
+            // Nothing painted into the mask: no history entry (see above).
         } else if (m_brushUsingRasterTiles && layer->rasterStorage.isEnabled()) {
             auto changes = layer->rasterStorage.endChangeTracking();
             m_controller->pushRasterTileSnapshot("brush_stroke",

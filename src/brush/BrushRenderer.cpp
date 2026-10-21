@@ -1761,18 +1761,28 @@ void BrushRenderer::drawMaskDab(Layer* layer, const BrushInputState& state,
     if (mw <= 0 || mh <= 0)
         return;
 
+    // Clip the dab to the mask rather than requiring its CENTRE to be inside it:
+    // a dab centred past the edge still covers mask pixels with the rest of its
+    // footprint, and the quad below is clipped by the viewport (which is the mask
+    // buffer), so the in-bounds part rasterises with the right geometry on its
+    // own. Only a dab whose whole footprint misses the buffer has nothing to do —
+    // skip that one, since everything below costs a full-mask texture copy.
+    // The quad spans +/-1 on both axes (y scaled by roundness <= 1) before the
+    // rotation, so its furthest corner sits sqrt(2) x the radius from the centre.
+    const float reach = params.effectiveSize * 1.41422f + 1.0f;
     const float validLeft = static_cast<float>(layer->maskOrigin.x());
     const float validTop = static_cast<float>(layer->maskOrigin.y());
     const float validRight = validLeft + static_cast<float>(mw);
     const float validBottom = validTop + static_cast<float>(mh);
-    if (state.imagePos.x() < validLeft ||
-        state.imagePos.y() < validTop ||
-        state.imagePos.x() >= validRight ||
-        state.imagePos.y() >= validBottom) {
+    if (state.imagePos.x() + reach < validLeft ||
+        state.imagePos.y() + reach < validTop ||
+        state.imagePos.x() - reach >= validRight ||
+        state.imagePos.y() - reach >= validBottom) {
         return;
     }
 
     // Translate from logical layer coords to mask pixel coords using maskOrigin.
+    // May land outside [0, mw) x [0, mh) — that is the clipped-dab case above.
     const float centerX = static_cast<float>(state.imagePos.x() - layer->maskOrigin.x());
     const float centerY = static_cast<float>(state.imagePos.y() - layer->maskOrigin.y());
 

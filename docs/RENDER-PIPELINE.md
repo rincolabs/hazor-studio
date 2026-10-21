@@ -1356,6 +1356,19 @@ render paths display the same pixels:
   `ProjectionCache` rebuilds the CPU projection on a worker thread → canvas
   switches from Path B to Path A without visual difference.
 
+**A dab is clipped, never discarded.** The brush is allowed to run with the
+cursor outside the canvas: what decides whether a pixel changes is whether the
+dab's *footprint* reaches an editable pixel, never where its centre sits. Each
+producer enforces that itself — `drawDabToRasterTiles` walks the tiles that
+intersect the dab rect (tiles outside `rasterBaseSize()` are legal, see
+`compositeImageExpanded`), `drawChannelDab` intersects the dab rect with the
+buffer, and the two GL paths rely on the viewport clipping the dab quad. A
+centre-containment test in any of them drops the whole dab and, worse, breaks
+the stroke: the engine's spacing and last-point state stops advancing, so the
+stroke resumes with a straight jump when the cursor comes back. `drawMaskDab`
+only rejects a dab whose footprint misses the mask buffer entirely, because
+everything after that point costs a full-mask texture copy.
+
 Which of those three a dab reaches is decided before it is rasterised, and
 only one can be armed: `ImageController::claimEditTarget` drops the others
 whenever the mask edit or a channel selection is claimed, on the central path
