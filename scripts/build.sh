@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$ROOT_DIR/scripts/build/common.sh"
 
 TARGET="linux-x86_64"
-CONFIG="Release"
+CONFIG="Debug"
 JOBS="${JOBS:-$(nproc)}"
 DO_PREPARE=0
 DO_CLEAN=0
@@ -17,18 +17,19 @@ DO_VERIFY=1
 MIGRATE_ONLY=0
 PACKAGE_FORMAT="none"
 ALL_TARGETS=0
-LEGACY_COMPAT=0
 
 usage() {
     cat <<'EOF'
 Usage: ./scripts/build.sh [options]
 
-With no options, preserves the original Linux Release developer build.
+With no options, builds the Hazor executable for the host (linux-x86_64,
+Debug, no packaging) -- the developer build. Release and distributable
+packages are opt-in: pass --config Release and/or --package.
 
 Options:
   --target TARGET       linux-x86_64, windows-x86_64, macos-x86_64,
                         or macos-arm64
-  --config CONFIG       Debug or Release (default: Release)
+  --config CONFIG       Debug or Release (default: Debug)
   --prepare             prepare/reuse pinned third-party dependencies first
   --migrate-only        link valid legacy Linux dependencies into the new layout
   --package FORMAT      appimage, flatpak, zip, bundle, all, or none
@@ -41,17 +42,14 @@ Options:
   --help                 show this help
 
 Examples:
+  ./scripts/build.sh                     # developer build (Debug, no package)
   ./scripts/build.sh --target linux-x86_64 --prepare
-  ./scripts/build.sh --target linux-x86_64 --package appimage
-  ./scripts/build.sh --target linux-x86_64 --package flatpak
-  ./scripts/build.sh --target windows-x86_64 --prepare --package zip
+  ./scripts/build.sh --target linux-x86_64 --config Release --package appimage
+  ./scripts/build.sh --target linux-x86_64 --config Release --package flatpak
+  ./scripts/build.sh --target windows-x86_64 --config Release --prepare --package zip
   OSXCROSS_TARGET_DIR=/opt/osxcross/target ./scripts/build.sh --target macos-arm64 --prepare
 EOF
 }
-
-if [[ "$#" -eq 0 ]]; then
-    LEGACY_COMPAT=1
-fi
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -148,38 +146,6 @@ if [[ "$ALL_TARGETS" == "1" ]]; then
     exit $?
 fi
 
-legacy_build() {
-    local build_dir="${BUILD_DIR:-$ROOT_DIR/build}"
-    local thirdparty="${THIRD_PARTY_DIR:-$ROOT_DIR/3rdparty}"
-    local qt="${QT_DIR:-$thirdparty/Qt/$HAZOR_QT_VERSION/gcc_64}"
-    local ort="${ONNXRUNTIME_DIR:-$thirdparty/onnx/runtime/$HAZOR_ORT_LINUX_PACKAGE}"
-    local realesrgan="${REALESRGAN_DIR:-$thirdparty/realesrgan}"
-    local models="${REALESRGAN_MODELS_DIR:-$realesrgan/models}"
-    local rawengine="${RAWENGINE_DEPS_DIR:-$thirdparty/rawengine}"
-    require_dir "$qt" Qt
-    require_dir "$ort" "ONNX Runtime"
-    require_dir "$realesrgan" RealESRGAN
-    require_dir "$models" "RealESRGAN models"
-    log "compatibility build: Linux x86_64 Release"
-    log "build dir: $build_dir"
-    log "Qt: $qt"
-    log "ONNX Runtime: $ort"
-    log "RawEngine dependencies: $rawengine"
-    mkdir -p "$build_dir"
-    cmake -S "$ROOT_DIR" -B "$build_dir" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH="$qt" \
-        -DONNXRUNTIME_ROOT="$ort" \
-        -DONNXRUNTIME_INCLUDE_DIR="$ort/include" \
-        -DONNXRUNTIME_LIBRARY="$ort/lib/libonnxruntime.so" \
-        -DRAWENGINE_DEPS_DIR="$rawengine"
-    cmake --build "$build_dir" --parallel "$JOBS" --target Hazor
-}
-
-if [[ "$LEGACY_COMPAT" == "1" ]]; then
-    legacy_build
-    exit 0
-fi
 
 configure_target
 export JOBS MIGRATE_ONLY

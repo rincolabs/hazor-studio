@@ -45,7 +45,13 @@ application with long build times and a legacy test suite.
 2. **Build only through [`./scripts/build.sh`](scripts/build.sh).** Do not
    invent `cmake` invocations, alternative build directories, or compiler
    flags. The script is the contract.
-3. **Never commit, push, tag, or open a PR unless asked.** Branching,
+3. **Verify with the bare developer build.** `./scripts/build.sh` with no
+   arguments is Debug, host-only and produces no package; that is the command
+   for checking that a change compiles. Never pass `--config Release`,
+   `--package`, `--all`, or a cross `--target` to verify your own work — those
+   exist to produce distributables and cost minutes to hours. Build them only
+   when the user asks for an artifact.
+4. **Never commit, push, tag, or open a PR unless asked.** Branching,
    committing and releasing are explicit user actions.
 
 ---
@@ -53,7 +59,14 @@ application with long build times and a legacy test suite.
 ## 3. Build and verify
 
 ```bash
-./scripts/build.sh          # configure + build the Hazor target (Release)
+./scripts/build.sh          # configure + build the Hazor target (Debug, host)
+```
+
+Release and packaging are opt-in, and are the user's call rather than a
+verification step:
+
+```bash
+./scripts/build.sh --target linux-x86_64 --config Release --package appimage
 ```
 
 Everything the script needs lives under `3rdparty/` (not in git) and can be
@@ -61,12 +74,12 @@ overridden with environment variables:
 
 | Variable | Default |
 |----------|---------|
-| `BUILD_DIR` | `<root>/build` |
+| `BUILD_DIR` | `<root>/build/<target>-<config>` |
 | `THIRD_PARTY_DIR` | `<root>/3rdparty` |
-| `QT_DIR` | `$THIRD_PARTY_DIR/Qt/6.8.3/gcc_64` |
-| `ONNXRUNTIME_DIR` | `$THIRD_PARTY_DIR/onnx/runtime/onnxruntime-linux-x64-gpu-1.26.0` |
-| `REALESRGAN_DIR` | `$THIRD_PARTY_DIR/realesrgan` |
-| `REALESRGAN_MODELS_DIR` | `$THIRD_PARTY_DIR/realesrgan/models` |
+| `QT_TARGET_DIR` | `$THIRD_PARTY_DIR/targets/<target>/qt/6.8.3/gcc_64` |
+| `ONNXRUNTIME_DIR` | `$THIRD_PARTY_DIR/targets/<target>/onnxruntime/1.26.0/<package>` |
+| `REALESRGAN_DIR` | `$THIRD_PARTY_DIR/targets/<target>/realesrgan/<version>` |
+| `REALESRGAN_MODELS_DIR` | `$THIRD_PARTY_DIR/common/realesrgan/<version>/models` |
 
 **A full build is slow.** Build once at the end of a coherent change rather
 than after every edit, and report compiler errors verbatim.
@@ -74,7 +87,7 @@ than after every edit, and report compiler errors verbatim.
 Scripts that exist but that agents must not use on their own initiative:
 [`run.sh`](scripts/run.sh) (launches the app — see rule 1),
 [`tests.sh`](scripts/tests.sh) / [`run-tests.sh`](scripts/run-tests.sh)
-(outdated suite — see rule 3).
+(outdated suite — see the end of section 3).
 
 ---
 
@@ -108,7 +121,7 @@ src/
 docs/              BUILD.md, MCP.md, RENDER-PIPELINE.md
 scripts/           build.sh, run.sh, tests.sh, run-tests.sh
 shaders/           Standalone GLSL files (most shaders are inline in C++)
-tests/             Outdated — see rule 3
+tests/             Outdated — see the end of section 3
 3rdparty/          Vendored deps, contents gitignored
 ```
 

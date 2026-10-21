@@ -71,28 +71,33 @@ validated.
 
 ### Central build interface
 
-The no-argument command remains the existing Linux developer build:
+The no-argument command is the developer build: host target
+(`linux-x86_64`), `Debug`, no packaging. It is what you want to check that a
+change compiles, and it is what agents are told to use (see
+[`AGENTS.md`](../AGENTS.md) rule 3).
 
 ```bash
 ./scripts/build.sh
 ```
 
-New isolated builds use an explicit target:
+`Release` is opt-in. Nothing infers it from the target or the package format,
+so a cross build or a packaging run stays Debug unless asked — a distributable
+needs `--config Release` spelled out:
 
 ```bash
 # Prepare once, then build incrementally.
 ./scripts/build.sh --target linux-x86_64 --prepare
 ./scripts/build.sh --target linux-x86_64
 
-# Select configuration and limit CPU/RAM pressure.
-./scripts/build.sh --target linux-x86_64 --config Debug --jobs 4
+# Limit CPU/RAM pressure.
+./scripts/build.sh --target linux-x86_64 --jobs 4
 
-# Package already prepared targets.
-./scripts/build.sh --target linux-x86_64 --package appimage
-./scripts/build.sh --target linux-x86_64 --package flatpak
-./scripts/build.sh --target windows-x86_64 --package zip
-./scripts/build.sh --target macos-x86_64 --package bundle
-./scripts/build.sh --target macos-arm64 --package bundle
+# Package already prepared targets. Distributables are Release builds.
+./scripts/build.sh --target linux-x86_64 --config Release --package appimage
+./scripts/build.sh --target linux-x86_64 --config Release --package flatpak
+./scripts/build.sh --target windows-x86_64 --config Release --package zip
+./scripts/build.sh --target macos-x86_64 --config Release --package bundle
+./scripts/build.sh --target macos-arm64 --config Release --package bundle
 
 # Clean only one build/package. Prepared dependencies survive.
 ./scripts/build.sh --target linux-x86_64 --clean
@@ -164,7 +169,7 @@ install:
 
 ```bash
 sudo apt install flex bison texinfo libgmp-dev libmpfr-dev libmpc-dev
-./scripts/build.sh --target windows-x86_64 --prepare --package zip
+./scripts/build.sh --target windows-x86_64 --config Release --prepare --package zip
 ```
 
 The six bootstrap stages (binutils, mingw-w64 headers, GCC stage 1, CRT,
