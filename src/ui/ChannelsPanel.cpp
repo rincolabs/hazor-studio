@@ -593,13 +593,28 @@ void ChannelsPanel::newAlphaChannel(bool withDialog)
                                       QColor(255, 0, 0), 0.5f);
         return;
     }
-    AlphaChannelDialog dialog(tr("New Channel"), suggested,
-                              ChannelMaskRepresentation::MaskedAreas,
-                              QColor(255, 0, 0), 0.5f, false, this);
-    if (dialog.exec() != QDialog::Accepted)
+    if (m_channelDlg) {
+        m_channelDlg->raise();
+        m_channelDlg->activateWindow();
         return;
-    m_controller->newAlphaChannel(dialog.channelName(), dialog.representation(),
-                                  dialog.overlayColor(), dialog.overlayOpacity());
+    }
+    // Modeless (see m_channelDlg): the channel is created on OK, against
+    // whatever document is active then.
+    auto* dialog = new AlphaChannelDialog(tr("New Channel"), suggested,
+                                          ChannelMaskRepresentation::MaskedAreas,
+                                          QColor(255, 0, 0), 0.5f, false, this);
+    m_channelDlg = dialog;
+    dialog->setWindowFlags(dialog->windowFlags() | Qt::Tool);
+    connect(dialog, &QDialog::accepted, this, [this, dialog]() {
+        if (!m_controller || !m_controller->document())
+            return;
+        m_controller->newAlphaChannel(dialog->channelName(), dialog->representation(),
+                                      dialog->overlayColor(), dialog->overlayOpacity());
+    });
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void ChannelsPanel::newSpotChannel()
@@ -607,13 +622,26 @@ void ChannelsPanel::newSpotChannel()
     if (!m_controller || !m_controller->document())
         return;
     auto* doc = m_controller->document();
-    SpotChannelDialog dialog(tr("New Spot Channel"),
-                             doc->uniqueChannelName(ChannelKind::Spot),
-                             QColor(255, 0, 255), 0.0f, QString(), false, this);
-    if (dialog.exec() != QDialog::Accepted)
+    if (m_channelDlg) {
+        m_channelDlg->raise();
+        m_channelDlg->activateWindow();
         return;
-    m_controller->newSpotChannel(dialog.channelName(), dialog.inkColor(),
-                                 dialog.solidity(), dialog.inkBook());
+    }
+    auto* dialog = new SpotChannelDialog(tr("New Spot Channel"),
+                                         doc->uniqueChannelName(ChannelKind::Spot),
+                                         QColor(255, 0, 255), 0.0f, QString(), false, this);
+    m_channelDlg = dialog;
+    dialog->setWindowFlags(dialog->windowFlags() | Qt::Tool);
+    connect(dialog, &QDialog::accepted, this, [this, dialog]() {
+        if (!m_controller || !m_controller->document())
+            return;
+        m_controller->newSpotChannel(dialog->channelName(), dialog->inkColor(),
+                                     dialog->solidity(), dialog->inkBook());
+    });
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void ChannelsPanel::duplicateCurrentChannel()
@@ -654,37 +682,76 @@ void ChannelsPanel::openChannelOptions(int channelIndex)
         || channelIndex >= static_cast<int>(doc->channels.size()))
         return;
     const DocumentChannel& ch = doc->channels[static_cast<size_t>(channelIndex)];
-    ChannelSettings settings = ChannelSettings::capture(ch);
 
-    if (ch.isSpot()) {
-        SpotChannelDialog dialog(tr("Spot Channel Options"), ch.name, ch.inkColor,
-                                 ch.solidity, ch.inkBook, true, this);
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        settings.name = dialog.channelName();
-        settings.inkColor = dialog.inkColor();
-        settings.solidity = dialog.solidity();
-        settings.inkBook = dialog.inkBook();
-        if (dialog.convertToAlpha())
-            settings.kind = ChannelKind::Alpha;
-    } else {
-        AlphaChannelDialog dialog(tr("Channel Options"), ch.name, ch.representation,
-                                  ch.overlayColor, ch.overlayOpacity, true, this);
-        if (dialog.exec() != QDialog::Accepted)
-            return;
-        settings.name = dialog.channelName();
-        settings.representation = dialog.representation();
-        settings.overlayColor = dialog.overlayColor();
-        settings.overlayOpacity = dialog.overlayOpacity();
-        if (dialog.convertToSpot()) {
-            settings.kind = ChannelKind::Spot;
-            // An alpha has no ink colour of its own; seed it from the overlay
-            // so the converted spot previews with the colour the user saw.
-            if (!settings.inkColor.isValid())
-                settings.inkColor = dialog.overlayColor();
-        }
+    if (m_channelDlg) {
+        m_channelDlg->raise();
+        m_channelDlg->activateWindow();
+        return;
     }
-    m_controller->setChannelSettings(channelIndex, settings);
+
+    // Modeless (see m_channelDlg). The settings are captured from the channel on
+    // OK rather than now: the dialog no longer blocks the document, so the
+    // channel may have moved or changed while it was open.
+    QDialog* dialog = nullptr;
+    if (ch.isSpot()) {
+        auto* spot = new SpotChannelDialog(tr("Spot Channel Options"), ch.name,
+                                           ch.inkColor, ch.solidity, ch.inkBook,
+                                           true, this);
+        dialog = spot;
+        connect(spot, &QDialog::accepted, this, [this, spot, channelIndex]() {
+            ChannelSettings settings;
+            if (!captureChannelSettings(channelIndex, settings))
+                return;
+            settings.name = spot->channelName();
+            settings.inkColor = spot->inkColor();
+            settings.solidity = spot->solidity();
+            settings.inkBook = spot->inkBook();
+            if (spot->convertToAlpha())
+                settings.kind = ChannelKind::Alpha;
+            m_controller->setChannelSettings(channelIndex, settings);
+        });
+    } else {
+        auto* alpha = new AlphaChannelDialog(tr("Channel Options"), ch.name,
+                                              ch.representation, ch.overlayColor,
+                                              ch.overlayOpacity, true, this);
+        dialog = alpha;
+        connect(alpha, &QDialog::accepted, this, [this, alpha, channelIndex]() {
+            ChannelSettings settings;
+            if (!captureChannelSettings(channelIndex, settings))
+                return;
+            settings.name = alpha->channelName();
+            settings.representation = alpha->representation();
+            settings.overlayColor = alpha->overlayColor();
+            settings.overlayOpacity = alpha->overlayOpacity();
+            if (alpha->convertToSpot()) {
+                settings.kind = ChannelKind::Spot;
+                // An alpha has no ink colour of its own; seed it from the overlay
+                // so the converted spot previews with the colour the user saw.
+                if (!settings.inkColor.isValid())
+                    settings.inkColor = alpha->overlayColor();
+            }
+            m_controller->setChannelSettings(channelIndex, settings);
+        });
+    }
+
+    m_channelDlg = dialog;
+    dialog->setWindowFlags(dialog->windowFlags() | Qt::Tool);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+// Re-reads the channel at `channelIndex` into `out`. Returns false when it is
+// gone — the channel dialogs are modeless, so the document can change under one.
+bool ChannelsPanel::captureChannelSettings(int channelIndex, ChannelSettings& out) const
+{
+    auto* doc = m_controller ? m_controller->document() : nullptr;
+    if (!doc || channelIndex < 0
+        || channelIndex >= static_cast<int>(doc->channels.size()))
+        return false;
+    out = ChannelSettings::capture(doc->channels[static_cast<size_t>(channelIndex)]);
+    return true;
 }
 
 void ChannelsPanel::renameCurrentChannel()

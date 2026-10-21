@@ -769,6 +769,8 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ui/ColorSwapWidget.hpp
     src/ui/colorpicker/ColorPickerDialog.cpp
     src/ui/colorpicker/ColorPickerDialog.hpp
+    src/ui/colorpicker/CanvasColorPickSource.cpp
+    src/ui/colorpicker/CanvasColorPickSource.hpp
     src/ui/colorpicker/SaturationBrightnessArea.cpp
     src/ui/colorpicker/SaturationBrightnessArea.hpp
     src/ui/colorpicker/ColorHueSlider.cpp

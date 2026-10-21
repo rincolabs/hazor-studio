@@ -338,7 +338,7 @@ void LayerStylesDialog::addColorRow(QFormLayout* form, int row,
         connect(dlg, &QDialog::finished, this,
             [this](int) { emit liveEditChanged(false); });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
     form->addRow(label, btn);
 }

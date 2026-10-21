@@ -485,7 +485,7 @@ void SwatchesPanel::editColorItem(QListWidgetItem* item)
                 SwatchManager::instance()->setColor(collectionId, colorId, color, name);
             });
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 void SwatchesPanel::renameColorItem(QListWidgetItem* item)
@@ -567,7 +567,7 @@ void SwatchesPanel::onGridContextMenu(const QPoint& pos)
         connect(dlg, &ColorPickerDialog::colorAccepted, this,
                 [this](const QColor& color) { addColorToCurrent(color); });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     } else if (chosen == editAct) {
         editColorItem(item);
     } else if (chosen == renameAct) {

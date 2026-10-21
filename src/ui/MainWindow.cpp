@@ -74,6 +74,7 @@
 #include "core/SwatchManager.hpp"
 #include "core/GuideTypes.hpp"
 #include "colorpicker/ColorPickerDialog.hpp"
+#include "colorpicker/CanvasColorPickSource.hpp"
 
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -359,6 +360,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_toolExecutor = new ToolExecutor(nullptr);
     m_colorEngine = new ColorEngine(this);
 
+    // The colour dialogs are opened from panels, tool options and adjustment
+    // editors, none of which knows about documents or tabs. Give them one way to
+    // reach the canvas the user is looking at: the resolver is consulted per
+    // call, so it keeps up with every tab switch on its own. The QPointer keeps
+    // a dialog that outlives this window from calling into freed memory.
+    CanvasColorPickSource::setResolver([self = QPointer<MainWindow>(this)]() -> CanvasView* {
+        return self ? self->m_canvas : nullptr;
+    });
+
     m_agentController = new AgentController(m_toolExecutor, this);
     m_presetManager = new AgentPresetManager(this);
 
@@ -512,11 +522,9 @@ MainWindow::MainWindow(QWidget* parent)
     auto* colorSettingsAction = editMenu->addAction(tr("Color &Settings..."));
     ShortcutManager::instance()->registerAction("edit.color_settings", colorSettingsAction);
     connect(colorSettingsAction, &QAction::triggered, this, [this]() {
-        AppSettingsDialog dlg(AppSettingsDialog::PageColorManagement,
-                              m_presetManager,
-                              m_agentController ? m_agentController->client() : nullptr,
-                              this);
-        if (dlg.exec() == QDialog::Accepted) {
+        showAppSettings(AppSettingsDialog::PageColorManagement, [this](int result) {
+            if (result != QDialog::Accepted)
+                return;
             // Color/display settings (display CM, monitor profile, intent) change
             // how every open document is shown without touching composition —
             // invalidate each document's display cache and repaint its canvas.
@@ -527,7 +535,7 @@ MainWindow::MainWindow(QWidget* parent)
                     tab.canvas->update();
             }
             updateStatusFromDocument();
-        }
+        });
     });
 
     auto* assignProfileAction = editMenu->addAction(tr("Assign &Profile..."));
@@ -1105,14 +1113,12 @@ MainWindow::MainWindow(QWidget* parent)
     auto* snapSettingsAction = snapMenu->addAction(tr("Snap Settings..."));
     ShortcutManager::instance()->registerAction("view.snap_settings", snapSettingsAction);
     connect(snapSettingsAction, &QAction::triggered, this, [this]() {
-        AppSettingsDialog dlg(AppSettingsDialog::PageInterface,
-                              m_presetManager,
-                              m_agentController ? m_agentController->client() : nullptr,
-                              this);
-        if (dlg.exec() == QDialog::Accepted) {
+        showAppSettings(AppSettingsDialog::PageInterface, [this](int result) {
+            if (result != QDialog::Accepted)
+                return;
             reloadRulerGuideSettingsForTabs();
             updateRulerGuideActionStates();
-        }
+        });
     });
     updateRulerGuideActionStates();
 
@@ -2076,6 +2082,18 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_toolBar, &ToolOptionsBar::textUnderlineChanged, this, &MainWindow::onTextUnderlineChanged);
     connect(m_toolBar, &ToolOptionsBar::textStrikethroughChanged, this, &MainWindow::onTextStrikethroughChanged);
     connect(m_toolBar, &ToolOptionsBar::textColorChanged, this, &MainWindow::onTextColorChanged);
+    // The text colour dialog previews on the canvas while it is open: every
+    // intermediate colour repaints the selected text undo-lessly, and the one
+    // undo step (or the restore) lands when the dialog closes.
+    connect(m_toolBar, &ToolOptionsBar::textColorPreviewChanged, this, [this](const QColor& c) {
+        if (m_canvas) m_canvas->previewTextColor(c);
+    });
+    connect(m_toolBar, &ToolOptionsBar::textColorPreviewFinished, this, [this](bool keep) {
+        if (!m_canvas) return;
+        m_canvas->endTextColorPreview(keep);
+        refreshLayerPanel();
+        refreshHistoryPanel();
+    });
     connect(m_toolBar, &ToolOptionsBar::textAlignChanged, this, &MainWindow::onTextAlignChanged);
     connect(m_toolBar, &ToolOptionsBar::textTrackingChanged, this, &MainWindow::onTextTrackingChanged);
     connect(m_toolBar, &ToolOptionsBar::textLeadingChanged, this, &MainWindow::onTextLeadingChanged);
@@ -2179,9 +2197,35 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_toolBar, &ToolOptionsBar::shapeTypeChanged, this, [this](int type) {
         if (m_canvas) m_canvas->setShapeType(type);
     });
+    // Same mutation as updateActiveShape, but through the controller's preview
+    // session: a colour dialog repaints the selected shape on every intermediate
+    // value and still leaves a single undo step behind.
+    auto previewActiveShape = [this](auto mutate) {
+        if (!m_doc || !m_ctrl) return;
+        const int activeIndex = m_doc->activeFlatIndex;
+        auto* node = m_doc->nodeAt(activeIndex);
+        if (!node || !node->layer || !node->layer->shapeData) return;
+        m_ctrl->beginShapeDataPreview(activeIndex);
+        ShapeData data = *node->layer->shapeData;
+        mutate(data);
+        m_ctrl->previewShapeData(data);
+    };
+
     connect(m_toolBar, &ToolOptionsBar::shapeFillColorChanged, this, [this, updateActiveShape](const QColor& c) {
         if (m_canvas) m_canvas->setShapeFillColor(c);
+        // A live preview already applied this colour and commits its own single
+        // undo step when the dialog closes; editing again here would duplicate
+        // the history entry.
+        if (m_ctrl && m_ctrl->shapeDataPreviewActive()) return;
         updateActiveShape([&](ShapeData& data) {
+            data.style.fillEnabled = true;
+            data.style.fillColor = c;
+        });
+    });
+    connect(m_toolBar, &ToolOptionsBar::shapeFillColorPreviewChanged, this,
+            [this, previewActiveShape](const QColor& c) {
+        if (m_canvas) m_canvas->setShapeFillColor(c);
+        previewActiveShape([&](ShapeData& data) {
             data.style.fillEnabled = true;
             data.style.fillColor = c;
         });
@@ -2192,10 +2236,25 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_toolBar, &ToolOptionsBar::shapeStrokeColorChanged, this, [this, updateActiveShape](const QColor& c) {
         if (m_canvas) m_canvas->setShapeStrokeColor(c);
+        if (m_ctrl && m_ctrl->shapeDataPreviewActive()) return;
         updateActiveShape([&](ShapeData& data) {
             data.style.strokeEnabled = true;
             data.style.strokeColor = c;
         });
+    });
+    connect(m_toolBar, &ToolOptionsBar::shapeStrokeColorPreviewChanged, this,
+            [this, previewActiveShape](const QColor& c) {
+        if (m_canvas) m_canvas->setShapeStrokeColor(c);
+        previewActiveShape([&](ShapeData& data) {
+            data.style.strokeEnabled = true;
+            data.style.strokeColor = c;
+        });
+    });
+    connect(m_toolBar, &ToolOptionsBar::shapeColorPreviewFinished, this, [this](bool keep) {
+        if (m_ctrl) m_ctrl->endShapeDataPreview(keep);
+        if (m_canvas) { m_canvas->syncLayersToGpu(); m_canvas->update(); }
+        refreshLayerPanel();
+        refreshHistoryPanel();
     });
     connect(m_toolBar, &ToolOptionsBar::shapeStrokeEnabledChanged, this, [this, updateActiveShape](bool enabled) {
         if (m_canvas) m_canvas->setShapeStrokeEnabled(enabled);
@@ -3704,16 +3763,50 @@ void MainWindow::onHomeTemplateRequested(const QString& name, int width, int hei
     showNewDocumentDialog(&settings);
 }
 
+void MainWindow::showAppSettings(int page, std::function<void(int)> onFinished)
+{
+    if (m_settingsDlg) {
+        m_settingsDlg->setCurrentPage(page);
+        m_settingsDlg->raise();
+        m_settingsDlg->activateWindow();
+        return;
+    }
+
+    auto* dlg = new AppSettingsDialog(page, m_presetManager,
+                                      m_agentController ? m_agentController->client() : nullptr,
+                                      this);
+    m_settingsDlg = dlg;
+    if (onFinished)
+        connect(dlg, &QDialog::finished, this, std::move(onFinished));
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
+}
+
 void MainWindow::showNewDocumentDialog(const DocumentSettings* initialSettings)
 {
-    NewDocumentDialog dlg(this);
-    if (initialSettings)
-        dlg.setSettings(*initialSettings);
-
-    if (dlg.exec() != QDialog::Accepted)
+    if (m_newDocumentDlg) {
+        m_newDocumentDlg->raise();
+        m_newDocumentDlg->activateWindow();
         return;
+    }
 
-    createDocumentFromSettings(dlg.settings());
+    // Modeless: the Custom background colour opens a colour picker whose
+    // eyedropper samples the canvas, so an already-open document stays
+    // clickable. The document is still created only on OK.
+    auto* dlg = new NewDocumentDialog(this);
+    if (initialSettings)
+        dlg->setSettings(*initialSettings);
+    m_newDocumentDlg = dlg;
+    dlg->setWindowFlags(dlg->windowFlags() | Qt::Tool);
+    connect(dlg, &QDialog::accepted, this, [this, dlg]() {
+        createDocumentFromSettings(dlg->settings());
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::createDocumentFromSettings(const DocumentSettings& s)
@@ -6087,11 +6180,17 @@ void MainWindow::onTextStrikethroughChanged(bool strikethrough)
 
 void MainWindow::onTextColorChanged(const QColor& color)
 {
-    if (m_colorEngine) {
-        m_colorEngine->setForegroundColor(color);
-    } else if (m_canvas) {
+    // The text colour control is an explicit instruction to recolour the
+    // selected text, so it applies whatever the active tool is — unlike the
+    // foreground swatch, which only recolours text under the Move tool (see the
+    // ColorEngine::foregroundColorChanged handler). Routing this through the
+    // foreground alone used to swallow the change for every other tool, the Text
+    // tool itself included.
+    if (m_canvas)
         m_canvas->setTextColor(color);
-    }
+    // Keep the foreground in sync: it is what the next text layer is created with.
+    if (m_colorEngine)
+        m_colorEngine->setForegroundColor(color);
 }
 
 void MainWindow::onTextAlignChanged(int align)
@@ -7346,10 +7445,9 @@ void MainWindow::onGenerativeFill()
 
 void MainWindow::onConfigureAgent()
 {
-    AppSettingsDialog dlg(AppSettingsDialog::PageAIAgent,
-                           m_presetManager, m_agentController ? m_agentController->client() : nullptr,
-                           this);
-    if (dlg.exec() == QDialog::Accepted) {
+    showAppSettings(AppSettingsDialog::PageAIAgent, [this](int result) {
+        if (result != QDialog::Accepted)
+            return;
         m_presetManager->loadAll();
         m_agentPanel->setAgentList(m_presetManager->presetNames(Assistant));
         if (m_generativeFillPanel)
@@ -7363,7 +7461,7 @@ void MainWindow::onConfigureAgent()
         } else if (!assistants.isEmpty()) {
             onAgentSelected(assistants.first());
         }
-    }
+    });
 }
 
 void MainWindow::applyMcpSettings()
@@ -7393,29 +7491,27 @@ void MainWindow::applyMcpSettings()
 
 void MainWindow::onSettings()
 {
-    AppSettingsDialog dlg(AppSettingsDialog::PageGeneral,
-                           m_presetManager, m_agentController ? m_agentController->client() : nullptr,
-                           this);
-    if (dlg.exec() == QDialog::Accepted) {
+    showAppSettings(AppSettingsDialog::PageGeneral, [this](int result) {
+        if (result != QDialog::Accepted)
+            return;
         reloadRulerGuideSettingsForTabs();
         updateRulerGuideActionStates();
-    }
+    });
 }
 
 void MainWindow::onOpenAiSettings()
 {
-    AppSettingsDialog dlg(AppSettingsDialog::PageAIMachineLearning,
-                          m_presetManager, m_agentController ? m_agentController->client() : nullptr,
-                          this);
-    dlg.exec();
-    // Provider/model settings may have changed: reset AI caches/sessions and
-    // refresh the tool's availability + model list.
-    if (m_canvas) {
-        if (auto* ai = m_canvas->aiSelectionController())
-            ai->onProviderOrSettingsChanged();
-        m_toolBar->bindAiController(m_canvas->aiSelectionController());
-        ensureAiControllerConnected();
-    }
+    showAppSettings(AppSettingsDialog::PageAIMachineLearning, [this](int) {
+        // Provider/model settings may have changed: reset AI caches/sessions and
+        // refresh the tool's availability + model list. Runs on cancel too, as it
+        // did when this was an exec() whose result was ignored.
+        if (m_canvas) {
+            if (auto* ai = m_canvas->aiSelectionController())
+                ai->onProviderOrSettingsChanged();
+            m_toolBar->bindAiController(m_canvas->aiSelectionController());
+            ensureAiControllerConnected();
+        }
+    });
 }
 
 void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)

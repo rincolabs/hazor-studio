@@ -243,6 +243,16 @@ public:
     void setTextStrikethrough(bool strikethrough);
     void setTextColor(const QColor& color);
     void setTextAlign(int align);
+
+    // ── Live text colour preview ──
+    // A colour dialog has to recolour the selected text while it is still open
+    // and still leave a single undo step behind. previewTextColor() snapshots
+    // the text layer on its first call and then recolours it without touching
+    // history; endTextColorPreview(true) pushes that one step, false restores
+    // the snapshot. Both are no-ops when there is no editable text layer, so a
+    // caller can bracket a colour dialog unconditionally.
+    void previewTextColor(const QColor& color);
+    void endTextColorPreview(bool keep);
     void setTextTracking(double tracking);
     void setTextLeading(double leading);
 
@@ -270,6 +280,22 @@ public:
     void setEyedropperSampleSize(SampleSize size) { m_eyedropperSampleSize = size; }
     SampleMode eyedropperSampleMode() const { return m_eyedropperSampleMode; }
     SampleSize eyedropperSampleSize() const { return m_eyedropperSampleSize; }
+
+    // Samples the document under a viewport position honouring the eyedropper's
+    // current sample mode and size. Shared by the Eyedropper tool and by the
+    // colour dialogs' eyedropper (setColorPickArmed).
+    QColor eyedropperSampleColor(QPointF screenPos);
+
+    // ── Colour-dialog eyedropper ──
+    // Armed by ColorPickerDialog: a left press/drag anywhere on the canvas
+    // samples the pixel under the cursor and reports it through colorPickSampled
+    // (continuously, so the dialog can preview) and colorPickFinished (on
+    // release). Picks fire regardless of the active tool — a colour dialog must
+    // not require the Eyedropper tool to be selected — and the press is consumed
+    // so the real tool never sees it. A tool switch or a document swap disarms
+    // and emits colorPickCancelled so the dialog un-presses its button.
+    void setColorPickArmed(bool armed);
+    bool colorPickArmed() const { return m_colorPickArmed; }
 
     // ── Curves editor image pick ──
     // Arms the Curves editor's eyedropper/target tools (0 = disarmed; 1=black,
@@ -388,6 +414,12 @@ signals:
     // The canvas disarmed the eyedropper itself (tool switch / Esc): the editor
     // should uncheck its eyedropper button.
     void hueSatPickCancelled();
+    // Colour-dialog eyedropper: the colour under the cursor while the user
+    // drags on the canvas, then once more on release (colorPickFinished).
+    // colorPickCancelled reports that the canvas disarmed itself.
+    void colorPickSampled(const QColor& color);
+    void colorPickFinished(const QColor& color);
+    void colorPickCancelled();
     void zoomChanged(float zoom);
     void mouseImageCoordChanged(QPointF imageCoord);
     void toolCallRequested(int tool, QPointF imagePos, QPointF screenPos);
@@ -652,7 +684,11 @@ private:
     void doAlignLayer(int alignmentType);
     void fillBucket(QPointF screenPos);
     void eyedropperSample(QPointF screenPos, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
-    QColor eyedropperSampleColor(QPointF screenPos);
+    // Moves/fills the eyedropper's hover read-out (hex + RGBA) for `screenPos`,
+    // or hides it when the sample is invalid. Shared by the Eyedropper tool's
+    // hover and by the colour-dialog pick drag.
+    void updateEyedropperReadout(QPointF screenPos, const QColor& color);
+    void hideEyedropperReadout();
     bool isInRotateZone(const QPolygonF& cornersScreenNdc, QPointF screenPos) const;
     QPointF constrainedGradientPoint(QPointF start, QPointF current,
                                      Qt::KeyboardModifiers modifiers) const;
@@ -1089,6 +1125,16 @@ private:
     int m_textDragStart = -1;
     TextLayerData m_textBeforeSnapshot;
     QTransform m_textBeforeTransform;
+    // ── Live text colour preview state (see previewTextColor) ──
+    // m_textColorPreviewData is the layer the session started on: if the user
+    // selects another layer while the dialog is open the session stops instead
+    // of recolouring the wrong text.
+    bool m_textColorPreview = false;
+    int m_textColorPreviewIndex = -1;
+    TextLayerData* m_textColorPreviewData = nullptr;
+    TextLayerData m_textColorPreviewBefore;
+    QTransform m_textColorPreviewTransform;
+    QColor m_textColorPreviewColor;
     QPointF m_textCreateStart;
     bool m_textCreatingBox = false;
 
@@ -1100,6 +1146,10 @@ private:
     int m_curvesPickMode = 0;
     bool m_curvesTargetDragging = false;
     double m_curvesTargetStartY = 0.0;
+
+    // ── Colour-dialog eyedropper state (see setColorPickArmed) ──
+    bool m_colorPickArmed = false;
+    bool m_colorPickDragging = false;
 
     // ── Hue/Saturation editor eyedropper state ──
     // 0 = disarmed, 1 = main (recenter range, one-shot click), 2 = add range,
@@ -1126,6 +1176,10 @@ private:
     QColor m_eyedropperHoverColor;
     QPointF m_eyedropperScreenPos;
     QLabel* m_eyedropperOverlay = nullptr;
+    // The colour square inside the read-out. A child of the label, so the
+    // label's own geometry and edge-flipping keep working untouched — the room
+    // for it comes from the label's extra right padding.
+    QLabel* m_eyedropperSwatch = nullptr;
     QLabel* m_transformOverlay = nullptr;
 
     // ── Crop tool state ──

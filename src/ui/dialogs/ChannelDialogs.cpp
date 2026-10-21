@@ -78,9 +78,19 @@ ChannelColorButton::ChannelColorButton(const QColor& color, QWidget* parent)
     setCursor(Qt::PointingHandCursor);
     updateSwatch();
     connect(this, &QPushButton::clicked, this, [this]() {
-        ColorPickerDialog picker(m_color, ColorPickerMode::Foreground, this);
-        if (picker.exec() == QDialog::Accepted)
-            setColor(picker.selectedColor());
+        if (m_picker) {
+            m_picker->raise();
+            m_picker->activateWindow();
+            return;
+        }
+        // Modeless so the picker's eyedropper can sample the image: an ink or
+        // overlay colour is usually matched to something in the document.
+        auto* picker = new ColorPickerDialog(m_color, ColorPickerMode::Foreground, this);
+        m_picker = picker;
+        connect(picker, &ColorPickerDialog::colorAccepted, this,
+                [this](const QColor& c) { setColor(c); });
+        picker->setAttribute(Qt::WA_DeleteOnClose);
+        picker->showModeless();
     });
 }
 

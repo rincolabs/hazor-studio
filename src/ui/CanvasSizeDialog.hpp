@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QDialog>
+#include <QPointer>
 #include <QSize>
 
 #include "controller/ImageController.hpp"
@@ -12,6 +13,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
+class ColorPickerDialog;
 
 struct CanvasSizeSettings {
     QSize targetSize;
@@ -52,6 +54,10 @@ private:
     double pixelsToUnit(double pixels, SizeUnit unit, int basePixels) const;
     void refreshSpinPresentation();
     CanvasAnchor selectedAnchor() const;
+
+    // The open colour picker, if any. Modeless (so its eyedropper can reach the
+    // canvas), hence the single-instance guard.
+    QPointer<ColorPickerDialog> m_colorDlg;
 
     QSize m_currentSize;
     double m_resolutionDpi = 300.0;

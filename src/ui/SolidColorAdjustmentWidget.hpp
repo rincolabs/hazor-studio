@@ -2,6 +2,7 @@
 
 #include <QAbstractButton>
 #include <QColor>
+#include <QPointer>
 #include <QWidget>
 
 #include "core/SolidColorData.hpp"
@@ -9,6 +10,7 @@
 class QLabel;
 class QLineEdit;
 class QSpinBox;
+class ColorPickerDialog;
 class ImageController;
 class AdjustmentPanelBar;
 
@@ -53,6 +55,8 @@ public:
 
     // Opens the colour picker bound to the current node (used by the swatch and
     // by a double-click on the layer's colour thumbnail). No-op when detached.
+    // The picker is modeless on purpose: its eyedropper needs the canvas to stay
+    // clickable so a colour can be sampled straight off the image.
     void openColorPicker();
 
 protected:
@@ -67,8 +71,15 @@ private:
     QVariantMap paramsFromData() const { return m_data.toParams(); }
     void setColorLive(const QColor& c);     // updates working data + UI + canvas
     void applyLive();
+    // A Solid Color fill covers the whole canvas, so it is also everything the
+    // picker's eyedropper would land on. While the eyedropper is armed the fill
+    // is bypassed (the existing alpha-0 path) so the image underneath can be
+    // sampled; it comes back — with the sampled colour — as soon as the pick ends.
+    void setEyedropperBypass(bool on);
     void beginGesture();
     void commitGesture(const QString& label);
+    // Drops the gesture without a history entry, restoring `before` on the node.
+    void cancelGesture(const QColor& before);
     void applyAndCommit(const QString& label);
 
     void onHexEdited();
@@ -87,6 +98,7 @@ private:
     bool m_inGesture = false;
     QVariantMap m_gestureBefore;
     bool m_previewOn = true;
+    bool m_eyedropperBypass = false;
     bool m_loading = false;
 
     // Header
@@ -101,4 +113,7 @@ private:
     QSpinBox* m_bSpin = nullptr;
 
     AdjustmentPanelBar* m_bar = nullptr;
+    // The open colour picker, if any: single-instance (a second click raises it)
+    // and cancelled whenever the editor is rebound or hidden under it.
+    QPointer<ColorPickerDialog> m_colorDlg;
 };

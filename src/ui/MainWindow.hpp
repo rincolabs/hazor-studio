@@ -409,6 +409,13 @@ private:
     void execToolDialog(class ToolDialog* dlg, const QString& toolName,
                          const QVariantMap& defaultParams);
 
+    // Opens Settings on `page`, modeless and single-instance, calling
+    // `onFinished` with the dialog's result when it closes. Modeless because the
+    // Interface page hosts a colour picker (guide colour) whose eyedropper has to
+    // click the canvas — exec() would swallow every one of those clicks. Follows
+    // execToolDialog's pattern: Qt::Tool + show() + deleteLater.
+    void showAppSettings(int page, std::function<void(int)> onFinished = {});
+
     void showNewDocumentDialog(const DocumentSettings* initialSettings = nullptr);
     void createDocumentFromSettings(const DocumentSettings& settings);
     void onHomeTemplateRequested(const QString& name, int width, int height);
@@ -614,6 +621,17 @@ private:
     bool m_progressActive = false;
     uint64_t m_activeProgressJobId = 0;
     QPointer<ImageController> m_progressController;
+
+    // Dialogs that used to run under exec() and are now modeless, so that the
+    // colour pickers they host can reach the canvas with the eyedropper. Being
+    // modeless leaves their menu item clickable while one is open, so each gets a
+    // single-instance guard: a second invocation raises the open dialog.
+    // m_menuColorDlg covers the colour-only commands (Fill Layer, New Solid
+    // Color Layer).
+    QPointer<QDialog> m_menuColorDlg;
+    QPointer<class AppSettingsDialog> m_settingsDlg;
+    QPointer<QDialog> m_canvasSizeDlg;
+    QPointer<QDialog> m_newDocumentDlg;
 
     // AI Select loading dialog (separate from the ImageController-driven progress
     // above; cancellation routes to the AI controller, not a long-operation job).

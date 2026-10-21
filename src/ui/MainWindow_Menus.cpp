@@ -151,10 +151,20 @@ void MainWindow::onMenuFillLayer()
     auto* layer = m_ctrl->activeLayer();
     if (!layer) return;
 
+    if (m_menuColorDlg) {
+        m_menuColorDlg->raise();
+        m_menuColorDlg->activateWindow();
+        return;
+    }
+
+    // Modeless on purpose: a modal dialog blocks the canvas, and the picker's
+    // eyedropper has to be able to sample the image the fill is going into. The
+    // fill still happens only on OK, on whichever layer is active then.
     QColor initial = m_colorEngine ? m_colorEngine->foregroundColor() : Qt::white;
-    ColorPickerDialog dlg(initial, ColorPickerMode::Foreground, this);
-    if (dlg.exec() == QDialog::Accepted) {
-        QColor c = dlg.selectedColor();
+    auto* dlg = new ColorPickerDialog(initial, ColorPickerMode::Foreground, this);
+    m_menuColorDlg = dlg;
+    connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& c) {
+        if (!m_ctrl || !m_canvas || !m_ctrl->activeLayer()) return;
         m_ctrl->executeTool("fill_layer", {
             {"red", static_cast<double>(c.red())},
             {"green", static_cast<double>(c.green())},
@@ -163,7 +173,9 @@ void MainWindow::onMenuFillLayer()
         });
         m_canvas->syncLayersToGpu();
         m_canvas->update();
-    }
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->showModeless();
 }
 
 void MainWindow::createSolidColorLayer()
@@ -176,17 +188,27 @@ void MainWindow::createSolidColorLayer()
     if (!initial.isValid())
         initial = QColor(Qt::white);
 
-    ColorPickerDialog dlg(initial, ColorPickerMode::Foreground, this);
-    if (dlg.exec() != QDialog::Accepted)
-        return;   // cancel = no layer (no ghost layer left behind)
+    if (m_menuColorDlg) {
+        m_menuColorDlg->raise();
+        m_menuColorDlg->activateWindow();
+        return;
+    }
 
-    const QColor chosen = dlg.selectedColor();
-    m_ctrl->addAdjustmentLayer(QStringLiteral("solidcolor"),
-                               solidcolor::SolidColorData::paramsFromColor(chosen));
-    if (m_canvas) { m_canvas->syncLayersToGpu(); m_canvas->update(); }
-    refreshLayerPanel();
-    refreshPropertiesPanel();
-    updateLayerMenuState();
+    // Modeless so the picker's eyedropper can sample the image the fill layer is
+    // being built from. Cancel still means no layer (no ghost layer left behind).
+    auto* dlg = new ColorPickerDialog(initial, ColorPickerMode::Foreground, this);
+    m_menuColorDlg = dlg;
+    connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& chosen) {
+        if (!m_ctrl || !m_doc) return;
+        m_ctrl->addAdjustmentLayer(QStringLiteral("solidcolor"),
+                                   solidcolor::SolidColorData::paramsFromColor(chosen));
+        if (m_canvas) { m_canvas->syncLayersToGpu(); m_canvas->update(); }
+        refreshLayerPanel();
+        refreshPropertiesPanel();
+        updateLayerMenuState();
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->showModeless();
 }
 
 void MainWindow::onMenuMergeVisible()
@@ -435,23 +457,40 @@ void MainWindow::onImageResizeCanvas()
     if (!m_ctrl || !m_doc)
         return;
 
-    const QColor bgColor = m_colorEngine ? m_colorEngine->backgroundColor() : Qt::white;
-    CanvasSizeDialog dlg(m_doc->size, m_doc->resolutionDpi, bgColor, this);
-    if (dlg.exec() != QDialog::Accepted)
+    if (m_canvasSizeDlg) {
+        m_canvasSizeDlg->raise();
+        m_canvasSizeDlg->activateWindow();
         return;
+    }
 
-    const CanvasSizeSettings s = dlg.settings();
-    CanvasResizeOptions options;
-    options.targetSize = s.targetSize;
-    options.anchor = s.anchor;
-    options.fillExtension = s.fillExtension;
-    options.extensionColor = s.extensionColor;
+    // Modeless: the Custom extension colour opens a colour picker whose
+    // eyedropper samples the canvas, so the canvas has to stay clickable. The
+    // resize still runs only on OK — and against whatever document is active
+    // then, which is re-read here rather than captured at open time.
+    const QColor bgColor = m_colorEngine ? m_colorEngine->backgroundColor() : Qt::white;
+    auto* dlg = new CanvasSizeDialog(m_doc->size, m_doc->resolutionDpi, bgColor, this);
+    m_canvasSizeDlg = dlg;
+    dlg->setWindowFlags(dlg->windowFlags() | Qt::Tool);
+    connect(dlg, &QDialog::accepted, this, [this, dlg]() {
+        if (!m_ctrl || !m_doc)
+            return;
+        const CanvasSizeSettings s = dlg->settings();
+        CanvasResizeOptions options;
+        options.targetSize = s.targetSize;
+        options.anchor = s.anchor;
+        options.fillExtension = s.fillExtension;
+        options.extensionColor = s.extensionColor;
 
-    const qint64 area = static_cast<qint64>(m_doc->size.width()) * m_doc->size.height();
-    if (area >= m_doc->perfConfig.autoTileMinArea)
-        m_ctrl->resizeCanvasAsync(options);
-    else
-        m_ctrl->resizeCanvas(options);
+        const qint64 area = static_cast<qint64>(m_doc->size.width()) * m_doc->size.height();
+        if (area >= m_doc->perfConfig.autoTileMinArea)
+            m_ctrl->resizeCanvasAsync(options);
+        else
+            m_ctrl->resizeCanvas(options);
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::onImageColorAdjustments()
@@ -625,7 +664,7 @@ void MainWindow::onMenuColorPicker()
     });
 
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 void MainWindow::onAboutDialog()

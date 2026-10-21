@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QDialog>
+#include <QPointer>
 #include <QPushButton>
 #include <QString>
 #include <vector>
@@ -15,6 +16,7 @@ class QLabel;
 class QLineEdit;
 class QRadioButton;
 class QSpinBox;
+class ColorPickerDialog;
 class Document;
 
 // Dialogs for the Channels panel. Each one only COLLECTS values — the
@@ -37,6 +39,8 @@ signals:
 private:
     void updateSwatch();
     QColor m_color;
+    // The open picker: modeless, so its eyedropper can reach the canvas.
+    QPointer<ColorPickerDialog> m_picker;
 };
 
 // New Channel / Channel Options for an Alpha channel.

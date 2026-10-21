@@ -983,8 +983,20 @@ CanvasView::CanvasView(Document* doc, ImageController* controller, QWidget* pare
     .arg(th->fontSizeXS);
 
     m_eyedropperOverlay = new QLabel(this);
-    m_eyedropperOverlay->setStyleSheet(overlayQss);
     m_eyedropperOverlay->setVisible(false);
+
+    // The read-out shows the sampled colour itself, as a square on its right:
+    // a hex triplet alone is hard to judge against the pixel under the cursor.
+    m_eyedropperSwatch = new QLabel(m_eyedropperOverlay);
+    m_eyedropperSwatch->setFixedSize(18, 18);
+    // Its own rules, or it would inherit the read-out's background, border and
+    // padding from the QLabel selector above; the swatch draws itself (border
+    // included) into a pixmap instead.
+    m_eyedropperSwatch->setStyleSheet(
+        QStringLiteral("QLabel { background: transparent; border: none; padding: 0px; }"));
+    m_eyedropperOverlay->setStyleSheet(
+        overlayQss + QStringLiteral("QLabel { padding-right: %1px; }")
+        .arg(th->spaceSM * 2 + m_eyedropperSwatch->width()));
     m_eyedropperOverlay->adjustSize();
 
     m_transformOverlay = new QLabel(this);
@@ -1477,6 +1489,14 @@ void CanvasView::setTool(Tool t)
     if (m_hueSatPickMode != 0) {
         setHueSatPickMode(0);
         emit hueSatPickCancelled();
+    }
+
+    // Same for a colour dialog's eyedropper: picking a tool is the user asking
+    // for the canvas back, so the dialog un-presses its button and keeps the
+    // colour it has.
+    if (m_colorPickArmed) {
+        setColorPickArmed(false);
+        emit colorPickCancelled();
     }
 
     // Leaving the AI Object Selection tool cancels any in-flight inference and
@@ -2830,7 +2850,10 @@ void CanvasView::applyTextCharStyle(const std::function<void(TextSpan&)>& fn)
     td->dirty = true;
     rerenderTextLayer();
 
-    if (canCommit)
+    // A colour dialog's live preview is a single gesture: endTextColorPreview()
+    // pushes the one undo step it deserves, so the per-change commit that every
+    // other style change makes is suppressed while a preview is running.
+    if (canCommit && !m_textColorPreview)
         m_controller->commitTextEdit(idx, before, beforeTransform);
 }
 
@@ -2903,6 +2926,74 @@ void CanvasView::setTextStrikethrough(bool strikethrough)
 void CanvasView::setTextColor(const QColor& color)
 {
     applyTextCharStyle([color](TextSpan& s) { s.color = color; });
+}
+
+// ── Live text colour preview ────────────────────────────────────────────────
+// A colour dialog produces dozens of intermediate colours but deserves exactly
+// one undo step. The session snapshots the text layer on the first preview,
+// suppresses the per-change commit in applyTextCharStyle, and on close either
+// pushes that single step or puts the snapshot back.
+
+void CanvasView::previewTextColor(const QColor& color)
+{
+    TextLayerData* td = activeTextData();
+    if (!td || !activeContentEditable())
+        return;   // nothing (or nothing editable) to preview — stay silent
+
+    if (!m_textColorPreview) {
+        TextSpan ch;
+        ParagraphStyle para;
+        m_textColorPreviewColor = currentTextContext(ch, para)
+            ? ch.color : QColor(Qt::black);
+        m_textColorPreviewIndex = (m_doc && m_doc->activeFlatIndex >= 0)
+            ? m_doc->activeFlatIndex : m_textLayerIndex;
+        auto* node = (m_doc && m_textColorPreviewIndex >= 0)
+            ? m_doc->nodeAt(m_textColorPreviewIndex) : nullptr;
+        m_textColorPreviewTransform = node ? node->transform : QTransform();
+        m_textColorPreviewBefore = *td;
+        m_textColorPreviewData = td;
+        m_textColorPreview = true;
+    } else if (m_textColorPreviewData != td) {
+        // The user selected a different layer while the dialog was open: stop
+        // previewing rather than recolour text the dialog was never opened on.
+        return;
+    }
+
+    setTextColor(color);
+}
+
+void CanvasView::endTextColorPreview(bool keep)
+{
+    if (!m_textColorPreview)
+        return;
+
+    auto* node = (m_doc && m_textColorPreviewIndex >= 0)
+        ? m_doc->nodeAt(m_textColorPreviewIndex) : nullptr;
+    TextLayerData* td = (node && node->layer) ? node->layer->textData.get() : nullptr;
+    const bool sameLayer = (td && td == m_textColorPreviewData);
+
+    if (!keep && sameLayer) {
+        // Put the original colour back through the normal channel first: that is
+        // the only way to clear it from the editor's pending insertion style,
+        // which the snapshot assignment below cannot reach. Then restore the
+        // snapshot so the runs are exactly what they were before the dialog.
+        setTextColor(m_textColorPreviewColor);
+        *td = m_textColorPreviewBefore;
+        td->dirty = true;
+        rerenderTextLayer();
+    }
+
+    const bool editing = m_textEditor.isEditing() && m_textEditor.data() == td;
+    m_textColorPreview = false;
+    m_textColorPreviewData = nullptr;
+
+    // While the text editor is live its own commit (snapshotted at beginEdit)
+    // already carries the colour, exactly as typing-time styling does — pushing
+    // a step here would overlap it. Not editing: this is the dialog's one step.
+    if (keep && sameLayer && !editing && m_controller)
+        m_controller->commitTextEdit(m_textColorPreviewIndex,
+                                     m_textColorPreviewBefore,
+                                     m_textColorPreviewTransform);
 }
 
 void CanvasView::setTextAlign(int align)
@@ -4196,6 +4287,15 @@ void CanvasView::keyPressEvent(QKeyEvent* e)
         return;
     }
 
+    // Esc cancels an armed colour-dialog eyedropper. The dialog stays open with
+    // the colour it already had — only the pick is called off.
+    if (e->key() == Qt::Key_Escape && m_colorPickArmed) {
+        setColorPickArmed(false);
+        emit colorPickCancelled();
+        e->accept();
+        return;
+    }
+
     // Esc cancels an armed Hue/Saturation eyedropper without applying anything.
     if (e->key() == Qt::Key_Escape && m_hueSatPickMode != 0) {
         if (m_hueSatDragging) {
@@ -4804,6 +4904,23 @@ void CanvasView::setHueSatPickMode(int mode)
         unsetCursor();
 }
 
+void CanvasView::setColorPickArmed(bool armed)
+{
+    if (m_colorPickArmed == armed)
+        return;
+    m_colorPickArmed = armed;
+    m_colorPickDragging = false;
+    if (armed) {
+        // The eyedropper cursor, not Qt::CrossCursor: the pick samples pixels
+        // exactly like the Eyedropper tool, so it should look like it too.
+        setViewportCursor(m_cursors[static_cast<int>(Tool::Eyedropper)]);
+    } else {
+        hideEyedropperReadout();
+        updateToolCursor();
+        update();
+    }
+}
+
 void CanvasView::mousePressEvent(QMouseEvent* e)
 {
     // Drop the OS's synthetic pen-mouse twin: tabletEvent already drove this input.
@@ -4827,6 +4944,20 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         m_rightButtonDown = false;
         m_lastMousePos = e->position();
         setCursor(Qt::ClosedHandCursor);
+        e->accept();
+        return;
+    }
+
+    // A colour dialog's eyedropper is armed: sample the pixel under the cursor and
+    // keep sampling while the button is held, so dragging over the image previews
+    // every colour it crosses. The press is consumed — the active tool must not
+    // paint, select or move anything while the user is picking a colour.
+    if (m_colorPickArmed && e->button() == Qt::LeftButton && m_doc) {
+        m_colorPickDragging = true;
+        const QColor sampled = eyedropperSampleColor(e->position());
+        updateEyedropperReadout(e->position(), sampled);
+        if (sampled.isValid())
+            emit colorPickSampled(sampled);
         e->accept();
         return;
     }
@@ -5685,6 +5816,18 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
 
 void CanvasView::mouseMoveEvent(QMouseEvent* e)
 {
+    // A colour dialog's eyedropper owns the pointer while it is armed: a held
+    // drag keeps sampling, and a plain hover only moves the read-out so the user
+    // can see what the next click would pick.
+    if (m_colorPickArmed) {
+        const QColor sampled = eyedropperSampleColor(e->position());
+        updateEyedropperReadout(e->position(), sampled);
+        if (m_colorPickDragging && sampled.isValid())
+            emit colorPickSampled(sampled);
+        update();
+        e->accept();
+        return;
+    }
     if (m_curvesTargetDragging) {
         emit curvesTargetDragged(
             static_cast<int>(m_curvesTargetStartY - e->position().y()));
@@ -6025,29 +6168,7 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         m_eyedropperScreenPos = e->position();
         m_eyedropperHoverColor = eyedropperSampleColor(e->position());
         setCursor(m_cursors[static_cast<int>(Tool::Eyedropper)]);
-        if (m_eyedropperHoverColor.isValid()) {
-            QColor c = m_eyedropperHoverColor;
-            QString hex = c.name(QColor::HexRgb).toUpper();
-            if (c.alpha() < 255)
-                hex = c.name(QColor::HexArgb).toUpper();
-            QString text = QStringLiteral("%1\nRGB(%2, %3, %4)\nA: %5")
-                .arg(hex)
-                .arg(c.red())
-                .arg(c.green())
-                .arg(c.blue())
-                .arg(c.alpha());
-            m_eyedropperOverlay->setText(text);
-            m_eyedropperOverlay->adjustSize();
-            QPoint pos = e->position().toPoint() + QPoint(16, 16);
-            if (pos.x() + m_eyedropperOverlay->width() > width())
-                pos.setX(e->position().toPoint().x() - m_eyedropperOverlay->width() - 8);
-            if (pos.y() + m_eyedropperOverlay->height() > height())
-                pos.setY(e->position().toPoint().y() - m_eyedropperOverlay->height() - 8);
-            m_eyedropperOverlay->move(pos);
-            m_eyedropperOverlay->setVisible(true);
-        } else {
-            m_eyedropperOverlay->setVisible(false);
-        }
+        updateEyedropperReadout(e->position(), m_eyedropperHoverColor);
         update();
     }
 
@@ -6390,6 +6511,17 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
         PointerInputEvent me = CanvasInputMapper::fromMouseEvent(e, PointerPhase::Release);
         m_inputState.noteMouseEvent(me);
     }
+    if (m_colorPickDragging && e->button() == Qt::LeftButton) {
+        m_colorPickDragging = false;
+        const QColor sampled = eyedropperSampleColor(e->position());
+        // Releasing ends the pick: the dialog disarms itself and un-presses its
+        // eyedropper button. An invalid sample (released off the image) keeps the
+        // colour the drag last reported rather than clearing it.
+        emit colorPickFinished(sampled);
+        e->accept();
+        return;
+    }
+
     if (m_curvesTargetDragging) {
         m_curvesTargetDragging = false;
         emit curvesTargetEnded();
@@ -11547,6 +11679,64 @@ void CanvasView::eyedropperSample(QPointF screenPos, Qt::MouseButton button,
         emit backgroundColorSampled(color);
     else
         emit colorSampled(color);
+}
+
+void CanvasView::updateEyedropperReadout(QPointF screenPos, const QColor& color)
+{
+    if (!m_eyedropperOverlay)
+        return;
+    if (!color.isValid()) {
+        m_eyedropperOverlay->setVisible(false);
+        return;
+    }
+
+    QString hex = color.name(QColor::HexRgb).toUpper();
+    if (color.alpha() < 255)
+        hex = color.name(QColor::HexArgb).toUpper();
+    const QString text = QStringLiteral("%1\nRGB(%2, %3, %4)\nA: %5")
+        .arg(hex)
+        .arg(color.red())
+        .arg(color.green())
+        .arg(color.blue())
+        .arg(color.alpha());
+    m_eyedropperOverlay->setText(text);
+    m_eyedropperOverlay->adjustSize();
+
+    if (m_eyedropperSwatch) {
+        auto* th = ThemeManager::instance()->current();
+        QPixmap swatch(m_eyedropperSwatch->size());
+        swatch.fill(Qt::transparent);
+        QPainter sp(&swatch);
+        const QRect sr = swatch.rect().adjusted(0, 0, -1, -1);
+        // Paint the sample over the panel colour so a translucent pixel reads as
+        // washed out rather than as a different, darker colour.
+        sp.fillRect(sr, th->colorBackgroundPrimary);
+        sp.fillRect(sr, color);
+        sp.setPen(th->colorBorder);
+        sp.drawRect(sr);
+        sp.end();
+        m_eyedropperSwatch->setPixmap(swatch);
+        // Vertically centred against the right edge, inside the padding reserved
+        // for it at construction.
+        m_eyedropperSwatch->move(
+            m_eyedropperOverlay->width() - m_eyedropperSwatch->width() - th->spaceSM,
+            (m_eyedropperOverlay->height() - m_eyedropperSwatch->height()) / 2);
+    }
+
+    QPoint pos = screenPos.toPoint() + QPoint(16, 16);
+    if (pos.x() + m_eyedropperOverlay->width() > width())
+        pos.setX(screenPos.toPoint().x() - m_eyedropperOverlay->width() - 8);
+    if (pos.y() + m_eyedropperOverlay->height() > height())
+        pos.setY(screenPos.toPoint().y() - m_eyedropperOverlay->height() - 8);
+    m_eyedropperOverlay->move(pos);
+    m_eyedropperOverlay->setVisible(true);
+}
+
+void CanvasView::hideEyedropperReadout()
+{
+    m_eyedropperHovering = false;
+    if (m_eyedropperOverlay)
+        m_eyedropperOverlay->setVisible(false);
 }
 
 QColor CanvasView::eyedropperSampleColor(QPointF screenPos)

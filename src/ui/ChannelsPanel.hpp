@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QImage>
+#include <QPointer>
 #include <QString>
 #include <QWidget>
 #include <cstdint>
 
+class QDialog;
 class QPushButton;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -76,6 +78,9 @@ private:
     void duplicateCurrentChannel();
     void deleteCurrentChannel();
     void openChannelOptions(int channelIndex);
+    // Re-reads the channel at `channelIndex` into `out`, false when it is gone.
+    // The channel dialogs are modeless, so what they edit can change under them.
+    bool captureChannelSettings(int channelIndex, struct ChannelSettings& out) const;
     void renameCurrentChannel();
     void mergeCurrentSpotChannel();
     void loadCurrentAsSelection(Qt::KeyboardModifiers mods);
@@ -100,6 +105,10 @@ private:
     QString m_rowSignature;
 
     ImageController* m_controller = nullptr;
+    // The open channel dialog (new / options, alpha or spot). Modeless, because
+    // it hosts an ink/overlay colour picker whose eyedropper samples the canvas;
+    // one at a time, since the panel's buttons stay live while it is open.
+    QPointer<QDialog> m_channelDlg;
     CanvasView* m_canvas = nullptr;
     QTreeWidget* m_tree = nullptr;
     ChannelItemDelegate* m_delegate = nullptr;

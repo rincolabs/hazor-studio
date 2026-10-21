@@ -7723,19 +7723,20 @@ void ImageController::createShapeLayer(const ShapeData& data)
     emit imageChanged();
 }
 
-void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
+bool ImageController::applyShapeDataInPlace(int flatIndex, const ShapeData& newData,
+                                            ShapeEdit& out)
 {
-    if (!m_doc) return;
+    if (!m_doc) return false;
     auto* node = m_doc->nodeAt(flatIndex);
-    if (!node || !node->layer || !node->layer->shapeData) return;
+    if (!node || !node->layer || !node->layer->shapeData) return false;
     if (!node->canEditContent()) {
         emit operationBlocked(tr("The content of this shape layer is locked."));
-        return;
+        return false;
     }
 
     ShapeData shape = normalizedShapeData(newData);
     if (!shapeHasGeometry(shape))
-        return;
+        return false;
 
     ShapeData before = *node->layer->shapeData;
     QImage beforeImage = node->layer->cpuImage.copy();
@@ -7747,7 +7748,7 @@ void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
         *node->layer->shapeData = before;
         node->layer->cpuImage = beforeImage;
         node->transform = beforeXf;
-        return;
+        return false;
     }
 
     QImage rendered = node->layer->cpuImage.copy();
@@ -7762,15 +7763,97 @@ void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
     node->invalidateEffects();
     node->thumbnailDirty = true;
 
+    out.before = std::move(before);
+    out.applied = std::move(shape);
+    out.beforeImage = std::move(beforeImage);
+    out.rendered = std::move(rendered);
+    out.beforeTransform = beforeXf;
+    out.afterTransform = afterXf;
+    return true;
+}
+
+void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
+{
+    ShapeEdit edit;
+    if (!applyShapeDataInPlace(flatIndex, newData, edit))
+        return;
+
     m_history.push(std::make_unique<ModifyShapeCommand>(
         m_doc, flatIndex,
-        std::move(before), shape,
-        std::move(beforeImage), rendered.copy(),
-        beforeXf, afterXf,
+        std::move(edit.before), std::move(edit.applied),
+        std::move(edit.beforeImage), std::move(edit.rendered),
+        edit.beforeTransform, edit.afterTransform,
         "edit_shape"));
 
     emit layerChanged(flatIndex);
     emit imageChanged();
+}
+
+// ── Live shape-data preview ─────────────────────────────────────────────────
+
+void ImageController::beginShapeDataPreview(int flatIndex)
+{
+    if (!m_doc) return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || !node->layer || !node->layer->shapeData) return;
+    // The fill and the stroke dialog can be open at once: the second one joins
+    // the session the first opened instead of re-snapshotting over its state.
+    if (m_shapePreviewActive && m_shapePreviewIndex == flatIndex) return;
+    if (m_shapePreviewActive) endShapeDataPreview(true);
+
+    m_shapePreviewActive = true;
+    m_shapePreviewIndex = flatIndex;
+    m_shapePreviewBefore = *node->layer->shapeData;
+    m_shapePreviewBeforeImage = node->layer->cpuImage.copy();
+    m_shapePreviewBeforeTransform = node->transform;
+}
+
+void ImageController::previewShapeData(const ShapeData& data)
+{
+    if (!m_shapePreviewActive) return;
+    ShapeEdit edit;
+    if (!applyShapeDataInPlace(m_shapePreviewIndex, data, edit))
+        return;
+    emit layerChanged(m_shapePreviewIndex);
+    emit imageChanged();
+}
+
+void ImageController::endShapeDataPreview(bool keep)
+{
+    if (!m_shapePreviewActive) return;
+    const int flatIndex = m_shapePreviewIndex;
+    m_shapePreviewActive = false;
+    m_shapePreviewIndex = -1;
+
+    auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    if (node && node->layer && node->layer->shapeData) {
+        if (keep) {
+            m_history.push(std::make_unique<ModifyShapeCommand>(
+                m_doc, flatIndex,
+                m_shapePreviewBefore, *node->layer->shapeData,
+                m_shapePreviewBeforeImage, node->layer->cpuImage.copy(),
+                m_shapePreviewBeforeTransform, node->transform,
+                "edit_shape"));
+        } else {
+            // Raster and transform are both derived from the shape data, so all
+            // three have to go back — the same restore ModifyShapeCommand::undo
+            // performs, minus the history entry.
+            node->layer->shapeData = std::make_shared<ShapeData>(m_shapePreviewBefore);
+            node->layer->cpuImage = m_shapePreviewBeforeImage;
+            node->transform = m_shapePreviewBeforeTransform;
+            node->layer->textureOutdated = true;
+            node->layer->shapeCache.dirty = true;
+            node->invalidateEffects();
+            node->thumbnailDirty = true;
+            ++m_doc->compositionGeneration;
+        }
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+    }
+
+    m_shapePreviewBefore = ShapeData();
+    m_shapePreviewBeforeImage = QImage();
+    m_shapePreviewBeforeTransform = QTransform();
 }
 
 void ImageController::bakeShapeTransform(int flatIndex, const QTransform& beforeTransform)

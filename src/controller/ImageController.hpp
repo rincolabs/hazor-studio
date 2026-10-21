@@ -581,6 +581,19 @@ public:
 
     void createShapeLayer(const ShapeData& data);
     void modifyShapeLayer(int flatIndex, const ShapeData& newData);
+
+    // ── Live shape-data editing (colour dialogs) ──
+    // A colour dialog hands over dozens of intermediate values but deserves a
+    // single undo step, so it follows the same contract the Curves editor uses
+    // for adjustment params: begin snapshots the layer, previewShapeData applies
+    // values without touching history, and end pushes one ModifyShapeCommand
+    // (keep = true) or puts the snapshot back (keep = false). begin on a layer
+    // that already has an open session is a no-op, so the fill and stroke
+    // dialogs can be open at the same time.
+    void beginShapeDataPreview(int flatIndex);
+    void previewShapeData(const ShapeData& data);
+    void endShapeDataPreview(bool keep);
+    bool shapeDataPreviewActive() const { return m_shapePreviewActive; }
     void bakeShapeTransform(int flatIndex, const QTransform& beforeTransform);
     // Re-render a shape descendant at its effective WORLD scale/rotation (parent
     // group chain included), keeping its on-screen appearance unchanged. Mutates
@@ -692,6 +705,29 @@ signals:
                                  ColorProfile profile, ColorProfileSource source);
 
 private:
+    // One shape-raster rebuild: applies `newData` to the shape layer, rebuilds
+    // its raster and folds the user transform back on top, reporting the
+    // before/after pieces a ModifyShapeCommand needs. Returns false — layer
+    // untouched — when the node is not an editable shape layer or the data has
+    // no geometry. Shared by modifyShapeLayer (which pushes a command) and by
+    // the live preview path (which does not).
+    struct ShapeEdit {
+        ShapeData before;
+        ShapeData applied;
+        QImage beforeImage;
+        QImage rendered;
+        QTransform beforeTransform;
+        QTransform afterTransform;
+    };
+    bool applyShapeDataInPlace(int flatIndex, const ShapeData& newData, ShapeEdit& out);
+
+    // ── Live shape-data preview state (see beginShapeDataPreview) ──
+    bool m_shapePreviewActive = false;
+    int m_shapePreviewIndex = -1;
+    ShapeData m_shapePreviewBefore;
+    QImage m_shapePreviewBeforeImage;
+    QTransform m_shapePreviewBeforeTransform;
+
     // Non-destructive flip of a node set as a single rigid area: reflects every
     // target about the union bounding-box centre (canvas NDC) so groups and
     // multi-selections mirror as one block (not each layer about its own

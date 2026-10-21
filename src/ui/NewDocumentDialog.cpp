@@ -473,7 +473,7 @@ void NewDocumentDialog::pickBackgroundColor()
             QStringLiteral("background-color: %1; border: 1px solid %2; border-radius: %3px;").arg(m_bgColor.name()).arg(t->colorBorder.name()).arg(t->radiusSM));
     });
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 void NewDocumentDialog::updateImageSizeDisplay()

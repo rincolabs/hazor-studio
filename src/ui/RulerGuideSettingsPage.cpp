@@ -154,7 +154,7 @@ RulerGuideSettingsPage::RulerGuideSettingsPage(QWidget* parent)
             updateColorButton();
         });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
 
     guidesForm->addRow(tr("Guide opacity:"), makeOpacityRow());

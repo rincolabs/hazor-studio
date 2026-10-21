@@ -143,6 +143,16 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **Filters & adjustments** — brightness/contrast/saturation/hue, blur, sharpen,
   edge detection, posterize, threshold, background removal, and more — all with
   live on-canvas preview and selection-aware application.
+- **Colour picker** — one picker behind every colour control (foreground /
+  background, brush, text, shape fill and stroke, fill bucket, swatches, layer
+  styles, Solid Color layers, guides). It carries an **eyedropper**: arm it and
+  press or drag anywhere on the image to pick the pixel under the cursor, with a
+  read-out following it that shows the hex/RGBA values next to a swatch of the
+  colour itself. Colours that show on the canvas —
+  text, shape fill and stroke, Solid Color fill layers, layer-style colours —
+  **preview live** while the picker is open; OK keeps the result as a single
+  undo step and Cancel (or Esc, or closing the window) puts the original colour
+  back without touching the history.
 - **AI agent** — a chat panel that turns natural-language requests into tool
   calls, driven by Ollama or an OpenAI-compatible provider.
 - **AI selection & matting** — ONNX-powered object selection (SAM) and

@@ -189,10 +189,16 @@ void SolidColorAdjustmentWidget::buildUi()
 
 void SolidColorAdjustmentWidget::showNode(int flatIndex)
 {
+    // Rebinding to another node pulls the ground out from under an open colour
+    // dialog: cancel it first, while m_flatIndex still points at the node it was
+    // opened on, so its colour is restored and the live-edit hold is lifted.
+    if (m_colorDlg && m_flatIndex != flatIndex)
+        m_colorDlg->reject();
     if (m_ctrl && m_flatIndex >= 0 && m_flatIndex != flatIndex && !m_previewOn)
         m_ctrl->updateAdjustmentParamsLive(m_flatIndex, paramsFromData());
     m_inGesture = false;
     m_previewOn = true;
+    m_eyedropperBypass = false;
     m_flatIndex = flatIndex;
     reloadFromNode();
 }
@@ -274,7 +280,7 @@ void SolidColorAdjustmentWidget::applyLive()
 {
     if (!m_ctrl || m_flatIndex < 0)
         return;
-    if (m_previewOn) {
+    if (m_previewOn && !m_eyedropperBypass) {
         m_ctrl->updateAdjustmentParamsLive(m_flatIndex, paramsFromData());
     } else {
         // Bypass: an alpha-0 fill reveals the layers below unchanged.
@@ -283,6 +289,14 @@ void SolidColorAdjustmentWidget::applyLive()
         m_ctrl->updateAdjustmentParamsLive(
             m_flatIndex, solidcolor::SolidColorData::paramsFromColor(transparent));
     }
+}
+
+void SolidColorAdjustmentWidget::setEyedropperBypass(bool on)
+{
+    if (m_eyedropperBypass == on)
+        return;
+    m_eyedropperBypass = on;
+    applyLive();   // reveals the layers below, or paints the fill back
 }
 
 void SolidColorAdjustmentWidget::beginGesture()
@@ -300,9 +314,28 @@ void SolidColorAdjustmentWidget::commitGesture(const QString& label)
     if (!m_inGesture)
         return;
     m_inGesture = false;
+    m_eyedropperBypass = false;   // never commit with the fill still hidden
     if (m_ctrl && m_flatIndex >= 0)
         m_ctrl->commitAdjustmentParams(m_flatIndex, m_gestureBefore,
                                        paramsFromData(), label);
+    if (m_ctrl)
+        m_ctrl->setAdjustmentLiveEdit(false);
+}
+
+void SolidColorAdjustmentWidget::cancelGesture(const QColor& before)
+{
+    m_eyedropperBypass = false;   // the fill is visible again whatever happened
+
+    // The dialog has already handed the original colour back through
+    // colorPreviewChanged, but a cancel must hold even if it could not (a
+    // detached node, a rebind under the dialog), so restore it explicitly —
+    // without recording an undo step.
+    m_data.color = before;
+    m_loading = true;
+    syncControls();
+    m_loading = false;
+    applyLive();
+    m_inGesture = false;
     if (m_ctrl)
         m_ctrl->setAdjustmentLiveEdit(false);
 }
@@ -319,30 +352,32 @@ void SolidColorAdjustmentWidget::openColorPicker()
 {
     if (m_loading || !m_ctrl || m_flatIndex < 0)
         return;
+    if (m_colorDlg) {
+        m_colorDlg->raise();
+        m_colorDlg->activateWindow();
+        return;
+    }
 
     const QColor before = m_data.color;
     beginGesture();   // captures m_gestureBefore + enters live-edit
 
+    // Modeless, not exec(): a modal dialog blocks every click on the canvas, and
+    // the picker's eyedropper has to be able to sample the image. The accept /
+    // cancel work that used to follow exec() now hangs off finished().
     auto* dlg = new ColorPickerDialog(before, ColorPickerMode::Foreground, this);
+    m_colorDlg = dlg;
     connect(dlg, &ColorPickerDialog::colorPreviewChanged, this,
             [this](const QColor& c) { setColorLive(c); });
-
-    const int res = dlg->exec();
-    if (res == QDialog::Accepted) {
-        setColorLive(dlg->selectedColor());
-        commitGesture(tr("Solid Color"));   // single undo step before→after
-    } else {
-        // Cancel: restore the previous colour without recording an undo step.
-        m_data.color = before;
-        m_loading = true;
-        syncControls();
-        m_loading = false;
-        applyLive();
-        m_inGesture = false;
-        if (m_ctrl)
-            m_ctrl->setAdjustmentLiveEdit(false);
-    }
-    delete dlg;
+    connect(dlg, &ColorPickerDialog::eyedropperArmedChanged, this,
+            [this](bool armed) { setEyedropperBypass(armed); });
+    connect(dlg, &QDialog::finished, this, [this, before](int result) {
+        if (result == QDialog::Accepted)
+            commitGesture(tr("Solid Color"));   // single undo step before→after
+        else
+            cancelGesture(before);
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->showModeless();
 }
 
 // ── Callbacks ────────────────────────────────────────────────────────────────
@@ -474,6 +509,10 @@ void SolidColorAdjustmentWidget::onDocumentChanged()
 
 void SolidColorAdjustmentWidget::hideEvent(QHideEvent* e)
 {
+    // A colour dialog outliving the editor that owns it would keep previewing
+    // into a node nothing is showing any more — and leave the live-edit hold on.
+    if (m_colorDlg)
+        m_colorDlg->reject();
     // Never leave a node stuck in bypass when the editor goes away.
     if (m_ctrl && m_flatIndex >= 0 && !m_previewOn) {
         m_previewOn = true;

@@ -27,7 +27,10 @@ CanvasSizeDialog::CanvasSizeDialog(const QSize& currentSize,
     , m_customColor(backgroundColor)
 {
     setWindowTitle(tr("Canvas Size"));
-    setModal(true);
+    // Deliberately NOT modal: the Custom extension colour opens the colour
+    // dialog, whose eyedropper samples the canvas, and any modality here
+    // swallows every canvas click. The host (MainWindow::onImageResizeCanvas)
+    // shows this modeless and resizes on accepted().
     resize(420, 420);
 
     auto* root = new QVBoxLayout(this);
@@ -204,12 +207,20 @@ void CanvasSizeDialog::onExtensionModeChanged(int index)
 
 void CanvasSizeDialog::pickCustomColor()
 {
-    ColorPickerDialog dlg(m_customColor, ColorPickerMode::Foreground, this);
-    if (dlg.exec() == QDialog::Accepted) {
-        QColor chosen = dlg.selectedColor();
+    if (m_colorDlg) {
+        m_colorDlg->raise();
+        m_colorDlg->activateWindow();
+        return;
+    }
+
+    auto* dlg = new ColorPickerDialog(m_customColor, ColorPickerMode::Foreground, this);
+    m_colorDlg = dlg;
+    connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& chosen) {
         if (chosen.isValid())
             m_customColor = chosen;
-    }
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->showModeless();
 }
 
 double CanvasSizeDialog::unitToPixels(double value, SizeUnit unit, int basePixels) const
