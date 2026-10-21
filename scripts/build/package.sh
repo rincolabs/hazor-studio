@@ -311,9 +311,11 @@ package_windows_zip() {
         find "$DIST_DIR" -maxdepth 1 -name 'libexiv2*.dll' -print -quit | grep -q . \
             || die "RawEngine was built but its exiv2 DLL was not found under $RAWENGINE_DEPS_DIR/exiv2"
         # Lens Corrections needs lensfun's camera/lens database at runtime.
-        # rtengine leaves lensfunDbDirectory empty, so LFDatabase::init() falls
-        # back to lensfun's own search, which on Windows is relative to the
-        # module — i.e. share/lensfun beside the executable.
+        # This layout is load-bearing: AppPaths::lensfunDatabaseDir() looks for
+        # share/lensfun/version_1 beside the executable and hands it to
+        # rtengine as lensfunDbBundleDirectory. Do not rely on lensfun's own
+        # module-relative search to find it — that path hunts for a
+        # liblensfun.dll, and Hazor links lensfun statically.
         require_dir "$RAWENGINE_DEPS_DIR/lensfun/share/lensfun" "lensfun database"
         mkdir -p "$DIST_DIR/share"
         cp -aL "$RAWENGINE_DEPS_DIR/lensfun/share/lensfun" "$DIST_DIR/share/"

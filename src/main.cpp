@@ -196,7 +196,8 @@ int main(int argc, char* argv[])
     // when the resource directory doesn't exist yet. Must run once, before
     // any RAW file is opened (registerDefaultImageCodecs()/onOpenFile()).
     RawEngine::initialize(AppPaths::rawEngineResourceDir().toStdString(),
-                          AppPaths::rawUserDir().toStdString());
+                          AppPaths::rawUserDir().toStdString(),
+                          AppPaths::lensfunDatabaseDir().toStdString());
 
     QSurfaceFormat fmt;
     fmt.setSwapInterval(1);

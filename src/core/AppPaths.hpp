@@ -48,6 +48,14 @@ QString bundledModelsDir();
 // RawEngine::initialize() as resourceDir. Mirrors bundledModelsDir().
 QString rawEngineResourceDir();
 
+// The lensfun camera/lens database shipped with the app
+// ("share/lensfun/version_1" beside the executable, staged by package.sh).
+// Empty when not shipped for this platform. Passed to RawEngine::initialize()
+// as lensfunDbDir, which needs an absolute path: lensfun's own
+// module-relative search looks for a liblensfun.dll, and Hazor links lensfun
+// statically, so that search finds nothing.
+QString lensfunDatabaseDir();
+
 // Hazor's own per-user RAW data directory (e.g. user-dropped DCP profiles
 // under "<rawUserDir()>/dcpprofiles"), under dataDir() so it survives
 // alongside the rest of the user's data. Passed to RawEngine::initialize()

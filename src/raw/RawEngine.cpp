@@ -23,7 +23,7 @@ bool g_initialized = false;
 // every field not set here). This only needs to set the fields upstream's own
 // Options::setDefaults() (rtgui/options.cc, not vendored — GUI-only) gives a
 // non-zero/non-empty value; everything else is correctly 0/false/"" already.
-void populateDefaultSettings(rtengine::Settings& s)
+void populateDefaultSettings(rtengine::Settings& s, const std::string& lensfunDbDir)
 {
 #if defined(_WIN32)
     s.iccDirectory = "C:\\WINDOWS\\System32\\spool\\drivers\\color";
@@ -84,17 +84,19 @@ void populateDefaultSettings(rtengine::Settings& s)
     s.xmp_sidecar_style = rtengine::Settings::XmpSidecarStyle::STD;
     s.metadata_xmp_sync = rtengine::Settings::MetadataXmpSync::NONE;
 
-    // Left empty (upstream default): lensfun's own default database search
-    // path is used. The vendored lensfun *library* (Fase 1) does not include
-    // its XML camera/lens database — distributing or pointing at one is a
-    // separate, not-yet-scoped concern; until then Lens Corrections silently
-    // finds no match, which is the existing RAWENGINE_WITH_LENSFUN=OFF
-    // fallback behavior (see the root CMakeLists.txt).
+    // lensfunDbDirectory stays empty so rtengine::init() first tries lensfun's
+    // own search, which is what a native/system lensfun install wants. The
+    // bundle directory is the fallback it takes when that search comes up
+    // empty — the Windows case, where lensfun is linked statically and its
+    // module-relative lookup hunts for a liblensfun.dll that is never built.
+    // Empty when the platform ships no database, which init() also handles.
+    s.lensfunDbBundleDirectory = Glib::ustring(lensfunDbDir);
 }
 
 } // namespace
 
-void RawEngine::initialize(const std::string& resourceDir, const std::string& userDir)
+void RawEngine::initialize(const std::string& resourceDir, const std::string& userDir,
+                           const std::string& lensfunDbDir)
 {
     if (g_initialized) {
         return;
@@ -103,7 +105,7 @@ void RawEngine::initialize(const std::string& resourceDir, const std::string& us
     Options::rtdir = Glib::ustring(userDir);
 
     Options& opts = App::get().mut_options();
-    populateDefaultSettings(opts.rtSettings);
+    populateDefaultSettings(opts.rtSettings, lensfunDbDir);
 
     // rtengine::init() stores &opts.rtSettings in a process-lifetime static
     // (rtengine::settings); safe because App::get()'s singleton also lives
@@ -158,7 +160,7 @@ MatchedCameraProfile RawEngine::matchedCameraProfile(const RawMetadata& metadata
 
 #else // !HAVE_RAWENGINE
 
-void RawEngine::initialize(const std::string&, const std::string&) {}
+void RawEngine::initialize(const std::string&, const std::string&, const std::string&) {}
 void RawEngine::shutdown() {}
 bool RawEngine::isAvailable() { return false; }
 

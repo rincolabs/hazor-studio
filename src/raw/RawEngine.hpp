@@ -38,9 +38,13 @@ public:
     // cammatrices.json, dcraw.json (3rdparty/rawengine/rtdata/, resolved via
     // AppPaths — see docs/BUILD.md). userDir is Hazor's own per-user RAW data
     // directory (e.g. userDir/dcpprofiles for user-dropped camera profiles).
+    // lensfunDbDir is the lensfun camera/lens database shipped with the app,
+    // as an absolute path (AppPaths::lensfunDatabaseDir()); pass it empty to
+    // leave Lens Corrections on lensfun's own database search.
     // Safe to call when HAVE_RAWENGINE is not compiled in: isAvailable()
     // simply stays false. Not thread-safe; call once during startup.
-    static void initialize(const std::string& resourceDir, const std::string& userDir);
+    static void initialize(const std::string& resourceDir, const std::string& userDir,
+                           const std::string& lensfunDbDir);
     static void shutdown();
 
     // True only after a successful initialize() (not merely HAVE_RAWENGINE

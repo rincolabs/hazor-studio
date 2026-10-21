@@ -287,6 +287,24 @@ OpenCV's own `OPENCV_INSTALL_PREFIX`/`OPENCV_BUILD_DIR`, which it generates with
 no option to disable and only uses for `cv::samples::findFile`; Hazor never
 calls it.
 
+Two sources on the Windows target need more than `-ffile-prefix-map`, since the
+flag only rewrites `__FILE__`:
+
+- **The MinGW runtime libraries.** libstdc++, the mingw-w64 CRT and
+  libwinpthreads bake `__FILE__` into their `assert()` strings, and every PE
+  links them, so `prepare_mingw_toolchain()` passes the map through
+  `CFLAGS_FOR_TARGET`/`CXXFLAGS_FOR_TARGET`; the plain variants reach only the
+  build-host tools. Those strings live in `.rdata`, not in a debug section, so
+  stripping does not remove them. The same assignment has to repeat `-g -O2`,
+  which autoconf substitutes only when `CFLAGS` is unset.
+- **Install prefixes compiled in as string literals.** glib derives
+  `GLIB_LOCALE_DIR` from its install prefix and lensfun derives `CONF_DATADIR`
+  from its own; no compiler flag touches either. glib is therefore built
+  against a fictitious prefix and installed through `DESTDIR` (its `.pc` files
+  are rewritten back to the real tree afterwards), and lensfun is built with
+  `-DPLATFORM_WINDOWS=ON` so that it takes the relative `share/lensfun` of its
+  Windows branch instead of an absolute `CMAKE_INSTALL_FULL_DATAROOTDIR`.
+
 ## Dependency downloads
 
 The exact versions and download sources used by CI are listed below. The local
@@ -373,7 +391,7 @@ upstream publishes one, built from source into that same layout otherwise:
 | expat | 2.9.0 | Built from [source](https://github.com/libexpat/libexpat/releases/download/R_2_9_0/expat-2.9.0.tar.gz) (CMake): `-DEXPAT_SHARED_LIBS=OFF -DEXPAT_BUILD_TESTS=OFF` |
 | lcms2 | 2.16 | Built from [source](https://github.com/mm2/Little-CMS/releases/download/lcms2.16/lcms2-2.16.tar.gz): `./configure --prefix=.../lcms2 --disable-shared --enable-static --with-pic && make install` |
 | fftw3f | 3.3.10 | Built from [source](https://www.fftw.org/fftw-3.3.10.tar.gz): `./configure --prefix=.../fftw3f --enable-float --enable-threads --disable-shared --enable-static --with-pic && make install` |
-| lensfun | 0.3.4 | Built from [source](https://github.com/lensfun/lensfun/archive/refs/tags/v0.3.4.tar.gz) (CMake): `-DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DBUILD_DOC=OFF -DINSTALL_PYTHON_MODULE=OFF`; also needs `glib-2.0` (system) |
+| lensfun | 0.3.4 | Built from [source](https://github.com/lensfun/lensfun/archive/refs/tags/v0.3.4.tar.gz) (CMake): `-DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DBUILD_DOC=OFF -DINSTALL_PYTHON_MODULE=OFF`, plus `-DPLATFORM_WINDOWS=ON` on the Windows target; also needs `glib-2.0` (system) |
 
 #### Where each target's copies come from
 
@@ -406,6 +424,16 @@ set `PKG_CONFIG_SYSROOT_DIR`: those `.pc` files come from our own cross build
 and already carry absolute paths inside the target prefix, so a sysroot would
 be prepended a second time and every `-I`/`-L` would point at a path that does
 not exist.
+
+Lens Corrections also needs lensfun's camera/lens database, which is data
+rather than a library. `package.sh` stages it as `share/lensfun/version_1`
+beside the executable on the Windows target, and
+[`AppPaths::lensfunDatabaseDir()`](../src/core/AppPaths.cpp) resolves it from
+there and hands it to `RawEngine::initialize()`, which sets rtengine's
+`lensfunDbBundleDirectory`. rtengine falls back to that only when lensfun's own
+search comes up empty, so a native build keeps using the platform database.
+Lensfun's module-relative lookup cannot be used here: it resolves against a
+`liblensfun.dll`, and we link lensfun statically.
 
 `RAWENGINE_WITH_LENSFUN=OFF` is meant to drop the requirement (Lens Corrections
 becomes unavailable, nothing else is affected), but **it does not build today**

@@ -177,14 +177,24 @@ mingw_toolchain_requirements() {
 # libstdc++, libwinpthreads and the mingw-w64 CRT bake __FILE__ into their
 # assert() strings, and every Windows binary links them — so without this the
 # build machine's directory layout ends up inside each shipped .exe/.dll, which
-# verify_no_local_paths() rejects and no amount of stripping removes (the
+# verify_no_local_paths() reports and no amount of stripping removes (the
 # strings live in .rdata, not in debug sections). The *_FOR_TARGET variants are
 # the ones that reach the runtime libraries; plain CFLAGS would only affect the
 # build-host tools.
+#
+# -g -O2 is not decoration: autoconf substitutes that pair only when CFLAGS is
+# unset in the environment, so assigning CFLAGS here to the prefix map alone
+# silently drops the optimisation level and builds the CRT and winpthreads at
+# -O0.
+mingw_target_cflags() {
+    printf '%s' "-g -O2 -ffile-prefix-map=$ROOT_DIR=."
+}
+
 mingw_configure_and_make() {
     local stage="$1" build="$2" configure="$3"
     shift 3
-    local map="-ffile-prefix-map=$ROOT_DIR=."
+    local map
+    map="$(mingw_target_cflags)"
     mkdir -p "$build"
     log "MinGW toolchain: configuring $stage"
     ( cd "$build" && PATH="$MINGW_TOOLCHAIN_DIR/bin:$PATH" \
@@ -241,10 +251,19 @@ prepare_mingw_toolchain() {
 
     # Stage 1 builds only the compiler: libstdc++ needs the CRT and winpthreads,
     # which do not exist yet.
+    #
+    # This stage cannot go through mingw_configure_and_make(): it runs configure
+    # and make separately so that stage 1 can stop at all-gcc. The target flags
+    # therefore have to be repeated here, and they matter more here than
+    # anywhere else — libstdc++ is built by stage 2 below, and it is the runtime
+    # library that carries the most __FILE__ assert strings into every binary.
     if [[ ! -x "$tc/bin/$triple-gcc" ]]; then
         mkdir -p "$build/gcc"
         log "MinGW toolchain: configuring gcc $HAZOR_MINGW_GCC_VERSION"
-        ( cd "$build/gcc" && PATH="$tc/bin:$PATH" "$gcc_src/configure" \
+        ( cd "$build/gcc" && PATH="$tc/bin:$PATH" \
+            CFLAGS_FOR_TARGET="$(mingw_target_cflags)" \
+            CXXFLAGS_FOR_TARGET="$(mingw_target_cflags)" \
+            "$gcc_src/configure" \
             --target="$triple" --prefix="$tc" --with-sysroot="$tc" \
             --enable-languages=c,c++ --enable-threads=posix \
             --disable-sjlj-exceptions --enable-fully-dynamic-string \
@@ -269,8 +288,14 @@ prepare_mingw_toolchain() {
             --host="$triple" --prefix="$tc/$triple"
     fi
 
+    # Repeating the flags on the make line is what makes a resumed run correct:
+    # configure bakes them into the generated Makefile, so a build directory
+    # left behind by an earlier run without them would otherwise rebuild
+    # libstdc++ at the stock "-g -O2" and re-embed the local paths.
     log "MinGW toolchain: building gcc stage 2 (libgcc, libstdc++)"
-    ( cd "$build/gcc" && PATH="$tc/bin:$PATH" make -j"$JOBS" )
+    ( cd "$build/gcc" && PATH="$tc/bin:$PATH" make -j"$JOBS" \
+        CFLAGS_FOR_TARGET="$(mingw_target_cflags)" \
+        CXXFLAGS_FOR_TARGET="$(mingw_target_cflags)" )
     ( cd "$build/gcc" && PATH="$tc/bin:$PATH" make install )
     require_file "$tc/$triple/lib/libstdc++.a" "cross libstdc++"
     write_provenance "$tc" "MinGW-w64 cross toolchain" \
@@ -771,17 +796,49 @@ prepare_rawengine_glib() {
     write_meson_cross_file "$cross_file"
     local prefix="$RAWENGINE_DEPS_DIR/glib"
     local build="$THIRD_PARTY_DIR/build-deps/$TARGET/rawengine-glib"
+    # glib compiles its install prefix into the library: GLIB_LOCALE_DIR (and
+    # GLIB_LOCALSTATEDIR/GLIB_RUNSTATEDIR) are derived from it in meson.build
+    # and baked into config.h as string literals, so -ffile-prefix-map cannot
+    # touch them and every binary linking libglib-2.0.a ends up carrying this
+    # machine's directory layout. Building against a fictitious prefix and
+    # staging the install through DESTDIR keeps those literals free of it.
+    #
+    # The value is otherwise inert on Windows: glib_get_locale_dir() in
+    # glib/ggettext.c reads back only the last two components of
+    # GLIB_LOCALE_DIR ("/share/locale") and resolves the rest from the loaded
+    # module at runtime. It does need those two components, though — the
+    # lookup walks backwards over two slashes and would run off the start of a
+    # shorter string, so the prefix cannot simply be made relative or empty.
+    local neutral_prefix="/hazor/rawengine/glib"
+    local stage="$build/stage"
     rm -rf -- "$build"
     PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig" \
         "$meson" setup "$build" "$source" \
             --cross-file "$cross_file" \
-            --prefix "$prefix" --libdir lib \
+            --prefix "$neutral_prefix" --libdir lib \
             --buildtype release --default-library static \
             --localedir share/locale \
             -Dnls=disabled -Dtests=false -Dglib_debug=disabled \
             -Dintrospection=disabled -Dman-pages=disabled -Ddocumentation=false
     "$meson" compile -C "$build" -j "$JOBS"
-    "$meson" install -C "$build"
+    DESTDIR="$stage" "$meson" install -C "$build"
+
+    # Merge rather than replace: prepare_rawengine_libffi and
+    # prepare_rawengine_pcre2 above share this one prefix (glib's pkg-config
+    # files have to find them) and their artifacts must survive.
+    require_dir "$stage$neutral_prefix/lib" "staged glib install"
+    mkdir -p "$prefix"
+    cp -a "$stage$neutral_prefix/." "$prefix/"
+
+    # The staged .pc files describe the fictitious prefix. The top-level
+    # CMakeLists finds glib with pkg_check_modules() and links
+    # GLIB2_LINK_LIBRARIES, the absolute paths pkg-config resolves from these
+    # files, so they have to name the real tree.
+    grep -rl -- "$neutral_prefix" "$prefix/lib/pkgconfig" 2>/dev/null \
+        | xargs -r sed -i -- "s|$neutral_prefix|$prefix|g"
+    if grep -rq -- "$neutral_prefix" "$prefix/lib/pkgconfig" 2>/dev/null; then
+        die "glib pkg-config files still reference $neutral_prefix"
+    fi
     write_provenance "$prefix" glib "$HAZOR_RAWENGINE_GLIB_VERSION" \
         "$HAZOR_RAWENGINE_GLIB_URL" "$HAZOR_RAWENGINE_GLIB_SHA256"
 }
@@ -810,8 +867,23 @@ prepare_rawengine_lensfun() {
     # which is empty when cross-compiling from Linux: the camera database would
     # install to an absolute "/lensfun/version_1". "share" is what it uses on
     # every other platform and keeps the data inside the target prefix.
+    #
+    # PLATFORM_WINDOWS is declared by config.h.in.cmake but never set by
+    # lensfun's own CMakeLists, so a MinGW cross build silently takes the *nix
+    # branch and bakes CMAKE_INSTALL_FULL_DATAROOTDIR — this machine's prefix —
+    # into CONF_DATADIR, which then ships inside Hazor.exe and only resolves
+    # here. Setting it picks the relative "share/lensfun" the Windows branch
+    # uses instead. Safe for the ABI: BUILD_STATIC defines CONF_LENSFUN_STATIC,
+    # which short-circuits lensfun.h's dllimport/dllexport decoration before it
+    # ever consults PLATFORM_WINDOWS. The relative path is not what finds the
+    # database at runtime either — that is lensfunDbBundleDirectory, set from
+    # AppPaths::lensfunDatabaseDir() — because lensfun's module-relative lookup
+    # searches for a liblensfun.dll that a static build never produces.
+    local -a platform_args=()
+    target_is_windows && platform_args=(-DPLATFORM_WINDOWS=ON)
     rawengine_cmake_build lensfun "$source" \
         -DCMAKE_INSTALL_DATAROOTDIR=share \
+        "${platform_args[@]}" \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
         -DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DBUILD_DOC=OFF \
         -DINSTALL_PYTHON_MODULE=OFF -DBUILD_LENSTOOL=OFF \
