@@ -4337,7 +4337,7 @@ void MainWindow::openHazorDevelop(int flatIndex)
     // silently re-reveal a *different* layer, and the completion filter below
     // would never match the index ImageController re-resolves.
     connect(develop, &RawDevelopWindow::applyRequested, develop,
-            [develop, controller, node](const RawDevelopParams& params) {
+            [this, develop, controller, node](const RawDevelopParams& params) {
         // Resolved against the controller's own document, not the active
         // tab's: Hazor Develop keeps working while the user is looking at
         // another document.
@@ -4352,22 +4352,34 @@ void MainWindow::openHazorDevelop(int flatIndex)
                 tr("Could not start RAW development. The layer may be locked or already processing."));
             return;
         }
-        develop->setApplyInProgress(true);
-    });
-    connect(m_ctrl, &ImageController::rawLayerDevelopFinished, develop,
-            [this, develop, node](LayerTreeNode* completed, int, bool ok, const QString& message) {
-        if (completed != node)
-            return;
-        develop->developFinished(ok, message);
-        // A successful re-reveal closes the window, which would swallow the
-        // non-fatal reframe warning with it. Show it on the main window
-        // instead, and only once the close has been processed — developFinished()
-        // deletes `develop`, whose own slot we are still inside.
-        if (ok && !message.isEmpty()) {
-            QTimer::singleShot(0, this, [this, message]() {
+
+        // The render itself already runs off the UI thread (RawDevelopService);
+        // what froze the interface was keeping Develop open and disabled for
+        // the whole wait. Close it right away and hand the wait off to the
+        // main window's own loading dialog instead, same as opening a RAW file.
+        develop->close();
+        beginProgressDelayed(tr("Progress"), tr("Applying RAW Changes…"), false);
+
+        // Self-disconnecting rather than tied to `develop` (already gone) or
+        // to `this` for the controller's lifetime (would accumulate one stale
+        // connection per Apply click): fires once for *this* node's result,
+        // ignoring any other RAW layer's re-reveal that finishes first, then
+        // detaches itself.
+        auto connection = std::make_shared<QMetaObject::Connection>();
+        *connection = connect(controller, &ImageController::rawLayerDevelopFinished, this,
+                [this, node, connection](LayerTreeNode* completed, int, bool ok, const QString& message) {
+            if (completed != node)
+                return;
+            disconnect(*connection);
+            closeProgress();
+            if (!ok) {
+                AppMessageDialog::warning(this, tr("Hazor Develop"),
+                    message.isEmpty() ? tr("RAW development failed.") : message);
+                return;
+            }
+            if (!message.isEmpty())
                 AppMessageDialog::warning(this, tr("Hazor Develop"), message);
-            });
-        }
+        });
     });
     develop->show();
     develop->raise();
