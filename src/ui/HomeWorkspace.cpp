@@ -10,12 +10,14 @@
 #include <QContextMenuEvent>
 #include <QDesktopServices>
 #include <QFileInfo>
+#include <QFont>
 #include <QFrame>
 #include <QHash>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QLayoutItem>
+#include <QLineEdit>
 #include <QLocale>
 #include <QMenu>
 #include <QMouseEvent>
@@ -28,7 +30,6 @@
 #include <QSet>
 #include <QSizePolicy>
 #include <QStackedWidget>
-#include <QTabBar>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -40,17 +41,19 @@
 
 namespace {
 
-constexpr int kHeaderAppIconSize = 48;
-constexpr int kHeaderHeight = 176;
+constexpr int kSidebarWidth = 212;
+constexpr int kSidebarLogoWidth = 164;
+constexpr int kSidebarLogoHeight = 92;
+constexpr int kHeaderHeight = 132;
 constexpr int kHeaderHorizontalMargin = 28;
-constexpr int kHeaderTopMargin = 24;
-constexpr int kNewDocumentButtonWidth = 200;
-constexpr int kNewDocumentButtonHeight = 48;
-constexpr int kDocumentCardWidth = 296;
-constexpr int kRecentCardHeight = 258;
-constexpr int kTemplateCardHeight = 238;
-constexpr int kCardPreviewWidth = 272;
-constexpr int kCardPreviewHeight = 166;
+constexpr int kHeaderVerticalMargin = 24;
+constexpr int kNewDocumentButtonWidth = 172;
+constexpr int kOpenButtonWidth = 112;
+constexpr int kHeaderButtonHeight = 44;
+constexpr int kDocumentCardWidth = 248;
+constexpr int kDocumentCardHeight = kDocumentCardWidth;
+constexpr int kCardPreviewWidth = 232;
+constexpr int kCardPreviewHeight = 180;
 
 struct SocialTemplatePreset {
     QString id;
@@ -151,42 +154,67 @@ QString dimensionsText(const QSize& size)
     return QObject::tr("%1 × %2 px").arg(size.width()).arg(size.height());
 }
 
-class HomeHeader final : public QWidget {
-public:
-    explicit HomeHeader(QWidget* parent = nullptr)
-        : QWidget(parent),
-          m_background(QStringLiteral(":/icons/home-workspace-bg.jpg"))
-    {
-        setFixedHeight(kHeaderHeight);
+QPixmap makeNavIcon(bool grid, const QColor& color)
+{
+    // Keep the 20 px artwork at the left and reserve an 8 px gutter before
+    // the button label, matching the header action buttons.
+    QPixmap pixmap(28, 20);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(color, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    if (grid) {
+        constexpr qreal cell = 5.0;
+        painter.drawRoundedRect(QRectF(3.0, 3.0, cell, cell), 0.8, 0.8);
+        painter.drawRoundedRect(QRectF(12.0, 3.0, cell, cell), 0.8, 0.8);
+        painter.drawRoundedRect(QRectF(3.0, 12.0, cell, cell), 0.8, 0.8);
+        painter.drawRoundedRect(QRectF(12.0, 12.0, cell, cell), 0.8, 0.8);
+    } else {
+        painter.drawEllipse(QRectF(2.5, 2.5, 15.0, 15.0));
+        painter.drawLine(QPointF(10.0, 5.5), QPointF(10.0, 10.0));
+        painter.drawLine(QPointF(10.0, 10.0), QPointF(13.5, 12.0));
     }
+    return pixmap;
+}
 
-protected:
-    void paintEvent(QPaintEvent*) override
-    {
-        if (m_background.isNull())
-            return;
+QIcon makeStatefulNavIcon(bool grid, const Theme* theme)
+{
+    QIcon icon;
+    icon.addPixmap(makeNavIcon(grid, theme->colorTextSecondary), QIcon::Normal, QIcon::Off);
+    icon.addPixmap(makeNavIcon(grid, theme->colorTextBright), QIcon::Normal, QIcon::On);
+    return icon;
+}
 
-        QRectF source(m_background.rect());
-        const qreal targetAspect = qreal(qMax(1, width())) / qMax(1, height());
-        const qreal sourceAspect = source.width() / source.height();
-        if (sourceAspect > targetAspect) {
-            const qreal cropWidth = source.height() * targetAspect;
-            source.setLeft((source.width() - cropWidth) / 2.0);
-            source.setWidth(cropWidth);
-        } else {
-            const qreal cropHeight = source.width() / targetAspect;
-            source.setTop((source.height() - cropHeight) / 2.0);
-            source.setHeight(cropHeight);
-        }
+QIcon makeHeaderActionIcon(bool folder, const QColor& color)
+{
+    // The extra transparent width is intentional: QPushButton offers no
+    // theme-independent icon/text gap, so keep an 8 px trailing gutter in the
+    // icon itself while preserving the 20 px artwork size.
+    QPixmap pixmap(28, 20);
+    pixmap.fill(Qt::transparent);
 
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        painter.drawPixmap(QRectF(rect()), m_background, source);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    if (folder) {
+        QPainterPath path;
+        path.moveTo(2.5, 6.0);
+        path.lineTo(8.0, 6.0);
+        path.lineTo(10.0, 8.0);
+        path.lineTo(17.5, 8.0);
+        path.lineTo(17.5, 16.5);
+        path.lineTo(2.5, 16.5);
+        path.closeSubpath();
+        painter.drawPath(path);
+    } else {
+        painter.drawLine(QPointF(10.0, 3.0), QPointF(10.0, 17.0));
+        painter.drawLine(QPointF(3.0, 10.0), QPointF(17.0, 10.0));
     }
-
-private:
-    QPixmap m_background;
-};
+    return QIcon(pixmap);
+}
 
 class RecentPreview final : public QWidget {
 public:
@@ -308,12 +336,12 @@ public:
         setObjectName(QStringLiteral("HomeRecentCard"));
         setFrameShape(QFrame::NoFrame);
         setCursor(Qt::PointingHandCursor);
-        setFixedSize(kDocumentCardWidth, kRecentCardHeight);
+        setFixedSize(kDocumentCardWidth, kDocumentCardHeight);
 
         const Theme* theme = ThemeManager::instance()->current();
         auto* layout = new QVBoxLayout(this);
-        layout->setContentsMargins(theme->spaceLG, theme->spaceLG,
-                                   theme->spaceLG, theme->spaceLG);
+        layout->setContentsMargins(theme->spaceMD, theme->spaceMD,
+                                   theme->spaceMD, theme->spaceMD);
         layout->setSpacing(theme->spaceSM);
 
         m_preview = new RecentPreview(this);
@@ -429,6 +457,90 @@ private:
     std::function<void()> m_remove;
 };
 
+class TemplateFilterButton final : public QPushButton {
+public:
+    explicit TemplateFilterButton(const QString& text, QWidget* parent = nullptr)
+        : QPushButton(text, parent)
+    {
+        setObjectName(QStringLiteral("HomeTemplateFilter"));
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        connect(ThemeManager::instance(), &ThemeManager::themeChanged,
+                this, qOverload<>(&QWidget::update));
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        const Theme* theme = ThemeManager::instance()->current();
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        // A cosmetic one-pixel pen centred on half-pixel coordinates avoids
+        // the jagged rounded borders produced by the Qt stylesheet rasterizer.
+        const QRectF outline = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        QPen border(theme->colorSurfaceDark, theme->borderThinWidth);
+        border.setCosmetic(true);
+        painter.setPen(border);
+
+        if (isChecked()) {
+            const QColor fill = isDown() ? theme->colorAccentPressed
+                : underMouse() ? theme->colorAccentHover
+                               : theme->colorAccent;
+            painter.setBrush(fill);
+        } else {
+            painter.setBrush(Qt::NoBrush);
+        }
+        painter.drawRoundedRect(outline, theme->radiusLG, theme->radiusLG);
+
+        QFont labelFont = font();
+        labelFont.setWeight(isChecked() ? QFont::DemiBold : QFont::Medium);
+        painter.setFont(labelFont);
+        painter.setPen(isChecked() || underMouse()
+            ? theme->colorTextBright
+            : theme->colorTextSecondary);
+        painter.drawText(rect(), Qt::AlignCenter, text());
+    }
+};
+
+class RecentEmptyIcon final : public QWidget {
+public:
+    explicit RecentEmptyIcon(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setFixedSize(44, 44);
+        connect(ThemeManager::instance(), &ThemeManager::themeChanged,
+                this, qOverload<>(&QWidget::update));
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        const Theme* theme = ThemeManager::instance()->current();
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPen pen(theme->colorTextDisabled, 2.0, Qt::SolidLine,
+                 Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+
+        painter.drawRoundedRect(QRectF(15.0, 7.0, 22.0, 25.0),
+                                theme->radiusMD, theme->radiusMD);
+        const QRectF imageRect(7.0, 14.0, 25.0, 23.0);
+        painter.drawRoundedRect(imageRect, theme->radiusMD, theme->radiusMD);
+        painter.drawEllipse(QPointF(25.0, 21.0), 2.5, 2.5);
+
+        QPainterPath mountains;
+        mountains.moveTo(11.0, 32.0);
+        mountains.lineTo(17.0, 25.0);
+        mountains.lineTo(21.0, 29.0);
+        mountains.lineTo(25.0, 26.0);
+        mountains.lineTo(29.0, 32.0);
+        painter.drawPath(mountains);
+    }
+};
+
 class TemplateCard final : public QFrame {
 public:
     TemplateCard(const SocialTemplatePreset& preset, std::function<void()> select,
@@ -439,12 +551,12 @@ public:
         setProperty("templateId", preset.id);
         setFrameShape(QFrame::NoFrame);
         setCursor(Qt::PointingHandCursor);
-        setFixedSize(kDocumentCardWidth, kTemplateCardHeight);
+        setFixedSize(kDocumentCardWidth, kDocumentCardHeight);
 
         const Theme* theme = ThemeManager::instance()->current();
         auto* layout = new QVBoxLayout(this);
-        layout->setContentsMargins(theme->spaceLG, theme->spaceLG,
-                                   theme->spaceLG, theme->spaceLG);
+        layout->setContentsMargins(theme->spaceMD, theme->spaceMD,
+                                   theme->spaceMD, theme->spaceMD);
         layout->setSpacing(theme->spaceSM);
         layout->addWidget(new FormatPreview(QSizeF(preset.width, preset.height), this));
 
@@ -489,10 +601,10 @@ QScrollArea* makeGridScrollArea(FlowLayout** gridLayout, QWidget* parent)
 
     auto* content = new QWidget(scroll);
     content->setObjectName(QStringLiteral("HomeGridContent"));
-    auto* layout = new FlowLayout(content, ThemeManager::instance()->current()->spaceXL,
-                                  ThemeManager::instance()->current()->spaceXL,
-                                  ThemeManager::instance()->current()->spaceXL);
-    layout->setRowAlignment(Qt::AlignHCenter);
+    auto* layout = new FlowLayout(content, ThemeManager::instance()->current()->spaceXXL,
+                                  ThemeManager::instance()->current()->spaceLG,
+                                  ThemeManager::instance()->current()->spaceLG);
+    layout->setRowAlignment(Qt::AlignLeft);
     content->setLayout(layout);
     scroll->setWidget(content);
     *gridLayout = layout;
@@ -508,61 +620,186 @@ HomeWorkspace::HomeWorkspace(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
 
     const Theme* theme = ThemeManager::instance()->current();
-    auto* root = new QVBoxLayout(this);
+    auto* root = new QHBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    auto* header = new HomeHeader(this);
-    header->setObjectName(QStringLiteral("HomeHeader"));
-    auto* headerLayout = new QVBoxLayout(header);
-    headerLayout->setContentsMargins(kHeaderHorizontalMargin, kHeaderTopMargin,
-                                     kHeaderHorizontalMargin, 0);
-    headerLayout->setSpacing(0);
+    auto* sidebar = new QWidget(this);
+    sidebar->setObjectName(QStringLiteral("HomeSidebar"));
+    sidebar->setFixedWidth(kSidebarWidth);
+    sidebar->setAttribute(Qt::WA_StyledBackground, true);
+    auto* sidebarLayout = new QVBoxLayout(sidebar);
+    sidebarLayout->setContentsMargins(0, theme->spaceXL, 0, theme->spaceXL);
+    sidebarLayout->setSpacing(theme->spaceMD);
 
-    auto* actions = new QHBoxLayout();
-    actions->setContentsMargins(0, 0, 0, 0);
-    actions->setSpacing(theme->spaceMD);
-
-    auto* appIcon = new QLabel(header);
-    appIcon->setPixmap(QPixmap(QStringLiteral(":/icons/app-icon.png")).scaled(
-        kHeaderAppIconSize, kHeaderAppIconSize,
+    auto* logo = new QLabel(sidebar);
+    logo->setObjectName(QStringLiteral("HomeLogo"));
+    logo->setPixmap(QPixmap(QStringLiteral(":/icons/home-logo.png")).scaled(
+        kSidebarLogoWidth, kSidebarLogoHeight,
         Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    appIcon->setFixedSize(kHeaderAppIconSize, kHeaderAppIconSize);
-    appIcon->setAlignment(Qt::AlignCenter);
-    actions->addWidget(appIcon);
-    actions->addStretch(1);
+    logo->setFixedSize(kSidebarWidth, 108);
+    logo->setAlignment(Qt::AlignCenter);
+    sidebarLayout->addWidget(logo);
+    sidebarLayout->addSpacing(theme->spaceLG);
 
-    auto* newDocument = new QPushButton(tr("New Document"), header);
-    newDocument->setObjectName(QStringLiteral("HomeNewDocumentButton"));
-    newDocument->setFixedSize(kNewDocumentButtonWidth, kNewDocumentButtonHeight);
-    QPixmap addIcon(20, 20);
-    addIcon.fill(Qt::transparent);
-    {
-        QPainter painter(&addIcon);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap));
-        painter.drawLine(QPointF(10.0, 3.0), QPointF(10.0, 17.0));
-        painter.drawLine(QPointF(3.0, 10.0), QPointF(17.0, 10.0));
-    }
-    newDocument->setIcon(QIcon(addIcon));
-    newDocument->setIconSize(addIcon.size());
-    actions->addWidget(newDocument);
-    headerLayout->addLayout(actions);
+    auto* sectionGroup = new QButtonGroup(this);
+    sectionGroup->setExclusive(true);
+
+    m_recentButton = new QPushButton(tr("Recent"), sidebar);
+    m_recentButton->setObjectName(QStringLiteral("HomeNavButton"));
+    m_recentButton->setCheckable(true);
+    m_recentButton->setChecked(true);
+    m_recentButton->setIconSize(QSize(28, 20));
+    m_recentButton->setFixedHeight(42);
+    m_recentButton->setCursor(Qt::PointingHandCursor);
+    sectionGroup->addButton(m_recentButton, 0);
+    sidebarLayout->addWidget(m_recentButton);
+
+    m_templatesButton = new QPushButton(tr("Templates"), sidebar);
+    m_templatesButton->setObjectName(QStringLiteral("HomeNavButton"));
+    m_templatesButton->setCheckable(true);
+    m_templatesButton->setIconSize(QSize(28, 20));
+    m_templatesButton->setFixedHeight(42);
+    m_templatesButton->setCursor(Qt::PointingHandCursor);
+    sectionGroup->addButton(m_templatesButton, 1);
+    sidebarLayout->addWidget(m_templatesButton);
+    sidebarLayout->addStretch(1);
+    root->addWidget(sidebar);
+
+    auto* mainArea = new QWidget(this);
+    mainArea->setObjectName(QStringLiteral("HomeMainArea"));
+    mainArea->setAttribute(Qt::WA_StyledBackground, true);
+    auto* mainLayout = new QVBoxLayout(mainArea);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
+
+    auto* header = new QWidget(mainArea);
+    header->setObjectName(QStringLiteral("HomeHeader"));
+    header->setFixedHeight(kHeaderHeight);
+    header->setAttribute(Qt::WA_StyledBackground, true);
+    auto* headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(kHeaderHorizontalMargin, kHeaderVerticalMargin,
+                                     kHeaderHorizontalMargin, kHeaderVerticalMargin);
+    headerLayout->setSpacing(theme->spaceXL);
+
+    auto* welcomeLayout = new QVBoxLayout();
+    welcomeLayout->setContentsMargins(0, 0, 0, 0);
+    welcomeLayout->setSpacing(theme->spaceSM);
+    auto* welcome = new QLabel(tr("WELCOME"), header);
+    welcome->setObjectName(QStringLiteral("HomeWelcomeTitle"));
+    welcomeLayout->addWidget(welcome);
+    auto* tagline = new QLabel(tr("Create. Design. Visualize."), header);
+    tagline->setObjectName(QStringLiteral("HomeWelcomeTagline"));
+    welcomeLayout->addWidget(tagline);
+    headerLayout->addLayout(welcomeLayout);
     headerLayout->addStretch(1);
-    connect(newDocument, &QPushButton::clicked, this, &HomeWorkspace::newDocumentRequested);
 
-    m_sectionTabs = new QTabBar(header);
-    m_sectionTabs->setObjectName(QStringLiteral("HomeSectionTabs"));
-    m_sectionTabs->addTab(tr("Recent"));
-    m_sectionTabs->addTab(tr("Templates"));
-    m_sectionTabs->setExpanding(false);
-    m_sectionTabs->setFixedHeight(43);
-    m_sectionTabs->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    headerLayout->addWidget(m_sectionTabs);
-    root->addWidget(header);
+    m_newDocumentButton = new QPushButton(tr("New Document"), header);
+    m_newDocumentButton->setObjectName(QStringLiteral("HomePrimaryAction"));
+    m_newDocumentButton->setIconSize(QSize(28, 20));
+    m_newDocumentButton->setFixedSize(kNewDocumentButtonWidth, kHeaderButtonHeight);
+    m_newDocumentButton->setCursor(Qt::PointingHandCursor);
+    headerLayout->addWidget(m_newDocumentButton);
 
-    m_sections = new QStackedWidget(this);
-    m_sections->addWidget(makeGridScrollArea(&m_recentLayout, m_sections));
+    m_openDocumentButton = new QPushButton(tr("Open"), header);
+    m_openDocumentButton->setObjectName(QStringLiteral("HomeSecondaryAction"));
+    m_openDocumentButton->setIconSize(QSize(28, 20));
+    m_openDocumentButton->setFixedSize(kOpenButtonWidth, kHeaderButtonHeight);
+    m_openDocumentButton->setCursor(Qt::PointingHandCursor);
+    headerLayout->addWidget(m_openDocumentButton);
+    mainLayout->addWidget(header);
+
+    connect(m_newDocumentButton, &QPushButton::clicked,
+            this, &HomeWorkspace::newDocumentRequested);
+    connect(m_openDocumentButton, &QPushButton::clicked,
+            this, &HomeWorkspace::openDocumentRequested);
+
+    m_sections = new QStackedWidget(mainArea);
+
+    auto* recentPage = new QWidget(m_sections);
+    recentPage->setObjectName(QStringLiteral("HomeRecentPage"));
+    auto* recentPageLayout = new QVBoxLayout(recentPage);
+    recentPageLayout->setContentsMargins(0, 0, 0, 0);
+    recentPageLayout->setSpacing(0);
+
+    auto* recentHeader = new QWidget(recentPage);
+    recentHeader->setObjectName(QStringLiteral("HomeSectionHeader"));
+    auto* recentHeaderLayout = new QHBoxLayout(recentHeader);
+    recentHeaderLayout->setContentsMargins(theme->spaceXXL, theme->spaceLG,
+                                           theme->spaceXXL, theme->spaceLG);
+    recentHeaderLayout->setSpacing(theme->spaceLG);
+    auto* recentTitle = new QLabel(tr("Recent"), recentHeader);
+    recentTitle->setObjectName(QStringLiteral("HomeSectionTitle"));
+    recentHeaderLayout->addWidget(recentTitle);
+    recentHeaderLayout->addStretch(1);
+    auto* recentFilter = new QLineEdit(recentHeader);
+    recentFilter->setObjectName(QStringLiteral("HomeRecentFilter"));
+    recentFilter->setPlaceholderText(tr("Filter recent files..."));
+    recentFilter->setClearButtonEnabled(true);
+    recentFilter->setFixedSize(220, 34);
+    recentHeaderLayout->addWidget(recentFilter);
+    recentPageLayout->addWidget(recentHeader);
+
+    m_recentContent = new QStackedWidget(recentPage);
+    m_recentContent->setObjectName(QStringLiteral("HomeRecentContent"));
+    m_recentContent->addWidget(makeGridScrollArea(&m_recentLayout, m_recentContent));
+
+    m_recentEmptyState = new QWidget(m_recentContent);
+    m_recentEmptyState->setObjectName(QStringLiteral("HomeRecentEmptyState"));
+    auto* emptyPageLayout = new QVBoxLayout(m_recentEmptyState);
+    emptyPageLayout->setContentsMargins(theme->spaceXXL, theme->spaceXXL,
+                                        theme->spaceXXL, theme->spaceXXL);
+    emptyPageLayout->setSpacing(0);
+    emptyPageLayout->addStretch(1);
+
+    auto* emptyIcon = new RecentEmptyIcon(m_recentEmptyState);
+    emptyPageLayout->addWidget(emptyIcon, 0, Qt::AlignHCenter);
+    emptyPageLayout->addSpacing(theme->spaceLG);
+
+    auto* emptyTitle = new QLabel(tr("No recent files yet"), m_recentEmptyState);
+    emptyTitle->setObjectName(QStringLiteral("HomeEmptyTitle"));
+    emptyTitle->setAlignment(Qt::AlignCenter);
+    emptyPageLayout->addWidget(emptyTitle, 0, Qt::AlignHCenter);
+    emptyPageLayout->addSpacing(theme->spaceLG);
+
+    auto* emptyDescription = new QLabel(
+        tr("Create a new document or open an existing file to get started."),
+        m_recentEmptyState);
+    emptyDescription->setObjectName(QStringLiteral("HomeEmptyDescription"));
+    emptyDescription->setAlignment(Qt::AlignCenter);
+    emptyDescription->setWordWrap(true);
+    emptyDescription->setMaximumWidth(520);
+    emptyDescription->setMinimumHeight(44);
+    emptyPageLayout->addWidget(emptyDescription, 0, Qt::AlignHCenter);
+    emptyPageLayout->addSpacing(theme->spaceXL);
+
+    auto* emptyActions = new QHBoxLayout();
+    emptyActions->setContentsMargins(0, 0, 0, 0);
+    emptyActions->setSpacing(theme->spaceMD);
+    emptyActions->addStretch(1);
+    m_emptyNewDocumentButton = new QPushButton(tr("New Document"), m_recentEmptyState);
+    m_emptyNewDocumentButton->setObjectName(QStringLiteral("HomePrimaryAction"));
+    m_emptyNewDocumentButton->setIconSize(QSize(28, 20));
+    m_emptyNewDocumentButton->setFixedSize(kNewDocumentButtonWidth, kHeaderButtonHeight);
+    m_emptyNewDocumentButton->setCursor(Qt::PointingHandCursor);
+    emptyActions->addWidget(m_emptyNewDocumentButton);
+    m_emptyOpenFileButton = new QPushButton(tr("Open File"), m_recentEmptyState);
+    m_emptyOpenFileButton->setObjectName(QStringLiteral("HomeSecondaryAction"));
+    m_emptyOpenFileButton->setIconSize(QSize(28, 20));
+    m_emptyOpenFileButton->setFixedSize(132, kHeaderButtonHeight);
+    m_emptyOpenFileButton->setCursor(Qt::PointingHandCursor);
+    emptyActions->addWidget(m_emptyOpenFileButton);
+    emptyActions->addStretch(1);
+    emptyPageLayout->addLayout(emptyActions);
+    emptyPageLayout->addStretch(1);
+    m_recentContent->addWidget(m_recentEmptyState);
+    recentPageLayout->addWidget(m_recentContent, 1);
+
+    connect(m_emptyNewDocumentButton, &QPushButton::clicked,
+            this, &HomeWorkspace::newDocumentRequested);
+    connect(m_emptyOpenFileButton, &QPushButton::clicked,
+            this, &HomeWorkspace::openDocumentRequested);
+    m_sections->addWidget(recentPage);
 
     auto* templatePage = new QWidget(m_sections);
     templatePage->setObjectName(QStringLiteral("HomeTemplatePage"));
@@ -570,19 +807,30 @@ HomeWorkspace::HomeWorkspace(QWidget* parent)
     templatePageLayout->setContentsMargins(0, 0, 0, 0);
     templatePageLayout->setSpacing(0);
 
+    auto* templateHeader = new QWidget(templatePage);
+    templateHeader->setObjectName(QStringLiteral("HomeSectionHeader"));
+    auto* templateHeaderLayout = new QHBoxLayout(templateHeader);
+    templateHeaderLayout->setContentsMargins(theme->spaceXXL, theme->spaceLG,
+                                             theme->spaceXXL, theme->spaceLG);
+    auto* templateTitle = new QLabel(tr("Templates"), templateHeader);
+    templateTitle->setObjectName(QStringLiteral("HomeSectionTitle"));
+    templateHeaderLayout->addWidget(templateTitle);
+    templateHeaderLayout->addStretch(1);
+    templatePageLayout->addWidget(templateHeader);
+
     auto* filterScroll = new QScrollArea(templatePage);
     filterScroll->setObjectName(QStringLiteral("HomeTemplateFiltersScroll"));
     filterScroll->setFrameShape(QFrame::NoFrame);
     filterScroll->setWidgetResizable(true);
     filterScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     filterScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    filterScroll->setFixedHeight(80);
+    filterScroll->setFixedHeight(66);
 
     auto* filterContent = new QWidget(filterScroll);
     filterContent->setObjectName(QStringLiteral("HomeTemplateFiltersContent"));
     auto* filterLayout = new QHBoxLayout(filterContent);
-    filterLayout->setContentsMargins(theme->spaceXXL, theme->spaceLG,
-                                     theme->spaceXXL, theme->spaceLG);
+    filterLayout->setContentsMargins(theme->spaceXXL, theme->spaceMD,
+                                     theme->spaceXXL, theme->spaceXL);
     filterLayout->setSpacing(theme->spaceLG);
     filterLayout->setSizeConstraint(QLayout::SetMinimumSize);
 
@@ -591,12 +839,9 @@ HomeWorkspace::HomeWorkspace(QWidget* parent)
     const auto& filters = platformFilters();
     for (int index = 0; index < static_cast<int>(filters.size()); ++index) {
         const PlatformFilter& filter = filters[index];
-        auto* chip = new QPushButton(filter.label, filterContent);
-        chip->setObjectName(QStringLiteral("HomeTemplateFilter"));
-        chip->setCheckable(true);
+        auto* chip = new TemplateFilterButton(filter.label, filterContent);
         chip->setChecked(index == 0);
         chip->setMinimumSize(72, 42);
-        chip->setCursor(Qt::PointingHandCursor);
         filterGroup->addButton(chip, index);
         filterLayout->addWidget(chip);
     }
@@ -613,9 +858,12 @@ HomeWorkspace::HomeWorkspace(QWidget* parent)
             applyTemplateFilter(filters[index].id);
     });
 
-    root->addWidget(m_sections, 1);
-    connect(m_sectionTabs, &QTabBar::currentChanged, m_sections,
-            &QStackedWidget::setCurrentIndex);
+    mainLayout->addWidget(m_sections, 1);
+    root->addWidget(mainArea, 1);
+    connect(sectionGroup, &QButtonGroup::idClicked,
+            m_sections, &QStackedWidget::setCurrentIndex);
+    connect(recentFilter, &QLineEdit::textChanged,
+            this, &HomeWorkspace::setRecentFilter);
 
     connect(RecentFilesManager::instance(), &RecentFilesManager::changed,
             this, &HomeWorkspace::rebuildRecent);
@@ -665,7 +913,10 @@ void HomeWorkspace::rebuildRecent()
         } else {
             card->updateEntry(entry);
         }
-        orderedCards.append(card);
+        if (m_recentFilter.isEmpty()
+            || QFileInfo(path).fileName().contains(m_recentFilter, Qt::CaseInsensitive)) {
+            orderedCards.append(card);
+        }
     }
 
     // Reorder the layout without destroying cards that are still represented
@@ -673,6 +924,9 @@ void HomeWorkspace::rebuildRecent()
     // thumbnails stable when an open moves an entry to the front.
     while (QLayoutItem* item = m_recentLayout->takeAt(0))
         delete item;
+
+    for (QWidget* card : std::as_const(m_recentCards))
+        card->hide();
 
     for (auto it = m_recentCards.begin(); it != m_recentCards.end();) {
         if (!currentPaths.contains(it.key())) {
@@ -684,21 +938,31 @@ void HomeWorkspace::rebuildRecent()
         }
     }
 
-    if (orderedCards.isEmpty()) {
-        if (!m_recentEmptyState) {
-            auto* empty = new QLabel(tr("No recent documents yet."), grid);
+    if (entries.isEmpty()) {
+        if (m_recentNoMatchState) {
+            m_recentNoMatchState->hide();
+            m_recentNoMatchState->deleteLater();
+            m_recentNoMatchState = nullptr;
+        }
+        m_recentContent->setCurrentWidget(m_recentEmptyState);
+    } else if (orderedCards.isEmpty()) {
+        m_recentContent->setCurrentIndex(0);
+        if (!m_recentNoMatchState) {
+            auto* empty = new QLabel(grid);
             empty->setObjectName(QStringLiteral("HomeEmptyState"));
             empty->setFixedSize(300, 80);
             empty->setAlignment(Qt::AlignCenter);
-            m_recentEmptyState = empty;
+            empty->setText(tr("No recent documents match this filter."));
+            m_recentNoMatchState = empty;
         }
-        m_recentLayout->addWidget(m_recentEmptyState);
-        m_recentEmptyState->show();
+        m_recentLayout->addWidget(m_recentNoMatchState);
+        m_recentNoMatchState->show();
     } else {
-        if (m_recentEmptyState) {
-            m_recentEmptyState->hide();
-            m_recentEmptyState->deleteLater();
-            m_recentEmptyState = nullptr;
+        m_recentContent->setCurrentIndex(0);
+        if (m_recentNoMatchState) {
+            m_recentNoMatchState->hide();
+            m_recentNoMatchState->deleteLater();
+            m_recentNoMatchState = nullptr;
         }
         for (QWidget* card : std::as_const(orderedCards)) {
             m_recentLayout->addWidget(card);
@@ -707,6 +971,12 @@ void HomeWorkspace::rebuildRecent()
     }
 
     m_recentLayout->invalidate();
+}
+
+void HomeWorkspace::setRecentFilter(const QString& text)
+{
+    m_recentFilter = text.trimmed();
+    rebuildRecent();
 }
 
 void HomeWorkspace::rebuildTemplates()
@@ -759,56 +1029,81 @@ void HomeWorkspace::applyThumbnail(const QString& path, const QImage& thumbnail,
 void HomeWorkspace::applyTheme()
 {
     const Theme* theme = ThemeManager::instance()->current();
+    const int homeButtonFontSize = theme->fontSizeMD + 2;
+    m_recentButton->setIcon(makeStatefulNavIcon(false, theme));
+    m_templatesButton->setIcon(makeStatefulNavIcon(true, theme));
+    m_newDocumentButton->setIcon(makeHeaderActionIcon(false, theme->colorTextBright));
+    m_openDocumentButton->setIcon(makeHeaderActionIcon(true, theme->colorTextBright));
+    m_emptyNewDocumentButton->setIcon(
+        makeHeaderActionIcon(false, theme->colorTextBright));
+    m_emptyOpenFileButton->setIcon(
+        makeHeaderActionIcon(true, theme->colorTextBright));
+
     setStyleSheet(QStringLiteral(
-        "HomeWorkspace { background: %1; }"
-        "#HomeHeader { background: transparent; }"
-        "#HomeNewDocumentButton {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #176fd1, stop:1 #2f91f5);"
-        "  color: #ffffff; border: 1px solid #3b91eb; border-radius: 8px;"
-        "  padding: 0 20px; font-size: 14px; font-weight: 600;"
-        "}"
-        "#HomeNewDocumentButton:hover {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #237ddd, stop:1 #3b9cff);"
-        "}"
-        "#HomeNewDocumentButton:pressed { background: #1767bd; }"
-        "#HomeSectionTabs { background: transparent; border: none; border-bottom: %2px solid %3; }"
-        "#HomeSectionTabs::tab { background: transparent; color: %4; border: none;"
-        "  border-bottom: 2px solid transparent; min-width: 62px; height: 42px;"
-        "  padding: 0 %5px; margin-right: %6px; font-size: %7px; font-weight: 500;"
-        "}"
-        "#HomeSectionTabs::tab:selected { color: %8; border-bottom: 2px solid %9; }"
-        "#HomeSectionTabs::tab:hover:!selected { color: %8; }"
-        "#HomeTemplatePage, #HomeTemplateFiltersScroll,"
+        "HomeWorkspace, #HomeMainArea { background: %1; }"
+        "#HomeSidebar { background: %2; border-right: %3px solid %4; }"
+        "#HomeLogo { background: transparent; }"
+        "#HomeNavButton { background: transparent; color: %5; border: none;"
+        "  border-left: 3px solid transparent; border-radius: %18px;"
+        "  margin: 0 8px; padding: 0 14px; text-align: left;"
+        "  font-size: %19px; font-weight: 500; }"
+        "#HomeNavButton:hover:!checked { background: %10; color: %6; }"
+        "#HomeNavButton:checked { background: %10; color: %6;"
+        "  border-left-color: %7; font-weight: 600; }"
+        "#HomeHeader { background: %2; }"
+        "#HomeWelcomeTitle { color: %6; background: transparent;"
+        "  font-size: 22px; font-weight: 700; letter-spacing: 3px; }"
+        "#HomeWelcomeTagline { color: %5; background: transparent;"
+        "  font-size: %15px; letter-spacing: 1px; }"
+        "#HomePrimaryAction, #HomeSecondaryAction { border-radius: %13px;"
+        "  padding: 0 16px; font-size: %19px; font-weight: 600; }"
+        "#HomePrimaryAction { background: %7; color: %6; border: %3px solid %7; }"
+        "#HomePrimaryAction:hover { background: %8; border-color: %8; }"
+        "#HomePrimaryAction:pressed { background: %9; border-color: %9; }"
+        "#HomeSecondaryAction { background: %16; color: %6; border: %3px solid %4; }"
+        "#HomeSecondaryAction:hover { background: %11; border-color: %12; }"
+        "#HomeSecondaryAction:pressed { background: %10; }"
+        "#HomeRecentPage, #HomeTemplatePage, #HomeSectionHeader,"
+        "#HomeTemplateFiltersScroll,"
         "#HomeTemplateFiltersScroll > QWidget, #HomeTemplateFiltersContent {"
-        "  background: %16; border: none;"
+        "  background: %2; border: none;"
         "}"
-        "#HomeTemplateFilter { background: %10; color: %4;"
-        "  border: %2px solid %3; border-radius: 20px; padding: 0 %6px;"
-        "  font-size: %7px; font-weight: 500;"
-        "}"
-        "#HomeTemplateFilter:hover:!checked { background: %12; border-color: %13; color: %8; }"
-        "#HomeTemplateFilter:checked { background: %9; border-color: %9; color: %8; font-weight: 600; }"
-        "#HomeTemplateFilter:checked:hover { background: %17; border-color: %17; }"
-        "#HomeGridScroll, #HomeGridScroll > QWidget, #HomeGridContent { background: %16; }"
-        "#HomeRecentCard, #HomeTemplateCard { background: %10; border: %2px solid %3; border-radius: %11px; }"
-        "#HomeRecentCard:hover, #HomeTemplateCard:hover { background: %12; border-color: %13; }"
-        "#HomeCardTitle { color: %8; font-size: %14px; font-weight: 600; }"
-        "#HomeCardDetail, #HomeCardMenu, #HomeEmptyState { color: %4; font-size: %15px; }"
+        "#HomeRecentContent, #HomeRecentEmptyState { background: %1; border: none; }"
+        "#HomeSectionHeader { border-bottom: %3px solid %4; }"
+        "#HomeSectionTitle { color: %6; background: transparent;"
+        "  font-size: 18px; font-weight: 700; }"
+        "#HomeEmptyTitle { background: transparent; color: %6;"
+        "  font-size: 18px; font-weight: 700; }"
+        "#HomeEmptyDescription { background: transparent; color: %5;"
+        "  font-size: 13px; }"
+        "#HomeRecentFilter { background: %2; color: %6;"
+        "  border: %3px solid %4; border-radius: %13px; padding: 0 10px;"
+        "  font-size: %15px; placeholder-text-color: %17; }"
+        "#HomeRecentFilter:focus { border-color: %12; }"
+        "#HomeTemplateFilter { background: transparent; border: none;"
+        "  padding: 0 16px; font-size: %19px; }"
+        "#HomeGridScroll, #HomeGridScroll > QWidget, #HomeGridContent { background: %1; }"
+        "#HomeRecentCard, #HomeTemplateCard { background: %16; border: %3px solid %4; border-radius: %13px; }"
+        "#HomeRecentCard:hover, #HomeTemplateCard:hover { background: %11; border-color: %12; }"
+        "#HomeCardTitle { background: transparent; color: %6; font-size: %14px; font-weight: 600; }"
+        "#HomeCardDetail, #HomeCardMenu, #HomeEmptyState { background: transparent; color: %5; font-size: %15px; }"
     ).arg(theme->colorBackgroundPrimary.name())
+     .arg(theme->colorBackgroundPrimary.name())
      .arg(theme->borderThinWidth)
      .arg(theme->colorBorder.name())
      .arg(theme->colorTextSecondary.name())
-     .arg(theme->spaceMD)
-     .arg(theme->spaceXL)
-     .arg(theme->fontSizeMD)
      .arg(theme->colorTextBright.name())
      .arg(theme->colorAccent.name())
+     .arg(theme->colorAccentHover.name())
+     .arg(theme->colorAccentPressed.name())
      .arg(theme->colorSurface.name())
-     .arg(theme->radiusLG)
      .arg(theme->colorSurfaceHover.name())
      .arg(theme->colorBorderFocus.name())
+     .arg(theme->radiusLG)
      .arg(theme->fontSizeMD)
      .arg(theme->fontSizeSM)
-     .arg(theme->colorPanelBackground.name())
-     .arg(theme->colorAccentHover.name()));
+     .arg(theme->colorSurfaceDark.name())
+     .arg(theme->colorTextDisabled.name())
+     .arg(theme->radiusMD)
+     .arg(homeButtonFontSize));
 }

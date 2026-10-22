@@ -9,9 +9,9 @@
 
 class FlowLayout;
 class QLabel;
+class QPushButton;
 class QScrollArea;
 class QStackedWidget;
-class QTabBar;
 class RecentThumbnailCache;
 class Document;
 
@@ -27,6 +27,7 @@ public:
 
 signals:
     void newDocumentRequested();
+    void openDocumentRequested();
     void recentDocumentRequested(const QString& path);
     void templateRequested(const QString& name, int width, int height);
 
@@ -37,16 +38,25 @@ private slots:
 
 private:
     void applyTemplateFilter(const QString& platform);
+    void setRecentFilter(const QString& text);
     void applyThumbnail(const QString& path, const QImage& thumbnail,
                         const QSize& originalSize);
 
-    QTabBar* m_sectionTabs = nullptr;
     QStackedWidget* m_sections = nullptr;
+    QStackedWidget* m_recentContent = nullptr;
+    QPushButton* m_recentButton = nullptr;
+    QPushButton* m_templatesButton = nullptr;
+    QPushButton* m_newDocumentButton = nullptr;
+    QPushButton* m_openDocumentButton = nullptr;
+    QPushButton* m_emptyNewDocumentButton = nullptr;
+    QPushButton* m_emptyOpenFileButton = nullptr;
     FlowLayout* m_recentLayout = nullptr;
     FlowLayout* m_templateLayout = nullptr;
     RecentThumbnailCache* m_thumbnails = nullptr;
     QHash<QString, QWidget*> m_recentCards;
     QWidget* m_recentEmptyState = nullptr;
+    QWidget* m_recentNoMatchState = nullptr;
     QList<QWidget*> m_templateCards;
+    QString m_recentFilter;
     QString m_templatePlatform = QStringLiteral("all");
 };

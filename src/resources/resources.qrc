@@ -161,6 +161,7 @@
         <file>icons/add-group.png</file>
         <file>icons/check-blue.xpm</file>
         <file>icons/app-logo.png</file>
+        <file alias="icons/home-logo.png">../../assets/logo.png</file>
         <file>icons/home-workspace-bg.jpg</file>
         <file>icons/splash.jpg</file>
         <file>icons/app-icon.png</file>

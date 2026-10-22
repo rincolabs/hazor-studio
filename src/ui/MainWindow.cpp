@@ -1297,6 +1297,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_tabWidget->tabBar(), &QTabBar::tabMoved, this, &MainWindow::onTabMoved);
     connect(m_homeWorkspace, &HomeWorkspace::newDocumentRequested,
             this, &MainWindow::onNewFile);
+    connect(m_homeWorkspace, &HomeWorkspace::openDocumentRequested,
+            this, &MainWindow::onOpenFile);
     connect(m_homeWorkspace, &HomeWorkspace::recentDocumentRequested,
             this, &MainWindow::onOpenRecentFile);
     connect(m_homeWorkspace, &HomeWorkspace::templateRequested,
