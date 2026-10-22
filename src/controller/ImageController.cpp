@@ -1,4 +1,5 @@
 #include "ImageController.hpp"
+#include "core/CrashHandler.hpp"
 #include "core/AdjustmentTypes.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
@@ -299,7 +300,9 @@ ImageController::ImageController(QObject* parent)
 
 ImageController::~ImageController()
 {
+    CrashHandler::breadcrumb("~ImageController: enter");
     flushGpuChanges();
+    CrashHandler::breadcrumb("~ImageController: done");
 }
 
 void ImageController::setDocument(Document* doc)

@@ -1,4 +1,5 @@
 #include "GPUViewport.hpp"
+#include "core/CrashHandler.hpp"
 #include "ChannelView.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
@@ -130,7 +131,9 @@ void GPUViewport::applyFixedBlend(int blendMode)
 GPUViewport::GPUViewport() = default;
 GPUViewport::~GPUViewport()
 {
+    CrashHandler::breadcrumb("~GPUViewport: enter");
     m_projection.releaseGL();
+    CrashHandler::breadcrumb("~GPUViewport: projection released");
     if (m_mainProg)     delete m_mainProg;
     if (m_solidProg)    delete m_solidProg;
     if (m_blendProg)    delete m_blendProg;
@@ -151,6 +154,7 @@ GPUViewport::~GPUViewport()
         if (e.fbo) glDeleteFramebuffers(1, &e.fbo);
         if (e.tex) glDeleteTextures(1, &e.tex);
     }
+    CrashHandler::breadcrumb("~GPUViewport: done");
 }
 
 // ── Initialize ─────────────────────────────────────────────────

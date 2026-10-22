@@ -2,6 +2,7 @@
 #include <QAbstractSpinBox>
 #include "core/AdjustmentTypes.hpp"
 #include "core/AppPaths.hpp"
+#include "core/CrashHandler.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
@@ -3616,6 +3617,7 @@ void MainWindow::onTabChanged(int index)
 
 void MainWindow::onTabCloseRequested(int index)
 {
+    CrashHandler::breadcrumb("onTabCloseRequested: tabWidget index", index);
     index = documentIndexForTabWidget(index);
     if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
 
@@ -3637,6 +3639,7 @@ void MainWindow::onTabCloseRequested(int index)
     }
 
     if (!ensureTabCanBeDiscardedOrSaved(index)) return;
+    CrashHandler::breadcrumb("onTabCloseRequested: prompts cleared", index);
 
     // They are views into the same file, and one left open would offer to
     // "Save" a project the user just closed.
@@ -3663,15 +3666,21 @@ void MainWindow::closeTabAt(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
 
+    CrashHandler::breadcrumb("closeTabAt: enter", index);
+
     auto& tab = m_tabs[index];
     // The isolated working copy exists for exactly as long as the tab editing
     // it: dropping the session here is what discards uncommitted content edits
     // (the user was asked first, in ensureTabCanBeDiscardedOrSaved) and what
     // makes the next Edit Contents start from the committed document again.
-    if (tab.container && tab.docId != tab.container->rootId())
+    if (tab.container && tab.docId != tab.container->rootId()) {
+        CrashHandler::breadcrumb("closeTabAt: endEditSession");
         tab.container->endEditSession(tab.docId);
-    if (tab.canvas)
+    }
+    if (tab.canvas) {
+        CrashHandler::breadcrumb("closeTabAt: cleanupDocumentLayers");
         tab.canvas->cleanupDocumentLayers();
+    }
     const int tabWidgetIndex = tabWidgetIndexForDocument(index);
     QWidget* page = tab.page ? tab.page : m_tabWidget->widget(tabWidgetIndex);
 
@@ -3684,6 +3693,7 @@ void MainWindow::closeTabAt(int index)
     // properties panel holds the adjustment editors (Curves/Color Balance),
     // which keep a pointer + documentChanged subscription to the controller —
     // detach them here too so they never touch the destroyed controller.
+    CrashHandler::breadcrumb("closeTabAt: detach panels");
     m_toolExecutor->setController(nullptr);
     m_layerPanel->setController(nullptr);
     // Detached by hand rather than through syncChannelsPanel(): that helper
@@ -3699,12 +3709,18 @@ void MainWindow::closeTabAt(int index)
     if (m_propsPanel)
         m_propsPanel->setController(nullptr);
 
+    CrashHandler::breadcrumb("closeTabAt: removeTab", tabWidgetIndex);
     m_tabWidget->blockSignals(true);
     m_tabWidget->removeTab(tabWidgetIndex);
     m_tabWidget->blockSignals(false);
+
+    CrashHandler::breadcrumb("closeTabAt: delete page");
     delete page;
 
+    CrashHandler::breadcrumb("closeTabAt: erase tab (destroys controller)");
     m_tabs.erase(m_tabs.begin() + index);
+    CrashHandler::breadcrumb("closeTabAt: tab erased, remaining",
+                             static_cast<long long>(m_tabs.size()));
 
     if (m_tabs.empty()) {
         m_activeTabIndex = -1;
@@ -3723,8 +3739,10 @@ void MainWindow::closeTabAt(int index)
         }
         m_coordLabel->setText(tr("X: —  Y: —"));
         m_sizeLabel->setText(tr("Size: —"));
+        CrashHandler::breadcrumb("closeTabAt: show Home page");
         m_tabWidget->setCurrentIndex(0);
         updateDirtyUi();
+        CrashHandler::breadcrumb("closeTabAt: done (no tabs left)");
     } else {
         if (activeTabRemoved)
             m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
@@ -3744,6 +3762,8 @@ void MainWindow::closeTabAt(int index)
         updateStatusFromDocument();
         m_canvas->update();
         updateDirtyUi();
+        CrashHandler::breadcrumb("closeTabAt: done (rebound to tab)",
+                                 m_activeTabIndex);
     }
 }
 

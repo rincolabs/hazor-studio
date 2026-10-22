@@ -1,5 +1,6 @@
 #include "CanvasView.hpp"
 #include "CanvasInputMapper.hpp"
+#include "core/CrashHandler.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
@@ -1188,11 +1189,15 @@ static QStringList extractValidDropImagePaths(const QMimeData* mime)
 
 CanvasView::~CanvasView()
 {
+    CrashHandler::breadcrumb("~CanvasView: enter");
     if (qApp)
         qApp->removeEventFilter(this);
     releaseTabletViewportCursor();
+    CrashHandler::breadcrumb("~CanvasView: makeCurrent");
     makeCurrent();
+    CrashHandler::breadcrumb("~CanvasView: brushRenderer.destroyGL");
     m_brushRenderer.destroyGL();
+    CrashHandler::breadcrumb("~CanvasView: delete GPUViewport");
     delete m_gpuViewport;
     m_gpuViewport = nullptr;
     if (m_previewTexture) {
@@ -1201,15 +1206,19 @@ CanvasView::~CanvasView()
                        : nullptr;
         if (gl) gl->glDeleteTextures(1, &m_previewTexture);
     }
+    CrashHandler::breadcrumb("~CanvasView: doneCurrent");
     doneCurrent();
+    CrashHandler::breadcrumb("~CanvasView: done");
 }
 
 void CanvasView::cleanupDocumentLayers()
 {
     if (m_gpuViewport) {
+        CrashHandler::breadcrumb("cleanupDocumentLayers: enter");
         makeCurrent();
         m_gpuViewport->cleanupDocumentLayers(m_doc);
         doneCurrent();
+        CrashHandler::breadcrumb("cleanupDocumentLayers: done");
     }
 }
 
