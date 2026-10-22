@@ -3686,7 +3686,15 @@ void MainWindow::closeTabAt(int index)
     // detach them here too so they never touch the destroyed controller.
     m_toolExecutor->setController(nullptr);
     m_layerPanel->setController(nullptr);
-    syncChannelsPanel();
+    // Detached by hand rather than through syncChannelsPanel(): that helper
+    // re-reads m_canvas/m_ctrl, which still point at the tab being closed, so
+    // it would ATTACH the panel to the very controller the lines below destroy.
+    // ChannelsPanel::setController then disconnects from whatever it last held
+    // — freed memory by the time the panel is pointed anywhere else.
+    if (m_channelsPanel) {
+        m_channelsPanel->setCanvas(nullptr);
+        m_channelsPanel->setController(nullptr);
+    }
     m_histogramPanel->setController(nullptr);
     if (m_propsPanel)
         m_propsPanel->setController(nullptr);

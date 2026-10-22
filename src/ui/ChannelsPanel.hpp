@@ -104,12 +104,18 @@ private:
     // they display changed.
     QString m_rowSignature;
 
-    ImageController* m_controller = nullptr;
+    // QPointer, not a raw pointer: the controller belongs to a document tab and
+    // dies with it, while this panel outlives every tab. setController() has to
+    // disconnect from whatever it last held, so a stale pointer here is not
+    // merely stale — it is a disconnect() through freed memory. The guard is
+    // structural; MainWindow::closeTabAt detaching the panel is the first line
+    // of defence, this is what makes forgetting it harmless.
+    QPointer<ImageController> m_controller;
     // The open channel dialog (new / options, alpha or spot). Modeless, because
     // it hosts an ink/overlay colour picker whose eyedropper samples the canvas;
     // one at a time, since the panel's buttons stay live while it is open.
     QPointer<QDialog> m_channelDlg;
-    CanvasView* m_canvas = nullptr;
+    QPointer<CanvasView> m_canvas;   // same reasoning as m_controller
     QTreeWidget* m_tree = nullptr;
     ChannelItemDelegate* m_delegate = nullptr;
 
