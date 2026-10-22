@@ -118,6 +118,7 @@ public:
     QString agentConfigDialogStyleSheet() const;
     QString brushDynamicsStyleSheet() const;
     QString exportDialogStyleSheet() const;
+    QString appDialogStyleSheet() const;
 
 signals:
     void changed();

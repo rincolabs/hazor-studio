@@ -1,52 +1,78 @@
 #include "ProgressDialog.h"
 
+#include "AppDialogChrome.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
 #include <QCloseEvent>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QVBoxLayout>
 #include <algorithm>
+
+namespace {
+// Intrinsic to the control, not a layout prop: a bar thinner than this reads
+// as a divider and a thicker one as a button.
+constexpr int kProgressBarHeight = 14;
+} // namespace
 
 ProgressDialog::ProgressDialog(QWidget* parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("Progress"));
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setWindowModality(Qt::ApplicationModal);
     setModal(true);
-    setFixedSize(360, 112);
     setSizeGripEnabled(false);
 
+    // Fixed width, free height: an in-flight operation can change the status
+    // text and the progress value, and neither may move the window.
+    setFixedWidth(AppDialogChrome::kProgressWidth);
+
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(14, 12, 14, 12);
-    root->setSpacing(8);
+    root->setContentsMargins(AppDialogChrome::kContentMargin, AppDialogChrome::kContentMargin,
+                             AppDialogChrome::kContentMargin, AppDialogChrome::kContentMargin);
+    root->setSpacing(AppDialogChrome::kSectionSpacing);
 
-    m_messageLabel = new QLabel(tr("Processing"), this);
-    m_messageLabel->setObjectName(QStringLiteral("progressMessage"));
-    m_messageLabel->setMinimumHeight(18);
-    root->addWidget(m_messageLabel);
+    // Status line and bar are one block, so they sit at the tighter spacing;
+    // the action row is a separate block and gets the section spacing.
+    auto* statusBlock = new QVBoxLayout;
+    statusBlock->setContentsMargins(0, 0, 0, 0);
+    statusBlock->setSpacing(AppDialogChrome::kTextSpacing);
 
-    auto* row = new QHBoxLayout;
-    row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(10);
+    m_message = tr("Processing");
+    m_messageLabel = new QLabel(m_message, this);
+    m_messageLabel->setObjectName(QStringLiteral("appDialogStatus"));
+    // Ignored horizontally: the label must take the width the layout gives it
+    // and elide inside it, never ask for the width its full text would need.
+    m_messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    statusBlock->addWidget(m_messageLabel);
 
     m_progressBar = new QProgressBar(this);
-    m_progressBar->setObjectName(QStringLiteral("progressBar"));
+    m_progressBar->setObjectName(QStringLiteral("appDialogProgress"));
     m_progressBar->setRange(0, 100);
     m_progressBar->setValue(0);
     m_progressBar->setTextVisible(false);
-    m_progressBar->setFixedHeight(14);
-    row->addWidget(m_progressBar, 1);
+    m_progressBar->setFixedHeight(kProgressBarHeight);
+    statusBlock->addWidget(m_progressBar);
 
-    m_cancelButton = new QPushButton(tr("Cancel"), this);
-    m_cancelButton->setObjectName(QStringLiteral("progressCancelButton"));
-    m_cancelButton->setFixedWidth(78);
-    row->addWidget(m_cancelButton, 0);
+    root->addLayout(statusBlock);
 
-    root->addLayout(row);
+    // Wrapped in a widget rather than added as a bare layout so that hiding it
+    // for a non-cancelable operation collapses its spacing too, instead of
+    // leaving an empty band under the bar.
+    m_actionRow = new QWidget(this);
+    auto* actions = AppDialogChrome::createActionRow();
+    m_actionRow->setLayout(actions);
+    m_cancelButton = AppDialogChrome::createActionButton(
+        tr("Cancel"), AppDialogChrome::ActionKind::Secondary, m_actionRow);
+    actions->addWidget(m_cancelButton);
+    m_actionRow->setVisible(false);
+    root->addWidget(m_actionRow);
 
     connect(m_cancelButton, &QPushButton::clicked, this, [this]() {
         if (!m_cancelable)
@@ -63,7 +89,8 @@ ProgressDialog::ProgressDialog(QWidget* parent)
 
 void ProgressDialog::setMessage(const QString& message)
 {
-    m_messageLabel->setText(message);
+    m_message = message;
+    updateMessageElide();
 }
 
 void ProgressDialog::setProgressValue(int value)
@@ -87,8 +114,17 @@ void ProgressDialog::setCancelable(bool cancelable)
 {
     m_canceled = false;
     m_cancelable = cancelable;
-    m_cancelButton->setVisible(cancelable);
-    m_cancelButton->setEnabled(cancelable && !m_canceled);
+    m_cancelButton->setEnabled(cancelable);
+
+    // isHidden(), not isVisible(): setCancelable() runs before show(), when a
+    // child of a hidden window reports itself invisible either way.
+    if (!m_actionRow->isHidden() == cancelable)
+        return;
+
+    // The only thing that legitimately changes this dialog's height, and it is
+    // decided before the operation starts rather than during it.
+    m_actionRow->setVisible(cancelable);
+    AppDialogChrome::sizeToContent(this, AppDialogChrome::kProgressWidth);
 }
 
 void ProgressDialog::closeEvent(QCloseEvent* event)
@@ -106,61 +142,39 @@ void ProgressDialog::closeEvent(QCloseEvent* event)
     event->ignore();
 }
 
+void ProgressDialog::resizeEvent(QResizeEvent* event)
+{
+    QDialog::resizeEvent(event);
+    updateMessageElide();
+}
+
+void ProgressDialog::updateMessageElide()
+{
+    if (!m_messageLabel)
+        return;
+
+    // Derived from the window width rather than read off the label: the label
+    // has not been given its share of the row yet the first time through, and
+    // a resize event arrives before the layout re-runs.
+    const int available = width() - 2 * AppDialogChrome::kContentMargin;
+    const QString shown = available > 0
+        ? m_messageLabel->fontMetrics().elidedText(m_message, Qt::ElideRight, available)
+        : m_message;
+
+    m_messageLabel->setText(shown);
+    m_messageLabel->setToolTip(shown == m_message ? QString() : m_message);
+}
+
 void ProgressDialog::applyTheme()
 {
-    const auto* t = ThemeManager::instance()->current();
+    const Theme* t = ThemeManager::instance()->current();
     if (!t)
         return;
 
-    setStyleSheet(QStringLiteral(R"(
-        QDialog {
-            background: %1;
-            color: %2;
-            border: 1px solid %3;
-            font-family: "%4";
-            font-size: %5px;
-        }
-        QLabel#progressMessage {
-            color: %2;
-            background: transparent;
-        }
-        QProgressBar#progressBar {
-            background: %6;
-            border: 1px solid %3;
-            border-radius: %7px;
-        }
-        QProgressBar#progressBar::chunk {
-            background: %8;
-            border-radius: %7px;
-        }
-        QPushButton#progressCancelButton {
-            background: %6;
-            color: %2;
-            border: 1px solid %3;
-            border-radius: %9px;
-            padding: 4px 10px;
-        }
-        QPushButton#progressCancelButton:hover {
-            background: %10;
-        }
-        QPushButton#progressCancelButton:pressed {
-            background: %11;
-        }
-        QPushButton#progressCancelButton:disabled {
-            color: %12;
-            background: %6;
-        }
-    )")
-        .arg(t->colorPanelBackground.name())
-        .arg(t->colorTextPrimary.name())
-        .arg(t->colorBorder.name())
-        .arg(t->fontFamily)
-        .arg(t->fontSizeMD)
-        .arg(t->colorSurface.name())
-        .arg(t->radiusSM)
-        .arg(t->colorAccent.name())
-        .arg(t->radiusMD)
-        .arg(t->colorSurfaceHover.name())
-        .arg(t->colorSurfacePressed.name())
-        .arg(t->colorTextDisabled.name()));
+    setStyleSheet(t->appDialogStyleSheet());
+
+    // A theme swap can change the font, so both the elide and the height that
+    // depends on it have to be redone.
+    updateMessageElide();
+    AppDialogChrome::sizeToContent(this, AppDialogChrome::kProgressWidth);
 }

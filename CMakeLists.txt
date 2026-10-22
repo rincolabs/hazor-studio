@@ -757,6 +757,8 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ui/SwatchesPanel.hpp
     src/ui/AppComboBox.cpp
     src/ui/AppComboBox.hpp
+    src/ui/AppDialogChrome.hpp
+    src/ui/AppDialogChrome.cpp
     src/ui/AppMessageDialog.hpp
     src/ui/AppMessageDialog.cpp
     src/ui/ColorMixerPanel.cpp

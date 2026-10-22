@@ -155,3 +155,91 @@ QString Theme::exportDialogStyleSheet() const
     .arg(spaceSM)
     .arg(spaceMD);
 }
+
+// Shared look for the two dialog families that only report something or ask
+// for a decision: AppMessageDialog and ProgressDialog. Deliberately partial —
+// the dialog surface, QPushButton#okBtn and QPushButton#cancelBtn already come
+// from globalStyleSheet(), and restating them here would make this a second
+// place to edit. Geometry (widths, margins, button metrics) is not here
+// either; it lives in AppDialogChrome, which both dialogs build against.
+QString Theme::appDialogStyleSheet() const
+{
+    return QStringLiteral(
+        "QLabel#appDialogTitle {\n"
+        "    color: %1; font-size: %2px; font-weight: 600; background: transparent;\n"
+        "}\n"
+        "QLabel#appDialogMessage {\n"
+        "    color: %5; font-size: %2px; background: transparent;\n"
+        "}\n"
+        "QLabel#appDialogDescription {\n"
+        "    color: %3; font-size: %4px; background: transparent;\n"
+        "}\n"
+        "QLabel#appDialogStatus {\n"
+        "    color: %5; font-size: %4px; background: transparent;\n"
+        "}\n"
+        "QPlainTextEdit#appDialogDetails {\n"
+        "    background: %6; color: %3; border: %7px solid %8; border-radius: %9px;\n"
+        "    font-family: '%10'; font-size: %11px;\n"
+        "}\n"
+    )
+    .arg(colorTextBright.name())
+    .arg(fontSizeLG)
+    .arg(colorTextSecondary.name())
+    .arg(fontSizeMD)
+    .arg(colorTextPrimary.name())
+    .arg(colorBackgroundTertiary.name())
+    .arg(borderNormalWidth)
+    .arg(colorBorder.name())
+    .arg(radiusSM)
+    .arg(fontFamilyMono)
+    .arg(fontSizeSM)
+    + QStringLiteral(
+        "QProgressBar#appDialogProgress {\n"
+        "    background: %1; border: %2px solid %3; border-radius: %4px;\n"
+        "}\n"
+        "QProgressBar#appDialogProgress::chunk {\n"
+        "    background: %5; border-radius: %4px;\n"
+        "}\n"
+    )
+    .arg(colorSurfaceDark.name())
+    .arg(borderNormalWidth)
+    .arg(colorBorder.name())
+    .arg(radiusSM)
+    .arg(colorAccent.name())
+    // A destructive action carries the secondary button's look, label colour
+    // included: in a dialog whose whole point is the decision, the wording is
+    // what says "Discard", and a red label there only adds noise. The rule
+    // exists at all because the base QPushButton is borderless, so without it
+    // the button would read as plain text next to the bordered ones.
+    + QStringLiteral(
+        "QPushButton#destructiveBtn {\n"
+        "    background: %1; color: %2; border: %3px solid %4; border-radius: %5px;\n"
+        "    padding: %6px %7px;\n"
+        "}\n"
+        "QPushButton#destructiveBtn:hover { background: %8; }\n"
+        "QPushButton#destructiveBtn:pressed { background: %9; }\n"
+        "QPushButton#destructiveBtn:disabled { color: %10; }\n"
+    )
+    .arg(colorSurface.name())
+    .arg(colorTextPrimary.name())
+    .arg(borderNormalWidth)
+    .arg(colorBorder.name())
+    .arg(radiusMD)
+    .arg(spaceSM)
+    .arg(spaceXL)
+    .arg(colorSurfaceHover.name())
+    .arg(colorSurfacePressed.name())
+    .arg(colorTextDisabled.name())
+    // The details disclosure is not one of the decision actions, so it must not
+    // look like one: flat, no border, left of the action group.
+    + QStringLiteral(
+        "QPushButton#appDialogDetailsToggle {\n"
+        "    background: transparent; border: none; border-radius: 0; padding: 0;\n"
+        "    color: %1; font-size: %2px; text-align: left;\n"
+        "}\n"
+        "QPushButton#appDialogDetailsToggle:hover { color: %3; }\n"
+    )
+    .arg(colorTextSecondary.name())
+    .arg(fontSizeMD)
+    .arg(colorTextBright.name());
+}
