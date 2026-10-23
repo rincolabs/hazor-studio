@@ -54,11 +54,9 @@ public:
 
     // ── Document / Canvas page (shown when no layer is selected) ──
     // Pushes the active document's canvas metrics into the Document page. The
-    // panel only displays + forwards edits; MainWindow owns all resize/document
-    // logic. `portraitActive`/`landscapeActive` light up the matching orientation
-    // button.
-    void setDocumentInfo(int widthPx, int heightPx, double resolutionDpi,
-                         const QString& colorMode, int bitDepth,
+    // panel only displays + forwards edits; MainWindow owns all resize logic.
+    // `portraitActive`/`landscapeActive` light up the matching orientation button.
+    void setDocumentInfo(int widthPx, int heightPx,
                          bool portraitActive, bool landscapeActive);
     // Switches the visible view to the Document/Canvas page.
     void showDocumentProperties();
@@ -145,10 +143,6 @@ signals:
     // A canvas dimension was committed. `field` is TransformField::FieldWidth or
     // FieldHeight; `value` is in px. MainWindow owns the resize + proportion math.
     void canvasSizeEdited(int field, double value);
-    // Resolution (DPI) committed on the Document page.
-    void canvasResolutionEdited(double dpi);
-    void canvasColorModeChanged(const QString& colorMode);
-    void canvasBitDepthChanged(int bitDepth);
     // Orientation buttons — swap W/H to portrait / landscape (no rotation).
     void canvasPortraitRequested();
     void canvasLandscapeRequested();
@@ -223,11 +217,6 @@ private:
     QDoubleSpinBox* m_canvasYInput = nullptr;
     QToolButton* m_portraitButton = nullptr;
     QToolButton* m_landscapeButton = nullptr;
-    ScrubbableValueInput* m_resolutionInput = nullptr;
-    double m_documentResolutionDpi = 300.0;
-    AppComboBox* m_resolutionUnitCombo = nullptr;
-    AppComboBox* m_modeCombo = nullptr;
-    AppComboBox* m_depthCombo = nullptr;
     QToolButton* m_rulersToggle = nullptr;
     AppComboBox* m_unitCombo = nullptr;
 };

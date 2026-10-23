@@ -253,7 +253,7 @@ void ExportImageDialog::buildUi()
     sizeRow->addWidget(new QLabel(tr("px")));
 
     m_constrainCheck = new QPushButton;
-    m_constrainCheck->setIcon(makeIcon(QStringLiteral(":/icons/constrain-proportions.png")));
+    m_constrainCheck->setIcon(makeIcon(QStringLiteral(":/icons/constrain-proportions.svg")));
     m_constrainCheck->setIconSize(QSize(20, 20));
     m_constrainCheck->setFixedSize(28, 24);
     m_constrainCheck->setCheckable(true);

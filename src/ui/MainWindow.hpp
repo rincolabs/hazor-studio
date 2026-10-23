@@ -351,7 +351,6 @@ private:
     void refreshPropertiesDocumentPage();
     // Document-page canvas edits — all routed through the existing resize logic.
     void applyCanvasSizeEdit(int field, double value);   // resize canvas (no resample)
-    void applyCanvasResolutionEdit(double dpi);
     void applyCanvasOrientation(bool portrait);          // swap W/H (resize canvas)
     void refreshHistoryPanel();
     // Points the Channels panel at the active tab's controller AND canvas

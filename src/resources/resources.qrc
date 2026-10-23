@@ -172,7 +172,7 @@
         <file>icons/format-align-center.png</file>
         <file>icons/format-align-right.png</file>
         <file>icons/prop-pixel-layer.png</file>
-        <file>icons/constrain-proportions.png</file>
+        <file>icons/constrain-proportions.svg</file>
         <file>icons/flip-horizontal.png</file>
         <file>icons/flip-vertical.png</file>
         <file>icons/prop-document.png</file>

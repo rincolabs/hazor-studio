@@ -27,7 +27,7 @@ static QLabel* makeTransformLabel(const QString& text, QWidget* parent)
 static QPushButton* makeLinkButton(QWidget* parent)
 {
     auto* button = new QPushButton(parent);
-    button->setIcon(makeIcon(QStringLiteral(":/icons/constrain-proportions.png")));
+    button->setIcon(makeIcon(QStringLiteral(":/icons/constrain-proportions.svg")));
     button->setIconSize(QSize(20, 20));
     button->setFixedSize(28, 24);
     button->setCheckable(true);

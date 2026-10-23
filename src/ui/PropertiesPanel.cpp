@@ -96,11 +96,11 @@ private:
 };
 
 // Builds a 28×24 icon button matching the Align bar's affordances.
-static QPushButton* makeIconButton(const QString& iconName, const QString& tooltip,
+static QPushButton* makeIconButton(const QString& iconFile, const QString& tooltip,
                                    QWidget* parent)
 {
     auto* btn = new QPushButton(parent);
-    btn->setIcon(makeIcon(QStringLiteral(":/icons/%1.png").arg(iconName)));
+    btn->setIcon(makeIcon(QStringLiteral(":/icons/%1").arg(iconFile)));
     btn->setIconSize(QSize(20, 20));
     btn->setFixedSize(28, 24);
     btn->setToolTip(tooltip);
@@ -348,9 +348,9 @@ void PropertiesPanel::buildTransformInterface(QVBoxLayout* parentLayout)
             TransformFieldsMode::PropertiesPanel, m_transformSection);
         m_transformSection->body()->addWidget(m_transformFields, 0, Qt::AlignLeft);
 
-        m_flipHButton = makeIconButton(QStringLiteral("flip-horizontal"),
+        m_flipHButton = makeIconButton(QStringLiteral("flip-horizontal.png"),
                                        tr("Flip horizontal"), m_transformFields);
-        m_flipVButton = makeIconButton(QStringLiteral("flip-vertical"),
+        m_flipVButton = makeIconButton(QStringLiteral("flip-vertical.png"),
                                        tr("Flip vertical"), m_transformFields);
         m_transformFields->setRotationActions(m_flipHButton, m_flipVButton);
     }
@@ -490,7 +490,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
             input->setMinimumWidth(52);
         }
 
-        m_canvasLinkButton = makeIconButton(QStringLiteral("constrain-proportions"),
+        m_canvasLinkButton = makeIconButton(QStringLiteral("constrain-proportions.svg"),
                                             tr("Link width and height (constrain proportions)"),
                                             canvasSection);
         m_canvasLinkButton->setCheckable(true);
@@ -516,45 +516,6 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_canvasXInput->setEnabled(false);
         m_canvasYInput->setEnabled(false);
 
-        // Resolution / Mode / Bit depth rows.
-        auto* formWrap = new QWidget(canvasSection);
-        formWrap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        auto* form = new QGridLayout(formWrap);
-        form->setContentsMargins(0, 0, 0, 0);
-        form->setHorizontalSpacing(t->spaceSM);
-        form->setVerticalSpacing(t->spaceSM);
-        form->setColumnStretch(2, 1);
-
-        m_resolutionInput = new ScrubbableValueInput(QString(), 1.0, 10000.0, 300.0,
-                                                     tr(" px/in"), 1.0, canvasSection);
-        m_resolutionInput->setDecimals(0);
-        m_resolutionInput->setMinimumWidth(72);
-        m_resolutionUnitCombo = new AppComboBox(canvasSection);
-        m_resolutionUnitCombo->addItem(tr("Pixels/Inch"));
-        m_resolutionUnitCombo->addItem(tr("Pixels/Centimeter"));
-        m_resolutionUnitCombo->setMinimumWidth(64);
-        form->addWidget(secondaryLabel(tr("Resolution"), canvasSection), 0, 0);
-        form->addWidget(m_resolutionInput, 0, 1, Qt::AlignLeft);
-        form->addWidget(m_resolutionUnitCombo, 0, 2, Qt::AlignLeft);
-
-        m_modeCombo = new AppComboBox(canvasSection);
-        m_modeCombo->addItem(tr("RGB Color"), QStringLiteral("RGB Color"));
-        m_modeCombo->addItem(tr("CMYK Color"), QStringLiteral("CMYK Color"));
-        m_modeCombo->addItem(tr("Grayscale"), QStringLiteral("Grayscale"));
-        m_modeCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        m_modeCombo->setMinimumWidth(64);
-        form->addWidget(secondaryLabel(tr("Mode"), canvasSection), 1, 0);
-        form->addWidget(m_modeCombo, 1, 1, 1, 2);
-
-        m_depthCombo = new AppComboBox(canvasSection);
-        m_depthCombo->addItem(tr("8 Bits/Channel"), 8);
-        m_depthCombo->addItem(tr("16 Bits/Channel"), 16);
-        m_depthCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        m_depthCombo->setMinimumWidth(64);
-        form->addWidget(secondaryLabel(tr("Depth"), canvasSection), 2, 0);
-        form->addWidget(m_depthCombo, 2, 1, 1, 2);
-
-        canvasSection->body()->addWidget(formWrap);
     }
     parentLayout->addWidget(canvasSection);
 
@@ -586,34 +547,6 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
     });
     connect(m_canvasHInput, &QDoubleSpinBox::editingFinished, this, [this]() {
         emit canvasSizeEdited(FieldHeight, m_canvasHInput->value());
-    });
-    connect(m_resolutionInput, &ScrubbableValueInput::editingFinished, this, [this](double v) {
-        const double dpi = (m_resolutionUnitCombo && m_resolutionUnitCombo->currentIndex() == 1)
-                               ? v * 2.54
-                               : v;
-        emit canvasResolutionEdited(dpi);
-    });
-    connect(m_resolutionUnitCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-        if (!m_resolutionInput)
-            return;
-        QSignalBlocker block(m_resolutionInput);
-        m_resolutionInput->setSuffix(idx == 1 ? tr(" px/cm") : tr(" px/in"));
-        m_resolutionInput->setValue(idx == 1
-                                        ? m_documentResolutionDpi / 2.54
-                                        : m_documentResolutionDpi);
-    });
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-        if (idx < 0)
-            return;
-        emit canvasColorModeChanged(m_modeCombo->itemData(idx).toString());
-    });
-    connect(m_depthCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-        if (idx < 0)
-            return;
-        emit canvasBitDepthChanged(m_depthCombo->itemData(idx).toInt());
     });
     connect(m_portraitButton, &QToolButton::clicked, this, [this]() {
         emit canvasPortraitRequested();
@@ -809,8 +742,7 @@ bool PropertiesPanel::canvasProportionsLocked() const
     return m_canvasLinkButton && m_canvasLinkButton->isChecked();
 }
 
-void PropertiesPanel::setDocumentInfo(int widthPx, int heightPx, double resolutionDpi,
-                                      const QString& colorMode, int bitDepth,
+void PropertiesPanel::setDocumentInfo(int widthPx, int heightPx,
                                       bool portraitActive, bool landscapeActive)
 {
     // setValue does not emit, but the orientation toggles drive on `clicked`
@@ -819,26 +751,6 @@ void PropertiesPanel::setDocumentInfo(int widthPx, int heightPx, double resoluti
     m_canvasHInput->setValue(heightPx);
     m_canvasXInput->setValue(0.0);
     m_canvasYInput->setValue(0.0);
-    m_documentResolutionDpi = resolutionDpi;
-    {
-        QSignalBlocker block(m_resolutionInput);
-        const bool pxPerCm = m_resolutionUnitCombo && m_resolutionUnitCombo->currentIndex() == 1;
-        m_resolutionInput->setSuffix(pxPerCm ? tr(" px/cm") : tr(" px/in"));
-        m_resolutionInput->setValue(pxPerCm ? resolutionDpi / 2.54 : resolutionDpi);
-    }
-    if (m_modeCombo) {
-        QSignalBlocker block(m_modeCombo);
-        const int idx = m_modeCombo->findData(colorMode);
-        if (idx >= 0)
-            m_modeCombo->setCurrentIndex(idx);
-    }
-    if (m_depthCombo) {
-        QSignalBlocker block(m_depthCombo);
-        const int idx = m_depthCombo->findData(bitDepth);
-        if (idx >= 0)
-            m_depthCombo->setCurrentIndex(idx);
-    }
-
     {
         QSignalBlocker pb(m_portraitButton);
         QSignalBlocker lb(m_landscapeButton);

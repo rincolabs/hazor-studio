@@ -1477,22 +1477,6 @@ MainWindow::MainWindow(QWidget* parent)
     // ── Document / Canvas page: all shortcuts to existing document logic. ──
     connect(m_propsPanel, &PropertiesPanel::canvasSizeEdited,
             this, &MainWindow::applyCanvasSizeEdit);
-    connect(m_propsPanel, &PropertiesPanel::canvasResolutionEdited,
-            this, &MainWindow::applyCanvasResolutionEdit);
-    connect(m_propsPanel, &PropertiesPanel::canvasColorModeChanged, this,
-            [this](const QString& colorMode) {
-        if (!m_doc || m_doc->colorMode == colorMode)
-            return;
-        m_doc->colorMode = colorMode;
-        markActiveTabDirty(true);
-    });
-    connect(m_propsPanel, &PropertiesPanel::canvasBitDepthChanged, this,
-            [this](int bitDepth) {
-        if (!m_doc || m_doc->bitDepth == bitDepth)
-            return;
-        m_doc->bitDepth = bitDepth;
-        markActiveTabDirty(true);
-    });
     connect(m_propsPanel, &PropertiesPanel::canvasPortraitRequested,
             this, [this]() { applyCanvasOrientation(true); });
     connect(m_propsPanel, &PropertiesPanel::canvasLandscapeRequested,
@@ -7192,8 +7176,7 @@ void MainWindow::refreshPropertiesDocumentPage()
     const int w = std::max(1, m_doc->size.width());
     const int h = std::max(1, m_doc->size.height());
     // Highlight the orientation matching the current aspect (neutral when square).
-    m_propsPanel->setDocumentInfo(w, h, m_doc->resolutionDpi,
-                                  m_doc->colorMode, m_doc->bitDepth,
+    m_propsPanel->setDocumentInfo(w, h,
                                   /*portraitActive*/ h > w,
                                   /*landscapeActive*/ w > h);
     const RulerGuideSettings rg = RulerGuideSettings::load();
@@ -7247,21 +7230,6 @@ void MainWindow::applyCanvasSizeEdit(int field, double value)
         m_ctrl->resizeCanvasAsync(options);
     else
         m_ctrl->resizeCanvas(options);
-}
-
-void MainWindow::applyCanvasResolutionEdit(double dpi)
-{
-    if (!m_ctrl || !m_doc || dpi <= 0.0)
-        return;
-
-    // Resolution-only change: keep the pixel dimensions, update DPI (print size).
-    ImageResizeOptions options;
-    options.targetSize = m_doc->size;
-    options.resampleImage = false;
-    options.updateResolution = true;
-    options.resolutionDpi = dpi;
-    if (!m_ctrl->resizeImage(options))
-        refreshPropertiesDocumentPage();  // rejected (no change) → restore display
 }
 
 void MainWindow::applyCanvasOrientation(bool portrait)
