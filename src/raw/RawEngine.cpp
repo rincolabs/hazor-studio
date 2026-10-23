@@ -8,6 +8,10 @@
 
 #ifdef HAVE_RAWENGINE
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "rtcompat/rtgui/options.hpp"
 #include "rtengine/dcp.h"
 #include "rtengine/iccstore.h"
@@ -107,6 +111,26 @@ void RawEngine::initialize(const std::string& resourceDir, const std::string& us
     Options& opts = App::get().mut_options();
     populateDefaultSettings(opts.rtSettings, lensfunDbDir);
 
+    // Interactive preview demosaic. This is the one upstream default Hazor
+    // deliberately does NOT inherit: rtgui's own `prevdemo` default is
+    // PD_Sidecar, and ImProcCoordinator::updatePreviewImage() reads it as
+    // `highDetailNeeded = prevdemo == PD_Sidecar ? true : (todo & M_HIGHQUAL)`
+    // — i.e. PD_Sidecar hard-wires the flag to true and the whole
+    // "if below 100% magnification, take a fast path" branch below it (FAST
+    // demosaic, ccSteps = 0) becomes dead code. Hazor Develop's preview then
+    // paid a full-resolution AMaZE demosaic of the sensor data before it could
+    // show anything, and RawSession's own design — the 1:1 RawDetailRegion that
+    // exists precisely to buy the full-quality demosaic back for one slice, and
+    // which drops it again when the region goes away (see RawDetailRegion in
+    // RawSession.hpp) — could never take effect, because the engine was already
+    // pinned to high detail with or without a region.
+    //
+    // PD_Fast restores that contract. It affects StagedImageProcessor
+    // (ImProcCoordinator) only: renderFull() runs through
+    // ProcessingJob/processImage() (simpleprocess.cc), which never consults
+    // prevdemo, so what Apply and Export bake is unchanged.
+    opts.prevdemo = PD_Fast;
+
     // rtengine::init() stores &opts.rtSettings in a process-lifetime static
     // (rtengine::settings); safe because App::get()'s singleton also lives
     // for the process's lifetime.
@@ -136,6 +160,16 @@ std::unique_ptr<RawSession> RawEngine::openFile(const std::string& path, std::st
     return RawSession::open(path, errorMessage);
 }
 
+void RawEngine::applyBackgroundThreadPolicy()
+{
+#ifdef _OPENMP
+    const int cores = omp_get_num_procs();
+    if (cores > 2) {
+        omp_set_num_threads(cores - 1);
+    }
+#endif
+}
+
 MatchedCameraProfile RawEngine::matchedCameraProfile(const RawMetadata& metadata)
 {
     MatchedCameraProfile result;
@@ -163,6 +197,7 @@ MatchedCameraProfile RawEngine::matchedCameraProfile(const RawMetadata& metadata
 void RawEngine::initialize(const std::string&, const std::string&, const std::string&) {}
 void RawEngine::shutdown() {}
 bool RawEngine::isAvailable() { return false; }
+void RawEngine::applyBackgroundThreadPolicy() {}
 
 std::unique_ptr<RawSession> RawEngine::openFile(const std::string& path, std::string* errorMessage)
 {

@@ -62,5 +62,21 @@ public:
     // when errorMessage is non-null it is set to a human-readable reason.
     static std::unique_ptr<RawSession> openFile(const std::string& path, std::string* errorMessage = nullptr);
 
+    // Call once at the top of any worker thread that is about to drive a
+    // RawSession (open, renderPreview, renderFull). rtengine parallelises over
+    // `omp_get_max_threads()`, i.e. every core, which is right for a batch
+    // converter and wrong for an interactive editor: a multi-second develop
+    // would leave nothing for Hazor's own UI thread, the GL frame or the
+    // compositor, and the whole desktop went unresponsive for the duration.
+    // This caps the calling thread's OpenMP team at one less than the core
+    // count (never below 1, and left alone on 1-2 core machines where giving a
+    // core away would cost more than it buys).
+    //
+    // OpenMP's thread-count control variable is per-thread, so this only
+    // affects renders driven from the calling thread — not the rest of the
+    // process, and not other RawSession workers. No-op when RAW support or
+    // OpenMP is not compiled in.
+    static void applyBackgroundThreadPolicy();
+
     static MatchedCameraProfile matchedCameraProfile(const RawMetadata& metadata);
 };

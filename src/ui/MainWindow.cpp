@@ -4242,6 +4242,7 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         if (m_ctrl) openHazorDevelop(0);
     });
     watcher->setFuture(QtConcurrent::run([path]() {
+        RawEngine::applyBackgroundThreadPolicy();
         RawOpenResult result;
         std::string errorMessage;
         std::unique_ptr<RawSession> session = RawEngine::openFile(path.toStdString(), &errorMessage);

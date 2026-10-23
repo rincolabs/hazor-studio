@@ -45,6 +45,33 @@ are `AppPaths::rawEngineResourceDir()` (`3rdparty/rawengine/rtdata/` —
 `cammatrices.json`, `dcraw.json`) and `AppPaths::rawUserDir()` (Hazor's own
 per-user RAW data directory, e.g. for user-dropped DCP profiles).
 
+### Engine-wide performance settings
+
+`RawEngine::initialize()` populates rtengine's globals from RawTherapee's own
+`Options::setDefaults()` values, with two deliberate exceptions, both of which
+exist because Hazor is an interactive editor and RawTherapee's defaults are
+tuned for a batch converter:
+
+- **`options.prevdemo = PD_Fast`.** `ImProcCoordinator::updatePreviewImage()`
+  reads it as `highDetailNeeded = prevdemo == PD_Sidecar ? true : (todo &
+  M_HIGHQUAL)`, so upstream's `PD_Sidecar` hard-wires that flag to true and the
+  "if below 100% magnification, take a fast path" branch under it becomes dead
+  code. With it, Hazor Develop's first preview paid a full-resolution AMaZE
+  demosaic of the sensor data before it could draw anything, and the 1:1 detail
+  region below could never pay for the full-quality demosaic *selectively* —
+  the engine was already pinned to it. `PD_Fast` is what makes the fast/high
+  split described there real. It affects `StagedImageProcessor` only;
+  `renderFull()` goes through `ProcessingJob`/`processImage()`
+  (`simpleprocess.cc`), which never consults `prevdemo`, so Apply and Export
+  are bit-identical either way.
+- **`RawEngine::applyBackgroundThreadPolicy()`**, called at the top of every
+  worker thread that drives a `RawSession`. rtengine parallelises over
+  `omp_get_max_threads()` — every core — which during a multi-second develop
+  left nothing for Hazor's UI thread, its GL frame or the desktop compositor.
+  This caps the *calling thread's* OpenMP team at one less than the core count
+  (OpenMP's thread-count control variable is per-thread, so nothing else in the
+  process is affected), and leaves 1–2 core machines alone.
+
 ## API surface
 
 - `RawEngine::initialize()` / `shutdown()` / `isAvailable()` — process-wide

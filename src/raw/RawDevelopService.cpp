@@ -133,6 +133,7 @@ bool RawDevelopService::requestDevelop(LayerTreeNode* node,
 
     auto future = QtConcurrent::run(
         [source, mode, cachedSession, cachedTempPath, paramsCopy]() -> std::shared_ptr<Task> {
+            RawEngine::applyBackgroundThreadPolicy();
             auto task = std::make_shared<Task>();
 
             RawSession* session = cachedSession;

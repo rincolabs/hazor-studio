@@ -1589,6 +1589,7 @@ void RawDevelopWindow::startPreview()
     m_previewWatcher->setFuture(QtConcurrent::run(m_previewPool,
         [this, params, existingSourcePath, source, generation, previewMaxEdge, previewUpdates,
          detailRequest]() {
+        RawEngine::applyBackgroundThreadPolicy();
         PreviewResult result;
         result.generation = generation;
         QString sourcePath = existingSourcePath;
