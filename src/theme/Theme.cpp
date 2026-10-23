@@ -24,11 +24,14 @@ QString Theme::titleBarStyleSheet() const
         "TitleBar { background: %1; }\n"
         "QMenuBar { padding: 0; margin: 0; }\n"
         "QLabel#titleBarTitle { color: %2; background: transparent; padding-left: 2px; }\n"
+        "QFrame#titleBarWindowSeparator { background: %6; border: none; }\n"
+        "QPushButton#sponsorBtn,\n"
         "QPushButton#minBtn, QPushButton#maxBtn, QPushButton#closeBtn {\n"
         "    background: transparent; color: %2;\n"
         "    border: none; border-radius: 0;\n"
         "    font-size: 13px; padding: 0;\n"
         "}\n"
+        "QPushButton#sponsorBtn:hover,\n"
         "QPushButton#minBtn:hover, QPushButton#maxBtn:hover {\n"
         "    background: %3; color: %4;\n"
         "}\n"
@@ -40,7 +43,8 @@ QString Theme::titleBarStyleSheet() const
     .arg(colorTextPrimary.name())
     .arg(colorSurfaceHover.name())
     .arg(colorTextBright.name())
-    .arg(colorDanger.name());
+    .arg(colorDanger.name())
+    .arg(colorBorder.name());
 }
 
 QString Theme::layerPanelStyleSheet() const

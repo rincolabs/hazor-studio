@@ -53,6 +53,7 @@ private:
     QLabel* m_iconLabel = nullptr;
     QLabel* m_titleLabel = nullptr;
     QWidget* m_menuBar = nullptr;
+    QPushButton* m_sponsorBtn = nullptr;
     QPushButton* m_minBtn = nullptr;
     QPushButton* m_maxBtn = nullptr;
     QPushButton* m_closeBtn = nullptr;

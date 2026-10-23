@@ -8,7 +8,7 @@ language. You can paint and edit by hand, or simply ask the AI to do things like
 
 ## Sponsor
 
-Hazor Studio is developed independently through Rincolabs. If you want to support the project and help keep its development moving forward, you can sponsor my work through GitHub Sponsors: [github.com/sponsors/allanesquina](https://github.com/sponsors/allanesquina).
+Hazor Studio is developed independently through Rincolabs. If you want to support the project and help keep its development moving forward, you can sponsor my work through GitHub Sponsors: [github.com/sponsors/allanesquina](https://github.com/sponsors/allanesquina). The same page is available from the **Sponsor** button in Hazor Studio's custom title bar.
 
 ## What it is
 

@@ -98,6 +98,7 @@
         <file>icons/window-maximize.png</file>
         <file>icons/window-restore.png</file>
         <file>icons/window-close.png</file>
+        <file alias="icons/sponsor-heart.png">shapes/material-design-icons-2.1.3/action/ios/ic_favorite_white_18pt.imageset/ic_favorite_white_18pt.png</file>
         <file>icons/zoom-fit.png</file>
         <file>icons/zoom-1-1.png</file>
         <file>icons/layer-mask.png</file>
