@@ -17,12 +17,13 @@
 #include <QPushButton>
 #include "colorpicker/ColorPickerDialog.hpp"
 
-NewDocumentDialog::NewDocumentDialog(QWidget* parent)
+NewDocumentDialog::NewDocumentDialog(QWidget* parent, Mode mode)
     : QDialog(parent)
 {
     setUpdatesEnabled(false);
 
-    setWindowTitle(tr("New | Edit"));
+    const QString modeTitle = mode == Mode::Edit ? tr("Edit") : tr("New");
+    setWindowTitle(modeTitle);
     setMinimumWidth(600);
     setMinimumHeight(480);
 
@@ -32,7 +33,8 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
     mainLayout->setContentsMargins(t->spaceXL, t->spaceLG, t->spaceXL, t->spaceLG);
 
     // ── Title ──
-    auto* title = new QLabel(tr("<h2>New | Edit</h2>"), this);
+    auto* title = new QLabel(
+        QStringLiteral("<h2>%1</h2>").arg(modeTitle.toHtmlEscaped()), this);
     title->setTextFormat(Qt::RichText);
     mainLayout->addWidget(title);
 

@@ -46,7 +46,9 @@ class NewDocumentDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit NewDocumentDialog(QWidget* parent = nullptr);
+    enum class Mode { New, Edit };
+
+    explicit NewDocumentDialog(QWidget* parent = nullptr, Mode mode = Mode::New);
 
     void setSettings(const DocumentSettings& s);
     DocumentSettings settings() const;

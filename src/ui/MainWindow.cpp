@@ -5066,7 +5066,7 @@ void MainWindow::onEditDocument()
     if (!m_doc) return;
 
     m_tabWidget->setUpdatesEnabled(false);
-    NewDocumentDialog dlg(this);
+    NewDocumentDialog dlg(this, NewDocumentDialog::Mode::Edit);
 
     DocumentSettings s;
     s.name = m_doc->name;
