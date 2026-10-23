@@ -6,6 +6,7 @@
 #include "core/LayerTreeNode.hpp"
 #include "core/LayerEffect.hpp"
 #include "core/BoxSelection.hpp"
+#include "brush/BrushSampling.hpp"
 #include "transform/TransformController.hpp"
 #include "controller/ImageController.hpp"
 #include "controller/Commands.hpp"
@@ -248,49 +249,6 @@ static QPointF constrainAngle45(const QPointF& from, const QPointF& to)
 static inline int docPixelIndex(double coordinate)
 {
     return static_cast<int>(std::floor(coordinate));
-}
-
-// x/y are continuous DOCUMENT-pixel coordinates, where integers sit on texel
-// edges and the centre of texel i is i + 0.5; the taps are indexed by texel
-// (integer = centre), so the coordinate is shifted half a texel first. Same
-// convention mismatch as sampleBilinearRgbaRaw had: without the shift this
-// clone-source preview showed a 2x2 box average of the source at 1:1 instead of
-// the pixels the dab actually copies, i.e. the overlay lied about the result.
-static QColor sampleCanvasBilinear(const QImage& image, float x, float y)
-{
-    if (image.isNull() || x < 0.0f || y < 0.0f
-        || x > static_cast<float>(image.width())
-        || y > static_cast<float>(image.height())) {
-        return Qt::transparent;
-    }
-
-    const float ix = x - 0.5f;
-    const float iy = y - 0.5f;
-    // Clamp to edge: in the outer half texel floor() lands outside the image
-    // and there is no neighbour to blend with.
-    const int x0 = std::clamp(static_cast<int>(std::floor(ix)), 0, image.width() - 1);
-    const int y0 = std::clamp(static_cast<int>(std::floor(iy)), 0, image.height() - 1);
-    const int x1 = std::clamp(static_cast<int>(std::floor(ix)) + 1, 0, image.width() - 1);
-    const int y1 = std::clamp(static_cast<int>(std::floor(iy)) + 1, 0, image.height() - 1);
-    const float tx = ix - std::floor(ix);
-    const float ty = iy - std::floor(iy);
-    auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
-
-    const QColor c00 = image.pixelColor(x0, y0);
-    const QColor c10 = image.pixelColor(x1, y0);
-    const QColor c01 = image.pixelColor(x0, y1);
-    const QColor c11 = image.pixelColor(x1, y1);
-
-    auto channel = [&](auto getter) {
-        const float a = lerp(getter(c00), getter(c10), tx);
-        const float b = lerp(getter(c01), getter(c11), tx);
-        return std::clamp(static_cast<int>(std::round(lerp(a, b, ty))), 0, 255);
-    };
-
-    return QColor(channel([](const QColor& c) { return static_cast<float>(c.red()); }),
-                  channel([](const QColor& c) { return static_cast<float>(c.green()); }),
-                  channel([](const QColor& c) { return static_cast<float>(c.blue()); }),
-                  channel([](const QColor& c) { return static_cast<float>(c.alpha()); }));
 }
 
 class SelectionDragOverlay : public QWidget {
@@ -2038,6 +1996,32 @@ void CanvasView::invalidateClonePreviewCache()
     m_clonePreviewSourceImage = QImage();
     m_clonePreviewSourceGeneration = std::numeric_limits<uint64_t>::max();
     m_clonePreviewSourceFlatIndex = -1;
+    m_clonePreviewImage = QImage();
+    m_clonePreviewKey = 0;
+}
+
+// Identity of everything cloneStampPreviewImage() reads other than the pointer
+// position, so the ~30 Hz reuse window in updateBrushPreviewOverlay() can only
+// ever serve a stale POSITION, never a preview built for a different brush or a
+// different source. Cheap enough to compute per pointer event (which is the
+// point: the preview itself is not).
+quint64 CanvasView::clonePreviewKey(const QImage& sourceImage) const
+{
+    const auto mix = [](quint64 seed, quint64 value) {
+        // Boost-style hash_combine; any cheap avalanche would do.
+        return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+    quint64 key = 0x9e3779b97f4a7c15ULL;
+    key = mix(key, static_cast<quint64>(sourceImage.cacheKey()));
+    key = mix(key, qRound64(double(m_brushSettings.size) * 64.0));
+    key = mix(key, qRound64(double(m_doc ? m_doc->zoom : 1.0f) * 4096.0));
+    key = mix(key, qRound64(double(m_brushSettings.hardness) * 4096.0));
+    key = mix(key, qRound64(double(m_brushSettings.opacity) * 4096.0));
+    key = mix(key, static_cast<quint64>(m_brushSettings.type));
+    key = mix(key, static_cast<quint64>(m_brushSettings.tipSource));
+    key = mix(key, m_brushSettings.tipSource == BrushTipSource::Image
+        ? static_cast<quint64>(m_brushSettings.tipImage.cacheKey()) : 0);
+    return key;
 }
 
 QImage CanvasView::clonePreviewSourceSnapshot()
@@ -2101,11 +2085,34 @@ QImage CanvasView::cloneStampPreviewImage(QPointF destinationScreen,
     QImage preview(side, side, QImage::Format_ARGB32);
     preview.fill(Qt::transparent);
 
+    // Hoist the preview-pixel -> source-pixel mapping out of the per-pixel path,
+    // exactly as drawCloneDabToRasterTiles does for the dab itself: screen ->
+    // document is affine (see screenToDocument), so evaluating it at three points
+    // and stepping incrementally replaces side² calls with three. At the 192 px
+    // cap that is ~37k mappings per pointer event turned into 3.
+    const qreal stepScreen = 1.0 / previewScale;
+    const qreal dx0 = (0.5 - center) * stepScreen;
+    const qreal dy0 = (0.5 - center) * stepScreen;
+    const QPointF base = screenToDocument(destinationScreen + QPointF(dx0, dy0));
+    const QPointF ddx = screenToDocument(destinationScreen + QPointF(dx0 + stepScreen, dy0)) - base;
+    const QPointF ddy = screenToDocument(destinationScreen + QPointF(dx0, dy0 + stepScreen)) - base;
+    // sourcePixel = sourceDoc + (mappedDoc - destinationDoc), regrouped so the
+    // loop only adds the two steps.
+    const QPointF origin = sourceDoc + (base - destinationDoc);
+
+    // The same raw-pointer sampler the dabs use (brush/BrushSampling.hpp), not
+    // QImage::pixelColor(): four out-of-line calls and four QColor temporaries
+    // per tap, side² times per pointer event, was what made hovering with the
+    // Clone Stamp over a large document stall the UI thread outright.
+    const uchar* sbits = source.constBits();
+    const int sbpl = source.bytesPerLine();
+    const int sw = source.width();
+    const int sh = source.height();
+
     for (int y = 0; y < side; ++y) {
         QRgb* row = reinterpret_cast<QRgb*>(preview.scanLine(y));
+        const QPointF rowOrigin = origin + ddy * y;
         for (int x = 0; x < side; ++x) {
-            const qreal dxScreen = (static_cast<qreal>(x) + 0.5 - center) / previewScale;
-            const qreal dyScreen = (static_cast<qreal>(y) + 0.5 - center) / previewScale;
             float maskAlpha = 0.0f;
             if (!tipAlpha.isNull()) {
                 maskAlpha = qAlpha(reinterpret_cast<const QRgb*>(
@@ -2121,16 +2128,17 @@ QImage CanvasView::cloneStampPreviewImage(QPointF destinationScreen,
             if (maskAlpha <= 0.0f)
                 continue;
 
-            const QPointF mappedDoc = screenToDocument(destinationScreen + QPointF(dxScreen, dyScreen));
-            const QPointF sourcePixel = sourceDoc + (mappedDoc - destinationDoc);
-            const QColor sampled = sampleCanvasBilinear(source,
-                static_cast<float>(sourcePixel.x()),
-                static_cast<float>(sourcePixel.y()));
+            float px[4];
+            sampleBilinearRgbaRaw(sbits, sbpl, sw, sh,
+                                  rowOrigin.x() + ddx.x() * x,
+                                  rowOrigin.y() + ddx.y() * x, px);
             const int alpha = std::clamp(static_cast<int>(
-                std::round(sampled.alpha() * maskAlpha * displayAlpha)), 0, 255);
+                std::round(px[3] * maskAlpha * displayAlpha)), 0, 255);
             if (alpha <= 0)
                 continue;
-            row[x] = qRgba(sampled.red(), sampled.green(), sampled.blue(), alpha);
+            row[x] = qRgba(static_cast<int>(std::lround(px[0])),
+                           static_cast<int>(std::lround(px[1])),
+                           static_cast<int>(std::lround(px[2])), alpha);
         }
     }
 
@@ -2455,23 +2463,35 @@ void CanvasView::updateBrushPreviewOverlay()
     const QPointF sourceScreen = documentToScreen(sourceDoc);
     QImage previewImage;
     if (m_cloneSourceDefined) {
-        // Rendering the source preview is O(preview²) with a per-pixel document
-        // mapping; during a stroke pointer events arrive at hundreds of Hz, so
-        // refresh the image at most ~30 Hz and reuse the last one in between —
-        // the overlay position still follows every event.
-        const bool reuse = m_brushDrawing
-            && !m_clonePreviewImage.isNull()
+        // Rendering the source preview is O(preview²); pointer events arrive at
+        // hundreds of Hz (a pen more than that), so refresh the image at most
+        // ~30 Hz and reuse the last one in between — the overlay position still
+        // follows every event.
+        //
+        // Deliberately NOT gated on m_brushDrawing any more: hovering is when
+        // the pointer moves most, and leaving the hover case unthrottled meant a
+        // full preview rebuild per motion event, on the UI thread, for as long
+        // as the cursor was over the canvas.
+        //
+        // The throttle is only allowed to serve a stale POINTER POSITION;
+        // clonePreviewKey() covers everything else the image depends on, so a
+        // brush or source change is picked up on the very next event rather than
+        // showing a preview of the wrong footprint for a frame.
+        const QImage sourceImage = (m_brushDrawing && m_cloneStrokeContext.isValid())
+            ? m_cloneStrokeContext.sourceImage
+            : clonePreviewSourceSnapshot();
+        const quint64 key = clonePreviewKey(sourceImage);
+        const bool reuse = !m_clonePreviewImage.isNull()
+            && key == m_clonePreviewKey
             && m_clonePreviewThrottle.isValid()
             && m_clonePreviewThrottle.elapsed() < 33;
         if (reuse) {
             previewImage = m_clonePreviewImage;
         } else {
-            const QImage sourceImage = (m_brushDrawing && m_cloneStrokeContext.isValid())
-                ? m_cloneStrokeContext.sourceImage
-                : clonePreviewSourceSnapshot();
             previewImage = cloneStampPreviewImage(m_lastScreenPos, destinationDoc,
                                                   sourceDoc, sourceImage);
             m_clonePreviewImage = previewImage;
+            m_clonePreviewKey = key;
             m_clonePreviewThrottle.start();
         }
     } else {
@@ -7637,8 +7657,13 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         return;
     }
 
-    if (layer->isDistortLayer())
+    if (layer->isDistortLayer()) {
         layer->distortData.reset();
+        // Changes what the layer renders without bumping compositionGeneration,
+        // which is what the snapshot cache below keys on — drop it by hand or the
+        // stroke would sample the pre-reset distort.
+        invalidateClonePreviewCache();
+    }
 
     layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
     m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
@@ -7662,11 +7687,19 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         m_cloneOffsetValid = true;
     }
 
-    // Snapshot converted ONCE here: both the dab sampler and the per-event
-    // source preview read it as RGBA8888, so neither pays a full-document
-    // format conversion during the stroke.
+    // Through the cache, not cloneSourceSnapshot() directly: the hover preview
+    // has almost always just composited this exact snapshot (same document
+    // generation, same active layer, same sample mode => same pixels, it is the
+    // same function), and a full-document CPU composite of a multi-megapixel
+    // document is hundreds of milliseconds on the UI thread. Paying it twice per
+    // stroke — once to show the source under the cursor, once to start the
+    // stroke — was the single biggest cost of a clone stroke.
+    //
+    // Converted ONCE here: both the dab sampler and the per-event source preview
+    // read it as RGBA8888, so neither pays a full-document format conversion
+    // during the stroke.
     m_cloneStrokeContext.sourceImage =
-        cloneSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+        clonePreviewSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
     m_cloneStrokeContext.sourceOffset = m_cloneSourceOffset;
     m_cloneStrokeContext.documentSize = m_doc->size;
     m_cloneStrokeContext.healing = m_stampHealing;

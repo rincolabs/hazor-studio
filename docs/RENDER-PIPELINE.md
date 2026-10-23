@@ -401,7 +401,7 @@ compositeFiltered
 | Export Layer/Group As... | [src/io/ImageIO.cpp](../src/io/ImageIO.cpp) (`compositeNodeImage`) | `compositeIsolatedNode`: one Layer/Group/Solid-Color-adjustment node against a transparent backdrop, no other node in the document, rendered canvas-sized/aligned like any other composite. Layer Bounds mode then alpha-trims the result to its non-transparent pixels (null if there are none, e.g. the node sits entirely outside the canvas). A non-Solid-Color Adjustment has no content of its own (`LayerTreeNode::hasIsolatedExportContent`) and is rejected before rendering. |
 | Merge Down | `applyMergeLayersState` ([ImageController.cpp](../src/controller/ImageController.cpp)) | `compositeSubset` of the pair, siblings from the same container, ancestor groups pass-through; blend mode survives when only one side has pixels |
 | Merge Visible / Flatten | `applyMergeVisibleState` / `applyFlattenImageState` | full `composite`; result is hoisted to the root |
-| Clone/Heal sampling | `compositeOnlyFlatIndex` / `compositeFromFlatIndex` | without stack adjustments (do not "bake" twice) |
+| Clone/Heal sampling | `compositeOnlyFlatIndex` / `compositeFromFlatIndex` | without stack adjustments (do not "bake" twice). Goes through **one** cache (`CanvasView::clonePreviewSourceSnapshot`, keyed on `compositionGeneration` + active layer + sample mode) shared by the hover source preview and the stroke snapshot: both want the same pixels from the same function, and compositing a multi-megapixel document is hundreds of milliseconds on the UI thread — paying it once to show the source under the cursor and again to start the stroke was the dominant cost of a clone stroke |
 | Thumbnails | `computeEffectedThumbnail` (LayerTreeNode) | reduced bake, off-thread |
 
 Destructive operations run through the *async document-state path*
@@ -754,9 +754,13 @@ Two things that are easy to get wrong:
   converting through `QImage` after a cubic warp.
 
 The Clone Stamp and Healing Brush do not go through `ImageEngine`: they point
-sample the frozen document snapshot per dab pixel
-([`sampleBilinearRgbaRaw`](../src/brush/BrushRenderer.cpp)), as does the
-clone-source preview overlay ([`sampleCanvasBilinear`](../src/renderer/CanvasView.cpp)).
+sample the frozen document snapshot per dab pixel, as does the clone-source
+preview overlay — through **one** sampler
+([`sampleBilinearRgbaRaw`](../src/brush/BrushSampling.hpp)), shared on purpose.
+The overlay exists to predict what the dab will copy, so a second sampler is a
+second convention and the overlay starts lying about the result; it used to run
+`QImage::pixelColor()` per tap instead, four out-of-line calls and four `QColor`
+temporaries per sampled pixel, on the UI thread, for every pointer event.
 The Eyedropper's 3x3/5x5/11x11 sample sizes average a neighbourhood too, in
 [`ColorSamplerService::averageRegion`](../src/engine/ColorSamplerService.cpp),
 and weight colour by alpha for the same reason — a plain RGBA mean reported a
@@ -780,7 +784,7 @@ Plus one rule that is specific to a point sampler:
   rounds the clone offset to whole pixels, so every tap lands at fraction 0.5 on
   **both** axes and each dab pixel is a flat 2x2 box average of the source: the
   detail of a pure copy, destroyed by a filter with nothing to filter. With the
-  shift a whole-pixel offset gives fraction 0, which both samplers short-circuit
+  shift a whole-pixel offset gives fraction 0, which the sampler short-circuits
   to a texel copy — the §4.4 principle applied to a sampler rather than a pass.
 - **The same convention decides which pixel a click acts on.** A tool that
   turns a continuous coordinate into a pixel index — the Eyedropper, the Magic

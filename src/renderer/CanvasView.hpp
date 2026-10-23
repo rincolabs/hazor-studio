@@ -557,6 +557,7 @@ private:
                                   QPointF sourceDoc,
                                   const QImage& sourceImage);
     QImage brushTipPreviewImage(int side) const;
+    quint64 clonePreviewKey(const QImage& sourceImage) const;
     // Silhouette brush cursor: trace the tip silhouette ONCE into a normalized unit
     // path (cached, keyed by the tip), then only QTransform it per hover frame — the
     // same compute-once/transform-per-frame strategy as KisBrush::outline().
@@ -873,6 +874,11 @@ private:
     // scaled tip mask is cached per tip/size.
     QElapsedTimer m_clonePreviewThrottle;
     QImage m_clonePreviewImage;
+    // Everything the preview image depends on EXCEPT the pointer position (brush
+    // footprint, falloff, tip, source image). The time throttle alone would be
+    // wrong for these: a stale image of the previous brush size is not just late,
+    // it is the wrong size. Pointer movement is what the throttle is for.
+    quint64 m_clonePreviewKey = 0;
     QImage m_cloneTipPreviewScaled;
     int m_cloneTipPreviewSide = -1;
     qint64 m_cloneTipPreviewKey = 0;

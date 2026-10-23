@@ -633,6 +633,7 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/raw/RawPreviewCapabilities.cpp
 
     src/brush/BrushTypes.hpp
+    src/brush/BrushSampling.hpp
     src/brush/DabContext.hpp
     src/brush/Brush.hpp
     src/brush/AutoBrush.cpp
