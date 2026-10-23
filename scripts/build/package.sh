@@ -292,7 +292,9 @@ package_windows_zip() {
                 -exec cp -f {} "$DIST_DIR/$plugin/" \;
         fi
     done
-    find "$OPENCV_PREFIX" -type f -name 'opencv*.dll' -exec cp -f {} "$DIST_DIR/" \;
+    find "$OPENCV_PREFIX" -type f -name 'libopencv*.dll' -exec cp -f {} "$DIST_DIR/" \;
+    find "$DIST_DIR" -maxdepth 1 -name 'libopencv_core*.dll' -print -quit | grep -q . \
+        || die "OpenCV DLLs not found under $OPENCV_PREFIX"
     copy_mingw_runtime "$DIST_DIR"
 
     # Windows resolves a DLL from the executable's own directory, so the AI

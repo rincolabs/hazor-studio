@@ -1042,7 +1042,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_showColorPaletteAction->setCheckable(true);
     {
         QSettings s;
-        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), true).toBool();
+        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), false).toBool();
         m_showColorPaletteAction->setChecked(visible);
     }
     connect(m_showColorPaletteAction, &QAction::toggled, this, [this](bool checked) {
@@ -3440,7 +3440,7 @@ void MainWindow::updateRulerGuideActionStates()
 
     if (m_showColorPaletteAction) {
         QSettings s;
-        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), true).toBool();
+        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), false).toBool();
         setCheckedQuietly(m_showColorPaletteAction, visible);
         if (m_colorPaletteBar)
             m_colorPaletteBar->setVisible(visible);

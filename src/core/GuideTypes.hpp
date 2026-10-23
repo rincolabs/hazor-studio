@@ -24,7 +24,7 @@ struct Guide {
 };
 
 struct RulerSettings {
-    bool showRulers = true;
+    bool showRulers = false;
     RulerUnit unit = RulerUnit::Pixels;
     qreal majorTickSpacing = 100.0;
     int minorTickDivisions = 5;
