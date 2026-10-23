@@ -7,17 +7,25 @@
 #include <QPixmap>
 
 namespace {
+// Keep the base channel row visually aligned with LayerItemDelegate. Channels
+// retain their own data and interactions; only the list metrics are shared.
+constexpr int kItemHeight = 50;
 constexpr int kMargin = 6;
-constexpr int kGap = 6;
+constexpr int kGap = 4;
 constexpr int kEyeSize = 20;
 constexpr int kBadgeSize = 8;
-constexpr int kRowPadding = 6;
+constexpr int kThumbToLabelPadding = 16;
+constexpr int kExpandedRowPadding = 10;
 // Thumbnail edge per panel setting (1 small / 2 medium / 3 large).
-constexpr int kThumbSmall = 22;
-constexpr int kThumbMedium = 32;
-constexpr int kThumbLarge = 44;
-// Row height when thumbnails are off: tall enough for the eye and the label.
-constexpr int kRowHeightNoThumb = 24;
+constexpr int kThumbSmall = 40;
+constexpr int kThumbMedium = 52;
+constexpr int kThumbLarge = 64;
+
+int visibilitySpacing()
+{
+    auto* th = ThemeManager::instance()->current();
+    return th ? th->spaceMD : kMargin;
+}
 } // namespace
 
 ChannelItemDelegate::ChannelItemDelegate(QObject* parent)
@@ -45,14 +53,16 @@ QSize ChannelItemDelegate::sizeHint(const QStyleOptionViewItem& option,
 {
     Q_UNUSED(index);
     const int thumb = thumbnailPixels();
-    const int height = thumb > 0 ? thumb + kRowPadding * 2 : kRowHeightNoThumb;
+    const int height = thumb > kThumbSmall
+        ? thumb + kExpandedRowPadding
+        : kItemHeight;
     return QSize(option.rect.width(), height);
 }
 
 QRect ChannelItemDelegate::eyeRect(const QStyleOptionViewItem& option) const
 {
     const QRect r = option.rect;
-    return QRect(r.left() + kMargin, r.center().y() - kEyeSize / 2,
+    return QRect(r.left() + visibilitySpacing(), r.center().y() - kEyeSize / 2,
                  kEyeSize, kEyeSize);
 }
 
@@ -62,7 +72,8 @@ QRect ChannelItemDelegate::thumbRect(const QStyleOptionViewItem& option) const
     if (thumb <= 0)
         return QRect();
     const QRect r = option.rect;
-    const int x = eyeRect(option).right() + kGap + 1;
+    const int spacing = visibilitySpacing();
+    const int x = eyeRect(option).right() + spacing + 1 + spacing + 1;
     return QRect(x, r.center().y() - thumb / 2, thumb, thumb);
 }
 
@@ -72,26 +83,20 @@ void ChannelItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
     auto* th = ThemeManager::instance()->current();
     const bool armed = index.data(RoleArmed).toBool();
     const bool visible = index.data(RoleVisible).toBool();
+    const bool selected = option.state & QStyle::State_Selected;
 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
 
     const QRect r = option.rect;
-    // Three states, three backgrounds. ARMED is the edit target and gets the
-    // selected surface; a merely visible row gets the plain row surface; the
-    // hover tint still applies on top of either.
-    if (armed)
-        painter->fillRect(r, th->colorSurfaceSelected);
+    // Selection follows the Layers list. The armed edit target is also treated
+    // as selected because it is the row the channel tools currently modify.
+    if (armed || selected)
+        painter->fillRect(r, th->colorSurfacePressed);
     else if (option.state & QStyle::State_MouseOver)
         painter->fillRect(r, th->colorSurfaceHover);
     else
         painter->fillRect(r, th->colorSurfaceRow);
-
-    if (armed) {
-        // A left accent bar, so the edit target is readable even where the
-        // selected surface is subtle.
-        painter->fillRect(QRect(r.left(), r.top(), 2, r.height()), th->colorAccent);
-    }
 
     // ── Eye ──
     {
@@ -102,14 +107,15 @@ void ChannelItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         painter->drawPixmap(eyeRect(option), visible ? visiblePix : hiddenPix);
         painter->restore();
 
-        const int sepX = eyeRect(option).right() + kGap / 2;
+        const int sepX = eyeRect(option).right() + visibilitySpacing() + 1;
         painter->save();
         painter->setPen(QPen(th->colorBorder, 1));
         painter->drawLine(sepX, r.top(), sepX, r.bottom());
         painter->restore();
     }
 
-    int x = eyeRect(option).right() + kGap + 1;
+    const int spacing = visibilitySpacing();
+    int x = eyeRect(option).right() + spacing + 1 + spacing + 1;
 
     // ── Thumbnail ──
     const QRect thumb = thumbRect(option);
@@ -120,11 +126,12 @@ void ChannelItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         painter->drawRect(thumb.adjusted(0, 0, -1, -1));
         const QImage image = index.data(RoleThumbnail).value<QImage>();
         if (!image.isNull()) {
-            const QImage scaled = image.scaled(thumb.size() - QSize(2, 2),
+            const QRect innerThumb = thumb.adjusted(2, 2, -2, -2);
+            const QImage scaled = image.scaled(innerThumb.size(),
                                                Qt::KeepAspectRatio,
                                                Qt::SmoothTransformation);
-            const QPoint at(thumb.left() + 1 + (thumb.width() - 2 - scaled.width()) / 2,
-                            thumb.top() + 1 + (thumb.height() - 2 - scaled.height()) / 2);
+            const QPoint at(innerThumb.left() + (innerThumb.width() - scaled.width()) / 2,
+                            innerThumb.top() + (innerThumb.height() - scaled.height()) / 2);
             painter->drawImage(at, scaled);
         }
         painter->restore();
@@ -141,7 +148,7 @@ void ChannelItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
                                     kBadgeSize - 1, kBadgeSize - 1));
             painter->restore();
         }
-        x = thumb.right() + kGap + 2;
+        x = thumb.right() + kGap + kThumbToLabelPadding + 1;
     }
 
     // ── Name ──
@@ -156,6 +163,10 @@ void ChannelItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
                           painter->fontMetrics().elidedText(
                               text, Qt::ElideRight, textRect.width()));
     }
+
+    // Match the subtle row boundary used by the Layers delegate.
+    painter->setPen(QPen(th->colorPanelBackground, 1));
+    painter->drawLine(r.bottomLeft(), r.bottomRight());
 
     painter->restore();
 }

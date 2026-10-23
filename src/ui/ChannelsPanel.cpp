@@ -20,6 +20,7 @@
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QSettings>
+#include <QShowEvent>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -100,14 +101,23 @@ void ChannelsPanel::buildUi()
     m_tree = new QTreeWidget(this);
     m_tree->setHeaderHidden(true);
     m_tree->setRootIsDecorated(false);
+    m_tree->setIndentation(0);
+    m_tree->setAnimated(true);
     m_tree->setUniformRowHeights(false);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->setMouseTracking(true);
     m_tree->setDragDropMode(QAbstractItemView::InternalMove);
+    m_tree->setDefaultDropAction(Qt::MoveAction);
+    m_tree->setDragEnabled(true);
+    m_tree->setAcceptDrops(true);
     m_tree->setDropIndicatorShown(true);
+    m_tree->setFocusPolicy(Qt::StrongFocus);
     m_tree->viewport()->installEventFilter(this);
+    m_tree->header()->setStretchLastSection(true);
+    m_tree->header()->setSectionResizeMode(QHeaderView::Stretch);
+    setFocusProxy(m_tree);
 
     m_delegate = new ChannelItemDelegate(this);
     m_delegate->setThumbnailSize(
@@ -131,6 +141,7 @@ void ChannelsPanel::buildUi()
         return button;
     };
 
+    bar->addStretch();
     m_loadSelectionBtn = addButton(QStringLiteral(":/icons/selection-new.png"),
                                    tr("Load channel as selection"));
     m_saveSelectionBtn = addButton(QStringLiteral(":/icons/layer-mask.png"),
@@ -139,7 +150,6 @@ void ChannelsPanel::buildUi()
                                 tr("Create new channel (Alt: options)"));
     m_deleteChannelBtn = addButton(QStringLiteral(":/icons/delete-layer.png"),
                                    tr("Delete channel"));
-    bar->addStretch();
     m_optionsBtn = addButton(QStringLiteral(":/icons/ui-settings.png"),
                              tr("Panel options"));
     layout->addWidget(m_actionBar);
@@ -237,6 +247,18 @@ void ChannelsPanel::refresh()
         return;
     rebuildRows();
     updateActionBar();
+}
+
+void ChannelsPanel::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+
+    // The canvas projection can become ready while this tab is hidden. Its
+    // one-shot projectionUpdated signal has already passed by the time the user
+    // opens Channels, so force the rows to re-read the cached projection now.
+    // Thumbnail images themselves remain cached; only the row data is rebuilt.
+    m_rowSignature.clear();
+    refresh();
 }
 
 void ChannelsPanel::rebuildRows()

@@ -8,6 +8,7 @@
 
 class QDialog;
 class QPushButton;
+class QShowEvent;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -88,6 +89,7 @@ private:
                                    Qt::KeyboardModifiers mods);
     void saveSelectionAsChannel();
 
+    void showEvent(QShowEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     // Thumbnail caches. Rebuilt only when their source actually changed: the

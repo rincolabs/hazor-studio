@@ -308,7 +308,7 @@ LayerPanel::LayerPanel(QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     // layout->setContentsMargins(t->spaceSM, t->spaceSM, t->spaceSM, t->spaceSM);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(t->spaceSM);
+    layout->setSpacing(0);
 
     m_topBar = new QWidget(this);
     auto* topLay = new QVBoxLayout(m_topBar);
@@ -415,12 +415,13 @@ LayerPanel::LayerPanel(QWidget* parent)
     m_actionBar = new QWidget(this);
     m_actionBar->setObjectName(QStringLiteral("layerActionBar"));
     auto* bottomLayout = new QHBoxLayout(m_actionBar);
-    bottomLayout->setSpacing(t->spaceMD);
+    bottomLayout->setContentsMargins(4, 4, 4, 4);
+    bottomLayout->setSpacing(4);
     auto makeIconBtn = [&](const QString& iconPath, const QString& tooltip) {
         auto* btn = new QPushButton(this);
         btn->setIcon(makeIcon(iconPath));
-        btn->setIconSize(QSize(20, 20));
-        btn->setFixedSize(28, 28);
+        btn->setIconSize(QSize(16, 16));
+        btn->setFixedSize(24, 24);
         btn->setToolTip(tooltip);
         return btn;
     };
@@ -449,6 +450,10 @@ LayerPanel::LayerPanel(QWidget* parent)
         });
     }
     m_adjustBtn->setMenu(adjustMenu);
+    // The native menu indicator shares the button's content area with the
+    // icon. Give this one control room for both so its icon keeps the same
+    // visual spacing as the icon-only buttons beside it.
+    m_adjustBtn->setFixedWidth(32);
 
     bottomLayout->addStretch();
     bottomLayout->addWidget(m_addBtn);
