@@ -1148,7 +1148,21 @@ QImage compositeFiltered(const Document* doc,
     renderNodesFiltered(result, doc->roots, doc, ndcToPixel, includeLayer,
                         applyAdjustments, forceDirectGroups, rawPixelNode);
 
-    return result.convertToFormat(QImage::Format_RGBA8888);
+    // convertTo(), not convertToFormat(): `result` is this function's own buffer
+    // with no other reference, so Qt unpremultiplies it in place instead of
+    // allocating a second canvas-sized image and copying into it. On a 24 MP
+    // document that is ~96 MB of allocation plus a full pass saved on every CPU
+    // composite — export, flatten, merge, clone sampling and the idle projection
+    // all land here. Pixels are identical either way.
+    //
+    // Checked, not assumed: convertTo() signals failure by leaving the image
+    // alone (it returns void on Qt 6.8), and every consumer of this function
+    // indexes the result as 4-byte RGBA (§3.2) — a silent premultiplied-ARGB
+    // return would be read as garbage rather than as an error.
+    result.convertTo(QImage::Format_RGBA8888);
+    if (result.format() != QImage::Format_RGBA8888)
+        return result.convertToFormat(QImage::Format_RGBA8888);
+    return result;
 }
 
 } // namespace
