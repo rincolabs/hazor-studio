@@ -50,6 +50,8 @@ TransformFieldsWidget::TransformFieldsWidget(TransformFieldsMode mode, QWidget* 
                                           QString::fromUtf8("°"), 1.0, this);
     m_rotInput->setDecimals(2);
     m_linkButton = makeLinkButton(this);
+    if (m_mode == TransformFieldsMode::PropertiesPanel)
+        m_linkButton->setIconSize(QSize(18, 18));
 
     if (m_mode == TransformFieldsMode::OptionsBar) {
         auto* row = new QHBoxLayout(this);

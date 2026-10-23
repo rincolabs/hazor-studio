@@ -493,6 +493,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_canvasLinkButton = makeIconButton(QStringLiteral("constrain-proportions.svg"),
                                             tr("Link width and height (constrain proportions)"),
                                             canvasSection);
+        m_canvasLinkButton->setIconSize(QSize(18, 18));
         m_canvasLinkButton->setCheckable(true);
 
         auto* canvasGridWrap = new QWidget(canvasSection);
