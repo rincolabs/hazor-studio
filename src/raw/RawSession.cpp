@@ -498,12 +498,21 @@ RawImageBuffer RawSession::renderFull(const RawDevelopParams& params, RawProgres
         buffer.height = img->getHeight();
         buffer.format = RawPixelFormat::RGBFloat;
         buffer.pixelsFloat.resize(std::size_t(buffer.width) * buffer.height * 3);
+        // Row pointers, not img->r(y, x) per component: IImagefloat is PLANAR
+        // (PlanarRGBData, three separately allocated planes of row pointers), so
+        // the indexed form re-walks the plane's pointer table three times for
+        // every pixel. Hoisting the three rows turns 9 dependent loads per pixel
+        // into 3 sequential ones over 3 contiguous rows — at 24 MP that is
+        // ~72 million pointer chases removed from a step that is pure copying.
         for (int y = 0; y < buffer.height; ++y) {
             float* row = &buffer.pixelsFloat[std::size_t(y) * buffer.width * 3];
+            const float* rr = img->r(y);
+            const float* gg = img->g(y);
+            const float* bb = img->b(y);
             for (int x = 0; x < buffer.width; ++x) {
-                row[x * 3 + 0] = img->r(y, x);
-                row[x * 3 + 1] = img->g(y, x);
-                row[x * 3 + 2] = img->b(y, x);
+                row[x * 3 + 0] = rr[x];
+                row[x * 3 + 1] = gg[x];
+                row[x * 3 + 2] = bb[x];
             }
         }
     }
