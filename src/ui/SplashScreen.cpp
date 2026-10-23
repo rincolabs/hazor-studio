@@ -4,6 +4,7 @@
 
 #include <QPainter>
 #include <QFont>
+#include <QFontMetrics>
 #include <QApplication>
 #include <QScreen>
 #include <QTimer>
@@ -16,7 +17,7 @@ SplashScreen::SplashScreen(QWidget* parent)
     setAttribute(Qt::WA_TranslucentBackground, false);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setAutoFillBackground(false);
-    setFixedSize(900, 600);
+    setFixedSize(950, 535);
 
     auto* screen = QApplication::primaryScreen();
     if (screen) {
@@ -95,7 +96,8 @@ void SplashScreen::paintEvent(QPaintEvent*)
     p.fillRect(rect(), t->colorSplashBackground);
 
     // Border outline
-    p.setPen(QPen(t->colorSplashBorder, 1));
+    constexpr int borderWidth = 1;
+    p.setPen(QPen(t->colorSplashBorder, borderWidth));
     p.drawRect(0, 0, w - 1, h - 1);
 
     // ── Logo ──
@@ -103,9 +105,9 @@ void SplashScreen::paintEvent(QPaintEvent*)
     if (!m_logo.isNull()) {
         int natW = m_logo.width() / m_logo.devicePixelRatio();
         int natH = m_logo.height() / m_logo.devicePixelRatio();
-        if (natW > 900) {
-            logoW = 900;
-            logoH = natH * 900 / natW;
+        if (natW > w) {
+            logoW = w;
+            logoH = natH * w / natW;
         } else {
             logoW = natW;
             logoH = natH;
@@ -143,7 +145,13 @@ void SplashScreen::paintEvent(QPaintEvent*)
     p.setFont(msgFont);
 
     p.setPen(t->colorSplashText);
-    p.drawText(QRect(barX, h - 62, barW, 20), Qt::AlignHCenter | Qt::AlignBottom, m_message);
+    constexpr int leftMargin = 8;
+    constexpr int bottomMargin = 4;
+    const QRect textBounds = QFontMetrics(msgFont).tightBoundingRect(m_message);
+    const int textLeft = borderWidth + leftMargin;
+    const int textBottom = h - borderWidth - bottomMargin - 1;
+    p.drawText(QPoint(textLeft - textBounds.left(), textBottom - textBounds.bottom()),
+               m_message);
 
     // ── Version + info footer ──
     QFont infoFont = font();
@@ -152,7 +160,11 @@ void SplashScreen::paintEvent(QPaintEvent*)
 
     QString footer = m_version.isEmpty() ? QStringLiteral("v") + qApp->applicationVersion() : m_version;
     p.setPen(t->colorSplashVersion);
-    p.drawText(QRect(20, h - 22, w - 40, 16), Qt::AlignRight, footer);
+    constexpr int rightMargin = 8;
+    const QRect footerBounds = QFontMetrics(infoFont).tightBoundingRect(footer);
+    const int footerRight = w - borderWidth - rightMargin - 1;
+    p.drawText(QPoint(footerRight - footerBounds.right(), textBottom - footerBounds.bottom()),
+               footer);
 
     if (!m_firstPainted) {
         m_firstPainted = true;

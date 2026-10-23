@@ -213,7 +213,7 @@ int main(int argc, char* argv[])
     QObject::connect(&splash, &SplashScreen::firstPainted, &app, [&]() {
         splash.setProgress(15, "Initializing application...");
 
-        splash.setProgress(35, "Creating main window...");
+        splash.setProgress(35, "Preparing your workspace...");
         window = std::make_unique<MainWindow>();
 
         fileOpenFilter->setWindow(window.get());
