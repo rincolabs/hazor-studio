@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QMainWindow>
 #include <QTabWidget>
 #include <QAction>
@@ -423,6 +424,7 @@ private:
     int documentIndexForTabWidget(int tabWidgetIndex) const;
     void onTabMoved(int from, int to);
     void syncDocumentTabOrder();
+    void setHomeDockMode(bool homeActive);
 
     DocumentTab& createTab(const QString& name, const QSize& size);
     // Opens an existing document of `container` in a new tab, sharing it rather
@@ -529,6 +531,11 @@ private:
     HomeWorkspace* m_homeWorkspace = nullptr;
     std::vector<DocumentTab> m_tabs;
     bool m_restoringHomeTab = false;
+    // In-memory only: entering Home temporarily hides the editing docks, while
+    // this snapshot preserves their visibility, tab groups, sizes and floating
+    // geometry for the next document tab. It is never written to QSettings.
+    QByteArray m_documentDockState;
+    bool m_homeDockMode = false;
 
     // ── Smart Object refresh debounce (see scheduleSmartObjectRefresh) ──
     QTimer* m_smartObjectRefreshTimer = nullptr;

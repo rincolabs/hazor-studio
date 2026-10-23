@@ -1322,6 +1322,7 @@ MainWindow::MainWindow(QWidget* parent)
     setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
 
     auto* toolsDock = new QDockWidget(tr("Tools"), this);
+    toolsDock->setObjectName(QStringLiteral("ToolsDock"));
     toolsDock->setAllowedAreas(Qt::LeftDockWidgetArea);
     toolsDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
     toolsDock->setTitleBarWidget(new QWidget(toolsDock));
@@ -2699,6 +2700,10 @@ MainWindow::MainWindow(QWidget* parent)
         applyViewportStatusBarTheme();
     });
 
+    // Home is the initial page, but currentChanged was connected only after
+    // that page was inserted. Apply its temporary dock state once construction
+    // has finished and every dock has been registered with QMainWindow.
+    setHomeDockMode(true);
 }
 
 void MainWindow::updateDockTitleBar(QDockWidget* dock)
@@ -3524,6 +3529,62 @@ void MainWindow::onTabMoved(int from, int to)
     onTabChanged(m_tabWidget->currentIndex());
 }
 
+void MainWindow::setHomeDockMode(bool homeActive)
+{
+    const QList<QDockWidget*> editingDocks = {
+        m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
+        m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
+        m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
+        m_generativeFillDock
+    };
+
+    if (homeActive) {
+        if (!m_homeDockMode) {
+            // QMainWindow's native state includes visibility, tabification,
+            // dock sizes and floating geometry. Keeping it only in memory
+            // makes the Home layout temporary rather than a workspace change.
+            m_documentDockState = saveState();
+            m_homeDockMode = true;
+        }
+        for (QDockWidget* dock : editingDocks) {
+            if (dock)
+                dock->hide();
+        }
+        return;
+    }
+
+    if (!m_homeDockMode)
+        return;
+
+    m_homeDockMode = false;
+    if (!m_documentDockState.isEmpty()) {
+        restoreState(m_documentDockState);
+        m_documentDockState.clear();
+
+        // restoreState() recreates Qt's private dock tab bars/group windows,
+        // but those new widgets do not reliably inherit the already-applied
+        // application stylesheet. Re-polish them after the layout settles so
+        // the native light frame/base never leaks around the restored column.
+        QTimer::singleShot(0, this, [this]() {
+            for (QTabBar* tabBar : findChildren<QTabBar*>()) {
+                tabBar->setDrawBase(false);
+                tabBar->style()->unpolish(tabBar);
+                tabBar->style()->polish(tabBar);
+                tabBar->update();
+            }
+            for (QWidget* widget : findChildren<QWidget*>()) {
+                if (qstrcmp(widget->metaObject()->className(),
+                            "QDockWidgetGroupWindow") != 0)
+                    continue;
+                widget->setAttribute(Qt::WA_StyledBackground, true);
+                widget->style()->unpolish(widget);
+                widget->style()->polish(widget);
+                widget->update();
+            }
+        });
+    }
+}
+
 void MainWindow::onTabChanged(int index)
 {
     clearSelectRefinePreview();
@@ -3532,6 +3593,7 @@ void MainWindow::onTabChanged(int index)
     }
 
     const int documentIndex = documentIndexForTabWidget(index);
+    setHomeDockMode(documentIndex < 0);
     if (documentIndex >= 0 && documentIndex < static_cast<int>(m_tabs.size())) {
         m_activeTabIndex = documentIndex;
         m_doc = m_tabs[documentIndex].document.get();
@@ -7414,6 +7476,9 @@ void MainWindow::closeEvent(QCloseEvent* e)
             return;
         }
     }
+    // Leave the real workspace state in place for any shutdown persistence
+    // outside this class; the Home-only hidden state must never be saved.
+    setHomeDockMode(false);
     e->accept();
 }
 
