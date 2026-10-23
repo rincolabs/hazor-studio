@@ -3,6 +3,7 @@
 #include <QWidget>
 
 class QDoubleSpinBox;
+class QHBoxLayout;
 class QPushButton;
 class ScrubbableValueInput;
 
@@ -29,6 +30,7 @@ public:
     void setTransformValues(double widthPx, double heightPx, double posX,
                             double posY, double rotationDeg);
     void setFieldsEnabled(bool enabled);
+    void setRotationActions(QWidget* first, QWidget* second);
 
 signals:
     void fieldEdited(int field, double value);
@@ -45,4 +47,5 @@ private:
     QDoubleSpinBox* m_xInput = nullptr;
     QDoubleSpinBox* m_yInput = nullptr;
     ScrubbableValueInput* m_rotInput = nullptr;
+    QHBoxLayout* m_rotationActions = nullptr;
 };

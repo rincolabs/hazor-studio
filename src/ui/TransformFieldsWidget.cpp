@@ -77,7 +77,7 @@ TransformFieldsWidget::TransformFieldsWidget(TransformFieldsMode mode, QWidget* 
         auto* grid = new QGridLayout(this);
         grid->setContentsMargins(0, 0, 0, 0);
         grid->setHorizontalSpacing(t->spaceSM);
-        grid->setVerticalSpacing(t->spaceXS);
+        grid->setVerticalSpacing(t->spaceSM);
         grid->addWidget(m_linkButton, 0, 0, 2, 1);
         grid->addWidget(makeTransformLabel(tr("W:"), this), 0, 1);
         grid->addWidget(m_wInput, 0, 2, Qt::AlignLeft);
@@ -88,7 +88,11 @@ TransformFieldsWidget::TransformFieldsWidget(TransformFieldsMode mode, QWidget* 
         grid->addWidget(makeTransformLabel(tr("Y:"), this), 1, 3);
         grid->addWidget(m_yInput, 1, 4, Qt::AlignLeft);
         grid->addWidget(makeTransformLabel(QString::fromUtf8("∠"), this), 2, 1);
-        grid->addWidget(m_rotInput, 2, 2, 1, 3, Qt::AlignLeft);
+        grid->addWidget(m_rotInput, 2, 2, Qt::AlignLeft);
+        m_rotationActions = new QHBoxLayout();
+        m_rotationActions->setContentsMargins(0, 0, 0, 0);
+        m_rotationActions->setSpacing(t->spaceSM);
+        grid->addLayout(m_rotationActions, 2, 3, 1, 2, Qt::AlignLeft);
         for (auto* input : { m_wInput, m_hInput, m_xInput, m_yInput }) {
             input->setMaximumWidth(100);
             input->setMinimumWidth(52);
@@ -147,6 +151,16 @@ void TransformFieldsWidget::setFieldsEnabled(bool enabled)
     m_yInput->setEnabled(enabled);
     m_rotInput->setEnabled(enabled);
     m_linkButton->setEnabled(enabled);
+}
+
+void TransformFieldsWidget::setRotationActions(QWidget* first, QWidget* second)
+{
+    if (!m_rotationActions)
+        return;
+    if (first)
+        m_rotationActions->addWidget(first);
+    if (second)
+        m_rotationActions->addWidget(second);
 }
 
 QDoubleSpinBox* TransformFieldsWidget::makeInput(double min, double max,

@@ -1,7 +1,6 @@
 #include "AlignBar.hpp"
 #include "FlowLayout.hpp"
 #include "IconUtils.hpp"
-#include "ToolBarSeparator.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
@@ -9,6 +8,8 @@
 #include <QComboBox>
 #include <QLabel>
 #include <QFrame>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 
 AlignBar::AlignBar(const QString& title, QWidget* parent)
     : QWidget(parent)
@@ -22,13 +23,18 @@ AlignBar::AlignBar(const QString& title, QWidget* parent)
     setSizePolicy(sp);
 
     auto* t = ThemeManager::instance()->current();
-    // FlowLayout so the row wraps to the next line on narrow panels instead of
-    // forcing the panel wider (QHBoxLayout never wraps).
-    auto* lay = new FlowLayout(this, 0, 4, 4);
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(t->spaceSM);
 
     // "Align:" label
     auto* label = new QLabel(tr("Align:"), this);
     label->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(t->colorTextBright.name()));
+    root->addWidget(label);
+
+    // Keep the controls in their own row, matching the Properties panel's
+    // label-above-controls pattern. FlowLayout preserves wrapping in narrow docks.
+    auto* buttons = new FlowLayout(0, 4, 4);
     // Align target combo
     m_alignTargetCombo = new QComboBox(this);
     m_alignTargetCombo->addItem(tr("Canvas"),    0);
@@ -59,26 +65,13 @@ AlignBar::AlignBar(const QString& title, QWidget* parent)
     m_alignCenterBoth->setToolTip(tr("Center horizontally and vertically"));
     m_alignCenterBoth->setEnabled(false);
 
-    lay->addWidget(m_alignTop);
-    lay->addWidget(m_alignMiddleV);
-    lay->addWidget(m_alignBottom);
-
-    lay->addWidget(new ToolBarSeparator(this));
-
-    lay->addWidget(m_alignLeft);
-    lay->addWidget(m_alignCenterH);
-    lay->addWidget(m_alignRight);
-
-    lay->addWidget(new ToolBarSeparator(this));
-
-    lay->addWidget(m_alignCenterBoth);
-
-    // Separator before Reset
-    auto* sepReset = new QFrame(this);
-    sepReset->setFrameShape(QFrame::VLine);
-    sepReset->setStyleSheet(QStringLiteral("color: %1;").arg(t->colorBorder.name()));
-    sepReset->setFixedWidth(2);
-    lay->addWidget(sepReset);
+    buttons->addWidget(m_alignTop);
+    buttons->addWidget(m_alignMiddleV);
+    buttons->addWidget(m_alignBottom);
+    buttons->addWidget(m_alignLeft);
+    buttons->addWidget(m_alignCenterH);
+    buttons->addWidget(m_alignRight);
+    buttons->addWidget(m_alignCenterBoth);
 
     m_resetTransformBtn = new QPushButton(this);
     m_resetTransformBtn->setIcon(makeIcon(":/icons/align-reset.png"));
@@ -86,11 +79,31 @@ AlignBar::AlignBar(const QString& title, QWidget* parent)
     m_resetTransformBtn->setFixedSize(26, 26);
     m_resetTransformBtn->setToolTip(tr("Reset transform (position, scale and rotation)"));
     m_resetTransformBtn->setEnabled(false);
-    lay->addWidget(m_resetTransformBtn);
+    buttons->addWidget(m_resetTransformBtn);
+    root->addLayout(buttons);
 
-    lay->addWidget(new ToolBarSeparator(this));
-    lay->addWidget(label);
-    lay->addWidget(m_alignTargetCombo);
+    auto* divider = new QFrame(this);
+    divider->setFrameShape(QFrame::NoFrame);
+    divider->setFixedHeight(1);
+    divider->setStyleSheet(QStringLiteral("background: %1; border: none;")
+                               .arg(t->colorBorder.name()));
+    auto* dividerWrap = new QWidget(this);
+    auto* dividerLayout = new QVBoxLayout(dividerWrap);
+    dividerLayout->setContentsMargins(0, t->spaceSM, 0, t->spaceSM);
+    dividerLayout->setSpacing(0);
+    dividerLayout->addWidget(divider);
+    root->addWidget(dividerWrap);
+
+    auto* targetRow = new QHBoxLayout();
+    targetRow->setContentsMargins(0, 0, 0, 0);
+    targetRow->setSpacing(t->spaceSM);
+    auto* targetLabel = new QLabel(tr("Align To:"), this);
+    targetLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; }")
+                                   .arg(t->colorTextBright.name()));
+    targetRow->addWidget(targetLabel);
+    targetRow->addWidget(m_alignTargetCombo);
+    targetRow->addStretch();
+    root->addLayout(targetRow);
 
     // Connections
     connect(m_alignTop,        &QPushButton::clicked, this, &AlignBar::alignTopClicked);

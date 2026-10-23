@@ -31,6 +31,16 @@
 
 #include <utility>
 
+static QFrame* makeHorizontalDivider(QWidget* parent)
+{
+    auto* divider = new QFrame(parent);
+    divider->setFrameShape(QFrame::NoFrame);
+    divider->setFixedHeight(1);
+    divider->setStyleSheet(QStringLiteral("background: %1; border: none;")
+                               .arg(ThemeManager::instance()->current()->colorBorder.name()));
+    return divider;
+}
+
 // ── CollapsibleSection ───────────────────────────────────────────────────────
 // Lightweight collapsible section: a clickable header with a disclosure
 // arrow that collapses/expands its body. Kept local to the panel — it carries no
@@ -58,16 +68,18 @@ public:
             "QToolButton { border: none; padding: %1px %2px; color: %3; "
             "font-weight: bold; text-align: left; background: transparent; }"
             "QToolButton:hover { color: %4; }")
-            .arg(t->spaceSM).arg(t->spaceMD)
+            .arg(t->spaceMD).arg(t->spaceMD)
             .arg(t->colorTextSecondary.name())
             .arg(t->colorTextBright.name()));
         root->addWidget(m_header);
 
         m_body = new QWidget(this);
         m_bodyLay = new QVBoxLayout(m_body);
-        m_bodyLay->setContentsMargins(t->spaceMD, t->spaceXS, t->spaceMD, t->spaceMD);
+        m_bodyLay->setContentsMargins(t->spaceMD, t->spaceSM,
+                                     t->spaceMD, t->spaceLG);
         m_bodyLay->setSpacing(t->spaceSM);
         root->addWidget(m_body);
+        root->addWidget(makeHorizontalDivider(this));
 
         connect(m_header, &QToolButton::toggled, this, [this](bool on) {
             m_body->setVisible(on);
@@ -159,18 +171,22 @@ PropertiesPanel::PropertiesPanel(QWidget* parent)
     // view is visible at a time (showCurvesEditor / showColorBalanceEditor /
     // showHueSaturationEditor / showLayerProperties).
     m_curvesEditor = new CurvesEditorWidget(content);
+    m_curvesEditor->layout()->setSpacing(t->spaceSM);
     m_curvesEditor->setVisible(false);
     contentLay->addWidget(m_curvesEditor);
 
     m_colorBalanceEditor = new ColorBalanceAdjustmentWidget(content);
+    m_colorBalanceEditor->layout()->setSpacing(t->spaceSM);
     m_colorBalanceEditor->setVisible(false);
     contentLay->addWidget(m_colorBalanceEditor);
 
     m_hueSaturationEditor = new HueSaturationAdjustmentWidget(content);
+    m_hueSaturationEditor->layout()->setSpacing(t->spaceSM);
     m_hueSaturationEditor->setVisible(false);
     contentLay->addWidget(m_hueSaturationEditor);
 
     m_solidColorEditor = new SolidColorAdjustmentWidget(content);
+    m_solidColorEditor->layout()->setSpacing(t->spaceSM);
     m_solidColorEditor->setVisible(false);
     contentLay->addWidget(m_solidColorEditor);
 
@@ -323,25 +339,20 @@ void PropertiesPanel::buildTransformInterface(QVBoxLayout* parentLayout)
     headerLay->addWidget(m_headerIcon);
     headerLay->addWidget(m_headerLabel, 1);
     parentLayout->addWidget(m_headerRow);
+    parentLayout->addWidget(makeHorizontalDivider(m_layerSection));
 
     // ── Transform section ──
     m_transformSection = new CollapsibleSection(tr("Transform"), m_layerSection);
     {
         m_transformFields = new TransformFieldsWidget(
             TransformFieldsMode::PropertiesPanel, m_transformSection);
-        m_transformSection->body()->addWidget(m_transformFields, 0, Qt::AlignHCenter);
+        m_transformSection->body()->addWidget(m_transformFields, 0, Qt::AlignLeft);
 
-        // Rotation + flip row.
-        auto* rotRow = new QHBoxLayout();
-        rotRow->setSpacing(t->spaceSM);
         m_flipHButton = makeIconButton(QStringLiteral("flip-horizontal"),
-                                       tr("Flip horizontal"), m_transformSection);
+                                       tr("Flip horizontal"), m_transformFields);
         m_flipVButton = makeIconButton(QStringLiteral("flip-vertical"),
-                                       tr("Flip vertical"), m_transformSection);
-        rotRow->addWidget(m_flipHButton);
-        rotRow->addWidget(m_flipVButton);
-        rotRow->addStretch();
-        m_transformSection->body()->addLayout(rotRow);
+                                       tr("Flip vertical"), m_transformFields);
+        m_transformFields->setRotationActions(m_flipHButton, m_flipVButton);
     }
     parentLayout->addWidget(m_transformSection);
 
@@ -444,6 +455,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
     headerLay->addWidget(docIcon);
     headerLay->addWidget(docLabel, 1);
     parentLayout->addWidget(header);
+    parentLayout->addWidget(makeHorizontalDivider(m_documentSection));
 
     // ── Canvas section ──
     auto* canvasSection = new CollapsibleSection(tr("Canvas"), m_documentSection);
@@ -463,17 +475,16 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
             return std::pair<QLabel*, QDoubleSpinBox*>(l, input);
         };
 
-        auto [wLabel, wInput] = makeField(tr("W"), 1.0, 100000.0, 0, tr(" px"));
-        auto [hLabel, hInput] = makeField(tr("H"), 1.0, 100000.0, 0, tr(" px"));
-        auto [xLabel, xInput] = makeField(tr("X"), -100000.0, 100000.0, 0, tr(" px"));
-        auto [yLabel, yInput] = makeField(tr("Y"), -100000.0, 100000.0, 0, tr(" px"));
+        auto [wLabel, wInput] = makeField(tr("W"), 1.0, 100000.0, 2, tr(" px"));
+        auto [hLabel, hInput] = makeField(tr("H"), 1.0, 100000.0, 2, tr(" px"));
+        auto [xLabel, xInput] = makeField(tr("X"), -100000.0, 100000.0, 2, tr(" px"));
+        auto [yLabel, yInput] = makeField(tr("Y"), -100000.0, 100000.0, 2, tr(" px"));
         m_canvasWInput = wInput;
         m_canvasHInput = hInput;
         m_canvasXInput = xInput;
         m_canvasYInput = yInput;
-        // Explicit minimum overrides minimumSizeHint (which is sized for the
-        // widest possible value) so the grid can compress in a narrow dock
-        // instead of overflowing behind the vertical scrollbar.
+        // Keep the same sizing policy as the layer Transform fields so both
+        // W/H/X/Y grids respond identically when the dock width changes.
         for (auto* input : { m_canvasWInput, m_canvasHInput, m_canvasXInput, m_canvasYInput }) {
             input->setMaximumWidth(100);
             input->setMinimumWidth(52);
@@ -485,10 +496,11 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         m_canvasLinkButton->setCheckable(true);
 
         auto* canvasGridWrap = new QWidget(canvasSection);
+        canvasGridWrap->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         auto* grid = new QGridLayout(canvasGridWrap);
         grid->setContentsMargins(0, 0, 0, 0);
         grid->setHorizontalSpacing(t->spaceSM);
-        grid->setVerticalSpacing(t->spaceXS);
+        grid->setVerticalSpacing(t->spaceSM);
         grid->addWidget(m_canvasLinkButton, 0, 0, 2, 1);
         grid->addWidget(wLabel, 0, 1);
         grid->addWidget(m_canvasWInput, 0, 2, Qt::AlignLeft);
@@ -498,7 +510,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         grid->addWidget(m_canvasHInput, 1, 2, Qt::AlignLeft);
         grid->addWidget(yLabel, 1, 3);
         grid->addWidget(m_canvasYInput, 1, 4, Qt::AlignLeft);
-        canvasSection->body()->addWidget(canvasGridWrap, 0, Qt::AlignHCenter);
+        canvasSection->body()->addWidget(canvasGridWrap, 0, Qt::AlignLeft);
 
         // The canvas has no offset concept — X/Y are informative only.
         m_canvasXInput->setEnabled(false);
@@ -510,7 +522,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         auto* form = new QGridLayout(formWrap);
         form->setContentsMargins(0, 0, 0, 0);
         form->setHorizontalSpacing(t->spaceSM);
-        form->setVerticalSpacing(t->spaceXS);
+        form->setVerticalSpacing(t->spaceSM);
         form->setColumnStretch(2, 1);
 
         m_resolutionInput = new ScrubbableValueInput(QString(), 1.0, 10000.0, 300.0,
@@ -551,7 +563,6 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
     {
         auto* orientRow = new QHBoxLayout();
         orientRow->setSpacing(t->spaceXS);
-        orientRow->addStretch();
 
         m_portraitButton = makeToggleButton(QStringLiteral("canvas-portrait"),
                                             tr("Portrait orientation"), aspectSection);
