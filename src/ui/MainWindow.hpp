@@ -366,6 +366,8 @@ private:
     void showSaveSelectionDialog();
     void showLoadSelectionDialog();
     void updateStatusFromDocument();
+    QString documentFileName(const DocumentTab& tab) const;
+    QString documentTabTitle(const DocumentTab& tab) const;
     void updateDirtyUi();
     void markActiveTabDirty(bool dirty = true);
     bool ensureTabCanBeDiscardedOrSaved(int index);

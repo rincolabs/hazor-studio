@@ -763,6 +763,45 @@ private:
 
 // ── Text Commands ────────────────────────────────────────────
 
+class RenameNodeCommand : public Command {
+public:
+    RenameNodeCommand(Document* doc, int flatIndex,
+                      QString beforeName, QString afterName,
+                      bool beforeNameIsAuto, bool afterNameIsAuto,
+                      QString commandName)
+        : m_doc(doc)
+        , m_flatIndex(flatIndex)
+        , m_beforeName(std::move(beforeName))
+        , m_afterName(std::move(afterName))
+        , m_beforeNameIsAuto(beforeNameIsAuto)
+        , m_afterNameIsAuto(afterNameIsAuto)
+        , m_name(std::move(commandName))
+    {}
+
+    void execute() override { apply(m_afterName, m_afterNameIsAuto); }
+    void undo() override { apply(m_beforeName, m_beforeNameIsAuto); }
+    QString name() const override { return m_name; }
+
+private:
+    void apply(const QString& name, bool nameIsAuto) {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (!node)
+            return;
+        node->name = name;
+        node->nameIsAuto = nameIsAuto;
+        if (node->layer)
+            node->layer->name = name;
+    }
+
+    Document* m_doc;
+    int m_flatIndex;
+    QString m_beforeName;
+    QString m_afterName;
+    bool m_beforeNameIsAuto;
+    bool m_afterNameIsAuto;
+    QString m_name;
+};
+
 class TextEditCommand : public Command {
 public:
     TextEditCommand(Document* doc, int flatIndex,

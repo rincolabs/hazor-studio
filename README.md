@@ -25,6 +25,10 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
   and X. Recent cards share File → Open Recent's history, show cached
   aspect-preserving previews, and can open, reveal, or remove entries without
   touching the original files.
+- **Contextual document tabs** — each document tab reports its file name,
+  current zoom, active layer (or layer-mask editing context), colour mode, bit
+  depth, and unsaved state. Titles update live and retain their complete text in
+  a tooltip when the tab bar elides them.
 - **Full tool set** — Move, Brush (advanced brush engine with smoothing,
   dynamics, dual/texture brushes), Eraser, Select, Shape (vector layers), Crop,
   Text, Fill Bucket, Gradient, Eyedropper, Zoom, and Hand.

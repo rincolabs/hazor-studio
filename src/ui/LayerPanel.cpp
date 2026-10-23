@@ -529,9 +529,7 @@ LayerPanel::LayerPanel(QWidget* parent)
         if (newName.isEmpty()) return;
         auto* node = m_controller->document()->nodeAt(flatIdx);
         if (!node) return;
-        node->name = newName;
-        node->nameIsAuto = false;   // user picked this name; stop auto-naming it
-        if (node->layer) node->layer->name = newName;
+        m_controller->renameNode(flatIdx, newName);
     });
 
     connect(m_tree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem* item) {
@@ -770,12 +768,8 @@ LayerPanel::LayerPanel(QWidget* parent)
                 QString newName = QInputDialog::getText(
                     this, tr("Rename"), tr("Name:"),
                     QLineEdit::Normal, node->name, &ok);
-                if (ok && !newName.isEmpty()) {
-                    node->name = newName;
-                    node->nameIsAuto = false;   // user picked this name; stop auto-naming it
-                    if (node->layer) node->layer->name = newName;
-                    refresh();
-                }
+                if (ok)
+                    m_controller->renameNode(idx, newName);
             });
             menu.addSeparator();
             menu.addAction(tr("Delete"), [this]() {

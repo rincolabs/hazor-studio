@@ -161,10 +161,28 @@
 #include <QDockWidget>
 #include <QTabBar>
 
-static QString tabLabel(const QString& name)
+static QString formattedZoomPercent(float zoom)
 {
-    constexpr int kMaxTabChars = 30;
-    return name.size() > kMaxTabChars ? name.left(kMaxTabChars) + QChar(0x2026) : name;
+    const double percent = std::max(0.0, static_cast<double>(zoom) * 100.0);
+    QString value = QString::number(percent, 'f', 1);
+    if (value.endsWith(QStringLiteral(".0")))
+        value.chop(2);
+    return value;
+}
+
+static QString documentColorModeLabel(const QString& colorMode)
+{
+    if (colorMode == QStringLiteral("RGB Color"))
+        return QStringLiteral("RGB");
+    if (colorMode == QStringLiteral("CMYK Color"))
+        return QStringLiteral("CMYK");
+    if (colorMode == QStringLiteral("Grayscale"))
+        return QStringLiteral("Gray");
+
+    QString label = colorMode.trimmed();
+    if (label.endsWith(QStringLiteral(" Color"), Qt::CaseInsensitive))
+        label.chop(6);
+    return label.isEmpty() ? QStringLiteral("RGB") : label;
 }
 
 static QString documentColorModeFromSetting(const QString& setting)
@@ -1222,6 +1240,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_tabWidget = new QTabWidget(centralHost);
     m_tabWidget->setTabsClosable(true);
     m_tabWidget->setMovable(true);
+    m_tabWidget->tabBar()->setElideMode(Qt::ElideRight);
     m_homeWorkspace = new HomeWorkspace(m_tabWidget);
     const int homeIndex = m_tabWidget->addTab(m_homeWorkspace, tr("Home"));
     m_tabWidget->setTabToolTip(homeIndex, tr("Home"));
@@ -3048,7 +3067,11 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
         m_toolBar->setTextAlign(static_cast<int>(ps.alignment));
         m_toolBar->setTextLeading(ps.lineHeight);
     });
-    connect(canvas, &CanvasView::zoomChanged, this, &MainWindow::onZoomChanged);
+    connect(canvas, &CanvasView::zoomChanged, this, [this, canvas](float zoom) {
+        if (canvas == m_canvas)
+            onZoomChanged(zoom);
+        updateDirtyUi();
+    });
     // The Channels panel builds its RGB / R-G-B thumbnails from this canvas'
     // CPU projection, which is composited off thread and therefore lands after
     // the imageChanged() that triggered it. Without this the thumbnails stayed
@@ -3198,6 +3221,7 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
                 }
             }
         }
+        updateDirtyUi();
     });
     connect(ctrlPtr, &ImageController::activeLayerChanged, this, [this](int idx) {
         Q_UNUSED(idx)
@@ -3224,6 +3248,7 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
         }
         updateDistortControls();
         if (m_canvas) m_canvas->update();
+        updateDirtyUi();
     });
 
     // Multi-selection changes (e.g. box-select on canvas) don't necessarily fire
@@ -3260,12 +3285,14 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
         // page's W/H/Resolution fields in sync with the active document.
         refreshPropertiesPanel();
         markActiveTabDirty(true);
+        updateDirtyUi();
     });
 
     connect(ctrlPtr, &ImageController::maskEditingChanged, this, [this](bool editing) {
         Q_UNUSED(editing)
         refreshPropertiesPanel();
         updateLayerMenuState();
+        updateDirtyUi();
     });
 
     // Keep the Properties panel's Show Overlay checkbox in sync when the
@@ -3334,7 +3361,7 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
     // Window-scope delete handler via event filter (catches Delete even when LayerPanel has focus)
     qApp->installEventFilter(this);
 
-    const int tabWidgetIndex = m_tabWidget->addTab(page, tabLabel(name));
+    const int tabWidgetIndex = m_tabWidget->addTab(page, name);
     m_tabWidget->setTabToolTip(tabWidgetIndex, name);
 
     DocumentTab tab;
@@ -3937,9 +3964,6 @@ void MainWindow::createDocumentFromSettings(const DocumentSettings& s)
     tab.isDirty = false;
     tab.currentProjectPath.clear();
 
-    const int tabWidgetIndex = tabWidgetIndexForDocument(m_activeTabIndex);
-    m_tabWidget->setTabText(tabWidgetIndex, tabLabel(s.name));
-    m_tabWidget->setTabToolTip(tabWidgetIndex, s.name);
     refreshLayerPanel();
     refreshPropertiesPanel();
     updateStatusFromDocument();
@@ -4662,11 +4686,6 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
         tab.sourcePath = QFileInfo(path).absoluteFilePath();
         RecentFilesManager::instance()->addFile(path);
     }
-    const int targetTabWidgetIndex = tabWidgetIndexForDocument(targetIndex);
-    if (targetTabWidgetIndex < m_tabWidget->count()) {
-        m_tabWidget->setTabText(targetTabWidgetIndex, tabLabel(tab.name));
-        m_tabWidget->setTabToolTip(targetTabWidgetIndex, tab.name);
-    }
     // Other tabs of the same container were written along with it — but NOT a
     // content tab with uncommitted edits: those live in a working copy the save
     // deliberately did not pick up, so its asterisk has to stay. What reached
@@ -4812,6 +4831,51 @@ void MainWindow::markActiveTabDirty(bool dirty)
         updateDirtyUi();
 }
 
+QString MainWindow::documentFileName(const DocumentTab& tab) const
+{
+    QString name;
+    if (!tab.currentProjectPath.isEmpty())
+        name = QFileInfo(tab.currentProjectPath).fileName();
+    else if (!tab.sourcePath.isEmpty())
+        name = QFileInfo(tab.sourcePath).fileName();
+    else if (!tab.name.isEmpty())
+        name = tab.name;
+    else if (tab.document)
+        name = tab.document->name;
+    return name.isEmpty() ? tr("Untitled") : name;
+}
+
+QString MainWindow::documentTabTitle(const DocumentTab& tab) const
+{
+    const QString fileName = documentFileName(tab);
+    if (!tab.document)
+        return tab.isDirty ? fileName + QStringLiteral(" *") : fileName;
+
+    const Document& document = *tab.document;
+    const float zoom = std::isfinite(document.zoomTarget)
+        ? document.zoomTarget : document.zoom;
+
+    QString layerName;
+    if (const auto* node = document.activeNode()) {
+        layerName = node->name;
+        if (layerName.isEmpty() && node->layer)
+            layerName = node->layer->name;
+    }
+
+    const QString colorContext = tab.controller && tab.controller->isEditingMask()
+        ? tr("Layer Mask")
+        : documentColorModeLabel(document.colorMode);
+    const QString details = layerName.isEmpty()
+        ? QStringLiteral("%1/%2").arg(colorContext).arg(document.bitDepth)
+        : QStringLiteral("%1, %2/%3")
+              .arg(layerName, colorContext)
+              .arg(document.bitDepth);
+
+    return QStringLiteral("%1 @ %2% (%3)%4")
+        .arg(fileName, formattedZoomPercent(zoom), details,
+             tab.isDirty ? QStringLiteral(" *") : QString());
+}
+
 void MainWindow::updateDirtyUi()
 {
     // EVERY tab's label is refreshed, not just the active one. A change can now
@@ -4822,20 +4886,20 @@ void MainWindow::updateDirtyUi()
     QString activeTitle = tr("Hazor Studio");
 
     for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
-        auto& tab = m_tabs[i];
-        QString baseName = tab.currentProjectPath.isEmpty()
-            ? tab.name
-            : QFileInfo(tab.currentProjectPath).fileName();
-        if (baseName.isEmpty())
-            baseName = tr("Untitled");
-        const QString tabName = tab.isDirty ? tabLabel(baseName) + "*" : tabLabel(baseName);
+        const auto& tab = m_tabs[i];
+        const QString fullTabTitle = documentTabTitle(tab);
         const int tabWidgetIndex = tabWidgetIndexForDocument(i);
         if (tabWidgetIndex < m_tabWidget->count()) {
-            m_tabWidget->setTabText(tabWidgetIndex, tabName);
-            m_tabWidget->setTabToolTip(tabWidgetIndex, baseName);
+            if (m_tabWidget->tabText(tabWidgetIndex) != fullTabTitle)
+                m_tabWidget->setTabText(tabWidgetIndex, fullTabTitle);
+            if (m_tabWidget->tabToolTip(tabWidgetIndex) != fullTabTitle)
+                m_tabWidget->setTabToolTip(tabWidgetIndex, fullTabTitle);
         }
-        if (i == m_activeTabIndex)
-            activeTitle = QStringLiteral("%1 - Hazor Studio").arg(tabName);
+        if (i == m_activeTabIndex) {
+            const QString windowDocumentName = documentFileName(tab)
+                + (tab.isDirty ? QStringLiteral(" *") : QString());
+            activeTitle = QStringLiteral("%1 - Hazor Studio").arg(windowDocumentName);
+        }
     }
 
     setWindowTitle(activeTitle);
@@ -5186,13 +5250,23 @@ void MainWindow::onEditDocument()
     }
     QSize newSize(wPx, hPx);
 
+    const QString newColorMode = documentColorModeFromSetting(s.colorMode);
+    const int newBitDepth = documentBitDepthFromSetting(s.colorMode);
+    const bool metadataChanged = m_doc->name != s.name
+        || !qFuzzyCompare(m_doc->resolutionDpi, ppi)
+        || m_doc->colorMode != newColorMode
+        || m_doc->bitDepth != newBitDepth;
+
     m_doc->name = s.name;
-    const int tabWidgetIndex = tabWidgetIndexForDocument(m_activeTabIndex);
-    if (m_activeTabIndex >= 0 && tabWidgetIndex < m_tabWidget->count())
-        m_tabWidget->setTabText(tabWidgetIndex, tabLabel(s.name));
+    if (m_activeTabIndex >= 0
+        && m_activeTabIndex < static_cast<int>(m_tabs.size())
+        && m_tabs[m_activeTabIndex].currentProjectPath.isEmpty()
+        && m_tabs[m_activeTabIndex].sourcePath.isEmpty()) {
+        m_tabs[m_activeTabIndex].name = s.name;
+    }
     m_doc->resolutionDpi = ppi;
-    m_doc->colorMode = documentColorModeFromSetting(s.colorMode);
-    m_doc->bitDepth = documentBitDepthFromSetting(s.colorMode);
+    m_doc->colorMode = newColorMode;
+    m_doc->bitDepth = newBitDepth;
 
     if (m_ctrl && m_doc->size != newSize)
         m_ctrl->resizeDocument(newSize);
@@ -5217,6 +5291,9 @@ void MainWindow::onEditDocument()
     refreshLayerPanel();
     refreshPropertiesPanel();
     updateStatusFromDocument();
+    if (metadataChanged)
+        markActiveTabDirty(true);
+    updateDirtyUi();
 }
 
 void MainWindow::onAddLayer()
@@ -7644,11 +7721,8 @@ void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
             QString newName = QInputDialog::getText(
                 this, tr("Rename"), tr("Name:"),
                 QLineEdit::Normal, node->name, &ok);
-            if (ok && !newName.isEmpty()) {
-                node->name = newName;
-                if (node->layer) node->layer->name = newName;
-                refreshLayerPanel();
-            }
+            if (ok)
+                m_ctrl->renameNode(idx, newName);
         });
 
         menu.addAction(m_duplicateLayerAction);

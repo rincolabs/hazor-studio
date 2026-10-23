@@ -227,6 +227,7 @@ public:
     void setStyleBakeBusy(bool busy);
     void removeNode(int flatIndex);
     void duplicateNode(int flatIndex);
+    void renameNode(int flatIndex, const QString& name);
     void setActiveNode(int flatIndex);
     void setMultiSelectNode(int flatIndex, bool addToSelection);
     void selectNodeRange(int fromFlat, int toFlat);

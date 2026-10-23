@@ -1949,6 +1949,30 @@ void ImageController::setActiveNode(int flatIndex)
     emit activeLayerChanged(flatIndex);
 }
 
+void ImageController::renameNode(int flatIndex, const QString& name)
+{
+    if (!m_doc)
+        return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    const QString trimmedName = name.trimmed();
+    if (!node || trimmedName.isEmpty()
+        || (node->name == trimmedName && !node->nameIsAuto)) {
+        return;
+    }
+
+    const QString beforeName = node->name;
+    const bool beforeNameIsAuto = node->nameIsAuto;
+    node->name = trimmedName;
+    node->nameIsAuto = false;
+    if (node->layer)
+        node->layer->name = trimmedName;
+
+    m_history.push(std::make_unique<RenameNodeCommand>(
+        m_doc, flatIndex, beforeName, trimmedName,
+        beforeNameIsAuto, false, tr("Rename Layer")));
+    emit layerChanged(flatIndex);
+}
+
 void ImageController::setMultiSelectNode(int flatIndex, bool addToSelection)
 {
     if (!m_doc) return;
