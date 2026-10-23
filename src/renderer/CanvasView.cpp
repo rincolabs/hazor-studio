@@ -36,6 +36,7 @@
 #include "io/ImageCodec.hpp"
 #include "processing/FilterProcessor.hpp"
 
+#include <QtConcurrent/QtConcurrent>
 #include <QMargins>
 #include <QMatrix4x4>
 #include <QWheelEvent>
@@ -1150,6 +1151,11 @@ CanvasView::~CanvasView()
     CrashHandler::breadcrumb("~CanvasView: enter");
     if (qApp)
         qApp->removeEventFilter(this);
+    // Same contract as AsyncProjectionBuilder's destructor: the clone-source
+    // task captures only its snapshot (never `this`), so letting it finish is
+    // safe — freeing that snapshot while it composites into it is not.
+    if (m_cloneSourceWatcher && m_cloneSourceWatcher->isRunning())
+        m_cloneSourceWatcher->waitForFinished();
     releaseTabletViewportCursor();
     CrashHandler::breadcrumb("~CanvasView: makeCurrent");
     makeCurrent();
@@ -1849,7 +1855,18 @@ void CanvasView::setCloneSource(QPointF documentPoint)
     m_cloneSourceDefined = true;
     m_cloneOffsetValid = false;
     m_cloneNeedsSourceFeedback = false;
-    invalidateClonePreviewCache();
+    // Only the rendered overlay, not the composited source: Alt-clicking moves
+    // where the sample is taken FROM, it does not change the pixels being
+    // sampled, and dropping the composite here would cost a rebuild for nothing
+    // (and leave the overlay with no source until the worker came back).
+    m_clonePreviewImage = QImage();
+    m_clonePreviewKey = 0;
+    // Prime it here, blocking, when there is nothing to show yet. Alt-click is
+    // one deliberate act, not a motion event, so a composite on this thread is
+    // the right place for the one the tool cannot avoid — and it buys every
+    // later hover and press an instant source.
+    if (!cloneSourceSnapshotIsFresh())
+        cloneSourceSnapshotBlocking();
     updateToolCursor();
     updateBrushPreviewOverlay();
     update();
@@ -1952,30 +1969,36 @@ bool CanvasView::promptRasterizeRawLayer()
     return picked == 1;
 }
 
-QImage CanvasView::cloneSourceSnapshot() const
+namespace {
+// The clone/heal source composite, as a free function over whatever Document it
+// is handed — the live one on the UI thread, or a shallowClone() snapshot on a
+// worker (see requestCloneSourceSnapshot()). It reads nothing but `doc` and
+// `mode` precisely so those two callers run identical code and cannot drift.
+QImage composeCloneSource(Document* doc, CloneSampleMode mode)
 {
-    if (!m_doc || m_doc->size.isEmpty())
+    if (!doc || doc->size.isEmpty())
         return QImage();
 
     RenderContext ctx;
-    ctx.document = m_doc;
-    ctx.outputSize = m_doc->size;
-    ctx.documentRect = QRectF(QPointF(0, 0), m_doc->size);
+    ctx.document = doc;
+    ctx.outputSize = doc->size;
+    ctx.documentRect = QRectF(QPointF(0, 0), doc->size);
     ctx.targetType = RenderTargetType::Canvas;
     ctx.highQuality = true;
 
     // The active layer is always the paint destination, so it must render raw
     // (no baked Single-Layer-Mode adjustments/effects) wherever it shows up in
     // the sample — see DocumentCompositor::drawLayerNode. Any OTHER sampled
-    // layer keeps its own adjustments/effects baked in as usual.
-    const LayerTreeNode* activeNode = m_doc->activeNode();
+    // layer keeps its own adjustments/effects baked in as usual. Resolved from
+    // `doc`, so on a snapshot this is the snapshot's own node.
+    const LayerTreeNode* activeNode = doc->activeNode();
 
-    switch (m_cloneSampleMode) {
+    switch (mode) {
     case CloneSampleMode::CurrentLayer:
-        return DocumentCompositor::compositeOnlyFlatIndex(m_doc, m_doc->activeFlatIndex, ctx,
+        return DocumentCompositor::compositeOnlyFlatIndex(doc, doc->activeFlatIndex, ctx,
                                                            activeNode);
     case CloneSampleMode::CurrentAndBelow:
-        return DocumentCompositor::compositeFromFlatIndex(m_doc, m_doc->activeFlatIndex, ctx,
+        return DocumentCompositor::compositeFromFlatIndex(doc, doc->activeFlatIndex, ctx,
                                                            activeNode);
     case CloneSampleMode::AllLayers:
     default:
@@ -1987,8 +2010,14 @@ QImage CanvasView::cloneSourceSnapshot() const
         // for display — baking them into the sample too would double them, and
         // the double-up compounds every time cloned pixels are themselves
         // re-sampled.
-        return DocumentCompositor::compositeFromFlatIndex(m_doc, 0, ctx, activeNode);
+        return DocumentCompositor::compositeFromFlatIndex(doc, 0, ctx, activeNode);
     }
+}
+} // namespace
+
+QImage CanvasView::cloneSourceSnapshot() const
+{
+    return composeCloneSource(m_doc, m_cloneSampleMode);
 }
 
 void CanvasView::invalidateClonePreviewCache()
@@ -2024,19 +2053,137 @@ quint64 CanvasView::clonePreviewKey(const QImage& sourceImage) const
     return key;
 }
 
+bool CanvasView::cloneSourceSnapshotIsFresh() const
+{
+    return m_doc
+        && !m_clonePreviewSourceImage.isNull()
+        && m_clonePreviewSourceGeneration == m_doc->compositionGeneration
+        && m_clonePreviewSourceFlatIndex == m_doc->activeFlatIndex
+        && m_clonePreviewSourceMode == m_cloneSampleMode;
+}
+
+bool CanvasView::cloneSourceBuildMatchesLiveState() const
+{
+    return m_doc
+        && m_cloneSourceBuildGeneration == m_doc->compositionGeneration
+        && m_cloneSourceBuildFlatIndex == m_doc->activeFlatIndex
+        && m_cloneSourceBuildMode == m_cloneSampleMode;
+}
+
+void CanvasView::requestCloneSourceSnapshot()
+{
+    if (!m_doc || m_doc->size.isEmpty())
+        return;
+    // Bounded to exactly when a snapshot is wanted. Without this the
+    // re-dispatch at the end of onCloneSourceSnapshotReady() would keep a
+    // worker busy compositing for a tool that is not even selected.
+    if (!isCloneOrHealingTool() || !m_cloneSourceDefined)
+        return;
+    // Nothing to build mid-stroke: the dabs read m_cloneStrokeContext, the
+    // generation cannot move until endBrushStroke(), and that bump would
+    // obsolete whatever this produced anyway.
+    if (m_brushDrawing)
+        return;
+
+    if (!m_cloneSourceWatcher) {
+        m_cloneSourceWatcher = new QFutureWatcher<QImage>(this);
+        connect(m_cloneSourceWatcher, &QFutureWatcher<QImage>::finished,
+                this, &CanvasView::onCloneSourceSnapshotReady);
+    }
+    if (m_cloneSourceWatcher->isRunning()) {
+        // One at a time; onCloneSourceSnapshotReady() re-requests if the
+        // document moved on while this build was running.
+        return;
+    }
+
+    // COW snapshot: Layer struct copies, no pixel copies, GPU handles zeroed
+    // (LayerTreeNode::shallowClone). Cheap enough for the UI thread, and the
+    // only reason the worker may walk the tree while the UI thread keeps
+    // mutating the live one — see docs/RENDER-PIPELINE.md.
+    auto snapshot = std::make_shared<Document>();
+    snapshot->size = m_doc->size;
+    snapshot->compositionGeneration = m_doc->compositionGeneration;
+    // composeCloneSource() resolves the paint destination through
+    // activeNode(), so the snapshot has to carry the index too — unlike
+    // ProjectionCache's snapshot, which composites every layer.
+    snapshot->activeFlatIndex = m_doc->activeFlatIndex;
+    snapshot->roots.reserve(m_doc->roots.size());
+    for (const auto& root : m_doc->roots)
+        snapshot->roots.push_back(root->shallowClone());
+
+    m_cloneSourceBuildGeneration = m_doc->compositionGeneration;
+    m_cloneSourceBuildFlatIndex = m_doc->activeFlatIndex;
+    m_cloneSourceBuildMode = m_cloneSampleMode;
+
+    const CloneSampleMode mode = m_cloneSampleMode;
+    m_cloneSourceWatcher->setFuture(QtConcurrent::run([snapshot, mode]() {
+        // Already RGBA8888 out of compositeFiltered(); the convert is a no-op
+        // shallow copy that documents what the dab sampler requires.
+        return composeCloneSource(snapshot.get(), mode)
+            .convertToFormat(QImage::Format_RGBA8888);
+    }));
+}
+
+void CanvasView::adoptCloneSourceSnapshot()
+{
+    if (!m_cloneSourceWatcher || m_cloneSourceWatcher->future().resultCount() == 0)
+        return;
+    QImage built = m_cloneSourceWatcher->result();
+    if (built.isNull())
+        return;
+    m_clonePreviewSourceImage = std::move(built);
+    m_clonePreviewSourceGeneration = m_cloneSourceBuildGeneration;
+    m_clonePreviewSourceFlatIndex = m_cloneSourceBuildFlatIndex;
+    m_clonePreviewSourceMode = m_cloneSourceBuildMode;
+}
+
+void CanvasView::onCloneSourceSnapshotReady()
+{
+    adoptCloneSourceSnapshot();
+    // The pointer may not move again before the user looks at the overlay, so
+    // the freshly built source has to be drawn without waiting for an event.
+    updateBrushPreviewOverlay();
+    // The document moved on while this was building (another stroke landed, the
+    // active layer changed): go round again so the next press finds it current.
+    if (!cloneSourceSnapshotIsFresh())
+        requestCloneSourceSnapshot();
+}
+
 QImage CanvasView::clonePreviewSourceSnapshot()
 {
     if (!m_doc)
         return QImage();
+    if (!cloneSourceSnapshotIsFresh())
+        requestCloneSourceSnapshot();
+    // Deliberately returns the stale snapshot when there is one: the overlay
+    // being a stroke behind for ~a frame is invisible next to the UI thread
+    // stopping dead for a full-document composite.
+    return m_clonePreviewSourceImage;
+}
 
-    const bool cacheValid = !m_clonePreviewSourceImage.isNull()
-        && m_clonePreviewSourceGeneration == m_doc->compositionGeneration
-        && m_clonePreviewSourceFlatIndex == m_doc->activeFlatIndex
-        && m_clonePreviewSourceMode == m_cloneSampleMode;
-    if (cacheValid)
+QImage CanvasView::cloneSourceSnapshotBlocking()
+{
+    if (cloneSourceSnapshotIsFresh())
         return m_clonePreviewSourceImage;
 
-    m_clonePreviewSourceImage = cloneSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+    // A build for this exact state is already underway — joining work in
+    // progress beats starting the same composite again on this thread. Reading
+    // the result directly afterwards, because waitForFinished() does not
+    // deliver the watcher's queued finished() signal.
+    if (m_cloneSourceWatcher && m_cloneSourceWatcher->isRunning()
+        && cloneSourceBuildMatchesLiveState()) {
+        m_cloneSourceWatcher->waitForFinished();
+        adoptCloneSourceSnapshot();
+        if (cloneSourceSnapshotIsFresh())
+            return m_clonePreviewSourceImage;
+    }
+
+    // Nothing current to wait for. Correctness over latency: a stroke cannot
+    // sample pixels that do not exist, so compose here.
+    QImage built = cloneSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+    if (built.isNull())
+        return built;
+    m_clonePreviewSourceImage = built;
     m_clonePreviewSourceGeneration = m_doc->compositionGeneration;
     m_clonePreviewSourceFlatIndex = m_doc->activeFlatIndex;
     m_clonePreviewSourceMode = m_cloneSampleMode;
@@ -7687,19 +7834,16 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         m_cloneOffsetValid = true;
     }
 
-    // Through the cache, not cloneSourceSnapshot() directly: the hover preview
-    // has almost always just composited this exact snapshot (same document
-    // generation, same active layer, same sample mode => same pixels, it is the
-    // same function), and a full-document CPU composite of a multi-megapixel
-    // document is hundreds of milliseconds on the UI thread. Paying it twice per
-    // stroke — once to show the source under the cursor, once to start the
-    // stroke — was the single biggest cost of a clone stroke.
+    // Through the shared cache, not cloneSourceSnapshot() directly: the worker
+    // started as soon as the previous stroke ended (requestCloneSourceSnapshot),
+    // so by the time the user presses again this is normally just a fetch. Only
+    // a press that beats the worker pays for a composite here, and even then it
+    // joins the build already running instead of starting a second one.
     //
-    // Converted ONCE here: both the dab sampler and the per-event source preview
-    // read it as RGBA8888, so neither pays a full-document format conversion
+    // Already RGBA8888: both the dab sampler and the per-event source preview
+    // read it that way, so neither pays a full-document format conversion
     // during the stroke.
-    m_cloneStrokeContext.sourceImage =
-        clonePreviewSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+    m_cloneStrokeContext.sourceImage = cloneSourceSnapshotBlocking();
     m_cloneStrokeContext.sourceOffset = m_cloneSourceOffset;
     m_cloneStrokeContext.documentSize = m_doc->size;
     m_cloneStrokeContext.healing = m_stampHealing;

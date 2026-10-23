@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QTimer>
 #include <QRect>
+#include <QFutureWatcher>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -551,7 +552,33 @@ private:
         return m_currentTool == Tool::CloneStamp;
     }
     QImage cloneSourceSnapshot() const;
+    // The clone/heal source composite, off the UI thread.
+    //
+    // endBrushStroke() bumps compositionGeneration, so the first pointer event
+    // after releasing a stroke found the cache stale and recomposited the whole
+    // document synchronously — a multi-megapixel CPU composite in a mouse-move
+    // handler, which is the "the mouse freezes after the dab" symptom. These
+    // dispatch it over a shallowClone() snapshot instead (same technique as
+    // ProjectionCache::makeSnapshot / AsyncProjectionBuilder) and let the
+    // overlay keep showing the previous snapshot — stale by one stroke, for the
+    // fraction of a second the composite takes — rather than blocking.
+    void requestCloneSourceSnapshot();
+    void onCloneSourceSnapshotReady();
+    // Cache matches the live document/layer/sample mode, i.e. nothing to build.
+    bool cloneSourceSnapshotIsFresh() const;
+    // The in-flight build is for the live state, i.e. worth waiting for rather
+    // than restarting.
+    bool cloneSourceBuildMatchesLiveState() const;
+    void adoptCloneSourceSnapshot();
+    // Non-blocking: returns the freshest snapshot available (possibly stale,
+    // possibly null) and schedules a rebuild when it isn't current. For the
+    // hover overlay, which can tolerate being a stroke behind.
     QImage clonePreviewSourceSnapshot();
+    // Blocking: for the two callers that cannot proceed without pixels — the
+    // stroke (a dab cannot sample what does not exist) and Alt-click priming.
+    // Waits for an in-flight build of the live state rather than starting a
+    // second one, and only composites here when there is none to wait for.
+    QImage cloneSourceSnapshotBlocking();
     QImage cloneStampPreviewImage(QPointF destinationScreen,
                                   QPointF destinationDoc,
                                   QPointF sourceDoc,
@@ -869,6 +896,14 @@ private:
     uint64_t m_clonePreviewSourceGeneration = std::numeric_limits<uint64_t>::max();
     int m_clonePreviewSourceFlatIndex = -1;
     CloneSampleMode m_clonePreviewSourceMode = CloneSampleMode::CurrentAndBelow;
+    // Identity of the build currently on the worker, so a request for the same
+    // state does not queue a second composite and the stroke path can tell a
+    // build worth waiting for from one that is already obsolete. Mirrors
+    // ProjectionCache's m_inFlightDoc/m_inFlightGen.
+    QFutureWatcher<QImage>* m_cloneSourceWatcher = nullptr;
+    uint64_t m_cloneSourceBuildGeneration = std::numeric_limits<uint64_t>::max();
+    int m_cloneSourceBuildFlatIndex = -1;
+    CloneSampleMode m_cloneSourceBuildMode = CloneSampleMode::CurrentAndBelow;
     // Per-event cost bound for the clone source preview: the rendered preview is
     // reused between refreshes (position still follows every event) and the
     // scaled tip mask is cached per tip/size.
