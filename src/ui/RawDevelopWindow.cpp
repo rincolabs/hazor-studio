@@ -345,7 +345,8 @@ QString shutterText(double seconds)
 } // namespace
 
 RawDevelopWindow::RawDevelopWindow(const RawLayerData& rawData,
-                                   const QImage& currentImage, QWidget* parent)
+                                   const QImage& currentImage, QWidget* parent,
+                                   std::unique_ptr<RawSession> session)
     : QMainWindow(parent)
     , m_rawData(rawData)
     , m_params(rawData.state.pp3.isEmpty()
@@ -375,6 +376,13 @@ RawDevelopWindow::RawDevelopWindow(const RawLayerData& rawData,
     m_previewPool->setMaxThreadCount(1);
     m_previewPool->setExpiryTimeout(-1);
 
+    // Adopted before the first requestPreview() below, so startPreview()'s
+    // worker finds m_previewSession already set and never opens the file. Safe
+    // to hand a session created on another thread to this pool's thread: nothing
+    // in rtengine's ImageSource is bound to the thread that decoded it, only to
+    // being driven by one pipeline at a time (RawSession.hpp).
+    m_previewSession = std::move(session);
+
     buildUi();
     connect(ThemeManager::instance(), &ThemeManager::themeChanged,
             this, &RawDevelopWindow::applyTheme);
@@ -382,6 +390,37 @@ RawDevelopWindow::RawDevelopWindow(const RawLayerData& rawData,
     updatePreviewImage(m_previewImage);
     updateProfileSummary();
     requestPreview();
+}
+
+std::unique_ptr<RawSession> RawDevelopWindow::takeIdleSession(QString* tempPath)
+{
+    if (!m_previewSession)
+        return nullptr;
+    // A preview in flight is driving this very session on the pool thread;
+    // handing it over would break RawSession's "externally serialized" contract,
+    // and blocking until it finishes would stall the UI thread. Decline instead.
+    if ((m_previewWatcher && m_previewWatcher->isRunning())
+        || m_previewPool->activeThreadCount() > 0) {
+        return nullptr;
+    }
+    if (tempPath && m_ownsPreviewSourcePath) {
+        // Ownership moves with the session: ~RawDevelopWindow() must stop
+        // deleting a file the new owner may still need to re-open from. This
+        // window also FORGETS the path, not just its ownership — Apply can still
+        // be refused after this point (locked layer), leaving the window open
+        // with neither a session nor a file it is allowed to assume still
+        // exists. Empty is the one state startPreview() handles correctly: it
+        // materializes the embedded bytes again.
+        *tempPath = m_previewSourcePath;
+        m_ownsPreviewSourcePath = false;
+        m_previewSourcePath.clear();
+    }
+    // A queued render would re-open the file we just gave away, on a window that
+    // is about to close. Nothing sensible is left to preview without a session.
+    if (m_previewDebounce)
+        m_previewDebounce->stop();
+    m_previewPending = false;
+    return std::move(m_previewSession);
 }
 
 RawDevelopWindow::~RawDevelopWindow()

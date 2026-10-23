@@ -58,6 +58,21 @@ public:
                         RawStorageMode mode,
                         const RawDevelopParams& params);
 
+    // Takes over an already-decoded session for `node` so the next
+    // requestDevelop() skips RawEngine::openFile() entirely. Hazor Develop hands
+    // its warm preview session over on Apply: the file is already decoded, the
+    // window is closing, and opening it a second time here cost another full
+    // decode (seconds, and hundreds of MB resident alongside the first).
+    //
+    // `tempPath`, when given, transfers ownership of an Embedded source's
+    // materialized temp file — the caller must stop deleting it.
+    //
+    // Ignored (session simply dropped) while a job for this node is in flight,
+    // and when one is already cached. Drops the session's interactive pipeline
+    // (RawSession::releasePreviewPipeline()): this cache only ever renders full.
+    void adoptSession(LayerTreeNode* node, std::unique_ptr<RawSession> session,
+                      const QString& tempPath = QString());
+
     bool isBusy(const LayerTreeNode* node) const;
 
     // Drop the cached session/temp file for one node (layer deleted,

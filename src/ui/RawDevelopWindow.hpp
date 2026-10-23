@@ -48,12 +48,28 @@ public:
     // layer it edits can be reordered or deleted while it is open. Resolving
     // the target is the owner's job (MainWindow::openHazorDevelop), keyed by
     // the layer's node.
+    // `session`, when non-null, is an already-decoded RawSession for the same
+    // file, adopted as this window's preview session instead of decoding it
+    // again. MainWindow::openRawFileAsNewTab() hands over the session it just
+    // used for the initial develop: opening a RAW used to cost two full decodes
+    // because that one was dropped on the floor and this window immediately
+    // opened its own.
     RawDevelopWindow(const RawLayerData& rawData,
-                     const QImage& currentImage, QWidget* parent = nullptr);
+                     const QImage& currentImage, QWidget* parent = nullptr,
+                     std::unique_ptr<RawSession> session = nullptr);
     ~RawDevelopWindow() override;
 
     void setApplyInProgress(bool busy);
     void developFinished(bool ok, const QString& errorMessage);
+
+    // Gives up the decoded preview session so Apply can render from it instead
+    // of decoding the file a third time (RawDevelopService::adoptSession()).
+    // Returns null when a preview render is in flight: waiting for it would
+    // freeze the UI at the exact moment the user pressed Apply, and the only
+    // cost of declining is the decode we were trying to skip. `tempPath`
+    // receives, and transfers ownership of, an Embedded source's materialized
+    // temp file when this window owned one.
+    std::unique_ptr<RawSession> takeIdleSession(QString* tempPath);
 
 signals:
     void applyRequested(RawDevelopParams params);

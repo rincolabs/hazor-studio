@@ -4159,6 +4159,12 @@ struct RawOpenResult {
     QString pp3;
     QSize developedSize;
     RawGeometry geometry;
+    // The session this develop ran on, kept alive instead of destroyed with the
+    // worker: opening a RAW goes straight into Hazor Develop, which needs a
+    // decoded session of its own, and decoding the same file twice in a row is
+    // seconds of CPU and a second few-hundred-MB allocation for nothing. Makes
+    // this result move-only, hence takeResult() below.
+    std::unique_ptr<RawSession> session;
 };
 } // namespace
 
@@ -4173,7 +4179,9 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
     beginProgressDelayed(tr("Progress"), tr("Opening RAW Image"), false);
     auto* watcher = new QFutureWatcher<RawOpenResult>(this);
     connect(watcher, &QFutureWatcher<RawOpenResult>::finished, this, [this, watcher, path]() {
-        const RawOpenResult loaded = watcher->result();
+        // takeResult(), not result(): RawOpenResult carries the opened
+        // RawSession, so the future's result is move-only (same as the PSD path).
+        RawOpenResult loaded = watcher->future().takeResult();
         watcher->deleteLater();
         closeProgress();
 
@@ -4238,8 +4246,9 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         updateLayerMenuState();
         updateDirtyUi();
         // Opening a RAW file always means developing it, so go straight to
-        // Hazor Develop instead of waiting for a thumbnail double-click.
-        if (m_ctrl) openHazorDevelop(0);
+        // Hazor Develop instead of waiting for a thumbnail double-click — and
+        // hand it the session this open already decoded.
+        if (m_ctrl) openHazorDevelop(0, std::move(loaded.session));
     });
     watcher->setFuture(QtConcurrent::run([path]() {
         RawEngine::applyBackgroundThreadPolicy();
@@ -4264,6 +4273,7 @@ void MainWindow::openRawFileAsNewTab(const QString& path)
         result.pp3 = QString::fromStdString(params.toPP3String());
         result.developedSize = QSize(buffer.width, buffer.height);
         result.geometry = buffer.geometry;
+        result.session = std::move(session);
         return result;
     }));
 }
@@ -4367,7 +4377,7 @@ void MainWindow::openPsdFileAsNewTab(const QString& path)
     }));
 }
 
-void MainWindow::openHazorDevelop(int flatIndex)
+void MainWindow::openHazorDevelop(int flatIndex, std::unique_ptr<RawSession> session)
 {
     if (!m_ctrl || !m_doc) return;
     auto* node = m_doc->nodeAt(flatIndex);
@@ -4386,7 +4396,8 @@ void MainWindow::openHazorDevelop(int flatIndex)
         return;
     }
 
-    auto* develop = new RawDevelopWindow(*node->layer->rawData, node->layer->cpuImage, this);
+    auto* develop = new RawDevelopWindow(*node->layer->rawData, node->layer->cpuImage, this,
+                                        std::move(session));
     m_developWindows.insert(node, develop);
     connect(develop, &QObject::destroyed, this, [this, node]() { m_developWindows.remove(node); });
 
@@ -4410,6 +4421,21 @@ void MainWindow::openHazorDevelop(int flatIndex)
                 tr("This RAW layer is no longer in its document."));
             return;
         }
+        // Donate Hazor Develop's warm preview session to the develop service
+        // BEFORE dispatching: requestDevelop() decides there and then whether it
+        // has to call RawEngine::openFile(), and the file this window has had
+        // decoded all along is the same one. Without this, Apply paid a second
+        // full decode — seconds of CPU and a few hundred MB resident next to the
+        // session still held by this (not yet destroyed) window, which is most of
+        // why Apply felt like the machine had stalled.
+        //
+        // Declined when a preview is still rendering (takeIdleSession()), and
+        // harmless on the failure path below: the session stays cached on the
+        // node for the retry, only this window's own next preview would re-decode.
+        QString donatedTempPath;
+        if (auto warm = develop->takeIdleSession(&donatedTempPath))
+            controller->adoptRawSession(liveIndex, std::move(warm), donatedTempPath);
+
         if (!controller->rerevealRawLayer(liveIndex, params)) {
             AppMessageDialog::warning(develop, tr("Hazor Develop"),
                 tr("Could not start RAW development. The layer may be locked or already processing."));

@@ -141,6 +141,30 @@ layer's). Double-clicking that thumbnail opens the independent **Hazor
 Develop** window (`LayerItemDelegate::rawThumbDoubleClicked` →
 `LayerPanel::rawEditRequested` → `RawDevelopWindow`).
 
+### One decode per file, handed along
+
+A native decode (`RawEngine::openFile()`) is seconds of CPU and a few hundred
+MB resident for a modern sensor, so the three consumers that would each have
+opened the same file pass one `RawSession` down the chain instead:
+
+```
+openRawFileAsNewTab()  decode + renderFull()   ─┐ session travels in RawOpenResult
+RawDevelopWindow       renderPreview() xN       ─┤ adopted as the preview session
+RawDevelopService      renderFull() on Apply    ─┘ donated via adoptSession()
+```
+
+Opening a RAW and applying one edit used to cost three full decodes of the same
+file, two of them resident at the same time. The hand-offs are plain
+`std::unique_ptr` moves, which is also what keeps `RawSession`'s "calls must be
+externally serialized" contract intact — ownership is never shared, only
+transferred, and `RawDevelopWindow::takeIdleSession()` declines while a preview
+render is in flight rather than blocking the UI thread to wait for one.
+`RawDevelopService::adoptSession()` drops the donated session's interactive
+pipeline (`RawSession::releasePreviewPipeline()`), which keeps the decoded
+`InitialImage` but not the `StagedImageProcessor` buffers — that cache only ever
+calls `renderFull()`. Every hand-off is an optimisation only: dropping a session
+on the floor costs a decode and changes nothing else.
+
 `raw_develop` (tool catalog / MCP / agent surface) adjusts a RAW Layer's
 white balance and exposure and re-reveals it via
 `ImageController::rerevealRawLayer()`. Its `white_balance_method` — like

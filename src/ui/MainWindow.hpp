@@ -28,6 +28,7 @@ class QDropEvent;
 class CanvasView;
 class DocumentContainer;
 class RawDevelopWindow;
+class RawSession;
 class LayerPanel;
 // Defined in ui/LayerPanel.hpp; opaque here so this header stays light.
 enum class LayerSmartObjectCommand;
@@ -466,7 +467,11 @@ private:
     // LayerPanel::rawEditRequested (double-click), openRawFileAsNewTab(), and
     // the drag-and-drop paths that land a RAW file via
     // ImageController::importExternalImages()'s outRawLayerFlatIndices.
-    void openHazorDevelop(int flatIndex);
+    // `session`, when non-null, is an already-decoded RawSession for that
+    // layer's file, handed straight to the window so it does not decode the
+    // file a second time (openRawFileAsNewTab() has one by the time it gets
+    // here). See RawDevelopWindow's constructor.
+    void openHazorDevelop(int flatIndex, std::unique_ptr<RawSession> session = nullptr);
     // Current flat index of `node` in `doc`, or -1 if it is no longer there.
     // Needed because a non-modal window (Hazor Develop) outlives the index it
     // was opened with, and may be applied while another tab is active.

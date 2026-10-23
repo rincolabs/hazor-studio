@@ -5392,6 +5392,16 @@ static QImage warpMaskByReframeTransform(const QImage& maskIn, const QPoint& mas
     return out;
 }
 
+void ImageController::adoptRawSession(int flatIndex, std::unique_ptr<RawSession> session,
+                                      const QString& tempPath)
+{
+    if (!m_doc || !session) return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer || !node->layer->rawData)
+        return;
+    m_rawDevelopService->adoptSession(node, std::move(session), tempPath);
+}
+
 bool ImageController::rerevealRawLayer(int flatIndex, const RawDevelopParams& params)
 {
     if (!m_doc) return false;

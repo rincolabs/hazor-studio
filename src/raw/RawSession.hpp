@@ -134,6 +134,20 @@ public:
     // (synchronous, potentially slow) call starts.
     RawImageBuffer renderFull(const RawDevelopParams& params, RawProgressListener* progress = nullptr, RawCancelToken cancelToken = nullptr);
 
+    // Drops the StagedImageProcessor (and any registered detail region) while
+    // keeping the decoded InitialImage — the expensive half — alive. The next
+    // renderPreview() simply rebuilds the processor.
+    //
+    // This is what makes a warm session worth handing from one owner to another
+    // (Hazor Develop -> RawDevelopService on Apply): the decode is reused, but
+    // the interactive pipeline's buffers — which for a session that had a 1:1
+    // RawDetailRegion registered include the full-quality demosaic — are not
+    // left resident in a cache that only ever calls renderFull() again.
+    //
+    // Same serialization contract as the render calls: no render may be in
+    // flight on this session.
+    void releasePreviewPipeline();
+
     struct Impl;
 
 private:

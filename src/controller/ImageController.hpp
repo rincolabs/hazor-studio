@@ -37,6 +37,7 @@ class UpscaleService;
 class DocumentContainer;
 class RawDevelopService;
 class RawDevelopParams;
+class RawSession;
 class LayerTreeNode;
 struct RawDevelopResult;
 struct InpaintResult;
@@ -521,6 +522,14 @@ public:
     // layer is pixel-locked, or a re-reveal for it is already in flight —
     // callers retry once rawLayerDevelopFinished() fires for that layer.
     bool rerevealRawLayer(int flatIndex, const RawDevelopParams& params);
+    // Hands an already-decoded RawSession for `flatIndex`'s RAW layer to the
+    // develop service, so the next rerevealRawLayer() does not re-decode the
+    // file. Hazor Develop donates its warm preview session when the user hits
+    // Apply. Purely an optimisation: dropping the session on the floor changes
+    // nothing but the cost of the next re-reveal. Must be called BEFORE
+    // rerevealRawLayer() for that re-reveal to benefit.
+    void adoptRawSession(int flatIndex, std::unique_ptr<RawSession> session,
+                         const QString& tempPath = QString());
     // Creates the editable pixel copy a paint tool needs when the user aims it
     // at a RAW Layer: the layer's already-developed pixels become a new Pixel
     // Layer inserted directly above the RAW node, the RAW node is hidden with

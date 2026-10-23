@@ -205,6 +205,26 @@ void RawDevelopService::onFinished(LayerTreeNode* node)
     emit developFinished(node, task->result);
 }
 
+void RawDevelopService::adoptSession(LayerTreeNode* node, std::unique_ptr<RawSession> session,
+                                     const QString& tempPath)
+{
+    if (!node || !session)
+        return;
+
+    Entry& e = entryFor(node);
+    // A job in flight captured e.session as a raw pointer, and onFinished() may
+    // still adopt its own opened session into this entry — replacing it here
+    // would dangle. Dropping the donated session just means paying a decode we
+    // were trying to save, which is exactly the old behaviour.
+    if (e.dispatched || e.session)
+        return;
+
+    session->releasePreviewPipeline();
+    e.session = std::move(session);
+    if (!tempPath.isEmpty())
+        e.tempPath = tempPath;
+}
+
 bool RawDevelopService::isBusy(const LayerTreeNode* node) const
 {
     auto it = m_entries.find(node);

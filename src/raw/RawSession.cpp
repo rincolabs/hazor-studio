@@ -271,7 +271,10 @@ struct RawSession::Impl {
     std::unique_ptr<DetailWaiter> detailWaiter;
     rtengine::DetailedCrop* detailCrop = nullptr;
 
-    ~Impl()
+    // Everything the interactive preview owns, in the one order that is safe.
+    // Leaves initialImage (and its original reference) untouched, so it serves
+    // both ~Impl and RawSession::releasePreviewPipeline().
+    void teardownPreviewPipeline()
     {
         // The region keeps a raw pointer to the coordinator and unregisters
         // itself from it when destroyed, so it has to go while the SIP is
@@ -279,6 +282,7 @@ struct RawSession::Impl {
         // destroy() only releases buffers and would leave it registered.
         delete detailCrop;
         detailCrop = nullptr;
+        detailWaiter.reset();
 
         // StagedImageProcessor::destroy() calls previewWaiter->delImage() via
         // freeAll() and decreaseRef()s initialImage once (matching the
@@ -287,7 +291,14 @@ struct RawSession::Impl {
         if (sip) {
             sip->setPreviewImageListener(nullptr);
             rtengine::StagedImageProcessor::destroy(sip);
+            sip = nullptr;
         }
+        previewWaiter.reset();
+    }
+
+    ~Impl()
+    {
+        teardownPreviewPipeline();
         if (initialImage) {
             initialImage->decreaseRef();
         }
@@ -457,6 +468,11 @@ RawImageBuffer RawSession::renderPreview(int maxEdge, const RawDevelopParams& pa
     return buffer;
 }
 
+void RawSession::releasePreviewPipeline()
+{
+    m_impl->teardownPreviewPipeline();
+}
+
 RawImageBuffer RawSession::renderFull(const RawDevelopParams& params, RawProgressListener* progress, RawCancelToken cancelToken)
 {
     if (cancelToken && cancelToken->load()) {
@@ -530,5 +546,6 @@ RawImageBuffer RawSession::renderPreview(int, const RawDevelopParams&, RawPrevie
                                          RawCancelToken, RawDevelopParams*,
                                          RawDetailRegion*, RawImageBuffer*) { return {}; }
 RawImageBuffer RawSession::renderFull(const RawDevelopParams&, RawProgressListener*, RawCancelToken) { return {}; }
+void RawSession::releasePreviewPipeline() {}
 
 #endif
