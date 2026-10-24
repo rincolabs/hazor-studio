@@ -158,7 +158,10 @@ GPUViewport::~GPUViewport()
     if (m_checkerTexture)    glDeleteTextures(1, &m_checkerTexture);
     if (m_blendTex)          glDeleteTextures(1, &m_blendTex);
     if (m_blendFbo)          glDeleteFramebuffers(1, &m_blendFbo);
-    if (m_compositeBaseFbo)  glDeleteFramebuffers(1, &m_compositeBaseFbo);
+    // m_compositeBaseFbo is deliberately NOT freed here: it is never generated,
+    // only aliased to m_sceneFbo by beginManagedComposite(). Deleting it would
+    // hand the driver a name this viewport does not own and that the m_sceneFbo
+    // line above has already released.
     for (auto& e : m_groupFboPool) {
         if (e.fbo) glDeleteFramebuffers(1, &e.fbo);
         if (e.tex) glDeleteTextures(1, &e.tex);
@@ -1972,10 +1975,23 @@ void GPUViewport::collectNodeGlNames(LayerTreeNode* node,
         // drops the tile map, and neither RasterTile nor Layer has a
         // destructor. Letting the map die first loses the names for good --
         // they would stay resident until the GL context itself goes away.
+        bool hadTiles = false;
         layer->rasterStorage.forEachTile([&](core::RasterTile& tile) {
             take(textures, tile.textureId);
             take(framebuffers, tile.fbo);
+            // cleanupDocumentLayers() runs on a LIVE tree, and a document can
+            // outlive the tab that showed it (DocumentContainer holds it by
+            // shared_ptr). Unlike a layer's base texture -- which syncLayersToGpu
+            // regenerates on sight of textureId == 0 -- a zeroed tile is only
+            // re-uploaded when the layer is flagged, so leaving the flags clear
+            // would render the layer blank. Mirror shallowClone()'s reset.
+            tile.texW = 0;
+            tile.texH = 0;
+            tile.dirtyGpu = true;
+            hadTiles = true;
         });
+        if (hadTiles)
+            layer->pendingGpuUpload = true;
     }
 
     for (auto& child : node->children)

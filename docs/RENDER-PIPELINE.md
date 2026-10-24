@@ -141,7 +141,9 @@ which is the backdrop untouched for every mode.
   group FBO / preview / effected — those require full resolution).
 - `syncLayersToGpu` uploads: base texture (or shape sprite), mask (R8),
   `effectedTexture` (bake of effects/clipped adjustments),
-  `styledBaseTexture` (base with style for live Single Layer Mode).
+  `styledBaseTexture` (base with style for live Single Layer Mode). It is also
+  the only point with a current context after a layer removal, so it reaps
+  `doc->retiredNodes` before touching the live tree — see §2.4.2.
 - `refreshShapeLayerSprites` re-rasterizes a shape layer whenever the zoom it
   was rasterized for changed, and that re-raster also marks the texture
   outdated and invalidates the node's effects. It keys on `doc->zoomTarget`,
@@ -266,6 +268,90 @@ The drag itself is additionally bracketed as a live composite edit
 the same hold an adjustment slider drag uses), so the CPU projection is not
 re-snapshotted and the layer panel does not rebuild its full-resolution
 thumbnails on every slider step.
+
+### 2.4.2 GL resource lifecycle — who frees what
+
+**There is no RAII here.** Neither `Layer`, `LayerTreeNode` nor `RasterTile` has
+a destructor that touches GL, because the thread that destroys a node almost
+never has a current context. Dropping a node therefore *loses* its texture
+names: they stay resident until the context itself goes away. Every GL name a
+node owns must be routed through
+`GPUViewport::collectNodeGlNames` → `deleteGlNames` while a context is current.
+
+`collectNodeGlNames` recurses into children and **zeroes each name on the node**
+as it harvests it, so nothing can reference or free it twice. It covers
+`effectedTexture`, `styledBaseTexture`, the style baker, `textureId`, `fbo`,
+`maskTextureId`, `maskFbo`, `lodTextures[1..3]` and — the bulk of a layer's VRAM
+— every `rasterStorage` tile's `textureId`/`fbo`. `deleteGlNames` issues one
+batched `glDeleteTextures`/`glDeleteFramebuffers`; a call per tile would be
+thousands of driver calls on a large document.
+
+Two entry points drain into it:
+
+- **`cleanupDocumentLayers(doc)`** — tab close only
+  ([`MainWindow::closeTabAt`](../src/ui/MainWindow.cpp)). Walks `doc->roots`,
+  **not** `doc->flatten()`: the flat list already contains every descendant and
+  `collectNodeGlNames` recurses, so flattening would visit each subtree twice.
+- **`syncLayersToGpu(doc)`** — reaps `doc->retiredNodes` first, before touching
+  the live tree.
+
+#### The retirement contract
+
+A layer removed in `ImageController` cannot be freed in place: the controller has
+no current GL context. **Park the detached node in `Document::retiredNodes` and
+let the next `syncLayersToGpu` reap it** — do not let it die:
+
+```cpp
+auto clone = node->clone();
+m_doc->retiredNodes.push_back(m_doc->takeNodeAt(idx));   // not (void)takeNodeAt
+```
+
+This is only safe because `clone()` builds a *fresh* `Layer` (every GL name
+defaulted to 0, raster tiles rebuilt from an image by `replaceWithImage`), which
+leaves the detached node the sole owner of the live textures. It is wrong for any
+`takeNodeAt()` whose node is **reinserted** — undo/redo, reorder — where the node
+keeps its textures and retiring it would free textures still in use. Honoured by
+`removeNode()` and `removeSelectedNodes()`; the other `takeNodeAt()` sites still
+leak on purpose.
+
+#### Zeroing a name on a live tree
+
+`cleanupDocumentLayers` runs on a **live** tree, and a document can outlive the
+tab that showed it — `DocumentTab::document` is a `shared_ptr` the container also
+holds, so a linked project keeps it alive. The two resource classes do not
+recover equally:
+
+- A layer's **base texture** self-heals: `syncLayersToGpu` regenerates it on
+  sight of `textureId == 0`.
+- A **raster tile** does not. `uploadDirtyRasterTiles` tolerates `textureId == 0`,
+  but the gate in `LayerCompositor` only calls it when
+  `pendingGpuUpload || textureOutdated`, and `computeRasterTilesForLayer` skips
+  every tile whose `textureId` is 0 — so a zeroed tile with clear flags renders
+  **blank**.
+
+So anything that zeroes a tile handle on a tree that may render again must also
+reset `texW`/`texH` to 0 and set `tile.dirtyGpu` + `layer->pendingGpuUpload`.
+`collectNodeGlNames` and `LayerTreeNode::shallowClone` both do this.
+
+#### Still leaking (known, unfixed)
+
+Freeing is per-call-site rather than a general mechanism, so these paths still
+strand names for the life of the context:
+
+- `RasterLayerStorage::clear()` / `removeTile()` / `replaceWithImage()` drop
+  tiles holding live names (~25 call sites on live layers: Edit > Clear, fill,
+  gradient, filter apply, undo of a brush stroke that created tiles).
+- Wholesale `doc->roots` replacement: `ResizeDocumentCommand::apply()`,
+  PSD import into the live document, and the other `cloneRoots`/`std::move`
+  assignments destroy the whole outgoing tree unrouted.
+- `RemoveLayerCommand::execute()` (the redo path) parks a node with live names
+  inside the command, where neither reap point can see it.
+- `CanvasView::initializeGL` allocates a new `GPUViewport` without deleting the
+  previous one, so on a context re-init `~GPUViewport` never runs.
+
+A `Document::retiredGlNames` queue that `RasterLayerStorage` pushes into whenever
+it drops a tile, drained by `deleteGlNames()` on the next sync, would cover all
+of these with one mechanism.
 
 ### 2.5 Frame caches
 

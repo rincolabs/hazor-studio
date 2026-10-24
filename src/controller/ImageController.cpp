@@ -2226,7 +2226,11 @@ void ImageController::removeSelectedNodes()
         }
 
         auto clone = node->clone();
-        (void)m_doc->takeNodeAt(idx);
+        // Retire rather than destroy, for the reason spelled out in
+        // removeNode(): clone() built a fresh Layer, so the detached node is
+        // the sole owner of the live GL names and there is no current context
+        // here to free them in.
+        m_doc->retiredNodes.push_back(m_doc->takeNodeAt(idx));
 
         composite->add(std::make_unique<RemoveLayerCommand>(
             m_doc, idx, std::move(clone), QString()));
