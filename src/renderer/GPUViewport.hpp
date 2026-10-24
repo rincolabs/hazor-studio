@@ -92,6 +92,17 @@ public:
     void uploadMaskTexture(Layer* layer);
     void cleanupDocumentLayers(Document* doc);
 
+    // Moves every GL name owned by `node` (and its children) into the two
+    // sinks, zeroing it on the node so nothing can reference it twice. The
+    // names are freed in one batched call by deleteGlNames() — issuing a
+    // glDeleteTextures per tile would be thousands of driver calls on a large
+    // document.
+    void collectNodeGlNames(LayerTreeNode* node,
+                            std::vector<unsigned int>& textures,
+                            std::vector<unsigned int>& framebuffers);
+    void deleteGlNames(std::vector<unsigned int>& textures,
+                       std::vector<unsigned int>& framebuffers);
+
     // ── Selection mask ──────────────────────────────────────
     // Null region = full re-upload. A valid region accumulates into a
     // subrect uploaded with glTexSubImage2D (quick-select dabs would

@@ -1840,7 +1840,12 @@ void ImageController::removeNode(int flatIndex)
 
     auto clone = node->clone();
 
-    (void)m_doc->takeNodeAt(flatIndex);
+    // clone() builds a fresh Layer (every GL name defaulted to 0, raster tiles
+    // rebuilt from an image), so the detached node is the sole owner of the
+    // live textures. Retire it instead of dropping it on the floor: there is no
+    // current GL context here, and the renderer frees the names on the next
+    // sync.
+    m_doc->retiredNodes.push_back(m_doc->takeNodeAt(flatIndex));
 
     if (m_doc->flatCount() == 0) {
         m_doc->activeFlatIndex = -1;

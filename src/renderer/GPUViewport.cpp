@@ -144,12 +144,21 @@ GPUViewport::~GPUViewport()
     if (m_displayProg)  delete m_displayProg;
     if (m_dotProg)      delete m_dotProg;
     if (m_shadowProg)   delete m_shadowProg;
-    if (m_curveLutTex)   glDeleteTextures(1, &m_curveLutTex);
-    if (m_displayLutTex) glDeleteTextures(1, &m_displayLutTex);
-    if (m_sceneTex)      glDeleteTextures(1, &m_sceneTex);
-    if (m_sceneFbo)      glDeleteFramebuffers(1, &m_sceneFbo);
-    if (m_clipTex)       glDeleteTextures(1, &m_clipTex);
-    if (m_clipFbo)       glDeleteFramebuffers(1, &m_clipFbo);
+    if (m_curveLutTex)      glDeleteTextures(1, &m_curveLutTex);
+    if (m_displayLutTex)    glDeleteTextures(1, &m_displayLutTex);
+    if (m_sceneTex)         glDeleteTextures(1, &m_sceneTex);
+    if (m_sceneFbo)         glDeleteFramebuffers(1, &m_sceneFbo);
+    if (m_clipTex)          glDeleteTextures(1, &m_clipTex);
+    if (m_clipFbo)          glDeleteFramebuffers(1, &m_clipFbo);
+    // Viewport- and document-sized attachments that outlived every earlier
+    // version of this destructor: the selection mask is GL_R8 at document
+    // size and the blend target GL_RGBA8 at viewport size, so a closed tab
+    // used to strand both for the lifetime of the GL context.
+    if (m_selectMaskTexture) glDeleteTextures(1, &m_selectMaskTexture);
+    if (m_checkerTexture)    glDeleteTextures(1, &m_checkerTexture);
+    if (m_blendTex)          glDeleteTextures(1, &m_blendTex);
+    if (m_blendFbo)          glDeleteFramebuffers(1, &m_blendFbo);
+    if (m_compositeBaseFbo)  glDeleteFramebuffers(1, &m_compositeBaseFbo);
     for (auto& e : m_groupFboPool) {
         if (e.fbo) glDeleteFramebuffers(1, &e.fbo);
         if (e.tex) glDeleteTextures(1, &e.tex);
@@ -1759,6 +1768,19 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
     // Deleting a layer doesn't run cleanupDocumentLayers (tab close only), so
     // drop the style bakers of nodes that are gone before reusing the pool.
     m_styleBakes.retain(flat);
+
+    // Reap layers removed since the last sync. They were parked by the
+    // controller precisely because this is the first point after the removal
+    // with a current GL context; freeing here and then letting the nodes die
+    // keeps their textures from outliving the document.
+    if (!doc->retiredNodes.empty()) {
+        std::vector<unsigned int> textures;
+        std::vector<unsigned int> framebuffers;
+        for (auto& retired : doc->retiredNodes)
+            collectNodeGlNames(retired.get(), textures, framebuffers);
+        deleteGlNames(textures, framebuffers);
+        doc->retiredNodes.clear();
+    }
     for (auto* node : flat) {
         if (!node->layer) continue;
         auto* layer = node->layer.get();
@@ -1921,47 +1943,75 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
     }
 }
 
+void GPUViewport::collectNodeGlNames(LayerTreeNode* node,
+                                     std::vector<unsigned int>& textures,
+                                     std::vector<unsigned int>& framebuffers)
+{
+    if (!node) return;
+
+    auto take = [](std::vector<unsigned int>& sink, unsigned int& name) {
+        if (name) {
+            sink.push_back(name);
+            name = 0;
+        }
+    };
+
+    take(textures, node->effectedTexture);
+    take(textures, node->styledBaseTexture);
+    m_styleBakes.release(node);
+
+    if (auto* layer = node->layer.get()) {
+        take(textures, layer->textureId);
+        take(textures, layer->maskTextureId);
+        take(framebuffers, layer->fbo);
+        take(framebuffers, layer->maskFbo);
+        for (int i = 1; i <= 3; ++i)
+            take(textures, layer->lodTextures[i]);
+        // The per-tile textures are the bulk of a layer's VRAM (256x256 RGBA8
+        // each) and nothing else frees them: RasterLayerStorage::clear() only
+        // drops the tile map, and neither RasterTile nor Layer has a
+        // destructor. Letting the map die first loses the names for good --
+        // they would stay resident until the GL context itself goes away.
+        layer->rasterStorage.forEachTile([&](core::RasterTile& tile) {
+            take(textures, tile.textureId);
+            take(framebuffers, tile.fbo);
+        });
+    }
+
+    for (auto& child : node->children)
+        collectNodeGlNames(child.get(), textures, framebuffers);
+}
+
+void GPUViewport::deleteGlNames(std::vector<unsigned int>& textures,
+                                std::vector<unsigned int>& framebuffers)
+{
+    if (!textures.empty())
+        glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    if (!framebuffers.empty())
+        glDeleteFramebuffers(static_cast<GLsizei>(framebuffers.size()),
+                             framebuffers.data());
+    textures.clear();
+    framebuffers.clear();
+}
+
 void GPUViewport::cleanupDocumentLayers(Document* doc)
 {
     initializeOpenGLFunctions();
     if (!doc) return;
-    auto flat = doc->flatten();
-    for (auto* node : flat) {
-        if (!node->layer) continue;
-        auto* layer = node->layer.get();
-        if (layer->textureId) {
-            glDeleteTextures(1, &layer->textureId);
-            layer->textureId = 0;
-        }
-        if (layer->fbo) {
-            glDeleteFramebuffers(1, &layer->fbo);
-            layer->fbo = 0;
-        }
-        if (layer->maskTextureId) {
-            glDeleteTextures(1, &layer->maskTextureId);
-            layer->maskTextureId = 0;
-        }
-        if (layer->maskFbo) {
-            glDeleteFramebuffers(1, &layer->maskFbo);
-            layer->maskFbo = 0;
-        }
-        if (node->effectedTexture) {
-            glDeleteTextures(1, &node->effectedTexture);
-            node->effectedTexture = 0;
-        }
-        if (node->styledBaseTexture) {
-            glDeleteTextures(1, &node->styledBaseTexture);
-            node->styledBaseTexture = 0;
-        }
-        m_styleBakes.release(node);
-        // Clean up LOD textures
-        for (int i = 1; i <= 3; ++i) {
-            if (layer->lodTextures[i]) {
-                glDeleteTextures(1, &layer->lodTextures[i]);
-                layer->lodTextures[i] = 0;
-            }
-        }
-    }
+
+    std::vector<unsigned int> textures;
+    std::vector<unsigned int> framebuffers;
+    // collectNodeGlNames() recurses, so walk the roots rather than flatten():
+    // the flat list already contains every descendant and would visit each
+    // subtree twice.
+    for (auto& root : doc->roots)
+        collectNodeGlNames(root.get(), textures, framebuffers);
+    // A layer removed after the last sync is still parked; closing the tab is
+    // its final chance to be freed.
+    for (auto& retired : doc->retiredNodes)
+        collectNodeGlNames(retired.get(), textures, framebuffers);
+    doc->retiredNodes.clear();
+    deleteGlNames(textures, framebuffers);
 }
 
 // ── Tiling (delegated to TileRenderer) ─────────────────────────

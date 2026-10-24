@@ -31,6 +31,15 @@ public:
     int activeFlatIndex = 0;
     std::set<int> selectedFlatIndices;
 
+    // Nodes detached from the tree that still own live GL names. The code that
+    // removes a layer runs in ImageController, which has no current GL context
+    // and so cannot free them; destroying the node there would lose the names
+    // for good. Park the node here instead and let the renderer reap it on the
+    // next sync, when a context is current. Only nodes that are genuinely
+    // being discarded belong here -- a node the caller reinserts (undo/redo,
+    // reorder) keeps its textures and must not be retired.
+    std::vector<std::unique_ptr<LayerTreeNode>> retiredNodes;
+
     float zoom = 1.0f;
     // The zoom an animated zoom is easing toward; equal to `zoom` whenever the
     // view is not mid-glide, which CanvasView::paintGL enforces once per frame

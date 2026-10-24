@@ -1000,6 +1000,17 @@ public:
             node->layer->maskFbo = 0;
             for (unsigned int& lod : node->layer->lodTextures)
                 lod = 0;
+            // The member-wise Layer copy above carries the tile map across, so
+            // the tiles arrive holding the live layer's texture names too.
+            // Zero them for the same reason: a snapshot must never sample a
+            // texture the UI thread may have freed, nor free one itself.
+            node->layer->rasterStorage.forEachTile([](core::RasterTile& tile) {
+                tile.textureId = 0;
+                tile.fbo = 0;
+                tile.texW = 0;
+                tile.texH = 0;
+                tile.dirtyGpu = true;
+            });
         }
 
         for (auto& child : children) {
