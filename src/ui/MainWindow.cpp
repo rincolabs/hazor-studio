@@ -1136,9 +1136,10 @@ MainWindow::MainWindow(QWidget* parent)
     auto* windowGenFillAction = windowMenu->addAction(tr("&Generative Fill"));
     connect(windowGenFillAction, &QAction::triggered, this, &MainWindow::onGenerativeFill);
 
-    auto* workspacesMenu = windowMenu->addMenu(tr("&Workspaces"));
-    auto* resetLayoutAction = workspacesMenu->addAction(tr("&Reset Panel Layout"));
-    connect(resetLayoutAction, &QAction::triggered, this, &MainWindow::resetDockLayout);
+    // Rebuilt every time it opens (see rebuildWorkspacesMenu): the preset list
+    // and which commands apply both depend on state the menu cannot cache.
+    m_workspacesMenu = windowMenu->addMenu(tr("&Workspaces"));
+    connect(m_workspacesMenu, &QMenu::aboutToShow, this, &MainWindow::rebuildWorkspacesMenu);
 
     auto* helpMenu = mainMenuBar->addMenu(tr("&Help"));
     auto* docsAction = helpMenu->addAction(tr("Documentation"));
@@ -1494,7 +1495,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Minimum width: 12.5% of screen, applied to each group's anchor dock. The
     // actual default arrangement is applied once via resetDockLayout() at the end
-    // of construction (shared with Window → Reset Panel Layout).
+    // of construction (shared with Window → Workspaces → Reset Workspace).
     int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 8;
     m_histogramDock->setMinimumWidth(minW);
     m_layersDock->setMinimumWidth(minW);
@@ -1634,6 +1635,14 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Establish the default panel arrangement (also reused by the menu action).
     resetDockLayout();
+
+    // Every dock exists and is registered with QMainWindow by now, which is
+    // the precondition for restoreState(): only here can the stored workspace
+    // be put back. The default above is what stays on screen when there is
+    // nothing stored or the stored blob is rejected.
+    m_workspace = new WorkspaceManager(this, this, this);
+    m_workspace->restoreWorkingLayout();
+    m_workspace->watchDocks(panelDocks());
 
     connect(m_brushDynamics, &BrushDynamicsPanel::importBrushesRequested, this,
             [this]() { if (m_importBrushesAction) m_importBrushesAction->trigger(); });
@@ -2740,6 +2749,40 @@ void MainWindow::refreshDockTitleBars()
 {
     for (QDockWidget* dock : panelDocks())
         updateDockTitleBar(dock);
+
+    // This runs after every grouping change, which is exactly when Qt has
+    // created or destroyed the tab bars the workspace autosave listens to.
+    if (m_workspace)
+        m_workspace->watchDockTabBars();
+}
+
+void MainWindow::scheduleRestoredDockChromeRefresh()
+{
+    // restoreState() recreates Qt's private dock tab bars/group windows,
+    // but those new widgets do not reliably inherit the already-applied
+    // application stylesheet. Re-polish them after the layout settles so
+    // the native light frame/base never leaks around the restored column.
+    QTimer::singleShot(0, this, [this]() {
+        // restoreState() rebuilds the tab groups, so which docks deserve a
+        // title bar changes with it.
+        refreshDockTitleBars();
+
+        for (QTabBar* tabBar : findChildren<QTabBar*>()) {
+            tabBar->setDrawBase(false);
+            tabBar->style()->unpolish(tabBar);
+            tabBar->style()->polish(tabBar);
+            tabBar->update();
+        }
+        for (QWidget* widget : findChildren<QWidget*>()) {
+            if (qstrcmp(widget->metaObject()->className(),
+                        "QDockWidgetGroupWindow") != 0)
+                continue;
+            widget->setAttribute(Qt::WA_StyledBackground, true);
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+            widget->update();
+        }
+    });
 }
 
 void MainWindow::scheduleDockTitleBarRefresh()
@@ -3605,7 +3648,7 @@ void MainWindow::setHomeDockMode(bool homeActive)
             // QMainWindow's native state includes visibility, tabification,
             // dock sizes and floating geometry. Keeping it only in memory
             // makes the Home layout temporary rather than a workspace change.
-            m_documentDockState = saveState();
+            m_documentDockState = saveState(WorkspaceManager::kStateVersion);
             m_homeDockMode = true;
         }
         for (QDockWidget* dock : editingDocks) {
@@ -3620,34 +3663,15 @@ void MainWindow::setHomeDockMode(bool homeActive)
 
     m_homeDockMode = false;
     if (!m_documentDockState.isEmpty()) {
-        restoreState(m_documentDockState);
+        const QByteArray snapshot = m_documentDockState;
         m_documentDockState.clear();
-
-        // restoreState() recreates Qt's private dock tab bars/group windows,
-        // but those new widgets do not reliably inherit the already-applied
-        // application stylesheet. Re-polish them after the layout settles so
-        // the native light frame/base never leaks around the restored column.
-        QTimer::singleShot(0, this, [this]() {
-            // restoreState() rebuilds the tab groups, so which docks deserve a
-            // title bar changes with it.
-            refreshDockTitleBars();
-
-            for (QTabBar* tabBar : findChildren<QTabBar*>()) {
-                tabBar->setDrawBase(false);
-                tabBar->style()->unpolish(tabBar);
-                tabBar->style()->polish(tabBar);
-                tabBar->update();
-            }
-            for (QWidget* widget : findChildren<QWidget*>()) {
-                if (qstrcmp(widget->metaObject()->className(),
-                            "QDockWidgetGroupWindow") != 0)
-                    continue;
-                widget->setAttribute(Qt::WA_StyledBackground, true);
-                widget->style()->unpolish(widget);
-                widget->style()->polish(widget);
-                widget->update();
-            }
-        });
+        // A snapshot that no longer restores (a workspace preset parked here
+        // while Home was active, saved by an older build) must not leave the
+        // user with whatever half-state Qt stopped at.
+        if (restoreState(snapshot, WorkspaceManager::kStateVersion))
+            scheduleRestoredDockChromeRefresh();
+        else
+            resetDockLayout();
     }
 }
 
@@ -6218,6 +6242,16 @@ void MainWindow::resetDockLayout()
 {
     if (!m_layersDock) return; // docks not built yet
 
+    // A reset is a change to the *editing* layout, but on the Home tab every
+    // editing dock is hidden and showing them below would spill panels over
+    // the Home page. Step out of Home mode, lay the default out, then step
+    // back in: re-entering snapshots the fresh arrangement for the next
+    // document tab and hides the docks again, all within one event loop
+    // iteration so nothing is ever painted in between.
+    const bool homeActive = m_homeDockMode;
+    if (homeActive)
+        setHomeDockMode(false);
+
     // Pull every right-side panel back into the right dock area, docked and
     // visible, so the regrouping below starts from a known state regardless of
     // where the user dragged / floated / closed them. Histogram is hidden again
@@ -6281,6 +6315,9 @@ void MainWindow::resetDockLayout()
         d->setFloating(true);
         d->hide();
     }
+
+    if (homeActive)
+        setHomeDockMode(true);
 }
 
 void MainWindow::applyBrushPressureEnabled(bool on)
@@ -7596,9 +7633,14 @@ void MainWindow::closeEvent(QCloseEvent* e)
             return;
         }
     }
-    // Leave the real workspace state in place for any shutdown persistence
-    // outside this class; the Home-only hidden state must never be saved.
+    // Put the real editing layout back before persisting it: the Home-only
+    // all-hidden state must never be what the next session restores.
     setHomeDockMode(false);
+    // Final, undebounced write, and the one that catches changes no signal
+    // reports in time — a tab reordered inside its group moments before
+    // quitting, or a window moved without being resized.
+    if (m_workspace)
+        m_workspace->saveNow();
     e->accept();
 }
 

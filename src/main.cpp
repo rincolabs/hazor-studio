@@ -219,7 +219,7 @@ int main(int argc, char* argv[])
         fileOpenFilter->setWindow(window.get());
         QObject::connect(&splash, &SplashScreen::finished, window.get(),
                          [&window, initialBrushImportFiles, initialProjectFiles, fileOpenFilter]() {
-            window->showMaximized();
+            window->showWithRestoredWorkspace();
 
             // Merge any *.hazor paths that arrived via QFileOpenEvent (macOS) before
             // the window existed with those parsed from argv (Windows/Linux).

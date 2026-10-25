@@ -168,6 +168,13 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **Non-linear history** — jump to any point in the undo/redo timeline.
 - **Theming & shortcuts** — light/dark semantic theme system and 77 fully
   configurable keyboard shortcuts.
+- **Workspaces** — the panel arrangement (dock positions and sizes, tab groups
+  with their order and active tab, floating panels, splitters and the window
+  geometry) is remembered between sessions, and can be stored as named
+  workspaces under **Window ▸ Workspaces**. Switching to one applies it
+  immediately; rearranging afterwards never edits it — only **Save Workspace**
+  does. **Reset Workspace** brings back the built-in layout, which can be
+  neither overwritten nor deleted.
 
 ## Architecture
 

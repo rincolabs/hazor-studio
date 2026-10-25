@@ -837,7 +837,10 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ui/RulerGuideSettingsPage.hpp
     src/ui/MainWindow.cpp
     src/ui/MainWindow_Menus.cpp
+    src/ui/MainWindow_Workspaces.cpp
     src/ui/MainWindow.hpp
+    src/ui/WorkspaceManager.cpp
+    src/ui/WorkspaceManager.hpp
     src/ui/ShortcutManager.cpp
     src/ui/ShortcutManager.hpp
     src/ui/ShortcutSettingsPage.cpp

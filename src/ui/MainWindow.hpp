@@ -17,6 +17,7 @@ class QMenu;
 #include "tools/ToolCatalog.hpp"
 #include "agent/AgentConfig.hpp"
 #include "smartobject/SmartObjectData.hpp"
+#include "ui/WorkspaceManager.hpp"
 
 class QResizeEvent;
 class QEvent;
@@ -69,7 +70,10 @@ class AiObjectSelectionController;
 struct AiCompatibilityMessage;
 struct DocumentSettings;
 
-class MainWindow : public QMainWindow {
+// WorkspaceHost is implemented here rather than inside WorkspaceManager
+// because only MainWindow knows that the live dock layout is not always the
+// one that belongs to the workspace (see setHomeDockMode).
+class MainWindow : public QMainWindow, public WorkspaceHost {
     Q_OBJECT
 
 public:
@@ -92,6 +96,16 @@ public:
     // launches the app with file arguments (extension association) or via a
     // QFileOpenEvent (macOS "Open With"). Returns the number of files opened.
     int openProjectFiles(const QStringList& files);
+
+    // Shows the window in the geometry the previous session left behind, or
+    // maximized on a first run, and arms workspace autosave. main.cpp calls
+    // this instead of show()/showMaximized().
+    void showWithRestoredWorkspace();
+
+    // ── WorkspaceHost ────────────────────────────────────────────────
+    QByteArray captureWorkspaceState() const override;
+    bool applyWorkspaceState(const QByteArray& state) override;
+    void applyDefaultWorkspaceState() override;
 
 signals:
     void customShapeIconPreloadFinished();
@@ -193,9 +207,23 @@ private slots:
     // Restore every panel to its default position: the right-side panels back
     // into the default two-group split (Histogram hidden until Window menu),
     // and the on-demand floating panels (Brush Settings, Brushes, Generative
-    // Fill) back to their hidden floating state. Wired to Window → Reset Panel
-    // Layout.
+    // Fill) back to their hidden floating state. This is the layout a first
+    // run starts with and the fallback whenever a stored workspace cannot be
+    // restored; Window → Workspaces → Reset Workspace goes through
+    // WorkspaceManager so the reset is persisted too.
     void resetDockLayout();
+
+    // ── Window → Workspaces ──────────────────────────────────────────
+    // Rebuilt on every aboutToShow so the preset list, the check mark on the
+    // active one and the enablement of the preset-only commands are never
+    // stale.
+    void rebuildWorkspacesMenu();
+    void onLoadWorkspace(const QString& name);
+    void onSaveWorkspace();
+    void onSaveWorkspaceAs();
+    void onRenameWorkspace();
+    void onDeleteWorkspace();
+    void onResetWorkspace();
 
     void onTextFontChanged(const QFont& font);
     void onTextSizeChanged(int size);
@@ -539,9 +567,14 @@ private:
     bool m_restoringHomeTab = false;
     // In-memory only: entering Home temporarily hides the editing docks, while
     // this snapshot preserves their visibility, tab groups, sizes and floating
-    // geometry for the next document tab. It is never written to QSettings.
+    // geometry for the next document tab. It is never written to QSettings
+    // directly — captureWorkspaceState() reads it so that a workspace saved
+    // from the Home tab still describes the editing layout.
     QByteArray m_documentDockState;
     bool m_homeDockMode = false;
+
+    WorkspaceManager* m_workspace = nullptr;
+    QMenu* m_workspacesMenu = nullptr;
 
     // ── Smart Object refresh debounce (see scheduleSmartObjectRefresh) ──
     QTimer* m_smartObjectRefreshTimer = nullptr;
@@ -729,6 +762,10 @@ private:
     bool isDockTabbedInMainWindow(QDockWidget* dock) const;
     void updateDockTitleBar(QDockWidget* dock);
     void refreshDockTitleBars();
+    // restoreState() rebuilds Qt's private dock tab bars and group windows,
+    // and those fresh widgets do not reliably inherit the application
+    // stylesheet. Every caller of restoreState() must queue this.
+    void scheduleRestoredDockChromeRefresh();
     // Deferred + coalesced, and never swaps title bars mid-drag.
     void scheduleDockTitleBarRefresh();
     // Subscribes a dock to the signals that can change its tabbed state.
