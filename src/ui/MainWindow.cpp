@@ -4034,11 +4034,14 @@ void MainWindow::createDocumentFromSettings(const DocumentSettings& s)
         }
     }
 
+    // Part of the document's initial state, not a first edit: the locked
+    // "Background" layer is seeded directly (newLayer() + fillActiveLayer()
+    // would push an "Add Layer" step, and the fill would be refused by the
+    // lock), so the new document opens with an empty Undo history.
     if (m_ctrl) {
-        m_ctrl->newLayer();
-        if (s.background != "Transparent") {
-            m_ctrl->fillActiveLayer(s.backgroundColor);
-        }
+        m_ctrl->initializeBackgroundLayer(
+            s.background == "Transparent" ? QColor(Qt::transparent)
+                                          : s.backgroundColor);
     }
     tab.isDirty = false;
     tab.currentProjectPath.clear();
@@ -4047,6 +4050,12 @@ void MainWindow::createDocumentFromSettings(const DocumentSettings& s)
     refreshPropertiesPanel();
     updateStatusFromDocument();
     updateLayerMenuState();
+    // Open at Fit to Screen rather than 100%: a print-resolution preset is far
+    // larger than the viewport, and the zoom indicator should report the zoom
+    // the user is actually looking at. fitToView() emits zoomChanged(), which
+    // is what drives the status-bar zoom combo, and defers itself to the first
+    // resizeGL when the brand-new tab's canvas has no laid-out size yet.
+    m_canvas->fitToView();
     m_canvas->update();
     updateDirtyUi();
 }

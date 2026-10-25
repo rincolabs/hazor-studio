@@ -1219,6 +1219,58 @@ void ImageController::newLayer()
     if (m_doc) ++m_doc->compositionGeneration;
 }
 
+void ImageController::initializeBackgroundLayer(const QColor& fill)
+{
+    if (!m_doc || m_doc->flatCount() != 0) return;
+
+    QSize size = m_doc->size;
+    if (!size.isValid() || size.isEmpty())
+        size = QSize(1024, 768);
+
+    auto treeNode = std::make_unique<LayerTreeNode>();
+    treeNode->type = LayerTreeNode::Type::Layer;
+    treeNode->name = tr("Background");
+    // Locked from the moment the document exists, like the Background of a
+    // scanned/flattened image: the user unlocks it (or adds a layer above)
+    // before painting. LockAll is the master bit the layer row's padlock
+    // toggles, so the row shows the lock closed with no further setup.
+    treeNode->lockFlags = LockAll;
+    treeNode->layer = std::make_shared<Layer>();
+    treeNode->layer->name = treeNode->name;
+    treeNode->layer->cpuImage = QImage(size, QImage::Format_RGBA8888);
+    treeNode->layer->cpuImage.fill(fill.isValid() ? fill : QColor(Qt::transparent));
+    treeNode->layer->owner = treeNode.get();
+    treeNode->layer->resetTransform = treeNode->transform;
+    treeNode->layer->hasResetTransform = true;
+    treeNode->layer->textureOutdated = true;
+    treeNode->layer->pendingGpuUpload = true;
+
+    m_doc->size = size;
+    m_doc->selection.resize(size.width(), size.height());
+    m_doc->roots.push_back(std::move(treeNode));
+    // A new document opens with nothing selected. Pre-selecting the Background
+    // would hand the user an edit target that is locked anyway, and the first
+    // click in the Layers panel is what picks a real target.
+    m_doc->deselectAll();
+
+    auto* node = m_doc->nodeAt(0);
+    if (node && node->layer) {
+        // Only a transparent Background gets sparse raster storage, for the
+        // reason newLayer() documents: an empty layer then owns no tile and
+        // costs nothing per frame. A filled one would tile the entire canvas
+        // up front and keep a second full-size copy of pixels cpuImage already
+        // holds, so it stays a plain cpuImage until the first stroke converts
+        // it (CanvasView::beginBrushStroke -> Layer::enableRasterStorage).
+        if (!fill.isValid() || fill.alpha() == 0)
+            node->layer->enableRasterStorage(m_doc->tileSize());
+        markLayerDirty(node->layer.get());
+    }
+
+    emit layerChanged(0);
+    emit activeLayerChanged(-1);
+    emit imageChanged();
+}
+
 void ImageController::newGroup()
 {
     if (!m_doc) return;

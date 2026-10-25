@@ -171,6 +171,15 @@ public:
     void deselectActive() { setActiveNode(-1); }
 
     void newLayer();
+    // Seeds a brand-new, still empty document with its initial "Background"
+    // layer, filled with `fill` (an invalid colour means transparent) and
+    // locked. Deliberately NOT newLayer(): the layer belongs to the document's
+    // initial state, so it is written straight into the tree without a command
+    // — a new document opens with an empty Undo history, and there is no
+    // history step that can take the user back to a document with no layers.
+    // Leaves the document with nothing selected. No-op on a document that
+    // already has a layer.
+    void initializeBackgroundLayer(const QColor& fill);
     void newGroup();
     // Dissolves the selected Group node(s) (or the active node when it is a
     // group), promoting their children into the group's parent at the same
