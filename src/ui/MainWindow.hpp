@@ -717,5 +717,21 @@ private:
     // Guards the selectionChanged-driven base invalidation while the refine
     // itself is mutating the selection.
     bool m_inSelectRefine = false;
+
+    // ── Dock title bars ──────────────────────────────────────────────────────
+    // A dock tabified inside the main window already shows its name on the tab,
+    // so Qt's own title bar under it only repeats the information. Collapse it
+    // there and keep it everywhere else: for a floating panel the title bar is
+    // the only handle to move or close it (on X11/Wayland Qt draws no native
+    // frame for dock windows).
+    // Every panel dock that participates in this, in one place.
+    QList<QDockWidget*> panelDocks() const;
+    bool isDockTabbedInMainWindow(QDockWidget* dock) const;
     void updateDockTitleBar(QDockWidget* dock);
+    void refreshDockTitleBars();
+    // Deferred + coalesced, and never swaps title bars mid-drag.
+    void scheduleDockTitleBarRefresh();
+    // Subscribes a dock to the signals that can change its tabbed state.
+    void watchDockTitleBar(QDockWidget* dock);
+    bool m_dockTitleBarRefreshScheduled = false;
 };

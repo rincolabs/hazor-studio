@@ -156,8 +156,6 @@
 #include <cmath>
 #include <functional>
 #include <optional>
-#include <QToolButton>
-#include <QHBoxLayout>
 #include <QDockWidget>
 #include <QTabBar>
 
@@ -348,26 +346,6 @@ static std::optional<ColorManagedOpenResult> prepareImageForOpenWithDialogs(
     }
     return result;
 }
-
-class DockTitleBar : public QWidget
-{
-public:
-    explicit DockTitleBar(QDockWidget* dock)
-        : QWidget(dock)
-    {
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addStretch();
-
-        auto* closeBtn = new QToolButton(this);
-        closeBtn->setText("×");
-
-        connect(closeBtn, &QToolButton::clicked,
-                dock, &QDockWidget::close);
-
-        // layout->addWidget(closeBtn);
-    }
-};
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -1370,24 +1348,12 @@ MainWindow::MainWindow(QWidget* parent)
                              QWidget* content) -> QDockWidget* {
         auto* dock = new QDockWidget(title, this);
         dock->setObjectName(objName);
-        // dock->setTitleBarWidget(new DockTitleBar(dock));
         dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea | Qt::BottomDockWidgetArea);
         dock->setFeatures(QDockWidget::DockWidgetMovable |
                           QDockWidget::DockWidgetFloatable |
                           QDockWidget::DockWidgetClosable);
         dock->setWidget(content);
-
-        connect(dock, &QDockWidget::dockLocationChanged, this, [this, dock] {
-            QTimer::singleShot(0, this, [this, dock] {
-                updateDockTitleBar(dock);
-            });
-        });
-
-        connect(dock, &QDockWidget::topLevelChanged, this, [this, dock] {
-            QTimer::singleShot(0, this, [this, dock] {
-                updateDockTitleBar(dock);
-            });
-        });
+        watchDockTitleBar(dock);
 
         themePanelBg(content, thInit);
         windowMenu->addAction(dock->toggleViewAction()); // reopen after close
@@ -1659,6 +1625,12 @@ MainWindow::MainWindow(QWidget* parent)
         // connect(d, &QDockWidget::topLevelChanged, this, [this](bool) { scheduleDockMaintenance(); });
         // connect(d, &QDockWidget::visibilityChanged, this, [this](bool) { scheduleDockMaintenance(); });
     }
+
+    // The on-demand panels start floating but can be tabbed into the right-hand
+    // column like any other; the ones built by makePanelDock() are already wired.
+    for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock,
+                            m_customShapesPanelDock, m_generativeFillDock })
+        watchDockTitleBar(d);
 
     // Establish the default panel arrangement (also reused by the menu action).
     resetDockLayout();
@@ -2709,21 +2681,100 @@ MainWindow::MainWindow(QWidget* parent)
     setHomeDockMode(true);
 }
 
+QList<QDockWidget*> MainWindow::panelDocks() const
+{
+    return { m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
+             m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
+             m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
+             m_generativeFillDock };
+}
+
+bool MainWindow::isDockTabbedInMainWindow(QDockWidget* dock) const
+{
+    // A hidden dock has no tab, and a floating one owns its window: both need
+    // their title bar (it is the only handle Qt gives a floating panel here).
+    if (!dock || dock->isHidden() || dock->isFloating())
+        return false;
+
+    // Docks grouped inside a floating QDockWidgetGroupWindow are reparented
+    // onto that container and are no longer part of the main window's dock
+    // area layout, so tabifiedDockWidgets() knows nothing about them. They keep
+    // the title bar too: the group window is frameless on X11/Wayland, so
+    // without it the whole group would become unmovable and unclosable.
+    if (dock->parentWidget() != this)
+        return false;
+
+    // Qt lists tab mates that are currently closed as well; only a visible one
+    // actually puts a second tab on screen.
+    const QList<QDockWidget*> tabMates = tabifiedDockWidgets(dock);
+    for (QDockWidget* mate : tabMates) {
+        if (mate && !mate->isHidden())
+            return true;
+    }
+    return false;
+}
+
 void MainWindow::updateDockTitleBar(QDockWidget* dock)
 {
     if (!dock)
         return;
 
-    // Desabilitado por enquanto, precisa validar a logica.
-    // const bool hasTabs = !tabifiedDockWidgets(dock).isEmpty();
+    const bool collapse = isDockTabbedInMainWindow(dock);
+    QWidget* current = dock->titleBarWidget();
+    if (collapse == (current != nullptr))
+        return; // already in the wanted state
 
-    // if (hasTabs) {
-    //     dock->setTitleBarWidget(new DockTitleBar(dock)); // no label
-    // } else {
-    //     dock->setTitleBarWidget(nullptr); // default title bar with title
-    // }
+    if (collapse) {
+        // An empty, zero-height title bar widget removes the bar entirely; the
+        // tab above stays the drag handle for the panel.
+        auto* collapsed = new QWidget(dock);
+        collapsed->setFixedHeight(0);
+        dock->setTitleBarWidget(collapsed);
+    } else {
+        dock->setTitleBarWidget(nullptr); // back to Qt's title bar, with title
+        current->deleteLater();           // setTitleBarWidget() only detaches it
+    }
+}
 
-    dock->setTitleBarWidget(nullptr); // default title bar with title
+void MainWindow::refreshDockTitleBars()
+{
+    for (QDockWidget* dock : panelDocks())
+        updateDockTitleBar(dock);
+}
+
+void MainWindow::scheduleDockTitleBarRefresh()
+{
+    if (m_dockTitleBarRefreshScheduled)
+        return;
+    m_dockTitleBarRefreshScheduled = true;
+
+    // Swapping a title bar widget re-runs the dock layout, so stay out of Qt's
+    // way while a drag is still in flight (mouse button held) and retry after.
+    const int delayMs = (QApplication::mouseButtons() != Qt::NoButton) ? 100 : 0;
+    QTimer::singleShot(delayMs, this, [this]() {
+        m_dockTitleBarRefreshScheduled = false;
+        if (QApplication::mouseButtons() != Qt::NoButton) {
+            scheduleDockTitleBarRefresh();
+            return;
+        }
+        refreshDockTitleBars();
+    });
+}
+
+void MainWindow::watchDockTitleBar(QDockWidget* dock)
+{
+    if (!dock)
+        return;
+
+    // Every one of these means the tab grouping may have changed — and not only
+    // for this dock: when a tab is dragged out of a group, the docks left behind
+    // emit nothing at all, so each signal refreshes the whole set.
+    connect(dock, &QDockWidget::dockLocationChanged, this,
+            [this](Qt::DockWidgetArea) { scheduleDockTitleBarRefresh(); });
+    connect(dock, &QDockWidget::topLevelChanged, this,
+            [this](bool) { scheduleDockTitleBarRefresh(); });
+    connect(dock, &QDockWidget::visibilityChanged, this,
+            [this](bool) { scheduleDockTitleBarRefresh(); });
 }
 
 void MainWindow::applyViewportStatusBarTheme()
@@ -3577,6 +3628,10 @@ void MainWindow::setHomeDockMode(bool homeActive)
         // application stylesheet. Re-polish them after the layout settles so
         // the native light frame/base never leaks around the restored column.
         QTimer::singleShot(0, this, [this]() {
+            // restoreState() rebuilds the tab groups, so which docks deserve a
+            // title bar changes with it.
+            refreshDockTitleBars();
+
             for (QTabBar* tabBar : findChildren<QTabBar*>()) {
                 tabBar->setDrawBase(false);
                 tabBar->style()->unpolish(tabBar);
@@ -6204,14 +6259,7 @@ void MainWindow::resetDockLayout()
     m_histogramDock->hide();
 
     QTimer::singleShot(0, this, [this]() {
-        updateDockTitleBar(m_histogramDock);
-        updateDockTitleBar(m_propsDock);
-        updateDockTitleBar(m_colorDock);
-        updateDockTitleBar(m_swatchesDock);
-        updateDockTitleBar(m_historyDock);
-        updateDockTitleBar(m_channelsDock);
-        updateDockTitleBar(m_layersDock);
-        updateDockTitleBar(m_agentDock);
+        refreshDockTitleBars();
 
         // tabifyDockWidget() creates new internal QTabBar instances that are
         // not re-polished automatically, so all stylesheet rules are ignored.
