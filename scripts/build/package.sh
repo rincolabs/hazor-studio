@@ -156,7 +156,7 @@ package_appimage() {
         "$packaged_binary"
     find "$appdir/usr/lib" -maxdepth 1 -name 'libonnxruntime*.so*' -delete 2>/dev/null || true
 
-    output="$ARTIFACT_DIR/HazorStudio-linux-x86_64.AppImage"
+    output="$(artifact_path linux-x86_64 AppImage)"
     if [[ -f "$output" ]]; then
         rm -f -- "$output"
     fi
@@ -224,7 +224,8 @@ package_flatpak() {
     require_command flatpak
     local build_root="$ROOT_DIR/build/flatpak-x86_64"
     local repo="$DIST_DIR/flatpak-repo"
-    local output="$ARTIFACT_DIR/HazorStudio-linux-x86_64.flatpak"
+    local output
+    output="$(artifact_path linux-x86_64 flatpak)"
     # Without an explicit state dir, flatpak-builder caches its git mirrors and
     # downloads in the caller's working directory, so the sandbox sources are
     # re-fetched whenever the script runs from somewhere else.
@@ -337,7 +338,8 @@ package_windows_zip() {
         "$HAZOR_MINGW_TRIPLE-strip" --strip-all "$binary" 2>/dev/null || true
     done < <(find "$DIST_DIR" -maxdepth 2 -type f \( -name '*.exe' -o -name '*.dll' \) -print0)
 
-    local output="$ARTIFACT_DIR/HazorStudio-Windows-x64.zip"
+    local output
+    output="$(artifact_path Windows-x64 zip)"
     if [[ -f "$output" ]]; then
         rm -f -- "$output"
     fi
@@ -466,7 +468,8 @@ package_macos() {
     copy_runtime_assets "$DIST_DIR/Hazor.app/Contents/Resources/3rdparty"
     write_runtime_notices "$DIST_DIR/Hazor.app/Contents/Resources/licenses"
     mkdir -p "$ARTIFACT_DIR"
-    local output="$ARTIFACT_DIR/HazorStudio-macOS-$TARGET_ARCH.zip"
+    local output
+    output="$(artifact_path "macOS-$TARGET_ARCH" zip)"
     [[ ! -f "$output" ]] || rm -f -- "$output"
     (cd "$DIST_DIR" && zip -q -r -y "$output" Hazor.app)
     log "unsigned macOS $TARGET_ARCH bundle created locally: $output"

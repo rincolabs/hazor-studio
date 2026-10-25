@@ -5,6 +5,18 @@ cmake_minimum_required(VERSION 3.16)
 # final link time, once something actually links `rawengine` into Hazor.
 project(ImageEditor VERSION 0.0.2 LANGUAGES CXX C)
 
+# Pre-release label for the version above: "beta", "rc1", … or empty for a
+# final release. project(... VERSION ...) accepts digits only, so the label
+# lives here next to it and this is the one place to set it. Both the generated
+# header and the packaging scripts read these two lines, so the splash screen,
+# the About diagnostics, the MCP server info and the package file name always
+# agree: 0.0.2 with an empty label, 0.0.2-beta with "beta".
+set(HAZOR_VERSION_SUFFIX "beta")
+set(HAZOR_VERSION_FULL "${PROJECT_VERSION}")
+if(HAZOR_VERSION_SUFFIX)
+    set(HAZOR_VERSION_FULL "${PROJECT_VERSION}-${HAZOR_VERSION_SUFFIX}")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -300,9 +312,10 @@ endif()
 # not yet wired into Hazor's document system.
 add_subdirectory(src/psd)
 
-# Single source of truth for the app version: project(... VERSION ...) above.
-# Everything that displays a version (splash screen, About dialog, MCP server
-# info, packaging) derives from the generated header instead of a hardcoded literal.
+# Single source of truth for the app version: project(... VERSION ...) and
+# HAZOR_VERSION_SUFFIX above. Everything that displays a version (splash screen,
+# About dialog, MCP server info, packaging) derives from the generated header
+# instead of a hardcoded literal.
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/Version.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/core/Version.hpp

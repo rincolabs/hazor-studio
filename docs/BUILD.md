@@ -41,7 +41,34 @@ require the user-supplied OSXCross/SDK setup described below.
 ## Local target matrix
 
 Each target has independent build, dependency, distribution and artifact
-directories.
+directories. Packages land in `artifacts/<target>/` named the way the published
+release assets are — `HazorStudio-<platform>-v<version>.<ext>`, as in
+`HazorStudio-linux-x86_64-v0.0.2-beta.AppImage`. Linux ships the executable
+packages themselves (`.AppImage`, `.flatpak`); only Windows is distributed as a
+ZIP, and macOS as a ZIP of the `.app`.
+
+`<version>` comes from two adjacent lines in
+[`CMakeLists.txt`](../CMakeLists.txt) — the same ones that generate
+`src/core/Version.hpp`, so the file name, the splash screen, the About
+diagnostics and the MCP server info never disagree:
+
+```cmake
+project(ImageEditor VERSION 0.0.2 LANGUAGES CXX C)
+set(HAZOR_VERSION_SUFFIX "beta")  # "beta", "rc1", … or empty for a final release
+```
+
+`project(... VERSION ...)` takes digits only, which is why the pre-release label
+is a separate line. Clearing it to `""` is what promotes a build from
+`0.0.2-beta` to `0.0.2`, in the package name and in the application alike.
+
+`HAZOR_APP_VERSION` overrides the file name alone, for a one-off build that must
+not touch `CMakeLists.txt` — the binary still reports what it was compiled with,
+so a real release gets its label from the line above instead:
+
+```bash
+HAZOR_APP_VERSION=0.0.2-rc1 ./scripts/build.sh \
+    --target linux-x86_64 --config Release --package appimage
+```
 
 | Target | Compiler / ABI | Package | Current boundary |
 |--------|----------------|---------|------------------|

@@ -122,17 +122,17 @@ verify_package() {
     verify_no_local_paths
     case "$PACKAGE_FORMAT" in
         appimage)
-            require_file "$ARTIFACT_DIR/HazorStudio-linux-x86_64.AppImage" AppImage
+            require_file "$(artifact_path linux-x86_64 AppImage)" AppImage
             require_file "$DIST_DIR/AppDir/usr/plugins/platformthemes/libqxdgdesktopportal.so" \
                 "Qt xdgdesktopportal plugin"
             find "$DIST_DIR/AppDir/usr/lib" -maxdepth 1 -name 'libQt6DBus.so*' \
                 -print -quit | grep -q . || die "AppImage staging is missing libQt6DBus"
             ;;
         flatpak)
-            require_file "$ARTIFACT_DIR/HazorStudio-linux-x86_64.flatpak" "Flatpak bundle"
+            require_file "$(artifact_path linux-x86_64 flatpak)" "Flatpak bundle"
             ;;
         zip)
-            require_file "$ARTIFACT_DIR/HazorStudio-Windows-x64.zip" "Windows ZIP"
+            require_file "$(artifact_path Windows-x64 zip)" "Windows ZIP"
             require_file "$DIST_DIR/platforms/qwindows.dll" "Qt Windows platform plugin"
             local dll dll_format
             while IFS= read -r -d '' dll; do
@@ -142,7 +142,7 @@ verify_package() {
             done < <(find "$DIST_DIR" -type f -name '*.dll' -print0)
             ;;
         bundle)
-            require_file "$ARTIFACT_DIR/HazorStudio-macOS-$TARGET_ARCH.zip" "macOS ZIP"
+            require_file "$(artifact_path "macOS-$TARGET_ARCH" zip)" "macOS ZIP"
             local app_binary="$DIST_DIR/Hazor.app/Contents/MacOS/Hazor"
             local app_format dependency macho otool
             require_file "$app_binary" "packaged macOS executable"
@@ -167,14 +167,14 @@ verify_package() {
         all)
             case "$TARGET_OS" in
                 linux)
-                    require_file "$ARTIFACT_DIR/HazorStudio-linux-x86_64.AppImage" AppImage
-                    require_file "$ARTIFACT_DIR/HazorStudio-linux-x86_64.flatpak" "Flatpak bundle"
+                    require_file "$(artifact_path linux-x86_64 AppImage)" AppImage
+                    require_file "$(artifact_path linux-x86_64 flatpak)" "Flatpak bundle"
                     ;;
                 windows)
-                    require_file "$ARTIFACT_DIR/HazorStudio-Windows-x64.zip" "Windows ZIP"
+                    require_file "$(artifact_path Windows-x64 zip)" "Windows ZIP"
                     ;;
                 macos)
-                    require_file "$ARTIFACT_DIR/HazorStudio-macOS-$TARGET_ARCH.zip" "macOS ZIP"
+                    require_file "$(artifact_path "macOS-$TARGET_ARCH" zip)" "macOS ZIP"
                     ;;
             esac
             ;;

@@ -38,6 +38,52 @@ real_path() {
     readlink -f -- "$1"
 }
 
+# The version in artifact names comes from the same two lines the binary gets it
+# from: project(... VERSION ...) and set(HAZOR_VERSION_SUFFIX ...) in
+# CMakeLists.txt, which generate src/core/Version.hpp. Reading them keeps
+# packaging from carrying a second copy that could disagree with what the splash
+# screen and the About dialog report.
+read_app_version() {
+    local version suffix
+    version="$(sed -n -E \
+        's/^project\(.*VERSION[[:space:]]+([0-9]+(\.[0-9]+)*).*/\1/p' \
+        "$ROOT_DIR/CMakeLists.txt" | head -n 1)"
+    [[ -n "$version" ]] \
+        || die "could not read project(... VERSION ...) from $ROOT_DIR/CMakeLists.txt"
+    # Empty for a final release, "beta"/"rc1"/… for a pre-release.
+    suffix="$(sed -n -E \
+        's/^set\(HAZOR_VERSION_SUFFIX[[:space:]]+"([^"]*)"\).*/\1/p' \
+        "$ROOT_DIR/CMakeLists.txt" | head -n 1)"
+    printf '%s%s\n' "$version" "${suffix:+-$suffix}"
+}
+
+# HAZOR_APP_VERSION overrides both lines for a one-off build that must not touch
+# CMakeLists.txt:
+#   HAZOR_APP_VERSION=0.0.2-rc1 ./scripts/build.sh ...
+# Note this renames the file only — the binary still reports what it was
+# compiled with, so the label for a real release belongs in CMakeLists.txt.
+# Stored without the leading "v" that artifact_path() adds back, so passing
+# either "0.0.2" or "v0.0.2" names the file the same way.
+HAZOR_APP_VERSION="${HAZOR_APP_VERSION:-$(read_app_version)}"
+HAZOR_APP_VERSION="${HAZOR_APP_VERSION#v}"
+export HAZOR_APP_VERSION
+
+# Local packages are named the way the GitHub releases are, so a file built
+# here is interchangeable with a downloaded one:
+#   HazorStudio-<platform>-v<version>.<ext>
+#   HazorStudio-linux-x86_64-v0.0.1-beta.zip
+# Carrying the version also stops two builds of different versions from
+# overwriting each other in artifacts/.
+#
+# package.sh writes these names and verify.sh asserts them, so both call here
+# rather than spelling the pattern out twice.
+artifact_path() {
+    local platform="$1"
+    local extension="$2"
+    printf '%s/HazorStudio-%s-v%s.%s\n' \
+        "$ARTIFACT_DIR" "$platform" "$HAZOR_APP_VERSION" "$extension"
+}
+
 safe_remove_tree() {
     local path="$1"
     local root="$2"
