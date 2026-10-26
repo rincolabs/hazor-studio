@@ -9,7 +9,7 @@ language. You can paint and edit by hand, or simply ask the AI to do things like
 Visit the landing page:
 [https://rincolabs.org/projects/hazor-studio](https://rincolabs.org/projects/hazor-studio/).
 
-![Hazor Studio generative fill preview](https://rincolabs.org/assets/images/hazor-studio-generative-fill-preview.webp)
+![Hazor Studio](https://rincolabs.org/assets/images/001.webp)
 
 ## Sponsor
 
