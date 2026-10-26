@@ -213,16 +213,26 @@ static int shapeToolTypeForPreset(const QString& presetId)
     return 0;
 }
 
+// PSD/PSB have no codec reader either: they go through PsdImportService, so
+// every place that dispatches a file by extension has to name them.
+static bool isPsdPath(const QString& path)
+{
+    return path.endsWith(QStringLiteral(".psd"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".psb"), Qt::CaseInsensitive);
+}
+
 static bool isSupportedDropImagePath(const QString& path)
 {
     // .hazor isn't an image codec format — it's the project container, opened
     // via loadProjectAsNewTab() — so it must be special-cased here or a
     // dragged project is silently rejected before the drop even fires. .hzs
     // is the old extension, still readable, so a dragged legacy project
-    // isn't rejected either.
+    // isn't rejected either. Same for .psd/.psb, which openPsdFileAsNewTab()
+    // handles.
     return imageCodecRegistry().findReader(path) != nullptr
         || path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
-        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive);
+        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+        || isPsdPath(path);
 }
 
 static QStringList extractValidDropImagePaths(const QMimeData* mime)
@@ -2911,6 +2921,16 @@ bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
         return true;
     }
 
+    // A dropped PSD/PSB takes the same PsdImportService route File > Open
+    // takes: the generic codec path below cannot read it at all, and even if
+    // it could it would flatten away the layers, masks, text and adjustments.
+    // The import runs asynchronously and reports its own failures, so there
+    // is nothing left to decide here.
+    if (isPsdPath(paths.front())) {
+        openPsdFileAsNewTab(paths.front());
+        return true;
+    }
+
     const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
     std::optional<ColorManagedOpenResult> colorManaged;
     if (loaded.ok) {
@@ -3246,11 +3266,13 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
     connect(canvas, &CanvasView::externalImagesDropped, this, [this, canvas](const QStringList& paths, QPointF screenPos) {
         if (!canvas || paths.isEmpty()) return;
 
-        // A project file always opens as its own document — skip the
+        // A project file — and a PSD/PSB, which is just as much a layered
+        // document — always opens as its own document: skip the
         // Insert-into-Canvas/Open-Image question below, which only makes
         // sense for a plain image.
         if (paths.front().endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
-            || paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
+            || paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+            || isPsdPath(paths.front())) {
             openDroppedImagesAsNewDocument(paths);
             return;
         }
@@ -4097,7 +4119,7 @@ void MainWindow::openPathAsNewTab(const QString& path)
     // PSD/PSB are their own import pipeline (PsdImportService), not a codec:
     // they carry layers, masks, text, shapes and adjustments the generic
     // codec path would flatten away.
-    if (path.endsWith(".psd", Qt::CaseInsensitive) || path.endsWith(".psb", Qt::CaseInsensitive)) {
+    if (isPsdPath(path)) {
         openPsdFileAsNewTab(path);
         return;
     }

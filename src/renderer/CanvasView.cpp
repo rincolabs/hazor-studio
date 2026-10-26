@@ -1127,9 +1127,13 @@ static bool isSupportedDropImagePath(const QString& path)
     // via MainWindow::loadProjectAsNewTab() — so it must be special-cased
     // here or a dragged project is silently rejected before the drop fires.
     // .hzs is the old extension, still readable, so it's accepted too.
+    // .psd/.psb have no codec reader either and go through
+    // MainWindow::openPsdFileAsNewTab(), so they are named here as well.
     return imageCodecRegistry().findReader(path) != nullptr
         || path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
-        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive);
+        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".psd"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".psb"), Qt::CaseInsensitive);
 }
 
 static QStringList extractValidDropImagePaths(const QMimeData* mime)
