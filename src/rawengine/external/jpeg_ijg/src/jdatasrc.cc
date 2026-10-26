@@ -209,9 +209,11 @@ my_jpeg_stdio_src (j_decompress_ptr cinfo, FILE * infile)
      * manager serially with the same JPEG object.  Caveat programmer.
      */
     if (cinfo->src == nullptr) { /* first time for this JPEG object? */
+        /* rt_jpeg_alloc_aligned(), not alloc_small() directly: my_source_mgr
+         * needs more alignment than the pool allocator promises. See jpeg.h. */
         cinfo->src = (struct jpeg_source_mgr *)
-                     (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_PERMANENT,
-                             sizeof(my_source_mgr));
+                     rt_jpeg_alloc_aligned ((j_common_ptr) cinfo, sizeof(my_source_mgr),
+                             alignof(my_source_mgr));
         src = (my_src_ptr) cinfo->src;
         src->buffer = (JOCTET *)
                       (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_PERMANENT,

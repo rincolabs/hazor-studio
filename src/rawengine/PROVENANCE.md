@@ -28,7 +28,22 @@
     subtree of the LibRaw project); only the *build* of it is reimplemented —
     see below.
   - `external/{cJSON,jpeg_ijg,klt}` are copied as curated by RawTherapee
-    (just the `include/` + `src/` subset it bundles), unmodified.
+    (just the `include/` + `src/` subset it bundles). `cJSON` and `klt` are
+    unmodified; `jpeg_ijg` carries one local fix, below.
+
+### Local fix in `external/jpeg_ijg`
+
+`my_jpeg_stdio_src()` (`src/jdatasrc.cc`) and `jpeg_memory_src()`
+(`src/jpeg_memsrc.cc`) allocated their source manager straight from libjpeg's
+`alloc_small()`, which only guarantees `ALIGN_SIZE` alignment — 8 bytes for
+the non-SIMD libjpeg-turbo this links. Both managers embed a `jmp_buf`, and on
+MinGW x86-64 that is `__m128`-based, so the structs are 16-byte aligned and GCC
+writes their function-pointer fields with aligned SSE stores (`movaps`). On a
+pool address that was only 8-byte aligned those stores faulted —
+`EXCEPTION_ACCESS_VIOLATION (0xc0000005)`, Windows only, since glibc's
+`jmp_buf` leaves the same structs at alignof 8. Both call sites now go through
+`rt_jpeg_alloc_aligned()` (`include/jpeg_ijg/jpeg.h`), which over-allocates and
+rounds the address up; see that function's comment for the full reasoning.
 
 ## Build system: reimplemented, not ported
 
