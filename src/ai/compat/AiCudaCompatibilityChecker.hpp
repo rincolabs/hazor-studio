@@ -5,9 +5,12 @@
 #include <QList>
 
 // Best-effort detection of the CUDA stack (driver, runtime, cuBLAS, cuDNN, GPU)
-// plus the modular runtime requirement table (spec §7). Detection never throws
-// and degrades gracefully when nvidia-smi / ldconfig are absent. On macOS CUDA is
-// never applicable and detect() returns an empty AiCudaInfo.
+// plus the modular runtime requirement table (spec §7). The libraries come from
+// AiCudaLibraryProbe (what the provider will actually be able to load); the
+// driver, GPU and — on Linux — the installed sonames come from nvidia-smi and
+// ldconfig. Detection never throws and degrades gracefully when those tools are
+// absent. On macOS CUDA is never applicable and detect() returns an empty
+// AiCudaInfo.
 namespace AiCudaCompatibilityChecker {
 
 AiCudaInfo detect();

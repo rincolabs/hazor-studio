@@ -495,6 +495,8 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ai/compat/AiRuntimeCompatibilityProfile.cpp
     src/ai/compat/AiCudaCompatibilityChecker.hpp
     src/ai/compat/AiCudaCompatibilityChecker.cpp
+    src/ai/compat/AiCudaLibraryProbe.hpp
+    src/ai/compat/AiCudaLibraryProbe.cpp
     src/ai/compat/AiCudnnCompatibilityChecker.hpp
     src/ai/compat/AiCudnnCompatibilityChecker.cpp
     src/ai/compat/AiProviderCompatibilityChecker.hpp

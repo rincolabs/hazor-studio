@@ -1,4 +1,5 @@
 #include "OnnxRuntimeBackend.hpp"
+#include "ai/compat/AiCudaLibraryProbe.hpp"
 #include "ai/runtime/AiExecutionProvider.hpp"
 
 #include <QDebug>
@@ -123,11 +124,33 @@ QStringList OnnxRuntimeBackend::availableProviders() const
 
 namespace {
 
+// CUDA and TensorRT need the CUDA stack installed on the machine: the provider
+// libraries ship with the editor, the toolkit does not. Ask the loader before
+// ONNX Runtime does — a failed append dumps a raw multi-line native error to
+// stderr for a case the editor handles by falling back to the CPU.
+bool cudaDependenciesAvailable(QString* reason)
+{
+    const AiCudaLibraryProbe::Result& probe = AiCudaLibraryProbe::probe();
+    if (probe.loadable)
+        return true;
+    if (reason) {
+        *reason = probe.missing.isEmpty()
+            ? QStringLiteral("CUDA %1 runtime libraries not found").arg(probe.cudaMajor)
+            : QStringLiteral("CUDA %1 runtime libraries not found: %2")
+                  .arg(probe.cudaMajor, probe.missing.join(QStringLiteral(", ")));
+    }
+    return false;
+}
+
 // Picks the best provider for "auto", honouring the documented priority. Avoids
-// TensorRT as an automatic default (it needs build/cache configuration).
+// TensorRT as an automatic default (it needs build/cache configuration), and
+// CUDA when its runtime libraries are not installed — the provider being
+// compiled into the package says nothing about the machine having CUDA.
 QString autoSelectProvider(const QStringList& available)
 {
-    if (available.contains(QString::fromLatin1(AiProvider::kCuda)))     return QString::fromLatin1(AiProvider::kCuda);
+    const bool cudaUsable = available.contains(QString::fromLatin1(AiProvider::kCuda))
+                            && cudaDependenciesAvailable(nullptr);
+    if (cudaUsable)                                                     return QString::fromLatin1(AiProvider::kCuda);
     if (available.contains(QString::fromLatin1(AiProvider::kOpenVino))) return QString::fromLatin1(AiProvider::kOpenVino);
     if (available.contains(QString::fromLatin1(AiProvider::kDirectMl))) return QString::fromLatin1(AiProvider::kDirectMl);
     return QString::fromLatin1(AiProvider::kCpu);
@@ -165,6 +188,11 @@ bool appendProvider(Ort::SessionOptions& options,
     }
     if (!AiProvider::supportedOnThisPlatform(providerId)) {
         if (reason) *reason = QStringLiteral("not supported on this platform");
+        return false;
+    }
+    if ((providerId == QLatin1String(AiProvider::kCuda)
+         || providerId == QLatin1String(AiProvider::kTensorRt))
+        && !cudaDependenciesAvailable(reason)) {
         return false;
     }
 

@@ -62,6 +62,10 @@ AiProviderCompatibility buildCuda(const QString& platform, bool runtimeAvailable
     p.details = tr("Required: %1 + %2\nDetected: CUDA %3 + cuDNN %4")
                     .arg(req.recommendedCudaPackage, req.recommendedCudnnPackage,
                          detectedCuda, detectedCudnn);
+    // Name the libraries the loader could not resolve: that list is the whole
+    // reason the provider is skipped, and it is the only actionable part of it.
+    if (!cuda.missingLibraries.isEmpty())
+        p.details += tr("\nNot found: %1").arg(cuda.missingLibraries.join(QStringLiteral(", ")));
 
     if (!p.supportedByOs) {
         p.status = AiCompatibilityStatus::Unsupported;

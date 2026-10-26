@@ -27,7 +27,11 @@ require the user-supplied OSXCross/SDK setup described below.
 > The editor **builds and runs without ONNX Runtime**. The AI inference layer
 > (SAM object selection, matting / background removal) simply reports itself as
 > unavailable at runtime. CPU/CUDA/TensorRT are chosen as runtime *Execution
-> Providers* in Settings — they are never separate builds.
+> Providers* in Settings — they are never separate builds. The GPU providers
+> ship in every package but additionally need the *machine's* CUDA 12 + cuDNN 9
+> libraries, which Hazor probes through the platform loader before selecting one:
+> without them it stays on the CPU and says so in one log line, instead of
+> letting ONNX Runtime fail the provider load with a native error dump.
 
 > The editor **builds and runs without the RAW engine** (`ENABLE_RAWENGINE=OFF`,
 > or with its dependencies missing): `Hazor` just builds without
