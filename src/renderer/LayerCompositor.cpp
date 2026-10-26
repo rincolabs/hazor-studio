@@ -73,10 +73,15 @@ static QMatrix4x4 layerRectSubMatrix(const QRect& bounds, const QSize& baseSize)
     return m;
 }
 
+// `quad` overrides the layer rect the mask is aligned to. It is only passed for
+// a padded filter preview, whose quad covers more than the layer's own base rect
+// (see the preview block in renderNodes); everything else asks for the layer's
+// mask target bounds by leaving it null.
 static bool maskOverlayGeometry(const Layer* layer,
                                 QMatrix4x4* mvpSubMatrix,
                                 QVector2D* maskUvOffset,
-                                QVector2D* maskUvScale)
+                                QVector2D* maskUvScale,
+                                const QRect& quad = QRect())
 {
     if (!layer || !mvpSubMatrix || !maskUvOffset || !maskUvScale)
         return false;
@@ -91,7 +96,7 @@ static bool maskOverlayGeometry(const Layer* layer,
         return mW > 0 && mH > 0;
     }
 
-    const QRect bounds = layer->maskTargetBounds();
+    const QRect bounds = quad.isEmpty() ? layer->maskTargetBounds() : quad;
     if (base.width() <= 0 || base.height() <= 0 || mW <= 0 || mH <= 0 || bounds.isEmpty())
         return false;
 
@@ -110,6 +115,7 @@ void LayerCompositor::composite(Document* doc,
                                  bool grayscaleMaskView,
                                  bool hasPreview,
                                  unsigned int previewTexture,
+                                 const QRect& previewLayerRect,
                                  bool forceFullResLod,
                                  bool showMaskOverlay,
                                  float maskOverlayOpacity,
@@ -117,6 +123,11 @@ void LayerCompositor::composite(Document* doc,
 {
     Q_UNUSED(grayscaleMaskView);
     const QTransform identity;
+    // No frame may inherit the previous frame's clipping-mask capture: the base
+    // may have been painted on, masked, moved or faded since. This also clears
+    // the arm, which the main shader shares with the canvas decorations and the
+    // projection display.
+    gpu->resetClipAlpha();
 
     const bool isolate = treeHasBlendMode(doc->roots)
                       || treeHasStackAdjustment(doc->roots)
@@ -128,7 +139,8 @@ void LayerCompositor::composite(Document* doc,
     if (!isolate) {
         // Empty document: nothing needs the canvas FBO.
         renderNodes(doc->roots, doc, viewMvp, canvasHalfExtents,
-                    editingMask, hasPreview, previewTexture, forceFullResLod,
+                    editingMask, hasPreview, previewTexture, previewLayerRect,
+                    forceFullResLod,
                     showMaskOverlay, maskOverlayOpacity, gpu,
                     false, identity, identity);
         return;
@@ -141,7 +153,8 @@ void LayerCompositor::composite(Document* doc,
     // each layer directly through the screen viewport transform.
     gpu->pushGroupFbo(doc->size.width(), doc->size.height());
     renderNodes(doc->roots, doc, viewMvp, canvasHalfExtents,
-                editingMask, hasPreview, previewTexture, forceFullResLod,
+                editingMask, hasPreview, previewTexture, previewLayerRect,
+                forceFullResLod,
                 showMaskOverlay, maskOverlayOpacity, gpu,
                 true, identity, identity);
 
@@ -163,13 +176,15 @@ void LayerCompositor::renderNodes(
     bool editingMask,
     bool hasPreview,
     unsigned int previewTexture,
+    const QRect& previewLayerRect,
     bool forceFullResLod,
     bool showMaskOverlay,
     float maskOverlayOpacity,
     GPUViewport* gpu,
     bool hasTargetAccum,
     const QTransform& targetAccum,
-    const QTransform& invTargetAccum)
+    const QTransform& invTargetAccum,
+    const LayerTreeNode* soleNode)
 {
     QOpenGLFunctions* gl = QOpenGLContext::currentContext()
                                ? QOpenGLContext::currentContext()->functions()
@@ -190,6 +205,11 @@ void LayerCompositor::renderNodes(
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
         if (!node->visible) continue;
+        // Clip-alpha capture: this pass renders one base and nothing else. The
+        // check sits above the Adjustment and Group branches so a Group base is
+        // reached by it too, and its children are then drawn by the recursive
+        // call, which clears the filter.
+        if (soleNode && node != soleNode) continue;
 
         // ── Normal-Mode adjustment: full-canvas pass over the backdrop ──
         // Everything below this node in the current scope is already in the
@@ -351,8 +371,15 @@ void LayerCompositor::renderNodes(
                 solidBlendMode = blend::shaderId(node->blendMode);
             }
 
+            // Fill fades the adjustment's contribution to the composite while
+            // its parameters stay as they are (§4.7). An Adjustment node is
+            // never a clipping base (LayerTreeNode::canBeClipBase), so the
+            // sole-node suppression the layer draws below need does not apply
+            // here, and it never splits its Fill with a style bake either —
+            // compositeFillOpacity() is the whole of it.
             gpu->drawAdjustmentPass(adjustments::shaderId(node->adjustment->type),
                                     node->opacity,
+                                    node->compositeFillOpacity(),
                                     hasMask ? lyr->maskTextureId : 0,
                                     hasMask,
                                     lyr ? lyr->maskDensity : 1.0f,
@@ -374,19 +401,46 @@ void LayerCompositor::renderNodes(
         }
 
         if (node->type == LayerTreeNode::Type::Group) {
+            // How this group merges into the current scope. The three cases
+            // mirror DocumentCompositor::renderNodesFiltered; LayerTreeNode
+            // owns the decision so the two compositors cannot drift.
+            //
+            // Pass Through sends the children into a buffer *seeded* with the
+            // backdrop, which the group's opacity then interpolates towards.
+            // Seeding is a blit out of the current render target, so it needs
+            // that target to be the canvas-sized isolation FBO — it always is,
+            // since composite() isolates the whole live stack for any document
+            // with a root node, and hasTargetAccum is exactly that condition.
+            const bool wantsPassThroughStage = node->passThroughNeedsStage();
+            const bool passThrough = wantsPassThroughStage && hasTargetAccum;
+
             // Isolate into a group FBO when the group's blend or opacity must
             // apply to the composed result. Group effects/masks are applied
             // only by the CPU projection (DocumentCompositor), the visual
             // source of truth; the live GPU path mirrors blend + opacity so the
             // hand-off to the projection stays seamless.
-            const bool isolate = node->blendMode != BlendMode::Normal
-                              || node->opacity < 0.999f
-                              // A Normal-Mode adjustment inside the group must
-                              // only affect the group's own content (mirrors
-                              // needsIsolatedComposite on the CPU path).
-                              || node->hasVisibleAdjustmentDirectChild();
+            //
+            // None of those reasons applies to a Pass Through group: its blend
+            // slot is unused (mergeBlendMode), its opacity rides in the branch
+            // above, and an adjustment among its children is *meant* to reach
+            // the layers below the group rather than be contained. The one case
+            // left is a stage we could not seed; isolating is the right
+            // fallback there, because a backdrop we cannot copy holds no layer
+            // content and the two models then agree.
+            const bool isolate = node->isPassThroughGroup()
+                ? (wantsPassThroughStage && !passThrough)
+                : (node->mergeBlendMode() != BlendMode::Normal
+                   || node->opacity < 0.999f
+                   // A child that reads the backdrop — a blend mode, or a
+                   // Normal-Mode adjustment — must read the group's own
+                   // content, not the stack below the group. Same predicate
+                   // needsIsolatedComposite() uses on the CPU path; the two
+                   // conditions differ only in the group effects/masks the
+                   // live path leaves to the projection.
+                   || node->groupScopeReadsBackdrop());
             BLENDDBG() << "[GroupCompose] name=" << node->name
                      << "isolate=" << isolate
+                     << "passThrough=" << passThrough
                      << "blendMode=" << static_cast<int>(node->blendMode)
                      << "opacity=" << node->opacity
                      << "groupAccum=" << node->accumulatedTransform()
@@ -395,9 +449,27 @@ void LayerCompositor::renderNodes(
                      << "docSize=" << doc->size
                      << "zoom=" << doc->zoom
                      << "pan=" << doc->panOffset;
-            if (!isolate) {
+            if (passThrough) {
+                gpu->pushGroupFbo(doc->size.width(), doc->size.height(),
+                                  /*seedFromTarget=*/true);
+                const QTransform identity;
                 renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                            editingMask, hasPreview, previewTexture, forceFullResLod,
+                            editingMask, hasPreview, previewTexture, previewLayerRect,
+                            forceFullResLod,
+                            showMaskOverlay, maskOverlayOpacity, gpu,
+                            true, identity, identity);
+                gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask,
+                                 /*passThrough=*/true);
+                gpu->mainProgram()->bind();
+                gpu->bindMainVao();
+            } else if (!isolate) {
+                // Direct: the children merge into the current target. For a
+                // full-opacity Pass Through group this is not a shortcut but
+                // the whole mechanism — it is what lets an inner blend mode
+                // read the layers below the group.
+                renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
+                            editingMask, hasPreview, previewTexture, previewLayerRect,
+                            forceFullResLod,
                             showMaskOverlay, maskOverlayOpacity, gpu,
                             hasTargetAccum, targetAccum, invTargetAccum);
             } else {
@@ -420,7 +492,8 @@ void LayerCompositor::renderNodes(
                 gpu->pushGroupFbo(doc->size.width(), doc->size.height());
                 const QTransform identity;
                 renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                            editingMask, hasPreview, previewTexture, forceFullResLod,
+                            editingMask, hasPreview, previewTexture, previewLayerRect,
+                            forceFullResLod,
                             showMaskOverlay, maskOverlayOpacity, gpu,
                             true, identity, identity);
                 gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask);
@@ -456,9 +529,57 @@ void LayerCompositor::renderNodes(
         if ((node->layer->maskTextureOutdated || node->layer->maskTextureId == 0)
             && !node->layer->maskImage.isNull()) {
             gpu->uploadMaskTexture(node->layer.get());
-            if (!node->effects.empty())
+            // The mask is part of the styled/effected bake, so a CPU-side mask
+            // change must rebuild it — not just re-upload the mask texture.
+            if (node->usesEffectedPipeline())
                 node->invalidateEffects();
         }
+
+        // ── Clipping mask (docs/RENDER-PIPELINE.md §4.6) ──
+        // The clip multiplies this layer's source alpha by the BASE layer's own
+        // alpha — captured into its own canvas-sized buffer, never read from the
+        // current render target, which already holds every layer below. Mirrors
+        // DocumentCompositor::renderNodesFiltered, which resolves the base with
+        // the same LayerTreeNode predicates.
+        bool clipArmed = false;
+        if (node->isClippedLayer()) {
+            const LayerTreeNode* base =
+                LayerTreeNode::resolveClipBase(nodes, static_cast<size_t>(i));
+            if (base) {
+                // A hidden base hides its whole run (its alpha is zero
+                // everywhere) — the CPU path skips the layer for the same reason.
+                if (!base->visible) continue;
+                if (gpu->clipAlphaOwner() != base
+                    && gpu->beginClipAlphaCapture(doc->size.width(),
+                                                  doc->size.height(), base)) {
+                    const QTransform identity;
+                    renderNodes(nodes, doc, viewMvp, canvasHalfExtents, editingMask,
+                                hasPreview, previewTexture, previewLayerRect,
+                                forceFullResLod,
+                                /*showMaskOverlay=*/false, maskOverlayOpacity, gpu,
+                                /*hasTargetAccum=*/true, identity, identity,
+                                /*soleNode=*/base);
+                    gpu->endClipAlphaCapture();
+                    gpu->mainProgram()->bind();
+                    gpu->bindMainVao();
+                }
+                // The owner check also covers a failed capture: without a buffer
+                // holding this base's alpha the layer is drawn unclipped, which
+                // is the same fallback the data model uses for an unresolvable
+                // base. Better a too-wide layer than a blank one.
+                clipArmed = (gpu->clipAlphaOwner() == base);
+            }
+        }
+
+        // Fill Opacity for the draws below (docs/RENDER-PIPELINE.md §4.7).
+        // LayerTreeNode::compositeFillOpacity() reads 1 for a layer whose Fill
+        // is already baked into its styled base, so it cannot be applied twice.
+        //
+        // A sole-node render is the clipping-mask alpha capture and nothing
+        // else, and a clip reads the base's *silhouette*: fading the base's
+        // content does not shrink the shape the layers above it clip to — the
+        // base's own opacity is folded into that alpha (§4.6), its Fill is not.
+        const float fillOpacity = soleNode ? 1.0f : node->compositeFillOpacity();
 
         // ── Single Layer Mode (clipped adjustment) — live GPU preview ──
         // A layer hosting visible adjustment children is composited like a
@@ -479,16 +600,29 @@ void LayerCompositor::renderNodes(
             const bool previewThisLayer = hasPreview && previewTexture
                 && node == doc->activeNode();
             gpu->pushGroupFbo(doc->size.width(), doc->size.height());
-            drawLayerBaseIsolated(node, doc, gpu, previewThisLayer, previewTexture);
+            drawLayerBaseIsolated(node, doc, gpu, previewThisLayer, previewTexture,
+                                  previewLayerRect);
             // Clipped adjustments draw over the isolated base in canvas-NDC, the
             // same target convention group children use (hasTargetAccum=true);
             // the adjustment branch maps each adjustment's mask in this layer's
             // pixel space (see the Type::Adjustment handling above).
             renderNodes(node->children, doc, viewMvp, canvasHalfExtents,
-                        editingMask, /*hasPreview*/false, 0, forceFullResLod,
+                        editingMask, /*hasPreview*/false, 0, QRect(),
+                        forceFullResLod,
                         showMaskOverlay, maskOverlayOpacity, gpu,
                         /*hasTargetAccum*/true, identity, identity);
-            gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask);
+            // The clip belongs to the composite-back, not to the passes inside
+            // the FBO: it must scale the finished (base + adjustments) result
+            // once, the way the CPU path clips computeEffectedImage's output.
+            gpu->setClipAlphaEnabled(clipArmed);
+            // The Fill is handed over explicitly rather than re-read off the
+            // node inside the pop: during a clip-alpha capture this layer's own
+            // Fill must not reach the captured silhouette, while the children of
+            // a *group* base keep theirs (they are the group's content). Only
+            // the sole-node test above can tell those two apart.
+            gpu->popGroupFbo(node, canvasHalfExtents, viewMvp, editingMask,
+                             /*passThrough=*/false, fillOpacity);
+            gpu->setClipAlphaEnabled(false);
             gpu->mainProgram()->bind();
             gpu->bindMainVao();
 
@@ -523,6 +657,12 @@ void LayerCompositor::renderNodes(
             }
             continue;
         }
+
+        // Every draw below merges this layer straight into the target, so the
+        // clip is armed across all of them (tiles included — the clip is indexed
+        // in document space, so a per-tile quad samples the right texels) and
+        // disarmed again before the loop moves on.
+        gpu->setClipAlphaEnabled(clipArmed);
 
         // ── Compute per-layer MVP ──
         QTransform totalTransform = hasTargetAccum
@@ -585,11 +725,32 @@ void LayerCompositor::renderNodes(
             baseTextureSize = node->layer->shapeCache.image.size();
         }
 
+        // ── Padded filter preview ──
+        // A filter whose effect reaches past the layer bounds is previewed on a
+        // source padded to the rect the committed filter will grow the layer to
+        // (CanvasView::showPreview + ImageController::growLayerForFilter), so the
+        // preview is drawn on that same, larger quad — otherwise the preview
+        // keeps showing the crop the applied result no longer has. The mask is
+        // aligned to the wider quad below for the same reason.
+        const bool previewQuadExpanded = usePreview
+            && baseTextureSize.width() > 0 && baseTextureSize.height() > 0
+            && !previewLayerRect.isEmpty()
+            && previewLayerRect != QRect(QPoint(0, 0), baseTextureSize);
+        const QRect maskQuad = previewQuadExpanded ? previewLayerRect : QRect();
+        if (previewQuadExpanded)
+            mvp = mvp * layerRectSubMatrix(previewLayerRect, baseTextureSize);
+
         bool shapeEffectTransformApplied = false;
         if (hasEffects && shapeSpriteActive
             && baseTextureSize.width() > 0
             && baseTextureSize.height() > 0) {
-            const QRectF bounds = node->effectedImageBounds();
+            // effectedTextureBounds(), never effectedImageBounds(): this must
+            // place the texture that is actually bound, and the *Image* variant
+            // rebuilds the bake inline (full-res composite + mask + blur) when
+            // the node is dirty — which is exactly its state while StyleBakePool
+            // is baking the new params on a worker. That inline rebuild was the
+            // UI-thread stall during a Layer Styles drag.
+            const QRectF bounds = node->effectedTextureBounds();
             const QTransform& spriteXf = node->layer->shapeCache.spriteTransform;
             const double baseW = baseTextureSize.width();
             const double baseH = baseTextureSize.height();
@@ -627,7 +788,8 @@ void LayerCompositor::renderNodes(
         if (hasEffects && baseTextureSize.width() > 0
             && baseTextureSize.height() > 0
             && !shapeEffectTransformApplied) {
-            const QRectF bounds = node->effectedImageBounds();
+            // See above: bounds of the bound texture, no inline rebuild.
+            const QRectF bounds = node->effectedTextureBounds();
             const double baseW = baseTextureSize.width();
             const double baseH = baseTextureSize.height();
             const double left = -1.0 + 2.0 * bounds.left() / baseW;
@@ -759,6 +921,7 @@ void LayerCompositor::renderNodes(
                                          tile.mvp,
                                          static_cast<int>(node->blendMode),
                                          node->opacity,
+                                         fillOpacity,
                                          hasMask,
                                          node->layer->maskDensity,
                                          vp[2],
@@ -772,7 +935,7 @@ void LayerCompositor::renderNodes(
                 gpu->bindMainVao();
                 for (const auto& tile : tiles) {
                     gpu->setMainUniforms(tile.mvp, node->opacity, hasMask,
-                                         node->layer->maskDensity);
+                                         node->layer->maskDensity, fillOpacity);
                     gpu->setMainTexture(GL_TEXTURE0, tile.textureId);
                     gpu->setUVUniforms(tile.uvScale, tile.uvOffset);
                     gpu->setMaskUVUniforms(tile.maskUvScale, tile.maskUvOffset);
@@ -795,6 +958,7 @@ void LayerCompositor::renderNodes(
                                                maskOverlayOpacity, rubyOff, rubyScl);
                 }
             }
+            gpu->setClipAlphaEnabled(false);
             continue;
         }
 
@@ -809,13 +973,15 @@ void LayerCompositor::renderNodes(
             QVector2D maskScl(1.0f, 1.0f);
             if (hasMask) {
                 QMatrix4x4 maskSub;
-                maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl);
+                maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl,
+                                    maskQuad);
             }
             gpu->drawShaderBlend(texId,
                                  hasMask ? node->layer->maskTextureId : 0,
                                  mvp,
                                  static_cast<int>(node->blendMode),
                                  node->opacity,
+                                 fillOpacity,
                                  hasMask,
                                  node->layer->maskDensity,
                                  vp[2],
@@ -854,7 +1020,7 @@ void LayerCompositor::renderNodes(
             gpu->mainProgram()->bind();
             gpu->bindMainVao();
             gpu->setMainUniforms(mvp, node->opacity, hasMask,
-                                 node->layer->maskDensity);
+                                 node->layer->maskDensity, fillOpacity);
             gpu->setMainTexture(GL_TEXTURE0, texId);
             gpu->setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
 
@@ -868,13 +1034,17 @@ void LayerCompositor::renderNodes(
                 QMatrix4x4 maskSub;
                 QVector2D maskOff;
                 QVector2D maskScl;
-                if (maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl))
+                if (maskOverlayGeometry(node->layer.get(), &maskSub, &maskOff, &maskScl,
+                                        maskQuad))
                     gpu->setMaskUVUniforms(maskScl, maskOff);
                 gl->glActiveTexture(GL_TEXTURE1);
                 gl->glBindTexture(GL_TEXTURE_2D, node->layer->maskTextureId);
             }
 
-            if (node->layer->tiledSystem) {
+            // The tile instances are placed inside `mvp` and carry UVs relative
+            // to the base rect, so a widened preview quad has to be drawn as the
+            // single quad it is.
+            if (node->layer->tiledSystem && !previewQuadExpanded) {
                 // Tiled draw
                 if (node->layer->pendingGpuUpload) {
                     gpu->uploadDirtyTiles(node->layer.get());
@@ -930,6 +1100,7 @@ void LayerCompositor::renderNodes(
                 }
             }
         }
+        gpu->setClipAlphaEnabled(false);
     }
 }
 
@@ -937,7 +1108,8 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
                                             Document* doc,
                                             GPUViewport* gpu,
                                             bool hasPreview,
-                                            unsigned int previewTexture)
+                                            unsigned int previewTexture,
+                                            const QRect& previewLayerRect)
 {
     QOpenGLFunctions* gl = QOpenGLContext::currentContext()
                                ? QOpenGLContext::currentContext()->functions()
@@ -968,19 +1140,33 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
         // Same construction as the generic non-tiled base draw below: the base
         // quad stays at `mvp`; the (possibly larger) mask buffer is aligned to it
         // via the mask UV scale/offset rather than by transforming the quad.
+        // The one exception is a padded preview — a filter that reaches past the
+        // layer bounds previews on a source grown to the rect the committed
+        // filter will grow the layer to, so the quad has to widen with it (see
+        // the matching block in renderNodes).
         const bool hasMask = layer->maskVisible
             && layer->maskTextureId != 0
             && !layer->maskImage.isNull();
+        const QSize baseSize = shapeSpriteActive
+            ? layer->shapeCache.image.size()
+            : layer->rasterBaseSize();
+        const bool previewQuadExpanded = !baseSize.isEmpty()
+            && !previewLayerRect.isEmpty()
+            && previewLayerRect != QRect(QPoint(0, 0), baseSize);
+        const QMatrix4x4 previewMvp = previewQuadExpanded
+            ? mvp * layerRectSubMatrix(previewLayerRect, baseSize)
+            : mvp;
         QMatrix4x4 maskSub;
         QVector2D maskOff(0.0f, 0.0f);
         QVector2D maskScl(1.0f, 1.0f);
         if (hasMask)
-            maskOverlayGeometry(layer, &maskSub, &maskOff, &maskScl);
+            maskOverlayGeometry(layer, &maskSub, &maskOff, &maskScl,
+                                previewQuadExpanded ? previewLayerRect : QRect());
 
         gpu->applyFixedBlend(static_cast<int>(BlendMode::Normal));
         gpu->mainProgram()->bind();
         gpu->bindMainVao();
-        gpu->setMainUniforms(mvp, 1.0f, hasMask, layer->maskDensity);
+        gpu->setMainUniforms(previewMvp, 1.0f, hasMask, layer->maskDensity);
         gpu->setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
         gpu->setMaskUVUniforms(maskScl, maskOff);
         if (hasMask) {
@@ -1000,8 +1186,12 @@ void LayerCompositor::drawLayerBaseIsolated(LayerTreeNode* node,
     // drawAdjustmentPass, mirroring computeEffectedImage (styled base → clipped
     // adjustments). The styled base is uploaded once per style/pixel change, so
     // the drag itself does no CPU bake and no re-upload.
-    if (!node->effects.empty() && node->styledBaseTexture) {
-        const QRectF bounds = node->styledBaseImageBounds();
+    if (node->hasEnabledEffects() && node->styledBaseTexture) {
+        // Bounds of the uploaded bake (styledBaseTextureBounds), not of the
+        // current params — see the effectedTextureBounds() note in
+        // renderNodes(): the *ImageBounds() variant would re-run the style
+        // bake on the UI thread while the async one is still in flight.
+        const QRectF bounds = node->styledBaseTextureBounds();
         const QSize baseSize = shapeSpriteActive
             ? layer->shapeCache.image.size()
             : layer->rasterBaseSize();

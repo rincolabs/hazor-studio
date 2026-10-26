@@ -1,4 +1,6 @@
 #include "GPUViewport.hpp"
+#include "core/CrashHandler.hpp"
+#include "ChannelView.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
@@ -68,6 +70,25 @@ void uploadR8TextureFromImage(const QImage& image)
     glPixelStorei(GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
 }
 
+// Uploads a full-resolution RGBA8 bake (effected image / styled base) into
+// `texture`, creating it on first use. Shared by the cache-backed uploads in
+// syncLayersToGpu and their interim-preview variants, so both place the same
+// filtering/wrap state on the texture (see StyleBakePool::InterimBake).
+void uploadRgba8Texture(unsigned int& texture, const QImage& image)
+{
+    if (texture == 0)
+        glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                 image.width(), image.height(),
+                 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 image.constBits());
+}
+
 void readR8TextureToImage(QImage& image)
 {
     GLint prevPackAlignment = 4;
@@ -110,7 +131,9 @@ void GPUViewport::applyFixedBlend(int blendMode)
 GPUViewport::GPUViewport() = default;
 GPUViewport::~GPUViewport()
 {
+    CrashHandler::breadcrumb("~GPUViewport: enter");
     m_projection.releaseGL();
+    CrashHandler::breadcrumb("~GPUViewport: projection released");
     if (m_mainProg)     delete m_mainProg;
     if (m_solidProg)    delete m_solidProg;
     if (m_blendProg)    delete m_blendProg;
@@ -119,14 +142,31 @@ GPUViewport::~GPUViewport()
     if (m_grayProg)     delete m_grayProg;
     if (m_adjustProg)   delete m_adjustProg;
     if (m_displayProg)  delete m_displayProg;
-    if (m_curveLutTex)   glDeleteTextures(1, &m_curveLutTex);
-    if (m_displayLutTex) glDeleteTextures(1, &m_displayLutTex);
-    if (m_sceneTex)      glDeleteTextures(1, &m_sceneTex);
-    if (m_sceneFbo)      glDeleteFramebuffers(1, &m_sceneFbo);
+    if (m_dotProg)      delete m_dotProg;
+    if (m_shadowProg)   delete m_shadowProg;
+    if (m_curveLutTex)      glDeleteTextures(1, &m_curveLutTex);
+    if (m_displayLutTex)    glDeleteTextures(1, &m_displayLutTex);
+    if (m_sceneTex)         glDeleteTextures(1, &m_sceneTex);
+    if (m_sceneFbo)         glDeleteFramebuffers(1, &m_sceneFbo);
+    if (m_clipTex)          glDeleteTextures(1, &m_clipTex);
+    if (m_clipFbo)          glDeleteFramebuffers(1, &m_clipFbo);
+    // Viewport- and document-sized attachments that outlived every earlier
+    // version of this destructor: the selection mask is GL_R8 at document
+    // size and the blend target GL_RGBA8 at viewport size, so a closed tab
+    // used to strand both for the lifetime of the GL context.
+    if (m_selectMaskTexture) glDeleteTextures(1, &m_selectMaskTexture);
+    if (m_checkerTexture)    glDeleteTextures(1, &m_checkerTexture);
+    if (m_blendTex)          glDeleteTextures(1, &m_blendTex);
+    if (m_blendFbo)          glDeleteFramebuffers(1, &m_blendFbo);
+    // m_compositeBaseFbo is deliberately NOT freed here: it is never generated,
+    // only aliased to m_sceneFbo by beginManagedComposite(). Deleting it would
+    // hand the driver a name this viewport does not own and that the m_sceneFbo
+    // line above has already released.
     for (auto& e : m_groupFboPool) {
         if (e.fbo) glDeleteFramebuffers(1, &e.fbo);
         if (e.tex) glDeleteTextures(1, &e.tex);
     }
+    CrashHandler::breadcrumb("~GPUViewport: done");
 }
 
 // ── Initialize ─────────────────────────────────────────────────
@@ -367,6 +407,61 @@ bool GPUViewport::ensureBlendTarget(int viewportW, int viewportH)
     return true;
 }
 
+// Canvas-sized RGBA8 target for the clipping-mask alpha. Same shape as
+// ensureBlendTarget, with one deliberate difference: GL_LINEAR filtering. The
+// clip is sampled at gl_FragCoord.xy, i.e. exactly on texel centres, so linear
+// is bit-exact here — and it is what keeps the sample correct if a future caller
+// ever reads the buffer at a different resolution.
+bool GPUViewport::ensureClipTarget(int viewportW, int viewportH)
+{
+    if (viewportW <= 0 || viewportH <= 0) return false;
+
+    GLint prevDrawFbo = 0;
+    GLint prevReadFbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDrawFbo);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
+
+    if (m_clipFbo == 0) glGenFramebuffers(1, &m_clipFbo);
+    if (m_clipTex == 0) glGenTextures(1, &m_clipTex);
+    if (m_clipFbo == 0 || m_clipTex == 0) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
+        return false;
+    }
+
+    if (viewportW != m_clipTexW || viewportH != m_clipTexH) {
+        glBindTexture(GL_TEXTURE_2D, m_clipTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, viewportW, viewportH, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, m_clipFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, m_clipTex, 0);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            qWarning("Clip FBO incomplete: %x", status);
+            m_clipTexW = 0;
+            m_clipTexH = 0;
+            m_clipOwner = nullptr;
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
+            return false;
+        }
+        m_clipTexW = viewportW;
+        m_clipTexH = viewportH;
+        // The buffer was reallocated: whatever it held is gone.
+        m_clipOwner = nullptr;
+    }
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
+    return true;
+}
+
 // ── VAO binding helpers ───────────────────────────────────────
 
 void GPUViewport::bindMainVao()
@@ -384,13 +479,80 @@ void GPUViewport::resetUniformCache()
     m_uc = UniformCache{};
 }
 
-void GPUViewport::setMainUniforms(const QMatrix4x4& mvp, float opacity,
-                                   bool hasMask, float maskDensity)
+void GPUViewport::setClipAlphaEnabled(bool enabled)
 {
+    const bool want = enabled && m_clipTex != 0 && m_clipTexW > 0 && m_clipTexH > 0;
+    if (want == m_clipEnabled) return;
+    m_clipEnabled = want;
+    // Unit 3 is the clip's alone (main uses 0/1, blend 0/1/2), so the binding can
+    // be made once per arm instead of per tile draw. Leave unit 0 active: every
+    // draw path assumes it.
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, m_clipEnabled ? m_clipTex : 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+void GPUViewport::resetClipAlpha()
+{
+    setClipAlphaEnabled(false);
+    m_clipOwner = nullptr;
+}
+
+void GPUViewport::applyMainClipUniforms()
+{
+    const float hc = m_clipEnabled ? 1.0f : 0.0f;
+    const QVector2D size(static_cast<float>(m_clipTexW),
+                         static_cast<float>(m_clipTexH));
+    // The size is part of the cache key, not just the flag: a document resize
+    // reallocates the buffer while the flag may well stay 1, and a stale
+    // uClipSize would offset every clip lookup.
+    if (qFuzzyCompare(1.0f + m_uc.mainHasClip, 1.0f + hc)
+        && (hc <= 0.0f || m_uc.mainClipSize == size))
+        return;
+    m_mainProg->setUniformValue(m_mainU.hasClip, hc);
+    // Pinned even while disarmed: left at its default the sampler would share
+    // unit 0 with uTexture, which is legal but reads as a mistake.
+    m_mainProg->setUniformValue(m_mainU.clipTexture, 3);
+    m_uc.mainHasClip = hc;
+    if (hc > 0.0f) {
+        m_mainProg->setUniformValue(m_mainU.clipSize, size);
+        m_uc.mainClipSize = size;
+    }
+}
+
+void GPUViewport::applyBlendClipUniforms()
+{
+    const float hc = m_clipEnabled ? 1.0f : 0.0f;
+    m_blendProg->setUniformValue(m_blendU.hasClip, hc);
+    m_blendProg->setUniformValue(m_blendU.clipTexture, 3);
+    if (hc > 0.0f) {
+        m_blendProg->setUniformValue(m_blendU.clipSize,
+                                     QVector2D(static_cast<float>(m_clipTexW),
+                                               static_cast<float>(m_clipTexH)));
+    }
+}
+
+void GPUViewport::setMainUniforms(const QMatrix4x4& mvp, float opacity,
+                                   bool hasMask, float maskDensity,
+                                   float fillOpacity)
+{
+    // Fill rides in the opacity uniform — see the declaration for why. One
+    // factor, so the uniform cache below keeps working unchanged.
+    opacity *= std::clamp(fillOpacity, 0.0f, 1.0f);
     m_mainProg->setUniformValue(m_mainU.texture, 0);
     m_mainProg->setUniformValue(m_mainU.maskTexture, 1);
+    // Follows the arm state, which is off for everything but a clipped layer's
+    // own merge — so no other main-shader draw can pick a clip up.
+    applyMainClipUniforms();
     setMainSourcePremultiplied(false);
     setMainAlphaWeightedSampling(true);
+    // Off by default for every main-shader draw: only the doc→screen view steps
+    // opt in (drawProjection, top-level popGroupFbo), so a layer drawn by the
+    // live compositor can never pick them up and drift from the CPU truth.
+    setMainSharpMagnification(false);
+    // Likewise: only the projection texture carries a mip pyramid, so every
+    // other draw must sample level 0.
+    setMainMipLevels(0);
 
     float hm = hasMask ? 1.0f : 0.0f;
     if (m_uc.mainTransform != mvp) {
@@ -603,6 +765,23 @@ void GPUViewport::setMainAlphaWeightedSampling(bool enabled)
     m_uc.mainAlphaWeightedSampling = value;
 }
 
+void GPUViewport::setMainSharpMagnification(bool enabled)
+{
+    const float value = enabled ? 1.0f : 0.0f;
+    if (qFuzzyCompare(1.0f + m_uc.mainSharpMagnify, 1.0f + value))
+        return;
+    m_mainProg->setUniformValue(m_mainU.sharpMagnify, value);
+    m_uc.mainSharpMagnify = value;
+}
+
+void GPUViewport::setMainMipLevels(int levels)
+{
+    if (m_uc.mainMipLevels == levels)
+        return;
+    m_mainProg->setUniformValue(m_mainU.mipLevels, levels);
+    m_uc.mainMipLevels = levels;
+}
+
 void GPUViewport::setMainTexture(GLenum unit, GLuint tex)
 {
     glActiveTexture(unit);
@@ -639,6 +818,7 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
                                   const QMatrix4x4& mvp,
                                   int blendMode,
                                   float opacity,
+                                  float fillOpacity,
                                   bool hasMask,
                                   float maskDensity,
                                   int viewportW,
@@ -650,7 +830,9 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
         applyFixedBlend(static_cast<int>(BlendMode::Normal));
         m_mainProg->bind();
         m_vao.bind();
-        setMainUniforms(mvp, opacity, hasMask, maskDensity);
+        // The mode is already being approximated as Normal here, so Fill folds
+        // into the coverage like Normal's does.
+        setMainUniforms(mvp, opacity, hasMask, maskDensity, fillOpacity);
         setMainTexture(GL_TEXTURE0, srcTexture);
         setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
         setMaskUVUniforms(maskUvScale, maskUvOffset);
@@ -709,12 +891,19 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
                                  static_cast<float>(viewportH));
     m_blendProg->setUniformValue(m_blendU.blendMode, blendModeMap(blendMode));
     m_blendProg->setUniformValue(m_blendU.opacity, opacity);
+    m_blendProg->setUniformValue(m_blendU.fillOpacity, fillOpacity);
     m_blendProg->setUniformValue(m_blendU.hasMask, hasMask ? 1.0f : 0.0f);
     m_blendProg->setUniformValue(m_blendU.maskDensity, maskDensity);
     m_blendProg->setUniformValue(m_blendU.maskUvScale, maskUvScale);
     m_blendProg->setUniformValue(m_blendU.maskUvOffset, maskUvOffset);
     m_blendProg->setUniformValue(m_blendU.srcPremultiplied, 0.0f);
     m_blendProg->setUniformValue(m_blendU.dstPremultiplied, 1.0f);
+    // A layer draw, never the view step (see setMainSharpMagnification): the
+    // layer's own scaling is baked into the document by the CPU compositor with
+    // a smooth filter, so the GPU must magnify it the same way.
+    m_blendProg->setUniformValue(m_blendU.sharpMagnify, 0.0f);
+    m_blendProg->setUniformValue(m_blendU.mipLevels, 0);
+    applyBlendClipUniforms();
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, srcTexture);
@@ -734,6 +923,7 @@ void GPUViewport::drawShaderBlend(GLuint srcTexture,
 
 void GPUViewport::drawAdjustmentPass(int adjustmentType,
                                      float opacity,
+                                     float fillOpacity,
                                      GLuint maskTexture,
                                      bool hasMask,
                                      float maskDensity,
@@ -752,7 +942,12 @@ void GPUViewport::drawAdjustmentPass(int adjustmentType,
                                      const QColor& solidColor,
                                      int solidBlendMode)
 {
-    if (adjustmentType < 0 || opacity <= 0.0f)
+    const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+    // Fill 0 is the adjustment contributing nothing, for every blend mode: the
+    // bare coverage goes to 0 and B(Cb, neutral) == Cb, so the regrouped
+    // composite below collapses to the untouched backdrop. Skipping the pass
+    // outright is that result without the full-target blit and draw.
+    if (adjustmentType < 0 || opacity <= 0.0f || fill <= 0.0f)
         return;
     if (!m_adjustProg || !m_adjustProg->isLinked())
         return;
@@ -796,6 +991,7 @@ void GPUViewport::drawAdjustmentPass(int adjustmentType,
                                   static_cast<float>(viewportW),
                                   static_cast<float>(viewportH));
     m_adjustProg->setUniformValue(m_adjustU.opacity, opacity);
+    m_adjustProg->setUniformValue(m_adjustU.fillOpacity, fill);
     m_adjustProg->setUniformValue(m_adjustU.hasMask, hasMask ? 1.0f : 0.0f);
     m_adjustProg->setUniformValue(m_adjustU.maskDensity, maskDensity);
     m_adjustProg->setUniformValue(m_adjustU.adjustmentType, adjustmentType);
@@ -862,9 +1058,13 @@ void GPUViewport::drawAdjustmentPass(int adjustmentType,
 
 // ── Group FBO ──────────────────────────────────────────────────
 
-void GPUViewport::pushGroupFbo(int vpW, int vpH)
+void GPUViewport::pushGroupFbo(int vpW, int vpH, bool seedFromTarget)
 {
     unsigned int fbo = 0, tex = 0;
+    // Captured before anything is rebound: the Pass Through seed copies out of
+    // whatever is currently being drawn into.
+    GLint srcFbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &srcFbo);
     // Reuse a pooled canvas-sized FBO when one matches; purge stale sizes so a
     // document resize doesn't leave dead full-canvas textures behind. The pool
     // exists because the live compositor pushes a group FBO every interactive
@@ -923,8 +1123,37 @@ void GPUViewport::pushGroupFbo(int vpW, int vpH)
     glDisable(GL_SCISSOR_TEST);
 
     glViewport(0, 0, vpW, vpH);
-    glClearColor(0, 0, 0, 0);
-    glClear(GL_COLOR_BUFFER_BIT);
+
+    // A Pass Through group's children blend against the layers *below* the
+    // group, so its buffer starts as the backdrop rather than as transparency.
+    // The copy is a straight blit because both sides are the same canvas-sized
+    // render target in the same canvas-NDC space (the live stack is always
+    // isolated into one — LayerCompositor::composite), which is exactly the
+    // condition tested here: a differently-sized target is the screen, where
+    // the "backdrop" would be the canvas decorations, so there is nothing we
+    // would want to seed from and the usual clear applies.
+    bool seeded = false;
+    if (seedFromTarget && savedVp[2] == vpW && savedVp[3] == vpH) {
+        auto* extra = QOpenGLContext::currentContext()
+                          ? QOpenGLContext::currentContext()->extraFunctions()
+                          : nullptr;
+        if (extra) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(srcFbo));
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+            extra->glBlitFramebuffer(savedVp[0], savedVp[1],
+                                     savedVp[0] + vpW, savedVp[1] + vpH,
+                                     0, 0, vpW, vpH,
+                                     GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            // Back to binding both targets at the new FBO, which is the
+            // state the clear path below leaves behind.
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            seeded = true;
+        }
+    }
+    if (!seeded) {
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
     m_groupFboStack.push_back(
         {fbo, tex, vpW, vpH,
          {savedVp[0], savedVp[1], savedVp[2], savedVp[3]},
@@ -933,14 +1162,84 @@ void GPUViewport::pushGroupFbo(int vpW, int vpH)
 
 }
 
+bool GPUViewport::beginClipAlphaCapture(int vpW, int vpH, const void* owner)
+{
+    if (m_clipCapturing) return false;
+    if (!ensureClipTarget(vpW, vpH)) return false;
+
+    // Same bookkeeping as pushGroupFbo — saved viewport/scissor, scissor off for
+    // the canvas-sized render — but onto a buffer the pool does not own, and
+    // with no composite-back on pop. See the comments there for why each piece
+    // is needed.
+    GLint savedVp[4] = {0, 0, vpW, vpH};
+    glGetIntegerv(GL_VIEWPORT, savedVp);
+    GLint savedScissor[4] = {0, 0, vpW, vpH};
+    glGetIntegerv(GL_SCISSOR_BOX, savedScissor);
+    const GLboolean scissorOn = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_clipFbo);
+    glViewport(0, 0, vpW, vpH);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    m_groupFboStack.push_back(
+        {m_clipFbo, m_clipTex, vpW, vpH,
+         {savedVp[0], savedVp[1], savedVp[2], savedVp[3]},
+         {savedScissor[0], savedScissor[1], savedScissor[2], savedScissor[3]},
+         scissorOn});
+
+    // The base is captured UNCLIPPED: a base is by definition not itself part of
+    // the run, and leaving the previous arm set would multiply the old alpha in.
+    setClipAlphaEnabled(false);
+    m_clipCapturing = true;
+    m_clipOwner = owner;
+    return true;
+}
+
+void GPUViewport::endClipAlphaCapture()
+{
+    if (!m_clipCapturing) return;
+    m_clipCapturing = false;
+    if (m_groupFboStack.empty()) return;
+
+    const auto entry = m_groupFboStack.back();
+    m_groupFboStack.pop_back();
+
+    // Restore the target and its viewport/scissor exactly as popGroupFbo does,
+    // but draw nothing: the texture is the result, and the buffer is not pooled.
+    if (!m_groupFboStack.empty())
+        glBindFramebuffer(GL_FRAMEBUFFER, m_groupFboStack.back().fbo);
+    else
+        glBindFramebuffer(GL_FRAMEBUFFER, m_compositeBaseFbo);
+    glViewport(entry.vp[0], entry.vp[1], entry.vp[2], entry.vp[3]);
+    glScissor(entry.scissorBox[0], entry.scissorBox[1],
+              entry.scissorBox[2], entry.scissorBox[3]);
+    if (entry.scissorEnabled)
+        glEnable(GL_SCISSOR_TEST);
+    else
+        glDisable(GL_SCISSOR_TEST);
+}
+
 void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                const QPointF& canvasHalfExtents,
                                const QMatrix4x4& viewMvp,
-                               bool editingMask)
+                               bool editingMask,
+                               bool passThrough,
+                               std::optional<float> fillOpacity)
 {
     if (m_groupFboStack.empty()) return;
     auto entry = m_groupFboStack.back();
     m_groupFboStack.pop_back();
+
+    // Fill Opacity of whatever this pop composites back. Reads 1 for a Group
+    // (groups have no Fill) and for a styled layer (its Fill is already in the
+    // styled base the FBO was drawn from), so the only case it is not 1 is the
+    // one this pop is responsible for: a Layer node that isolated itself for
+    // its Single-Layer-Mode adjustments, whose Fill applies once to the
+    // finished result — the same place the CPU path applies it.
+    const float nodeFill =
+        std::clamp(fillOpacity.value_or(groupNode->compositeFillOpacity()), 0.0f, 1.0f);
 
     // Restore parent FBO. At the top level this is m_compositeBaseFbo — 0
     // (screen) normally, or the scene FBO while a managed display composite is
@@ -976,8 +1275,73 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         mvp.scale(static_cast<float>(canvasHalfExtents.x()),
                   static_cast<float>(canvasHalfExtents.y()));
     }
+    // At the top level this draw is doc→screen — the same pure view mapping
+    // drawProjection performs — so it must magnify with the same sub-texel box,
+    // otherwise a live frame of an isolated document looks softer than the idle
+    // projection and the canvas "pops" when a stroke ends. A nested pop is a 1:1
+    // copy into another canvas-NDC FBO, where the footprint is 1 either way.
+    // No pyramid either way: the group FBO is re-rendered every interactive
+    // frame, so minification keeps to level 0 rather than paying a
+    // glGenerateMipmap per frame — the pyramid-less path in
+    // SamplingShaderLib.hpp.
+    const bool viewStep = !nested;
 
-    if (needsShaderBlend(static_cast<int>(groupNode->blendMode))) {
+    if (passThrough) {
+        // Pass Through: the FBO was seeded with the backdrop (pushGroupFbo's
+        // seedFromTarget) and the children were composited on top of it, so it
+        // already holds "backdrop with the group applied". Merging it back is
+        // therefore an interpolation towards that result by the group's
+        // opacity, not a composite *over* the target — source-over would count
+        // the backdrop a second time and come out too opaque wherever it is
+        // semi-transparent. This is the fixed-function form of the CPU path's
+        // compositePassThroughStage, and it has to agree with it pixel for
+        // pixel.
+        //
+        // The main shader emits straight-alpha colour with uOpacity folded into
+        // the alpha it outputs, so with t in both uOpacity and the blend
+        // constant the factors below evaluate to
+        //   rgb: Cs·(As·t) + Cd·(1-t)   = premultiplied(src)·t + dst·(1-t)
+        //   a:   As·t      + Ad·(1-t)
+        // i.e. exactly mix(dst, src, t) on premultiplied colour and alpha.
+        const float t = std::clamp(groupNode->opacity, 0.0f, 1.0f);
+        glBlendColor(0.0f, 0.0f, 0.0f, t);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA,
+                            GL_ONE, GL_ONE_MINUS_CONSTANT_ALPHA);
+        glBlendEquation(GL_FUNC_ADD);
+        glEnable(GL_BLEND);
+
+        m_mainProg->bind();
+        m_vao.bind();
+        m_mainProg->setUniformValue(m_mainU.transform, mvp);
+        m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
+        m_mainProg->setUniformValue(m_mainU.texture, 0);
+        m_mainProg->setUniformValue(m_mainU.opacity, t);
+        m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
+        m_mainProg->setUniformValue(m_mainU.instanced, 0);
+        // Follows the clip arm state, which LayerCompositor sets only around
+        // the pop of a clipped Layer node that isolated itself for its
+        // Single-Layer-Mode adjustments: the clip then applies once, to the
+        // composed result, instead of to each pass inside the FBO.
+        applyMainClipUniforms();
+        setMainSourcePremultiplied(true);
+        setMainAlphaWeightedSampling(true);
+        setMainSharpMagnification(viewStep);
+        setMainMipLevels(0);
+        // Same render-target V-flip as the branches below.
+        setUVUniforms(QVector2D(1.0f, -1.0f), QVector2D(0.0f, 1.0f));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, entry.tex);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        setMainSharpMagnification(false);
+        setMainSourcePremultiplied(false);
+        setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
+
+        // Restore the standard source-over factors: these constant-alpha ones
+        // are this draw's alone. The blend *constant* is left as it is on
+        // purpose — nothing else selects a GL_CONSTANT_* factor, so it is read
+        // by no other draw, and re-setting it would only be noise.
+        applyFixedBlend(static_cast<int>(BlendMode::Normal));
+    } else if (needsShaderBlend(static_cast<int>(groupNode->mergeBlendMode()))) {
         // Two-pass blend: copy the current target (dst) into m_blendTex, then run
         // the blend shader sampling src = group FBO, dst = m_blendTex. All sizing
         // uses the restored target viewport (entry.vp) — not the canvas-sized FBO —
@@ -1027,14 +1391,19 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
                                          static_cast<float>(tw),
                                          static_cast<float>(th));
             m_blendProg->setUniformValue(m_blendU.blendMode,
-                                         blendModeMap(static_cast<int>(groupNode->blendMode)));
+                                         blendModeMap(static_cast<int>(groupNode->mergeBlendMode())));
             m_blendProg->setUniformValue(m_blendU.opacity, groupNode->opacity);
+            m_blendProg->setUniformValue(m_blendU.fillOpacity, nodeFill);
             m_blendProg->setUniformValue(m_blendU.hasMask, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskDensity, 0.0f);
             m_blendProg->setUniformValue(m_blendU.maskUvScale, QVector2D(1.0f, 1.0f));
             m_blendProg->setUniformValue(m_blendU.maskUvOffset, QVector2D(0.0f, 0.0f));
             m_blendProg->setUniformValue(m_blendU.srcPremultiplied, 1.0f);
             m_blendProg->setUniformValue(m_blendU.dstPremultiplied, 1.0f);
+            m_blendProg->setUniformValue(m_blendU.sharpMagnify,
+                                         viewStep ? 1.0f : 0.0f);
+            m_blendProg->setUniformValue(m_blendU.mipLevels, 0);
+            applyBlendClipUniforms();
 
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, entry.tex);
@@ -1061,32 +1430,44 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
             m_mainProg->setUniformValue(m_mainU.transform, mvp);
             m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
             m_mainProg->setUniformValue(m_mainU.texture, 0);
-            m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
+            m_mainProg->setUniformValue(m_mainU.opacity,
+                                        groupNode->opacity * nodeFill);
             m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
             m_mainProg->setUniformValue(m_mainU.maskDensity, 0.0f);
             m_mainProg->setUniformValue(m_mainU.instanced, 0);
+            applyMainClipUniforms();
             setMainSourcePremultiplied(true);
             setMainAlphaWeightedSampling(true);
+            setMainSharpMagnification(viewStep);
+            setMainMipLevels(0);
             setUVUniforms(QVector2D(1.0f, -1.0f), QVector2D(0.0f, 1.0f));
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, entry.tex);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            setMainSharpMagnification(false);
             setMainSourcePremultiplied(false);
             setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
         }
     } else {
         // Normal blend: draw with applyBlendMode
-        applyFixedBlend(static_cast<int>(groupNode->blendMode));
+        applyFixedBlend(static_cast<int>(groupNode->mergeBlendMode()));
         m_mainProg->bind();
         m_vao.bind();
         m_mainProg->setUniformValue(m_mainU.transform, mvp);
         m_uc.mainTransform = mvp; // keep cache coherent (see renderCanvasDecorations)
         m_mainProg->setUniformValue(m_mainU.texture, 0);
-        m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity);
+        m_mainProg->setUniformValue(m_mainU.opacity, groupNode->opacity * nodeFill);
         m_mainProg->setUniformValue(m_mainU.hasMask, 0.0f);
         m_mainProg->setUniformValue(m_mainU.instanced, 0);
+        // Follows the clip arm state, which LayerCompositor sets only around
+        // the pop of a clipped Layer node that isolated itself for its
+        // Single-Layer-Mode adjustments: the clip then applies once, to the
+        // composed result, instead of to each pass inside the FBO.
+        applyMainClipUniforms();
         setMainSourcePremultiplied(true);
         setMainAlphaWeightedSampling(true);
+        setMainSharpMagnification(viewStep);
+        setMainMipLevels(0);
         // The group FBO is an OpenGL render target (row 0 = bottom), but the
         // shared quad's UVs assume an uploaded image (row 0 = top). Flip V while
         // sampling so the composed group is not drawn upside-down (which, because
@@ -1097,6 +1478,7 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, entry.tex);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        setMainSharpMagnification(false);
         setMainSourcePremultiplied(false);
         setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
 
@@ -1117,6 +1499,26 @@ void GPUViewport::popGroupFbo(LayerTreeNode* groupNode,
     }
 }
 
+// ── Pasteboard dot pattern ──────────────────────────────────────
+
+void GPUViewport::renderPasteboardDots()
+{
+    if (!m_dotProg || !m_dotProg->isLinked()) return;
+
+    auto* t = ThemeManager::instance()->current();
+    const QColor bg = t->canvasBackground;
+    const QColor dot = t->canvasDotColor;
+
+    m_dotProg->bind();
+    m_dotProg->setUniformValue(m_dotU.bgColor, bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
+    m_dotProg->setUniformValue(m_dotU.dotColor, dot.redF(), dot.greenF(), dot.blueF(), 1.0f);
+    m_dotProg->setUniformValue(m_dotU.spacing, 20.0f);
+    m_dotProg->setUniformValue(m_dotU.radius, 1.4f);
+    m_vao.bind();
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    m_dotProg->release();
+}
+
 // ── Canvas decorations ─────────────────────────────────────────
 
 void GPUViewport::renderCanvasDecorations(const RenderParams& p,
@@ -1130,17 +1532,69 @@ void GPUViewport::renderCanvasDecorations(const RenderParams& p,
     QMatrix4x4 sm = vm;
     sm.scale(hx, hy);
 
-    // Shadow
-    m_solidProg->bind();
-    m_solidProg->setUniformValue(m_solidU.transform, sm);
-    QMatrix4x4 shadowMvp = sm;
-    shadowMvp.translate(0.006f, -0.006f);
-    m_solidProg->setUniformValue(m_solidU.transform, shadowMvp);
-    m_solidProg->setUniformValue(m_solidU.color, 0.0f, 0.0f, 0.0f, 0.3f);
-    m_vao.bind();
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glBlendEquation(GL_FUNC_ADD);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // Shadow — two soft passes (a tight "contact" shadow where the canvas
+    // meets the pasteboard, plus a wider, fainter "ambient" one), both
+    // evaluated as an analytic Gaussian blur of the canvas's screen-space
+    // rect rather than drawn as an offset copy of the canvas quad. The old
+    // approach drew one hard-edged quad the exact size of the canvas,
+    // nudged diagonally by a few pixels: the canvas (drawn on top right
+    // afterwards) then fully covered the two edges the offset moved *toward*
+    // (top/left), leaving a visible sliver only on the other two. Deriving
+    // the falloff from distance-to-rect instead means all four edges — and
+    // their corners — fall off identically and smoothly by construction, so
+    // there is no per-edge special-casing to get wrong.
+    if (m_shadowProg && m_shadowProg->isLinked()) {
+        QVector4D corners[4] = {
+            vm * QVector4D(-hx, -hy, 0, 1),
+            vm * QVector4D( hx, -hy, 0, 1),
+            vm * QVector4D(-hx,  hy, 0, 1),
+            vm * QVector4D( hx,  hy, 0, 1),
+        };
+        float leftNdc = 1e9f, rightNdc = -1e9f;
+        float bottomNdc = 1e9f, topNdc = -1e9f;
+        for (auto& c : corners) {
+            float nx = c.x() / c.w();
+            float ny = c.y() / c.w();
+            leftNdc   = std::min(leftNdc, nx);
+            rightNdc  = std::max(rightNdc, nx);
+            bottomNdc = std::min(bottomNdc, ny);
+            topNdc    = std::max(topNdc, ny);
+        }
+        // Device pixels (gl_FragCoord space), matching GL_VIEWPORT rather
+        // than RenderParams::viewportW/H (logical pixels) — the two differ
+        // under a HiDPI device-pixel ratio.
+        GLint vp[4];
+        glGetIntegerv(GL_VIEWPORT, vp);
+        const float leftPx   = (leftNdc   + 1.0f) * 0.5f * vp[2] + vp[0];
+        const float rightPx  = (rightNdc  + 1.0f) * 0.5f * vp[2] + vp[0];
+        const float bottomPx = (bottomNdc + 1.0f) * 0.5f * vp[3] + vp[1];
+        const float topPx    = (topNdc    + 1.0f) * 0.5f * vp[3] + vp[1];
+        const QVector2D rectCenter((leftPx + rightPx) * 0.5f, (bottomPx + topPx) * 0.5f);
+        const QVector2D rectHalfSize((rightPx - leftPx) * 0.5f, (topPx - bottomPx) * 0.5f);
+        const float dpr = p.viewportW > 0
+            ? static_cast<float>(vp[2]) / static_cast<float>(p.viewportW) : 1.0f;
+
+        m_shadowProg->bind();
+        m_vao.bind();
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBlendEquation(GL_FUNC_ADD);
+        m_shadowProg->setUniformValue(m_shadowU.rectHalfSize, rectHalfSize);
+
+        // Ambient: wide, very soft, barely offset — the diffuse falloff a
+        // raised document casts over the whole pasteboard.
+        m_shadowProg->setUniformValue(m_shadowU.rectCenter,
+            rectCenter + QVector2D(0.0f, -6.0f * dpr));
+        m_shadowProg->setUniformValue(m_shadowU.sigma, 22.0f * dpr);
+        m_shadowProg->setUniformValue(m_shadowU.color, 0.0f, 0.0f, 0.0f, 0.20f);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        // Contact: tight and a touch more opaque, anchoring the edge itself.
+        m_shadowProg->setUniformValue(m_shadowU.rectCenter,
+            rectCenter + QVector2D(0.0f, -2.0f * dpr));
+        m_shadowProg->setUniformValue(m_shadowU.sigma, 6.0f * dpr);
+        m_shadowProg->setUniformValue(m_shadowU.color, 0.0f, 0.0f, 0.0f, 0.28f);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
 
     // Checkerboard: compact, screen-space squares like professional editors.
     if (m_checkerTexture) {
@@ -1171,18 +1625,6 @@ void GPUViewport::renderCanvasDecorations(const RenderParams& p,
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         m_mainProg->release();
     }
-
-    // Border
-    m_solidProg->bind();
-    m_solidProg->setUniformValue(m_solidU.transform, sm);
-    m_solidProg->setUniformValue(m_solidU.color, 0.45f, 0.45f, 0.45f, 1.0f);
-    m_fboVao.bind();
-    m_fboVbo.bind();
-    glBufferData(GL_ARRAY_BUFFER, sizeof(outlineVertices), outlineVertices, GL_STATIC_DRAW);
-    glDrawArrays(GL_LINE_LOOP, 0, 4);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
-    m_fboVao.release();
-    m_solidProg->release();
 
     m_vao.bind();
     m_mainProg->bind();
@@ -1326,6 +1768,22 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
     m_renderCache.markInvalid();
 
     auto flat = doc->flatten();
+    // Deleting a layer doesn't run cleanupDocumentLayers (tab close only), so
+    // drop the style bakers of nodes that are gone before reusing the pool.
+    m_styleBakes.retain(flat);
+
+    // Reap layers removed since the last sync. They were parked by the
+    // controller precisely because this is the first point after the removal
+    // with a current GL context; freeing here and then letting the nodes die
+    // keeps their textures from outliving the document.
+    if (!doc->retiredNodes.empty()) {
+        std::vector<unsigned int> textures;
+        std::vector<unsigned int> framebuffers;
+        for (auto& retired : doc->retiredNodes)
+            collectNodeGlNames(retired.get(), textures, framebuffers);
+        deleteGlNames(textures, framebuffers);
+        doc->retiredNodes.clear();
+    }
     for (auto* node : flat) {
         if (!node->layer) continue;
         auto* layer = node->layer.get();
@@ -1402,21 +1860,36 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
         // previewed live on the GPU (FBO isolation in LayerCompositor) — that is
         // the whole point of the GPU path. The CPU projection commit still bakes
         // them as the source of truth; this only affects the live preview.
+        //
+        // The styled base underneath computeEffectedImage() is the costly part
+        // (full-res tile composite + mask pass + the OpenCV blur for
+        // shadows/glows) — ensureFresh() keeps it off this (UI) thread by
+        // baking it on a worker when a style/pixel/mask change actually
+        // requires a rebuild. While that bake is in flight it returns false:
+        // this node's cache-backed upload is skipped for the frame and the
+        // canvas draws the interim bake (a result the next edit superseded, see
+        // StyleBakePool::InterimBake) or else keeps the previous texture.
         if (node->usesEffectedPipeline() && !node->clippedAdjustmentsOnGpu()) {
-            QImage effected = node->computeEffectedImage();
-            if (!effected.isNull()) {
-                if (!node->effectedTexture)
-                    glGenTextures(1, &node->effectedTexture);
-                glBindTexture(GL_TEXTURE_2D, node->effectedTexture);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                             effected.width(), effected.height(),
-                             0, GL_RGBA, GL_UNSIGNED_BYTE,
-                             effected.constBits());
-                node->effectedTextureOutdated = false;
+            // The interim bake is the styled base alone, which equals the
+            // effected image only when no Single-Layer-Mode adjustment is baked
+            // on top — the ordinary styles-only layer. With adjustment children
+            // (text / masked shape hosts) uploading it would drop them, so
+            // don't ask for one and keep showing the last complete bake.
+            StyleBakePool::InterimBake interim;
+            const bool wantInterim = !node->hasVisibleAdjustmentChildren();
+            if (m_styleBakes.ensureFresh(node, node->effectedTexture != 0,
+                                         wantInterim ? &interim : nullptr)) {
+                QImage effected = node->computeEffectedImage();
+                if (!effected.isNull()) {
+                    uploadRgba8Texture(node->effectedTexture, effected);
+                    node->uploadedEffectedBounds = node->effectedBakeBounds();
+                    node->effectedTextureOutdated = false;
+                }
+            } else if (!interim.isNull()) {
+                // Preview only: effectedTextureOutdated deliberately stays set,
+                // so the fresh bake still replaces this the moment it lands.
+                uploadRgba8Texture(node->effectedTexture, interim.image);
+                node->uploadedEffectedBounds = interim.bounds;
             }
         }
 
@@ -1426,22 +1899,25 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
         // it (instead of a per-frame computeEffectedImage CPU bake). Uploaded only
         // when outdated — i.e. on a style/pixel/mask change — never per adjustment
         // frame, so the costly style blur runs once and the drag stays on the GPU.
-        if (node->clippedAdjustmentsOnGpu() && !node->effects.empty()
+        // Same async bake as above: ensureFresh() returning false means it is
+        // still running on a worker, so upload the interim bake if there is one
+        // (the GPU applies the clipped adjustments over whatever styled base it
+        // gets) and otherwise keep showing the previous styledBaseTexture.
+        if (node->clippedAdjustmentsOnGpu() && node->hasEnabledEffects()
             && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)) {
-            QImage styled = node->computeStyledBaseImage();
-            if (!styled.isNull()) {
-                if (!node->styledBaseTexture)
-                    glGenTextures(1, &node->styledBaseTexture);
-                glBindTexture(GL_TEXTURE_2D, node->styledBaseTexture);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                             styled.width(), styled.height(),
-                             0, GL_RGBA, GL_UNSIGNED_BYTE,
-                             styled.constBits());
-                node->styledBaseTextureOutdated = false;
+            StyleBakePool::InterimBake interim;
+            if (m_styleBakes.ensureFresh(node, node->styledBaseTexture != 0,
+                                         &interim)) {
+                QImage styled = node->computeStyledBaseImage();
+                if (!styled.isNull()) {
+                    uploadRgba8Texture(node->styledBaseTexture, styled);
+                    node->uploadedStyledBaseBounds = node->styledBaseBakeBounds();
+                    node->styledBaseTextureOutdated = false;
+                }
+            } else if (!interim.isNull()) {
+                // Preview only — styledBaseTextureOutdated stays set.
+                uploadRgba8Texture(node->styledBaseTexture, interim.image);
+                node->uploadedStyledBaseBounds = interim.bounds;
             }
         }
 
@@ -1470,46 +1946,88 @@ void GPUViewport::syncLayersToGpu(Document* doc, Layer* editingMaskLayer)
     }
 }
 
+void GPUViewport::collectNodeGlNames(LayerTreeNode* node,
+                                     std::vector<unsigned int>& textures,
+                                     std::vector<unsigned int>& framebuffers)
+{
+    if (!node) return;
+
+    auto take = [](std::vector<unsigned int>& sink, unsigned int& name) {
+        if (name) {
+            sink.push_back(name);
+            name = 0;
+        }
+    };
+
+    take(textures, node->effectedTexture);
+    take(textures, node->styledBaseTexture);
+    m_styleBakes.release(node);
+
+    if (auto* layer = node->layer.get()) {
+        take(textures, layer->textureId);
+        take(textures, layer->maskTextureId);
+        take(framebuffers, layer->fbo);
+        take(framebuffers, layer->maskFbo);
+        for (int i = 1; i <= 3; ++i)
+            take(textures, layer->lodTextures[i]);
+        // The per-tile textures are the bulk of a layer's VRAM (256x256 RGBA8
+        // each) and nothing else frees them: RasterLayerStorage::clear() only
+        // drops the tile map, and neither RasterTile nor Layer has a
+        // destructor. Letting the map die first loses the names for good --
+        // they would stay resident until the GL context itself goes away.
+        bool hadTiles = false;
+        layer->rasterStorage.forEachTile([&](core::RasterTile& tile) {
+            take(textures, tile.textureId);
+            take(framebuffers, tile.fbo);
+            // cleanupDocumentLayers() runs on a LIVE tree, and a document can
+            // outlive the tab that showed it (DocumentContainer holds it by
+            // shared_ptr). Unlike a layer's base texture -- which syncLayersToGpu
+            // regenerates on sight of textureId == 0 -- a zeroed tile is only
+            // re-uploaded when the layer is flagged, so leaving the flags clear
+            // would render the layer blank. Mirror shallowClone()'s reset.
+            tile.texW = 0;
+            tile.texH = 0;
+            tile.dirtyGpu = true;
+            hadTiles = true;
+        });
+        if (hadTiles)
+            layer->pendingGpuUpload = true;
+    }
+
+    for (auto& child : node->children)
+        collectNodeGlNames(child.get(), textures, framebuffers);
+}
+
+void GPUViewport::deleteGlNames(std::vector<unsigned int>& textures,
+                                std::vector<unsigned int>& framebuffers)
+{
+    if (!textures.empty())
+        glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+    if (!framebuffers.empty())
+        glDeleteFramebuffers(static_cast<GLsizei>(framebuffers.size()),
+                             framebuffers.data());
+    textures.clear();
+    framebuffers.clear();
+}
+
 void GPUViewport::cleanupDocumentLayers(Document* doc)
 {
     initializeOpenGLFunctions();
     if (!doc) return;
-    auto flat = doc->flatten();
-    for (auto* node : flat) {
-        if (!node->layer) continue;
-        auto* layer = node->layer.get();
-        if (layer->textureId) {
-            glDeleteTextures(1, &layer->textureId);
-            layer->textureId = 0;
-        }
-        if (layer->fbo) {
-            glDeleteFramebuffers(1, &layer->fbo);
-            layer->fbo = 0;
-        }
-        if (layer->maskTextureId) {
-            glDeleteTextures(1, &layer->maskTextureId);
-            layer->maskTextureId = 0;
-        }
-        if (layer->maskFbo) {
-            glDeleteFramebuffers(1, &layer->maskFbo);
-            layer->maskFbo = 0;
-        }
-        if (node->effectedTexture) {
-            glDeleteTextures(1, &node->effectedTexture);
-            node->effectedTexture = 0;
-        }
-        if (node->styledBaseTexture) {
-            glDeleteTextures(1, &node->styledBaseTexture);
-            node->styledBaseTexture = 0;
-        }
-        // Clean up LOD textures
-        for (int i = 1; i <= 3; ++i) {
-            if (layer->lodTextures[i]) {
-                glDeleteTextures(1, &layer->lodTextures[i]);
-                layer->lodTextures[i] = 0;
-            }
-        }
-    }
+
+    std::vector<unsigned int> textures;
+    std::vector<unsigned int> framebuffers;
+    // collectNodeGlNames() recurses, so walk the roots rather than flatten():
+    // the flat list already contains every descendant and would visit each
+    // subtree twice.
+    for (auto& root : doc->roots)
+        collectNodeGlNames(root.get(), textures, framebuffers);
+    // A layer removed after the last sync is still parked; closing the tab is
+    // its final chance to be freed.
+    for (auto& retired : doc->retiredNodes)
+        collectNodeGlNames(retired.get(), textures, framebuffers);
+    doc->retiredNodes.clear();
+    deleteGlNames(textures, framebuffers);
 }
 
 // ── Tiling (delegated to TileRenderer) ─────────────────────────
@@ -1574,7 +2092,13 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
         bool shapeChanged = cache.dirty
             || !cache.shapeSnapshot
             || !ShapeVectorRenderer::sameShapeData(*cache.shapeSnapshot, *layer->shapeData);
-        bool zoomChanged = std::abs(cache.zoom - doc->zoom) > 0.0001f;
+        // zoomTarget, not zoom: keying on the live zoom would redo this CPU
+        // rasterization (plus a texture upload and an effects invalidation) on
+        // every frame of an animated zoom. Keying on the destination does it
+        // once, at the resolution the glide ends on — and spriteTransform is
+        // built from the shape's NDC bounds alone, independent of zoom, so the
+        // sprite stays correctly placed while the viewport eases there.
+        bool zoomChanged = std::abs(cache.zoom - doc->zoomTarget) > 0.0001f;
         bool docChanged = cache.documentSize != doc->size;
         bool transformChanged = cache.transformSnapshot != accum;
         bool scaleChanged = std::abs(cache.scaleX - curSx) > 0.0001f
@@ -1587,7 +2111,7 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
             *layer->shapeData,
             accum,
             doc->size,
-            doc->zoom,
+            doc->zoomTarget,
             p.canvasHalfExtents,
             p.viewportW,
             p.viewportH);
@@ -1596,7 +2120,7 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
             cache.image = sprite.image;
             cache.spriteTransform = sprite.spriteTransform;
             cache.dirty = false;
-            cache.zoom = doc->zoom;
+            cache.zoom = doc->zoomTarget;
             cache.documentSize = doc->size;
             cache.transformSnapshot = accum;
             cache.scaleX = curSx;
@@ -1619,9 +2143,17 @@ void GPUViewport::refreshShapeLayerSprites(Document* doc, const RenderParams& p)
 // blend/opacity/mask/effect (see DocumentCompositor). Mirrors how a
 // full-canvas, identity-transform layer is drawn, so orientation matches the
 // per-layer path exactly.
-bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMvp)
+bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMvp,
+                                 bool allowStale)
 {
-    const unsigned int tex = m_projection.update(p.doc);
+    unsigned int tex = m_projection.update(p.doc);
+    if (!tex && allowStale && m_projection.texture() != 0
+        && m_projection.size() == p.doc->size) {
+        // The projection for this generation is still being composited. Show
+        // the previous one rather than returning false: the fallback path has
+        // no channel view, so a frame of it would flash the plain composite.
+        tex = m_projection.texture();
+    }
     if (!tex) return false;
 
     const float hx = p.canvasHalfExtents.x();
@@ -1629,24 +2161,29 @@ bool GPUViewport::drawProjection(const RenderParams& p, const QMatrix4x4& viewMv
     QMatrix4x4 mvp = viewMvp;
     mvp.scale(hx, hy);
 
-    // Keep the texture state aligned with the live per-layer compositor. The
-    // main shader applies alpha-weighted sampling for straight-alpha content, so
-    // idle projection frames and live layer frames handle transparent edges the
-    // same way.
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
     // Normal/source-over blend so transparent areas reveal the checkerboard.
     applyFixedBlend(static_cast<int>(BlendMode::Normal));
     m_mainProg->bind();
     m_vao.bind();
     m_mainProg->setUniformValue(m_mainU.instanced, 0);
     setMainUniforms(mvp, 1.0f, false, 0.0f);
+    // doc→screen is a pure view mapping: the projection IS the CPU truth at
+    // document resolution, so how it is resampled here changes only the way
+    // those finished pixels are presented — never what they are. Hence both
+    // view-only sampling modes are enabled: a sub-texel box when magnifying,
+    // and the premultiplied mip pyramid ProjectionCache uploads when
+    // minifying (the "fit to window" case).
+    setMainSharpMagnification(true);
+    setMainMipLevels(m_projection.mipLevels());
+    // The pyramid is premultiplied — generating it from straight alpha would
+    // average the meaningless colour of transparent texels into every level.
+    setMainSourcePremultiplied(true);
     setMainTexture(GL_TEXTURE0, tex);
     setUVUniforms(QVector2D(1.0f, 1.0f), QVector2D(0.0f, 0.0f));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    setMainSourcePremultiplied(false);
+    setMainMipLevels(0);
+    setMainSharpMagnification(false);
     return true;
 }
 
@@ -1661,6 +2198,7 @@ void GPUViewport::render(const RenderParams& p)
     const QColor canvasBg = t->canvasBackground;
     glClearColor(canvasBg.redF(), canvasBg.greenF(), canvasBg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    renderPasteboardDots();
 
     if (!p.doc || !m_mainProg || !m_mainProg->isLinked()) return;
 
@@ -1681,7 +2219,7 @@ void GPUViewport::render(const RenderParams& p)
         static_cast<float>(p.doc->panOffset.y()));
     m_cachedViewMvp.scale(p.doc->zoom);
 
-    // Decorations (shadow, checkerboard, border)
+    // Decorations (shadow, checkerboard)
     renderCanvasDecorations(p, m_cachedViewMvp);
 
     // Scissor test — clip to canvas bounds
@@ -1706,10 +2244,20 @@ void GPUViewport::render(const RenderParams& p)
     }
     GLint vp[4];
     glGetIntegerv(GL_VIEWPORT, vp);
-    int sx = static_cast<int>(std::floor((leftNdc   + 1.0f) * 0.5f * vp[2] + vp[0]));
-    int sy = static_cast<int>(std::floor((bottomNdc + 1.0f) * 0.5f * vp[3] + vp[1]));
-    int sw = static_cast<int>(std::ceil ((rightNdc  - leftNdc)  * 0.5f * vp[2]));
-    int sh = static_cast<int>(std::ceil ((topNdc    - bottomNdc) * 0.5f * vp[3]));
+    // floor(left)/ceil(right) independently, then derive width/height from
+    // those — NOT ceil(right - left), which isn't the same when the two
+    // edges land on different fractional pixel offsets. That mismatch let the
+    // scissor rect end up a pixel short on one edge depending on zoom/pan,
+    // clipping the real content short and exposing the checkerboard beneath
+    // it along that edge.
+    float leftPx   = (leftNdc   + 1.0f) * 0.5f * vp[2] + vp[0];
+    float rightPx  = (rightNdc  + 1.0f) * 0.5f * vp[2] + vp[0];
+    float bottomPx = (bottomNdc + 1.0f) * 0.5f * vp[3] + vp[1];
+    float topPx    = (topNdc    + 1.0f) * 0.5f * vp[3] + vp[1];
+    int sx = static_cast<int>(std::floor(leftPx));
+    int sy = static_cast<int>(std::floor(bottomPx));
+    int sw = static_cast<int>(std::ceil(rightPx)) - sx;
+    int sh = static_cast<int>(std::ceil(topPx))   - sy;
 
     glEnable(GL_SCISSOR_TEST);
     glScissor(sx, sy, sw, sh);
@@ -1765,9 +2313,15 @@ void GPUViewport::render(const RenderParams& p)
         // Clipped-adjustment layers handled live on the GPU never upload an
         // effectedTexture (see syncLayersToGpu) — don't force a sync (and thus a
         // CPU bake) for them; LayerCompositor isolates them per frame instead.
+        // While the node's style bake is on a worker the texture stays
+        // outdated by design — re-entering the full syncLayersToGpu for it
+        // every frame would re-upload every mask and drop the projection
+        // cache for nothing. StyleBakePool's ready callback schedules the
+        // repaint that performs the upload once the result lands.
         if (node->usesEffectedPipeline()
             && !node->clippedAdjustmentsOnGpu()
-            && (node->effectedTextureOutdated || node->effectedTexture == 0)) {
+            && (node->effectedTextureOutdated || node->effectedTexture == 0)
+            && !m_styleBakes.isBuilding(node)) {
             needsLayerSync = true;
             break;
         }
@@ -1776,8 +2330,9 @@ void GPUViewport::render(const RenderParams& p)
         // style/pixel/mask change (NOT on adjustment param drags), so this fires
         // once after such a change and never per drag frame — the drag itself
         // reuses the texture and runs entirely through drawAdjustmentPass.
-        if (node->clippedAdjustmentsOnGpu() && !node->effects.empty()
-            && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)) {
+        if (node->clippedAdjustmentsOnGpu() && node->hasEnabledEffects()
+            && (node->styledBaseTextureOutdated || node->styledBaseTexture == 0)
+            && !m_styleBakes.isBuilding(node)) {
             needsLayerSync = true;
             break;
         }
@@ -1827,12 +2382,21 @@ void GPUViewport::render(const RenderParams& p)
     // per-layer GPU compositor below — this is intentional (keeping the active
     // layer on the GPU); the two paths share blend semantics
     // via renderer/BlendRules.hpp. Overlays are always drawn on top afterwards.
+    // A non-default channel view (a hidden colour component, a visible alpha
+    // or spot channel, Quick Mask) is applied by ProjectionCache as a CPU
+    // post-pass in document space — see renderer/ChannelView.hpp for why it
+    // lives there and not in a screen-space shader. The canvas therefore stays
+    // on the projection for those frames, including live ones: falling back to
+    // the per-layer compositor would drop the channel view mid-stroke and show
+    // the full-colour composite instead.
+    const bool channelView = !channelview::isDefaultView(p.doc);
     const bool useProjection = m_useProjectionDisplay
-                            && !p.liveEdit
-                            && !p.editingMask
                             && !p.grayscaleMaskView
                             && !p.hasPreview
-                            && !p.showMaskOverlay;
+                            && (channelView
+                                || (!p.liveEdit
+                                    && !p.editingMask
+                                    && !p.showMaskOverlay));
 
     // Color-managed display (final stage): the document composite — projection
     // OR live per-layer — is rendered into the scene FBO, then resolved to screen
@@ -1858,7 +2422,7 @@ void GPUViewport::render(const RenderParams& p)
                           && ensureDisplayLut(p)
                           && beginManagedComposite(p);
 
-        if (useProjection && drawProjection(p, m_cachedViewMvp)) {
+        if (useProjection && drawProjection(p, m_cachedViewMvp, channelView)) {
             // Scissor stays clipped to the canvas; blend stays on so transparent
             // projection pixels reveal the checkerboard drawn underneath.
             projectionShown = true;
@@ -1873,6 +2437,7 @@ void GPUViewport::render(const RenderParams& p)
                 compositor.composite(p.doc, m_cachedViewMvp, p.canvasHalfExtents,
                                      p.editingMask, p.grayscaleMaskView,
                                      p.hasPreview, p.previewTexture,
+                                     p.previewLayerRect,
                                      paintToolActive,
                                      p.showMaskOverlay, p.maskOverlayOpacity,
                                      this);

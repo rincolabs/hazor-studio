@@ -320,14 +320,25 @@ void LayerStylesDialog::addColorRow(QFormLayout* form, int row,
     connect(btn, &QPushButton::clicked, this, [this, row, key, updateButton]() {
         QColor current = effectAt(row).params.value(key).value<QColor>();
         auto* dlg = new ColorPickerDialog(current, ColorPickerMode::Foreground, this);
+        emit liveEditChanged(true);
+        // Live-update the preview as the user drags inside the still-open
+        // picker, exactly like a slider drag does, not just once on OK.
+        connect(dlg, &ColorPickerDialog::colorPreviewChanged, this,
+            [this, row, key, updateButton](const QColor& c) {
+                effectAt(row).params[key] = c;
+                updateButton(c);
+                emitPreview();
+            });
         connect(dlg, &ColorPickerDialog::colorAccepted, this,
             [this, row, key, updateButton](const QColor& picked) {
                 effectAt(row).params[key] = picked;
                 updateButton(picked);
                 emitPreview();
             });
+        connect(dlg, &QDialog::finished, this,
+            [this](int) { emit liveEditChanged(false); });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
     form->addRow(label, btn);
 }
@@ -381,6 +392,10 @@ void LayerStylesDialog::addIntRow(QFormLayout* form, int row, const QString& lab
         effectAt(row).params[key] = value;
         emitPreview();
     });
+    connect(slider, &QSlider::sliderPressed, this,
+            [this]() { emit liveEditChanged(true); });
+    connect(slider, &QSlider::sliderReleased, this,
+            [this]() { emit liveEditChanged(false); });
 
     form->addRow(label, container);
 }
@@ -442,6 +457,10 @@ void LayerStylesDialog::addDoubleRow(QFormLayout* form, int row, const QString& 
         effectAt(row).params[key] = static_cast<double>(value) / factor;
         emitPreview();
     });
+    connect(slider, &QSlider::sliderPressed, this,
+            [this]() { emit liveEditChanged(true); });
+    connect(slider, &QSlider::sliderReleased, this,
+            [this]() { emit liveEditChanged(false); });
 
     form->addRow(label, container);
 }

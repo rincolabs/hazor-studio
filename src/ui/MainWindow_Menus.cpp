@@ -29,8 +29,7 @@
 #include "ui/dialogs/RemoveBgDialog.hpp"
 #include "colorpicker/ColorPickerDialog.hpp"
 #include "core/SolidColorData.hpp"
-
-#include <QMessageBox>
+#include "ui/AppMessageDialog.hpp"
 
 // ── execToolDialog helper ─────────────────────────────────────────
 
@@ -119,10 +118,9 @@ void MainWindow::onMenuRemoveLayer()
     if (idx < 0) return;
 
     if (!m_ctrl->isLayerEmpty(idx)) {
-        auto ret = QMessageBox::question(this, tr("Delete Layer"),
-            tr("This layer is not empty. Delete it anyway?"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ret != QMessageBox::Yes) return;
+        if (!AppMessageDialog::confirm(this, tr("Delete Layer"),
+                tr("This layer is not empty. Delete it anyway?")))
+            return;
     }
 
     m_ctrl->removeSelectedNodes();
@@ -153,10 +151,20 @@ void MainWindow::onMenuFillLayer()
     auto* layer = m_ctrl->activeLayer();
     if (!layer) return;
 
+    if (m_menuColorDlg) {
+        m_menuColorDlg->raise();
+        m_menuColorDlg->activateWindow();
+        return;
+    }
+
+    // Modeless on purpose: a modal dialog blocks the canvas, and the picker's
+    // eyedropper has to be able to sample the image the fill is going into. The
+    // fill still happens only on OK, on whichever layer is active then.
     QColor initial = m_colorEngine ? m_colorEngine->foregroundColor() : Qt::white;
-    ColorPickerDialog dlg(initial, ColorPickerMode::Foreground, this);
-    if (dlg.exec() == QDialog::Accepted) {
-        QColor c = dlg.selectedColor();
+    auto* dlg = new ColorPickerDialog(initial, ColorPickerMode::Foreground, this);
+    m_menuColorDlg = dlg;
+    connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& c) {
+        if (!m_ctrl || !m_canvas || !m_ctrl->activeLayer()) return;
         m_ctrl->executeTool("fill_layer", {
             {"red", static_cast<double>(c.red())},
             {"green", static_cast<double>(c.green())},
@@ -165,7 +173,9 @@ void MainWindow::onMenuFillLayer()
         });
         m_canvas->syncLayersToGpu();
         m_canvas->update();
-    }
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->showModeless();
 }
 
 void MainWindow::createSolidColorLayer()
@@ -178,17 +188,27 @@ void MainWindow::createSolidColorLayer()
     if (!initial.isValid())
         initial = QColor(Qt::white);
 
-    ColorPickerDialog dlg(initial, ColorPickerMode::Foreground, this);
-    if (dlg.exec() != QDialog::Accepted)
-        return;   // cancel = no layer (no ghost layer left behind)
+    if (m_menuColorDlg) {
+        m_menuColorDlg->raise();
+        m_menuColorDlg->activateWindow();
+        return;
+    }
 
-    const QColor chosen = dlg.selectedColor();
-    m_ctrl->addAdjustmentLayer(QStringLiteral("solidcolor"),
-                               solidcolor::SolidColorData::paramsFromColor(chosen));
-    if (m_canvas) { m_canvas->syncLayersToGpu(); m_canvas->update(); }
-    refreshLayerPanel();
-    refreshPropertiesPanel();
-    updateLayerMenuState();
+    // Modeless so the picker's eyedropper can sample the image the fill layer is
+    // being built from. Cancel still means no layer (no ghost layer left behind).
+    auto* dlg = new ColorPickerDialog(initial, ColorPickerMode::Foreground, this);
+    m_menuColorDlg = dlg;
+    connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& chosen) {
+        if (!m_ctrl || !m_doc) return;
+        m_ctrl->addAdjustmentLayer(QStringLiteral("solidcolor"),
+                                   solidcolor::SolidColorData::paramsFromColor(chosen));
+        if (m_canvas) { m_canvas->syncLayersToGpu(); m_canvas->update(); }
+        refreshLayerPanel();
+        refreshPropertiesPanel();
+        updateLayerMenuState();
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->showModeless();
 }
 
 void MainWindow::onMenuMergeVisible()
@@ -273,16 +293,29 @@ void MainWindow::showLayerStylesDialog(int idx)
     dlg->setWindowModality(Qt::NonModal);
     dlg->setModal(false);
 
+    // A slider drag is a live composite edit, exactly like an adjustment
+    // slider drag: hold the CPU projection and the layer panel for its
+    // duration so each frame only costs the (off-thread) style bake.
+    connect(dlg, &LayerStylesDialog::liveEditChanged, this, [this](bool active) {
+        if (m_ctrl) m_ctrl->setAdjustmentLiveEdit(active);
+    });
+
     connect(dlg, &LayerStylesDialog::stylesChanged, this, [this, dlg, idx]() {
         if (!m_ctrl || !m_canvas) return;
         m_ctrl->previewLayerEffects(idx, dlg->styles());
         m_canvas->syncLayersToGpu();
         m_canvas->update();
-        refreshLayerPanel();
+        // No refreshLayerPanel() here: previewLayerEffects' imageChanged already
+        // refreshes the panel when no drag is in progress, and during a drag the
+        // panel is deliberately held (its styled-layer thumbnail is a full-res
+        // bake). The commit/reject handlers below refresh it once at the end.
     });
 
     connect(dlg, &QDialog::accepted, this, [this, dlg, idx, before]() {
         if (!m_ctrl || !m_canvas) return;
+        // A dialog closed mid-drag never sees sliderReleased — make sure the
+        // live-composite hold is lifted before the final commit renders.
+        m_ctrl->setAdjustmentLiveEdit(false);
         m_ctrl->commitLayerEffects(idx, before, dlg->styles());
         m_canvas->syncLayersToGpu();
         m_canvas->update();
@@ -294,6 +327,7 @@ void MainWindow::showLayerStylesDialog(int idx)
 
     connect(dlg, &QDialog::rejected, this, [this, idx, before]() {
         if (!m_ctrl || !m_canvas) return;
+        m_ctrl->setAdjustmentLiveEdit(false);
         m_ctrl->previewLayerEffects(idx, before);
         m_canvas->syncLayersToGpu();
         m_canvas->update();
@@ -423,23 +457,40 @@ void MainWindow::onImageResizeCanvas()
     if (!m_ctrl || !m_doc)
         return;
 
-    const QColor bgColor = m_colorEngine ? m_colorEngine->backgroundColor() : Qt::white;
-    CanvasSizeDialog dlg(m_doc->size, m_doc->resolutionDpi, bgColor, this);
-    if (dlg.exec() != QDialog::Accepted)
+    if (m_canvasSizeDlg) {
+        m_canvasSizeDlg->raise();
+        m_canvasSizeDlg->activateWindow();
         return;
+    }
 
-    const CanvasSizeSettings s = dlg.settings();
-    CanvasResizeOptions options;
-    options.targetSize = s.targetSize;
-    options.anchor = s.anchor;
-    options.fillExtension = s.fillExtension;
-    options.extensionColor = s.extensionColor;
+    // Modeless: the Custom extension colour opens a colour picker whose
+    // eyedropper samples the canvas, so the canvas has to stay clickable. The
+    // resize still runs only on OK — and against whatever document is active
+    // then, which is re-read here rather than captured at open time.
+    const QColor bgColor = m_colorEngine ? m_colorEngine->backgroundColor() : Qt::white;
+    auto* dlg = new CanvasSizeDialog(m_doc->size, m_doc->resolutionDpi, bgColor, this);
+    m_canvasSizeDlg = dlg;
+    dlg->setWindowFlags(dlg->windowFlags() | Qt::Tool);
+    connect(dlg, &QDialog::accepted, this, [this, dlg]() {
+        if (!m_ctrl || !m_doc)
+            return;
+        const CanvasSizeSettings s = dlg->settings();
+        CanvasResizeOptions options;
+        options.targetSize = s.targetSize;
+        options.anchor = s.anchor;
+        options.fillExtension = s.fillExtension;
+        options.extensionColor = s.extensionColor;
 
-    const qint64 area = static_cast<qint64>(m_doc->size.width()) * m_doc->size.height();
-    if (area >= m_doc->perfConfig.autoTileMinArea)
-        m_ctrl->resizeCanvasAsync(options);
-    else
-        m_ctrl->resizeCanvas(options);
+        const qint64 area = static_cast<qint64>(m_doc->size.width()) * m_doc->size.height();
+        if (area >= m_doc->perfConfig.autoTileMinArea)
+            m_ctrl->resizeCanvasAsync(options);
+        else
+            m_ctrl->resizeCanvas(options);
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::onImageColorAdjustments()
@@ -582,16 +633,14 @@ void MainWindow::showAiUpscaleDialog(UpscaleTarget target)
     UpscaleOptions options = dlg.options();
     if (options.target == UpscaleTarget::CurrentDocument
         && options.output == UpscaleOutputMode::ReplaceDocument) {
-        QMessageBox::warning(this, tr("AI Upscale"),
+        AppMessageDialog::warning(this, tr("AI Upscale"),
             tr("Replace Document is disabled until full document snapshots are available. Use New Document."));
         return;
     }
     if (options.target == UpscaleTarget::CurrentLayer
         && options.output == UpscaleOutputMode::ReplaceLayer) {
-        const auto answer = QMessageBox::question(this, tr("AI Upscale"),
-            tr("Replace the current layer with the upscaled result?"),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (answer != QMessageBox::Yes)
+        if (!AppMessageDialog::confirm(this, tr("AI Upscale"),
+                tr("Replace the current layer with the upscaled result?")))
             return;
     }
 
@@ -615,7 +664,7 @@ void MainWindow::onMenuColorPicker()
     });
 
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 void MainWindow::onAboutDialog()

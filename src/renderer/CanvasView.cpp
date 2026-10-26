@@ -1,10 +1,12 @@
 #include "CanvasView.hpp"
 #include "CanvasInputMapper.hpp"
+#include "core/CrashHandler.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
 #include "core/LayerEffect.hpp"
 #include "core/BoxSelection.hpp"
+#include "brush/BrushSampling.hpp"
 #include "transform/TransformController.hpp"
 #include "controller/ImageController.hpp"
 #include "controller/Commands.hpp"
@@ -14,6 +16,7 @@
 #include "shape/ShapeCommands.hpp"
 #include "shape/ShapePresetFactory.hpp"
 #include "shape/SvgShapeConverter.hpp"
+#include "gradient/GradientRenderer.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include <opencv2/core.hpp>
@@ -27,10 +30,14 @@
 #include "RulerGuideOverlay.hpp"
 #include "transform/SnapEngine.hpp"
 #include "ui/ShortcutManager.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ai/tool/AiObjectSelectionController.hpp"
 #include "ai/tool/AiRemoveObjectController.hpp"
 #include "io/ImageCodec.hpp"
+#include "processing/FilterProcessor.hpp"
 
+#include <QtConcurrent/QtConcurrent>
+#include <QMargins>
 #include <QMatrix4x4>
 #include <QWheelEvent>
 #include <QMouseEvent>
@@ -59,6 +66,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <limits>
 
 static bool snapDebugEnabled()
@@ -78,17 +86,6 @@ static bool isPenSyntheticMouse(const QMouseEvent* e)
     const auto t = e->pointerType();
     return t == QPointingDevice::PointerType::Pen
         || t == QPointingDevice::PointerType::Eraser;
-}
-
-static bool pointInsideMaskBounds(const Layer* layer, const QPointF& imagePos)
-{
-    if (!layer || layer->maskImage.isNull())
-        return false;
-    const QRectF bounds(QPointF(layer->maskOrigin), QSizeF(layer->maskImage.size()));
-    return imagePos.x() >= bounds.left()
-        && imagePos.y() >= bounds.top()
-        && imagePos.x() < bounds.right()
-        && imagePos.y() < bounds.bottom();
 }
 
 static QTransform unitRectToCanvasTransform(const QRectF& canvasBounds)
@@ -242,37 +239,17 @@ static QPointF constrainAngle45(const QPointF& from, const QPointF& to)
                    from.y() + std::sin(snapped) * len);
 }
 
-static QColor sampleCanvasBilinear(const QImage& image, float x, float y)
+// Which pixel does a continuous document/layer coordinate fall in? Integers sit
+// on pixel EDGES (see screenToDocument), so it is floor(x) — what fillBucket()
+// already does. std::round()/std::lround() pick the neighbour as soon as the
+// fraction reaches 0.5, which covers three quarters of a pixel's area (only the
+// top-left quadrant rounds back to its own pixel): zoomed in, a click in the
+// same visible pixel seeded a different one depending on where inside it it
+// landed. floor also handles negative coordinates, which is what the lround
+// here was reaching for.
+static inline int docPixelIndex(double coordinate)
 {
-    if (image.isNull() || x < 0.0f || y < 0.0f
-        || x > static_cast<float>(image.width() - 1)
-        || y > static_cast<float>(image.height() - 1)) {
-        return Qt::transparent;
-    }
-
-    const int x0 = std::clamp(static_cast<int>(std::floor(x)), 0, image.width() - 1);
-    const int y0 = std::clamp(static_cast<int>(std::floor(y)), 0, image.height() - 1);
-    const int x1 = std::min(x0 + 1, image.width() - 1);
-    const int y1 = std::min(y0 + 1, image.height() - 1);
-    const float tx = x - static_cast<float>(x0);
-    const float ty = y - static_cast<float>(y0);
-    auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
-
-    const QColor c00 = image.pixelColor(x0, y0);
-    const QColor c10 = image.pixelColor(x1, y0);
-    const QColor c01 = image.pixelColor(x0, y1);
-    const QColor c11 = image.pixelColor(x1, y1);
-
-    auto channel = [&](auto getter) {
-        const float a = lerp(getter(c00), getter(c10), tx);
-        const float b = lerp(getter(c01), getter(c11), tx);
-        return std::clamp(static_cast<int>(std::round(lerp(a, b, ty))), 0, 255);
-    };
-
-    return QColor(channel([](const QColor& c) { return static_cast<float>(c.red()); }),
-                  channel([](const QColor& c) { return static_cast<float>(c.green()); }),
-                  channel([](const QColor& c) { return static_cast<float>(c.blue()); }),
-                  channel([](const QColor& c) { return static_cast<float>(c.alpha()); }));
+    return static_cast<int>(std::floor(coordinate));
 }
 
 class SelectionDragOverlay : public QWidget {
@@ -966,8 +943,20 @@ CanvasView::CanvasView(Document* doc, ImageController* controller, QWidget* pare
     .arg(th->fontSizeXS);
 
     m_eyedropperOverlay = new QLabel(this);
-    m_eyedropperOverlay->setStyleSheet(overlayQss);
     m_eyedropperOverlay->setVisible(false);
+
+    // The read-out shows the sampled colour itself, as a square on its right:
+    // a hex triplet alone is hard to judge against the pixel under the cursor.
+    m_eyedropperSwatch = new QLabel(m_eyedropperOverlay);
+    m_eyedropperSwatch->setFixedSize(18, 18);
+    // Its own rules, or it would inherit the read-out's background, border and
+    // padding from the QLabel selector above; the swatch draws itself (border
+    // included) into a pixmap instead.
+    m_eyedropperSwatch->setStyleSheet(
+        QStringLiteral("QLabel { background: transparent; border: none; padding: 0px; }"));
+    m_eyedropperOverlay->setStyleSheet(
+        overlayQss + QStringLiteral("QLabel { padding-right: %1px; }")
+        .arg(th->spaceSM * 2 + m_eyedropperSwatch->width()));
     m_eyedropperOverlay->adjustSize();
 
     m_transformOverlay = new QLabel(this);
@@ -1134,7 +1123,17 @@ CanvasView::CanvasView(Document* doc, ImageController* controller, QWidget* pare
 
 static bool isSupportedDropImagePath(const QString& path)
 {
-    return imageCodecRegistry().findReader(path) != nullptr;
+    // .hazor isn't an image codec format — it's the project container, opened
+    // via MainWindow::loadProjectAsNewTab() — so it must be special-cased
+    // here or a dragged project is silently rejected before the drop fires.
+    // .hzs is the old extension, still readable, so it's accepted too.
+    // .psd/.psb have no codec reader either and go through
+    // MainWindow::openPsdFileAsNewTab(), so they are named here as well.
+    return imageCodecRegistry().findReader(path) != nullptr
+        || path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".psd"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".psb"), Qt::CaseInsensitive);
 }
 
 static QStringList extractValidDropImagePaths(const QMimeData* mime)
@@ -1153,11 +1152,20 @@ static QStringList extractValidDropImagePaths(const QMimeData* mime)
 
 CanvasView::~CanvasView()
 {
+    CrashHandler::breadcrumb("~CanvasView: enter");
     if (qApp)
         qApp->removeEventFilter(this);
+    // Same contract as AsyncProjectionBuilder's destructor: the clone-source
+    // task captures only its snapshot (never `this`), so letting it finish is
+    // safe — freeing that snapshot while it composites into it is not.
+    if (m_cloneSourceWatcher && m_cloneSourceWatcher->isRunning())
+        m_cloneSourceWatcher->waitForFinished();
     releaseTabletViewportCursor();
+    CrashHandler::breadcrumb("~CanvasView: makeCurrent");
     makeCurrent();
+    CrashHandler::breadcrumb("~CanvasView: brushRenderer.destroyGL");
     m_brushRenderer.destroyGL();
+    CrashHandler::breadcrumb("~CanvasView: delete GPUViewport");
     delete m_gpuViewport;
     m_gpuViewport = nullptr;
     if (m_previewTexture) {
@@ -1166,15 +1174,19 @@ CanvasView::~CanvasView()
                        : nullptr;
         if (gl) gl->glDeleteTextures(1, &m_previewTexture);
     }
+    CrashHandler::breadcrumb("~CanvasView: doneCurrent");
     doneCurrent();
+    CrashHandler::breadcrumb("~CanvasView: done");
 }
 
 void CanvasView::cleanupDocumentLayers()
 {
     if (m_gpuViewport) {
+        CrashHandler::breadcrumb("cleanupDocumentLayers: enter");
         makeCurrent();
         m_gpuViewport->cleanupDocumentLayers(m_doc);
         doneCurrent();
+        CrashHandler::breadcrumb("cleanupDocumentLayers: done");
     }
 }
 
@@ -1189,8 +1201,59 @@ void CanvasView::showPreview(const QString& toolName, const QVariantMap& params)
     QImage source = node->layer->compositeImage().convertToFormat(QImage::Format_RGBA8888);
     if (source.isNull()) { return; }
 
+    QVariantMap previewParams = params;
+    QRect previewRect;   // layer-pixel quad; stays empty unless `source` is padded
+
+    // ── Room for an effect that reaches past the layer bounds ──
+    // Applying the filter grows the layer so zoom/radial/motion blur and the
+    // convolution blurs are not cropped by the layer's own bounds
+    // (ImageController::growLayerForFilter). Pad the preview source to the same
+    // rect — the compositor then draws it on the matching, wider quad — or the
+    // preview would keep showing a crop the result does not have. Only where the
+    // committed filter would grow too: with a selection active the selection is
+    // the clip the user asked for, and a text/shape/RAW/Smart Object layer is
+    // refused outright (ImageController::checkDestructiveOp).
+    const bool selectionActive = m_doc->selection.active() && !m_doc->selection.isEmpty();
+    if (m_controller && !selectionActive
+        && node->layer->hasDirectlyEditablePixels()) {
+        const QRect base(QPoint(0, 0), source.size());
+        // Cheap reject before the content-bounds alpha scan — this runs on every
+        // slider tick: the reach measured from the whole image rect is an upper
+        // bound for any tighter content, so a null one settles it outright.
+        const bool mayReachOutside = !processing::FilterProcessor::outwardReach(
+            toolName.toStdString(), params, source.size(), QRect()).isNull();
+        // Tile-granular content bounds for a dab layer (its cpuImage is the
+        // stale base, so cpuContentBounds() would not describe `source`); the
+        // committed path scans the flushed composite and can only ask for less.
+        const QRect content = !mayReachOutside ? base
+            : node->layer->rasterStorage.isEnabled()
+                ? node->layer->contentImageBounds().toAlignedRect()
+                : node->layer->cpuContentBounds();
+        const QRect target = mayReachOutside
+            ? m_controller->filterTargetRect(node->layer.get(), source.size(), content,
+                                             toolName.toStdString(), params)
+            : base;
+        if (target != base && target.contains(base)) {
+            QImage padded(target.size(), QImage::Format_RGBA8888);
+            padded.fill(Qt::transparent);
+            {
+                QPainter p(&padded);
+                p.drawImage(-target.topLeft(), source);
+            }
+            previewParams = processing::FilterProcessor::paramsForGrownImage(
+                toolName.toStdString(), params, source.size(),
+                QMargins(-target.left(), -target.top(),
+                         target.left() + target.width() - source.width(),
+                         target.top() + target.height() - source.height()));
+            source = padded;
+            previewRect = target;
+        }
+    }
+
     m_previewSourceNode = node;
-    m_previewRenderer->generatePreview(source, toolName.toStdString(), params, size());
+    m_previewPendingLayerRect = previewRect;
+    m_previewRenderer->generatePreview(source, toolName.toStdString(),
+                                       previewParams, size());
 }
 
 void CanvasView::onPreviewReady(const QImage& previewImage)
@@ -1210,9 +1273,13 @@ void CanvasView::onPreviewReady(const QImage& previewImage)
             cv::Mat maskFull = m_doc->selectionMaskForLayer(
                 lw, lh, m_previewSourceNode->accumulatedTransform());
             if (!maskFull.empty()) {
-                cv::Mat origSmall, maskSmall;
+                cv::Mat maskSmall;
                 cv::Mat origFull = ImageEngine::toCvMatFast(sourceImg);
-                cv::resize(origFull,  origSmall, cv::Size(pw, ph), 0, 0, cv::INTER_AREA);
+                // Layer pixels go through the premultiplied path so the
+                // unfiltered surround matches PreviewRenderer's downscale; the
+                // mask is single channel and stays a plain resize.
+                cv::Mat origSmall = ImageEngine::resizePremultiplied(
+                    origFull, cv::Size(pw, ph), cv::INTER_AREA);
                 cv::resize(maskFull,  maskSmall, cv::Size(pw, ph), 0, 0, cv::INTER_AREA);
                 cv::Mat previewCv = ImageEngine::toCvMatFast(previewImage);
                 previewCv.copyTo(origSmall, maskSmall);
@@ -1222,6 +1289,7 @@ void CanvasView::onPreviewReady(const QImage& previewImage)
     }
 
     m_previewImage = result;
+    m_previewLayerRect = m_previewPendingLayerRect;
     makeCurrent();
     if (m_previewTexture == 0)
         glGenTextures(1, &m_previewTexture);
@@ -1243,6 +1311,8 @@ void CanvasView::clearPreview()
 {
     m_previewRenderer->cancel();
     m_previewSourceNode = nullptr;
+    m_previewLayerRect = QRect();
+    m_previewPendingLayerRect = QRect();
 
     if (!m_hasPreview) return;
 
@@ -1396,6 +1466,14 @@ void CanvasView::setTool(Tool t)
     if (m_hueSatPickMode != 0) {
         setHueSatPickMode(0);
         emit hueSatPickCancelled();
+    }
+
+    // Same for a colour dialog's eyedropper: picking a tool is the user asking
+    // for the canvas back, so the dialog un-presses its button and keeps the
+    // colour it has.
+    if (m_colorPickArmed) {
+        setColorPickArmed(false);
+        emit colorPickCancelled();
     }
 
     // Leaving the AI Object Selection tool cancels any in-flight inference and
@@ -1781,7 +1859,18 @@ void CanvasView::setCloneSource(QPointF documentPoint)
     m_cloneSourceDefined = true;
     m_cloneOffsetValid = false;
     m_cloneNeedsSourceFeedback = false;
-    invalidateClonePreviewCache();
+    // Only the rendered overlay, not the composited source: Alt-clicking moves
+    // where the sample is taken FROM, it does not change the pixels being
+    // sampled, and dropping the composite here would cost a rebuild for nothing
+    // (and leave the overlay with no source until the worker came back).
+    m_clonePreviewImage = QImage();
+    m_clonePreviewKey = 0;
+    // Prime it here, blocking, when there is nothing to show yet. Alt-click is
+    // one deliberate act, not a motion event, so a composite on this thread is
+    // the right place for the one the tool cannot avoid — and it buys every
+    // later hover and press an instant source.
+    if (!cloneSourceSnapshotIsFresh())
+        cloneSourceSnapshotBlocking();
     updateToolCursor();
     updateBrushPreviewOverlay();
     update();
@@ -1797,9 +1886,7 @@ bool CanvasView::canPaintActiveRasterLayer() const
         return false;
     if (!node->visible)
         return false;
-    if (node->isPixelEditingLocked())
-        return false;
-    if (layer->isTextLayer() || layer->isShapeLayer())
+    if (!node->canEditPixels())
         return false;
     return true;
 }
@@ -1825,11 +1912,13 @@ bool CanvasView::ensurePaintTargetLayer(const QString& undoName)
     if (m_freeTransformActive || m_distortActive)
         return false;
 
-    // A layer (pixel/text/shape) or adjustment is already selected: don't
+    // A layer (pixel/text/shape/RAW) or adjustment is already selected: don't
     // auto-create. The tool's own gate (checkDestructiveOp / lock checks /
-    // rasterization rules) decides whether the action proceeds or is blocked.
+    // rasterization rules) decides whether the action proceeds or is blocked —
+    // except for a RAW Layer, which gets the raster-copy offer instead and ends
+    // the gesture either way.
     if (m_doc->activeLayer())
-        return true;
+        return ensureRasterCopyForRawTarget();
 
     // Nothing editable is selected (empty document, deselected, or a group is
     // active): create a fresh transparent, document-sized pixel layer above the
@@ -1840,27 +1929,99 @@ bool CanvasView::ensurePaintTargetLayer(const QString& undoName)
     return true;
 }
 
-QImage CanvasView::cloneSourceSnapshot() const
+bool CanvasView::ensureRasterCopyForRawTarget()
 {
-    if (!m_doc || m_doc->size.isEmpty())
+    if (!m_doc || !m_controller)
+        return true;
+    // A RAW layer's MASK is ordinary 8-bit pixels of its own — painting it is
+    // legal and has nothing to do with the derived develop result.
+    if (m_editingMask)
+        return true;
+
+    auto* node = m_doc->activeNode();
+    auto* layer = m_doc->activeLayer();
+    if (!node || !layer || !layer->isRawLayer())
+        return true;
+    // A locked RAW layer is never offered a copy: Lock Image Pixels / Lock All
+    // is the real reason the edit cannot happen, and the tool's own gate
+    // (ImageController::checkDestructiveOp) is what says so.
+    if (node->isPixelEditingLocked())
+        return true;
+
+    // Cancel changes nothing at all: no layer, no visibility, no selection.
+    if (promptRasterizeRawLayer())
+        m_controller->rasterCopyRawLayer(m_doc->activeFlatIndex);
+    return false;
+}
+
+bool CanvasView::promptRasterizeRawLayer()
+{
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Cancel"),              QMessageBox::RejectRole },
+        { tr("Create Raster Copy"),  QMessageBox::AcceptRole },
+    };
+    const int picked = AppMessageDialog::choice(
+        window(),
+        tr("Rasterize RAW Layer?"),
+        tr("Painting requires a raster layer. Hazor will create an editable "
+           "pixel copy while preserving the original RAW layer."),
+        AppMessageDialog::Icon::Question,
+        buttons,
+        /*defaultIndex=*/1,
+        tr("Changes made to the RAW development will not automatically update "
+           "the raster copy."));
+    return picked == 1;
+}
+
+namespace {
+// The clone/heal source composite, as a free function over whatever Document it
+// is handed — the live one on the UI thread, or a shallowClone() snapshot on a
+// worker (see requestCloneSourceSnapshot()). It reads nothing but `doc` and
+// `mode` precisely so those two callers run identical code and cannot drift.
+QImage composeCloneSource(Document* doc, CloneSampleMode mode)
+{
+    if (!doc || doc->size.isEmpty())
         return QImage();
 
     RenderContext ctx;
-    ctx.document = m_doc;
-    ctx.outputSize = m_doc->size;
-    ctx.documentRect = QRectF(QPointF(0, 0), m_doc->size);
+    ctx.document = doc;
+    ctx.outputSize = doc->size;
+    ctx.documentRect = QRectF(QPointF(0, 0), doc->size);
     ctx.targetType = RenderTargetType::Canvas;
     ctx.highQuality = true;
 
-    switch (m_cloneSampleMode) {
+    // The active layer is always the paint destination, so it must render raw
+    // (no baked Single-Layer-Mode adjustments/effects) wherever it shows up in
+    // the sample — see DocumentCompositor::drawLayerNode. Any OTHER sampled
+    // layer keeps its own adjustments/effects baked in as usual. Resolved from
+    // `doc`, so on a snapshot this is the snapshot's own node.
+    const LayerTreeNode* activeNode = doc->activeNode();
+
+    switch (mode) {
     case CloneSampleMode::CurrentLayer:
-        return DocumentCompositor::compositeOnlyFlatIndex(m_doc, m_doc->activeFlatIndex, ctx);
+        return DocumentCompositor::compositeOnlyFlatIndex(doc, doc->activeFlatIndex, ctx,
+                                                           activeNode);
     case CloneSampleMode::CurrentAndBelow:
-        return DocumentCompositor::compositeFromFlatIndex(m_doc, m_doc->activeFlatIndex, ctx);
+        return DocumentCompositor::compositeFromFlatIndex(doc, doc->activeFlatIndex, ctx,
+                                                           activeNode);
     case CloneSampleMode::AllLayers:
     default:
-        return DocumentCompositor::composite(m_doc, ctx);
+        // Flat index 0 covers every layer, so this composites the whole
+        // document — but unlike DocumentCompositor::composite(), it still
+        // excludes Normal-Mode adjustments (see compositeFromFlatIndex), so the
+        // clone source isn't sampled with adjustments already baked in. Those
+        // adjustments apply once, live, when the painted dabs are composited
+        // for display — baking them into the sample too would double them, and
+        // the double-up compounds every time cloned pixels are themselves
+        // re-sampled.
+        return DocumentCompositor::compositeFromFlatIndex(doc, 0, ctx, activeNode);
     }
+}
+} // namespace
+
+QImage CanvasView::cloneSourceSnapshot() const
+{
+    return composeCloneSource(m_doc, m_cloneSampleMode);
 }
 
 void CanvasView::invalidateClonePreviewCache()
@@ -1868,21 +2029,165 @@ void CanvasView::invalidateClonePreviewCache()
     m_clonePreviewSourceImage = QImage();
     m_clonePreviewSourceGeneration = std::numeric_limits<uint64_t>::max();
     m_clonePreviewSourceFlatIndex = -1;
+    m_clonePreviewImage = QImage();
+    m_clonePreviewKey = 0;
+}
+
+// Identity of everything cloneStampPreviewImage() reads other than the pointer
+// position, so the ~30 Hz reuse window in updateBrushPreviewOverlay() can only
+// ever serve a stale POSITION, never a preview built for a different brush or a
+// different source. Cheap enough to compute per pointer event (which is the
+// point: the preview itself is not).
+quint64 CanvasView::clonePreviewKey(const QImage& sourceImage) const
+{
+    const auto mix = [](quint64 seed, quint64 value) {
+        // Boost-style hash_combine; any cheap avalanche would do.
+        return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+    };
+    quint64 key = 0x9e3779b97f4a7c15ULL;
+    key = mix(key, static_cast<quint64>(sourceImage.cacheKey()));
+    key = mix(key, qRound64(double(m_brushSettings.size) * 64.0));
+    key = mix(key, qRound64(double(m_doc ? m_doc->zoom : 1.0f) * 4096.0));
+    key = mix(key, qRound64(double(m_brushSettings.hardness) * 4096.0));
+    key = mix(key, qRound64(double(m_brushSettings.opacity) * 4096.0));
+    key = mix(key, static_cast<quint64>(m_brushSettings.type));
+    key = mix(key, static_cast<quint64>(m_brushSettings.tipSource));
+    key = mix(key, m_brushSettings.tipSource == BrushTipSource::Image
+        ? static_cast<quint64>(m_brushSettings.tipImage.cacheKey()) : 0);
+    return key;
+}
+
+bool CanvasView::cloneSourceSnapshotIsFresh() const
+{
+    return m_doc
+        && !m_clonePreviewSourceImage.isNull()
+        && m_clonePreviewSourceGeneration == m_doc->compositionGeneration
+        && m_clonePreviewSourceFlatIndex == m_doc->activeFlatIndex
+        && m_clonePreviewSourceMode == m_cloneSampleMode;
+}
+
+bool CanvasView::cloneSourceBuildMatchesLiveState() const
+{
+    return m_doc
+        && m_cloneSourceBuildGeneration == m_doc->compositionGeneration
+        && m_cloneSourceBuildFlatIndex == m_doc->activeFlatIndex
+        && m_cloneSourceBuildMode == m_cloneSampleMode;
+}
+
+void CanvasView::requestCloneSourceSnapshot()
+{
+    if (!m_doc || m_doc->size.isEmpty())
+        return;
+    // Bounded to exactly when a snapshot is wanted. Without this the
+    // re-dispatch at the end of onCloneSourceSnapshotReady() would keep a
+    // worker busy compositing for a tool that is not even selected.
+    if (!isCloneOrHealingTool() || !m_cloneSourceDefined)
+        return;
+    // Nothing to build mid-stroke: the dabs read m_cloneStrokeContext, the
+    // generation cannot move until endBrushStroke(), and that bump would
+    // obsolete whatever this produced anyway.
+    if (m_brushDrawing)
+        return;
+
+    if (!m_cloneSourceWatcher) {
+        m_cloneSourceWatcher = new QFutureWatcher<QImage>(this);
+        connect(m_cloneSourceWatcher, &QFutureWatcher<QImage>::finished,
+                this, &CanvasView::onCloneSourceSnapshotReady);
+    }
+    if (m_cloneSourceWatcher->isRunning()) {
+        // One at a time; onCloneSourceSnapshotReady() re-requests if the
+        // document moved on while this build was running.
+        return;
+    }
+
+    // COW snapshot: Layer struct copies, no pixel copies, GPU handles zeroed
+    // (LayerTreeNode::shallowClone). Cheap enough for the UI thread, and the
+    // only reason the worker may walk the tree while the UI thread keeps
+    // mutating the live one — see docs/RENDER-PIPELINE.md.
+    auto snapshot = std::make_shared<Document>();
+    snapshot->size = m_doc->size;
+    snapshot->compositionGeneration = m_doc->compositionGeneration;
+    // composeCloneSource() resolves the paint destination through
+    // activeNode(), so the snapshot has to carry the index too — unlike
+    // ProjectionCache's snapshot, which composites every layer.
+    snapshot->activeFlatIndex = m_doc->activeFlatIndex;
+    snapshot->roots.reserve(m_doc->roots.size());
+    for (const auto& root : m_doc->roots)
+        snapshot->roots.push_back(root->shallowClone());
+
+    m_cloneSourceBuildGeneration = m_doc->compositionGeneration;
+    m_cloneSourceBuildFlatIndex = m_doc->activeFlatIndex;
+    m_cloneSourceBuildMode = m_cloneSampleMode;
+
+    const CloneSampleMode mode = m_cloneSampleMode;
+    m_cloneSourceWatcher->setFuture(QtConcurrent::run([snapshot, mode]() {
+        // Already RGBA8888 out of compositeFiltered(); the convert is a no-op
+        // shallow copy that documents what the dab sampler requires.
+        return composeCloneSource(snapshot.get(), mode)
+            .convertToFormat(QImage::Format_RGBA8888);
+    }));
+}
+
+void CanvasView::adoptCloneSourceSnapshot()
+{
+    if (!m_cloneSourceWatcher || m_cloneSourceWatcher->future().resultCount() == 0)
+        return;
+    QImage built = m_cloneSourceWatcher->result();
+    if (built.isNull())
+        return;
+    m_clonePreviewSourceImage = std::move(built);
+    m_clonePreviewSourceGeneration = m_cloneSourceBuildGeneration;
+    m_clonePreviewSourceFlatIndex = m_cloneSourceBuildFlatIndex;
+    m_clonePreviewSourceMode = m_cloneSourceBuildMode;
+}
+
+void CanvasView::onCloneSourceSnapshotReady()
+{
+    adoptCloneSourceSnapshot();
+    // The pointer may not move again before the user looks at the overlay, so
+    // the freshly built source has to be drawn without waiting for an event.
+    updateBrushPreviewOverlay();
+    // The document moved on while this was building (another stroke landed, the
+    // active layer changed): go round again so the next press finds it current.
+    if (!cloneSourceSnapshotIsFresh())
+        requestCloneSourceSnapshot();
 }
 
 QImage CanvasView::clonePreviewSourceSnapshot()
 {
     if (!m_doc)
         return QImage();
+    if (!cloneSourceSnapshotIsFresh())
+        requestCloneSourceSnapshot();
+    // Deliberately returns the stale snapshot when there is one: the overlay
+    // being a stroke behind for ~a frame is invisible next to the UI thread
+    // stopping dead for a full-document composite.
+    return m_clonePreviewSourceImage;
+}
 
-    const bool cacheValid = !m_clonePreviewSourceImage.isNull()
-        && m_clonePreviewSourceGeneration == m_doc->compositionGeneration
-        && m_clonePreviewSourceFlatIndex == m_doc->activeFlatIndex
-        && m_clonePreviewSourceMode == m_cloneSampleMode;
-    if (cacheValid)
+QImage CanvasView::cloneSourceSnapshotBlocking()
+{
+    if (cloneSourceSnapshotIsFresh())
         return m_clonePreviewSourceImage;
 
-    m_clonePreviewSourceImage = cloneSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+    // A build for this exact state is already underway — joining work in
+    // progress beats starting the same composite again on this thread. Reading
+    // the result directly afterwards, because waitForFinished() does not
+    // deliver the watcher's queued finished() signal.
+    if (m_cloneSourceWatcher && m_cloneSourceWatcher->isRunning()
+        && cloneSourceBuildMatchesLiveState()) {
+        m_cloneSourceWatcher->waitForFinished();
+        adoptCloneSourceSnapshot();
+        if (cloneSourceSnapshotIsFresh())
+            return m_clonePreviewSourceImage;
+    }
+
+    // Nothing current to wait for. Correctness over latency: a stroke cannot
+    // sample pixels that do not exist, so compose here.
+    QImage built = cloneSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+    if (built.isNull())
+        return built;
+    m_clonePreviewSourceImage = built;
     m_clonePreviewSourceGeneration = m_doc->compositionGeneration;
     m_clonePreviewSourceFlatIndex = m_doc->activeFlatIndex;
     m_clonePreviewSourceMode = m_cloneSampleMode;
@@ -1931,11 +2236,34 @@ QImage CanvasView::cloneStampPreviewImage(QPointF destinationScreen,
     QImage preview(side, side, QImage::Format_ARGB32);
     preview.fill(Qt::transparent);
 
+    // Hoist the preview-pixel -> source-pixel mapping out of the per-pixel path,
+    // exactly as drawCloneDabToRasterTiles does for the dab itself: screen ->
+    // document is affine (see screenToDocument), so evaluating it at three points
+    // and stepping incrementally replaces side² calls with three. At the 192 px
+    // cap that is ~37k mappings per pointer event turned into 3.
+    const qreal stepScreen = 1.0 / previewScale;
+    const qreal dx0 = (0.5 - center) * stepScreen;
+    const qreal dy0 = (0.5 - center) * stepScreen;
+    const QPointF base = screenToDocument(destinationScreen + QPointF(dx0, dy0));
+    const QPointF ddx = screenToDocument(destinationScreen + QPointF(dx0 + stepScreen, dy0)) - base;
+    const QPointF ddy = screenToDocument(destinationScreen + QPointF(dx0, dy0 + stepScreen)) - base;
+    // sourcePixel = sourceDoc + (mappedDoc - destinationDoc), regrouped so the
+    // loop only adds the two steps.
+    const QPointF origin = sourceDoc + (base - destinationDoc);
+
+    // The same raw-pointer sampler the dabs use (brush/BrushSampling.hpp), not
+    // QImage::pixelColor(): four out-of-line calls and four QColor temporaries
+    // per tap, side² times per pointer event, was what made hovering with the
+    // Clone Stamp over a large document stall the UI thread outright.
+    const uchar* sbits = source.constBits();
+    const int sbpl = source.bytesPerLine();
+    const int sw = source.width();
+    const int sh = source.height();
+
     for (int y = 0; y < side; ++y) {
         QRgb* row = reinterpret_cast<QRgb*>(preview.scanLine(y));
+        const QPointF rowOrigin = origin + ddy * y;
         for (int x = 0; x < side; ++x) {
-            const qreal dxScreen = (static_cast<qreal>(x) + 0.5 - center) / previewScale;
-            const qreal dyScreen = (static_cast<qreal>(y) + 0.5 - center) / previewScale;
             float maskAlpha = 0.0f;
             if (!tipAlpha.isNull()) {
                 maskAlpha = qAlpha(reinterpret_cast<const QRgb*>(
@@ -1951,16 +2279,17 @@ QImage CanvasView::cloneStampPreviewImage(QPointF destinationScreen,
             if (maskAlpha <= 0.0f)
                 continue;
 
-            const QPointF mappedDoc = screenToDocument(destinationScreen + QPointF(dxScreen, dyScreen));
-            const QPointF sourcePixel = sourceDoc + (mappedDoc - destinationDoc);
-            const QColor sampled = sampleCanvasBilinear(source,
-                static_cast<float>(sourcePixel.x()),
-                static_cast<float>(sourcePixel.y()));
+            float px[4];
+            sampleBilinearRgbaRaw(sbits, sbpl, sw, sh,
+                                  rowOrigin.x() + ddx.x() * x,
+                                  rowOrigin.y() + ddx.y() * x, px);
             const int alpha = std::clamp(static_cast<int>(
-                std::round(sampled.alpha() * maskAlpha * displayAlpha)), 0, 255);
+                std::round(px[3] * maskAlpha * displayAlpha)), 0, 255);
             if (alpha <= 0)
                 continue;
-            row[x] = qRgba(sampled.red(), sampled.green(), sampled.blue(), alpha);
+            row[x] = qRgba(static_cast<int>(std::lround(px[0])),
+                           static_cast<int>(std::lround(px[1])),
+                           static_cast<int>(std::lround(px[2])), alpha);
         }
     }
 
@@ -2285,23 +2614,35 @@ void CanvasView::updateBrushPreviewOverlay()
     const QPointF sourceScreen = documentToScreen(sourceDoc);
     QImage previewImage;
     if (m_cloneSourceDefined) {
-        // Rendering the source preview is O(preview²) with a per-pixel document
-        // mapping; during a stroke pointer events arrive at hundreds of Hz, so
-        // refresh the image at most ~30 Hz and reuse the last one in between —
-        // the overlay position still follows every event.
-        const bool reuse = m_brushDrawing
-            && !m_clonePreviewImage.isNull()
+        // Rendering the source preview is O(preview²); pointer events arrive at
+        // hundreds of Hz (a pen more than that), so refresh the image at most
+        // ~30 Hz and reuse the last one in between — the overlay position still
+        // follows every event.
+        //
+        // Deliberately NOT gated on m_brushDrawing any more: hovering is when
+        // the pointer moves most, and leaving the hover case unthrottled meant a
+        // full preview rebuild per motion event, on the UI thread, for as long
+        // as the cursor was over the canvas.
+        //
+        // The throttle is only allowed to serve a stale POINTER POSITION;
+        // clonePreviewKey() covers everything else the image depends on, so a
+        // brush or source change is picked up on the very next event rather than
+        // showing a preview of the wrong footprint for a frame.
+        const QImage sourceImage = (m_brushDrawing && m_cloneStrokeContext.isValid())
+            ? m_cloneStrokeContext.sourceImage
+            : clonePreviewSourceSnapshot();
+        const quint64 key = clonePreviewKey(sourceImage);
+        const bool reuse = !m_clonePreviewImage.isNull()
+            && key == m_clonePreviewKey
             && m_clonePreviewThrottle.isValid()
             && m_clonePreviewThrottle.elapsed() < 33;
         if (reuse) {
             previewImage = m_clonePreviewImage;
         } else {
-            const QImage sourceImage = (m_brushDrawing && m_cloneStrokeContext.isValid())
-                ? m_cloneStrokeContext.sourceImage
-                : clonePreviewSourceSnapshot();
             previewImage = cloneStampPreviewImage(m_lastScreenPos, destinationDoc,
                                                   sourceDoc, sourceImage);
             m_clonePreviewImage = previewImage;
+            m_clonePreviewKey = key;
             m_clonePreviewThrottle.start();
         }
     } else {
@@ -2689,7 +3030,10 @@ void CanvasView::applyTextCharStyle(const std::function<void(TextSpan&)>& fn)
     td->dirty = true;
     rerenderTextLayer();
 
-    if (canCommit)
+    // A colour dialog's live preview is a single gesture: endTextColorPreview()
+    // pushes the one undo step it deserves, so the per-change commit that every
+    // other style change makes is suppressed while a preview is running.
+    if (canCommit && !m_textColorPreview)
         m_controller->commitTextEdit(idx, before, beforeTransform);
 }
 
@@ -2762,6 +3106,74 @@ void CanvasView::setTextStrikethrough(bool strikethrough)
 void CanvasView::setTextColor(const QColor& color)
 {
     applyTextCharStyle([color](TextSpan& s) { s.color = color; });
+}
+
+// ── Live text colour preview ────────────────────────────────────────────────
+// A colour dialog produces dozens of intermediate colours but deserves exactly
+// one undo step. The session snapshots the text layer on the first preview,
+// suppresses the per-change commit in applyTextCharStyle, and on close either
+// pushes that single step or puts the snapshot back.
+
+void CanvasView::previewTextColor(const QColor& color)
+{
+    TextLayerData* td = activeTextData();
+    if (!td || !activeContentEditable())
+        return;   // nothing (or nothing editable) to preview — stay silent
+
+    if (!m_textColorPreview) {
+        TextSpan ch;
+        ParagraphStyle para;
+        m_textColorPreviewColor = currentTextContext(ch, para)
+            ? ch.color : QColor(Qt::black);
+        m_textColorPreviewIndex = (m_doc && m_doc->activeFlatIndex >= 0)
+            ? m_doc->activeFlatIndex : m_textLayerIndex;
+        auto* node = (m_doc && m_textColorPreviewIndex >= 0)
+            ? m_doc->nodeAt(m_textColorPreviewIndex) : nullptr;
+        m_textColorPreviewTransform = node ? node->transform : QTransform();
+        m_textColorPreviewBefore = *td;
+        m_textColorPreviewData = td;
+        m_textColorPreview = true;
+    } else if (m_textColorPreviewData != td) {
+        // The user selected a different layer while the dialog was open: stop
+        // previewing rather than recolour text the dialog was never opened on.
+        return;
+    }
+
+    setTextColor(color);
+}
+
+void CanvasView::endTextColorPreview(bool keep)
+{
+    if (!m_textColorPreview)
+        return;
+
+    auto* node = (m_doc && m_textColorPreviewIndex >= 0)
+        ? m_doc->nodeAt(m_textColorPreviewIndex) : nullptr;
+    TextLayerData* td = (node && node->layer) ? node->layer->textData.get() : nullptr;
+    const bool sameLayer = (td && td == m_textColorPreviewData);
+
+    if (!keep && sameLayer) {
+        // Put the original colour back through the normal channel first: that is
+        // the only way to clear it from the editor's pending insertion style,
+        // which the snapshot assignment below cannot reach. Then restore the
+        // snapshot so the runs are exactly what they were before the dialog.
+        setTextColor(m_textColorPreviewColor);
+        *td = m_textColorPreviewBefore;
+        td->dirty = true;
+        rerenderTextLayer();
+    }
+
+    const bool editing = m_textEditor.isEditing() && m_textEditor.data() == td;
+    m_textColorPreview = false;
+    m_textColorPreviewData = nullptr;
+
+    // While the text editor is live its own commit (snapshotted at beginEdit)
+    // already carries the colour, exactly as typing-time styling does — pushing
+    // a step here would overlap it. Not editing: this is the dialog's one step.
+    if (keep && sameLayer && !editing && m_controller)
+        m_controller->commitTextEdit(m_textColorPreviewIndex,
+                                     m_textColorPreviewBefore,
+                                     m_textColorPreviewTransform);
 }
 
 void CanvasView::setTextAlign(int align)
@@ -2960,7 +3372,26 @@ void CanvasView::initializeGL()
     // the next paint uploads + displays the freshly-built projection. Queued so
     // it is delivered to the GUI thread even though the signal originates there.
     m_gpuViewport->setProjectionRepaintCallback([this]() {
+        QMetaObject::invokeMethod(this, [this]() {
+            update();
+            emit projectionUpdated();
+        }, Qt::QueuedConnection);
+    });
+    // Repaint when an off-thread layer-style bake finishes (Fase D async):
+    // the next paint's needsLayerSync poll uploads the freshly baked effect.
+    m_gpuViewport->setStyleBakeRepaintCallback([this]() {
         QMetaObject::invokeMethod(this, [this]() { update(); }, Qt::QueuedConnection);
+    });
+    // A style bake the user is waiting on (a style edit, not the per-dab bakes
+    // of a brush stroke — ImageController decides) gets the app's standard
+    // delayed loading dialog. Queued like the repaint above: this fires from
+    // inside syncLayersToGpu, i.e. from paintGL with the GL context current,
+    // and a modal dialog spins a nested event loop.
+    m_gpuViewport->setStyleBakeBusyCallback([this](bool busy) {
+        QMetaObject::invokeMethod(this, [this, busy]() {
+            if (m_controller)
+                m_controller->setStyleBakeBusy(busy);
+        }, Qt::QueuedConnection);
     });
     m_brushRenderer.initGL();
     updateCanvasRect();
@@ -3011,27 +3442,56 @@ bool CanvasView::viewportCanvasMetrics(double& vw, double& vh,
     return true;
 }
 
-void CanvasView::clampPanOffset()
+// Exponential ease-out time constant shared by the pan and zoom glides, so a
+// scroll and a zoom settle with the same weight. An exponential has no hard
+// end, so this is not the duration: it reaches 63% in one constant and the
+// half-pixel settle tests below cut it off at roughly three, i.e. ~165ms of
+// visible motion — short enough to read as responsive rather than inertial.
+static constexpr double kViewEaseTimeConstant = 0.055;
+
+QPointF CanvasView::clampedPanOffset(const QPointF& pan) const
 {
     double vw, vh, cw, ch;
     if (!viewportCanvasMetrics(vw, vh, cw, ch))
-        return;
+        return pan;
 
     // panOffset is stored in viewport NDC: it is the clip-space position of the
     // canvas CENTRE (vertex 0,0 maps to clip = panOffset). Convert it to the
     // clampPan() convention (screen-pixel position of the canvas TOP-LEFT),
     // remembering screen Y grows downward while NDC Y grows upward.
-    const double specX = (m_doc->panOffset.x() + 1.0) * 0.5 * vw - cw * 0.5;
-    const double specY = (1.0 - m_doc->panOffset.y()) * 0.5 * vh - ch * 0.5;
+    const double specX = (pan.x() + 1.0) * 0.5 * vw - cw * 0.5;
+    const double specY = (1.0 - pan.y()) * 0.5 * vh - ch * 0.5;
 
     const QPointF clamped = core::ViewportCamera::clampPan(
         QPointF(specX, specY), QSizeF(vw, vh), QSizeF(cw, ch), m_overscrollEnabled);
 
-    // Convert the clamped top-left back to centre-NDC.
-    const double newPanX = (clamped.x() + cw * 0.5) * 2.0 / vw - 1.0;
-    const double newPanY = 1.0 - (clamped.y() + ch * 0.5) * 2.0 / vh;
+    // Pixel-grid alignment — the reason this is the LAST step before storing.
+    // The canvas top-left lands at (viewport - canvas)/2 device pixels when
+    // centred, i.e. on a HALF pixel whenever that difference is odd. A half-pixel
+    // offset makes the viewport sample the projection between two texels, so every
+    // pixel on screen becomes a blend of its neighbours and the whole image looks
+    // soft — even at 100% zoom, where nothing should be resampled at all. Snapping
+    // the top-left to whole device pixels is what GIMP gets for free by keeping its
+    // scroll offsets integral (gint offset_x/offset_y, app/display/gimpdisplayshell.h).
+    // Snapping here (rather than when building the MVP) keeps overlays, hit-testing
+    // and the scroll bars reading the exact same aligned value.
+    // Stable under repetition: clampPan() may pull a snapped value back by at most
+    // half a pixel, and rounding maps it straight back to the same snapped value.
+    const double dpr = std::max(1.0, static_cast<double>(devicePixelRatioF()));
+    const double snappedX = std::round(clamped.x() * dpr) / dpr;
+    const double snappedY = std::round(clamped.y() * dpr) / dpr;
 
-    m_doc->panOffset = QPointF(newPanX, newPanY);
+    // Convert the clamped + snapped top-left back to centre-NDC.
+    const double newPanX = (snappedX + cw * 0.5) * 2.0 / vw - 1.0;
+    const double newPanY = 1.0 - (snappedY + ch * 0.5) * 2.0 / vh;
+
+    return QPointF(newPanX, newPanY);
+}
+
+void CanvasView::clampPanOffset()
+{
+    if (!m_doc) return;
+    m_doc->panOffset = clampedPanOffset(m_doc->panOffset);
 }
 
 void CanvasView::updateScrollBars()
@@ -3098,6 +3558,8 @@ void CanvasView::onScrollBarMoved()
     if (m_updatingScrollBars)
         return;
 
+    cancelPanAnimation();
+
     double vw, vh, cw, ch;
     if (!viewportCanvasMetrics(vw, vh, cw, ch))
         return;
@@ -3131,12 +3593,28 @@ void CanvasView::setOverscrollEnabled(bool enabled)
 void CanvasView::paintGL()
 {
     updateCanvasRect();
+    // Ease both glides by one frame's worth before anything reads zoom/pan.
+    // Riding paintGL()'s own cadence (rather than a wall-clock timer) means
+    // they never ask for frames faster than they can actually be produced.
+    // Zoom goes first: its cursor-anchor correction is a pan delta, and the pan
+    // ease below should run from the already-corrected value.
+    const bool zoomAnimated = advanceZoomAnimation();
+    const bool panAnimated = advancePanAnimation();
     // Single enforcement net: keeps panOffset valid no matter which path moved
     // it (interactive pan/zoom, viewport resize, document switch, controller
     // reset_view/zoom, project load) before anything reads it this frame.
     clampPanOffset();
+    if (panAnimated || zoomAnimated)
+        reprojectSelectionDragOverlay();
 
     if (!m_gpuViewport || !m_doc) return;
+    // The same kind of net for zoomTarget: outside a glide, the zoom that
+    // content resolution is chosen for is simply the live zoom. Holding that
+    // true here is why the zoom combo, the controller's zoom tool and project
+    // load need no bookkeeping of their own — this is the only place the
+    // document is rendered from, so the invariant cannot be observed stale.
+    if (!m_zoomAnimating)
+        m_doc->zoomTarget = m_doc->zoom;
     if (snapDebugEnabled()) {
         qInfo().noquote()
             << "[Snap][canvas-paintGL]"
@@ -3222,6 +3700,7 @@ void CanvasView::paintGL()
 
     p.hasPreview      = m_hasPreview;
     p.previewTexture  = m_previewTexture;
+    p.previewLayerRect = m_previewLayerRect;
 
     p.selectType          = static_cast<int>(m_selectType);
     p.selectStart         = m_selectStart;
@@ -3276,6 +3755,11 @@ void CanvasView::paintGL()
         updateDistortOverlay();
 
     updateBrushPreviewOverlay();
+
+    // Still easing: ask for the next frame now rather than waiting on another
+    // external event to trigger it.
+    if (m_panAnimating || m_zoomAnimating)
+        update();
 }
 
 void CanvasView::resizeGL(int w, int h)
@@ -3309,6 +3793,9 @@ void CanvasView::fitToView()
     if (!m_doc || m_doc->size.isEmpty())
         return;
 
+    cancelPanAnimation();
+    cancelZoomAnimation();
+
     const int vpW = width();
     const int vpH = height();
     if (vpW <= 0 || vpH <= 0) {
@@ -3328,6 +3815,7 @@ void CanvasView::fitToView()
     zoom = std::clamp(zoom, 0.01f, 100.0f);
 
     m_doc->zoom = zoom;
+    m_doc->zoomTarget = zoom;
     m_doc->panOffset = QPointF(0.0f, 0.0f);
     m_pendingFit = false;
 
@@ -3340,7 +3828,10 @@ void CanvasView::fitToView()
 void CanvasView::zoomToOriginal()
 {
     if (!m_doc) return;
+    cancelPanAnimation();
+    cancelZoomAnimation();
     m_doc->zoom = std::clamp(1.0f, 0.01f, 100.0f);
+    m_doc->zoomTarget = m_doc->zoom;
     m_doc->panOffset = QPointF(0.0f, 0.0f);
     updateCanvasRect();
     clampPanOffset();
@@ -3352,11 +3843,19 @@ void CanvasView::setZoom(float zoom)
 {
     if (!m_doc) return;
 
+    // Absolute setter (zoom combo, controller, project load). It wins over a
+    // glide outright rather than becoming its new destination — and it does so
+    // before the early-out, so setting the zoom to wherever a glide currently
+    // sits still means "stop here". Single enforcement point: this is why
+    // view.zoom_in/out from the menu no longer need their own cancel.
+    cancelZoomAnimation();
+
     const float clampedZoom = std::clamp(zoom, 0.01f, 100.0f);
     if (std::abs(m_doc->zoom - clampedZoom) < 0.0001f)
         return;
 
     m_doc->zoom = clampedZoom;
+    m_doc->zoomTarget = clampedZoom;
     updateCanvasRect();
     // Re-clamp against the new on-screen canvas size so the pan stays valid (and
     // re-centres when overscroll-off zoom makes the canvas smaller than the view).
@@ -3365,16 +3864,158 @@ void CanvasView::setZoom(float zoom)
     update();
 }
 
+// Zoom ladder — simple fractions and whole multiples, mirroring GIMP's preset
+// table (libgimpwidgets/gimpzoommodel.c). Stepping by a bare factor (the old
+// zoom * 1.25) never lands on an exact ratio: from 100% it walks 125%, 156.25%,
+// 195.3%… so the viewport is always resampling the projection by an arbitrary
+// fraction. On a ladder, the zoom levels people actually stop at (1:1, 1:2, 1:4,
+// 2:1, 4:1) are exact pixel replications/decimations, which is the single
+// cheapest sharpness win available for the display path.
+// Trimmed to the zoom range setZoom() clamps to (0.01 .. 100).
+static constexpr float kZoomPresets[] = {
+    1.0f / 90,  1.0f / 64,  1.0f / 45, 1.0f / 32,
+    1.0f / 23,  1.0f / 16,  1.0f / 11, 1.0f / 8,
+    2.0f / 11,  1.0f / 4,   1.0f / 3,  1.0f / 2,
+    2.0f / 3,
+    1.0f,
+    3.0f / 2,   2.0f,       3.0f,      4.0f,
+    11.0f / 2,  8.0f,       11.0f,     16.0f,
+    23.0f,      32.0f,      45.0f,     64.0f,
+    90.0f,
+};
+
+// Next/previous ladder entry. The relative epsilon keeps a zoom that is already
+// sitting on a preset (or a hair off it after a float round-trip) from being
+// treated as "between" that preset and the next one, which would make a step
+// silently do nothing.
+static float steppedZoom(float current, bool zoomIn)
+{
+    constexpr int   kCount = static_cast<int>(std::size(kZoomPresets));
+    constexpr float kEps   = 1e-3f;
+
+    if (zoomIn) {
+        for (int i = 0; i < kCount; ++i)
+            if (kZoomPresets[i] > current * (1.0f + kEps))
+                return kZoomPresets[i];
+        return kZoomPresets[kCount - 1];
+    }
+    for (int i = kCount - 1; i >= 0; --i)
+        if (kZoomPresets[i] < current * (1.0f - kEps))
+            return kZoomPresets[i];
+    return kZoomPresets[0];
+}
+
+void CanvasView::stepZoomAnimated(int steps, const std::optional<QPointF>& anchorWidgetPos)
+{
+    if (!m_doc || steps == 0) return;
+
+    // Step from the glide's DESTINATION, not from the live zoom: mid-glide
+    // m_doc->zoom is a partially eased value sitting between two ladder
+    // entries, and stepping off that would make a fast wheel spin land short of
+    // the n entries actually asked for (and off-ladder, which is the one thing
+    // the preset table exists to prevent).
+    const float from = m_zoomAnimating ? m_zoomAnimTarget : m_doc->zoom;
+    float target = from;
+    for (int i = std::abs(steps); i > 0; --i)
+        target = steppedZoom(target, steps > 0);
+    target = std::clamp(target, 0.01f, 100.0f);
+    if (std::abs(target - from) < 0.0001f)
+        return;                     // already parked on the end of the ladder
+
+    // Pivot, captured in canvas-normalised (image) coordinates so it stays the
+    // same image point for the whole glide while zoom and pan both move under
+    // it. The canvas centre is the no-op pivot — the correction in
+    // advanceZoomAnimation() is exactly zero there, which is the behaviour the
+    // menu and keyboard zoom have always had.
+    m_zoomAnchorCanvas = (anchorWidgetPos && width() > 0 && height() > 0)
+        ? screenToCanvasNdc(*anchorWidgetPos)
+        : QPointF(0.0, 0.0);
+
+    m_zoomAnimTarget = target;
+    m_doc->zoomTarget = target;
+    if (!m_zoomAnimating) {
+        m_zoomAnimClock.start();
+        m_zoomAnimating = true;
+        update();
+    }
+    // Report the commanded zoom rather than the eased value: the readout should
+    // show where the gesture is going, and this keeps the signal at one emit per
+    // step — the same rate the instant zoom had, instead of one per frame.
+    emit zoomChanged(target);
+}
+
+bool CanvasView::advanceZoomAnimation()
+{
+    if (!m_zoomAnimating || !m_doc) return false;
+
+    double vw, vh, cw, ch;
+    if (!viewportCanvasMetrics(vw, vh, cw, ch)) {
+        cancelZoomAnimation();
+        return false;
+    }
+
+    const double dt = std::clamp(m_zoomAnimClock.restart() / 1000.0, 0.0, 0.05);
+    const double alpha = 1.0 - std::exp(-dt / kViewEaseTimeConstant);
+
+    // Ease in LOG space. The ladder is multiplicative (…1/2, 2/3, 1, 3/2, 2…),
+    // so interpolating log(zoom) gives every step the same duration and the
+    // same apparent speed, where interpolating zoom itself would crawl through
+    // the fractions near 1% and lurch between the whole multiples near 100x.
+    const double logTarget = std::log(static_cast<double>(m_zoomAnimTarget));
+    const double logFrom   = std::log(static_cast<double>(m_doc->zoom));
+    double logNext = logFrom + (logTarget - logFrom) * alpha;
+
+    // The on-screen canvas size is zoom * docSize, so its derivative with
+    // respect to log(zoom) is that size itself: this is the same "within half a
+    // pixel at the canvas edge" settle test the pan glide uses, written in log
+    // space, and it stops the ease asymptotically crawling forever.
+    const bool settled = std::abs(logTarget - logNext) * std::max(cw, ch) * 0.5 < 0.5;
+    const float nextZoom = settled
+        ? m_zoomAnimTarget
+        : std::clamp(static_cast<float>(std::exp(logNext)), 0.01f, 100.0f);
+
+    // Cursor anchor. With
+    //     clip = panOffset + zoom * canvasHalfExtents * canvasPoint
+    // holding an image point's clip position fixed across a zoom change is a
+    // pure pan delta, independent of where the pan currently is. That is what
+    // lets this compose with a pan glide instead of fighting it: the very same
+    // delta is handed to that glide's destination below, so the scroll keeps
+    // heading where it was aimed while the zoom pivots under it.
+    const double dz = static_cast<double>(nextZoom) - static_cast<double>(m_doc->zoom);
+    const QPointF panDelta(-dz * m_canvasHalfExtents.x() * m_zoomAnchorCanvas.x(),
+                           -dz * m_canvasHalfExtents.y() * m_zoomAnchorCanvas.y());
+
+    m_doc->zoom = nextZoom;
+    m_doc->panOffset += panDelta;
+    if (m_panAnimating)
+        m_panAnimTarget = clampedPanOffset(m_panAnimTarget + panDelta);
+
+    if (settled) {
+        m_zoomAnimating = false;
+        m_doc->zoomTarget = m_doc->zoom;
+    }
+    return true;
+}
+
+void CanvasView::cancelZoomAnimation()
+{
+    m_zoomAnimating = false;
+    m_wheelZoomAccum = 0.0;
+    // Park the content-resolution key on what is actually on screen, so an
+    // abandoned destination never leaves shape sprites rasterized for a zoom
+    // the view never reached.
+    if (m_doc)
+        m_doc->zoomTarget = m_doc->zoom;
+}
+
 void CanvasView::zoomIn()
 {
-    if (!m_doc) return;
-    setZoom(m_doc->zoom * 1.25f);
+    stepZoomAnimated(1, std::nullopt);
 }
 
 void CanvasView::zoomOut()
 {
-    if (!m_doc) return;
-    setZoom(m_doc->zoom / 1.25f);
+    stepZoomAnimated(-1, std::nullopt);
 }
 
 void CanvasView::resizeEvent(QResizeEvent* e)
@@ -3454,16 +4095,98 @@ void CanvasView::wheelEvent(QWheelEvent* e)
 {
     if (!m_doc) return;
 
-    float factor = 1.1f;
-    if (e->angleDelta().y() > 0)
-        setZoom(m_doc->zoom * factor);
-    else
-        setZoom(m_doc->zoom / factor);
+    if (e->modifiers().testFlag(Qt::ControlModifier)) {
+        // One ladder step per notch (same as the zoom buttons and GIMP's wheel
+        // binding), so wheel zooming also stops on exact ratios instead of drifting
+        // onto arbitrary 1.1^n factors that force a resample at every level.
+        //
+        // Bank the deltas and spend whole notches rather than stepping once per
+        // event: angleDelta is in eighths of a degree and only a classic
+        // detented wheel sends a full 120 per event, so a high-resolution wheel
+        // or a trackpad would otherwise fire a dozen-plus steps per gesture and
+        // cross the entire ladder. Banking also absorbs a horizontal-only wheel
+        // (y == 0 contributes nothing) instead of reading it as a step.
+        const double notchDelta = e->angleDelta().y();
+        if (notchDelta != 0.0 && (notchDelta < 0.0) != (m_wheelZoomAccum < 0.0))
+            m_wheelZoomAccum = 0.0;   // direction reversed: drop the stale bank
+        m_wheelZoomAccum += notchDelta;
+        const int notches = static_cast<int>(m_wheelZoomAccum / 120.0);
+        m_wheelZoomAccum -= notches * 120.0;
+        // The pan glide is deliberately left running: the anchor correction in
+        // advanceZoomAnimation() is applied to its destination too, so the two
+        // compose and a zoom no longer throws away scroll distance in flight.
+        if (notches != 0)
+            stepZoomAnimated(notches, e->position());
+        return;
+    }
 
-    // The selection drag overlays store screen points; a mid-gesture zoom
-    // would otherwise leave the preview displaced from the real (doc-space)
-    // path until the next mouse move.
-    reprojectSelectionDragOverlay();
+    // Plain scroll pans the canvas like any other scrollable view (Ctrl is
+    // the zoom modifier instead); Shift redirects a vertical-only wheel to
+    // the horizontal axis for mice without a horizontal wheel.
+    constexpr qreal kPixelsPerNotch = 40.0;
+    const QPoint pixels  = e->pixelDelta();
+    const QPoint degrees = e->angleDelta();
+    QPointF delta = pixels.isNull()
+        ? QPointF(degrees.x() / 120.0 * kPixelsPerNotch, degrees.y() / 120.0 * kPixelsPerNotch)
+        : QPointF(pixels);
+
+    if (delta.x() == 0.0 && delta.y() != 0.0 && e->modifiers().testFlag(Qt::ShiftModifier))
+        delta = QPointF(delta.y(), 0.0);
+
+    // Screen Y grows downward while panOffset is stored in clip-space NDC
+    // (Y up), so the two axes pick up panOffset with opposite sign.
+    const QPointF ndcDelta(2.0 * delta.x() / width(), -2.0 * delta.y() / height());
+
+    // Extend the running glide's destination rather than restarting it, so a
+    // steady stream of wheel ticks reads as one continuous slide. paintGL()
+    // drives the actual easing (see advancePanAnimation()); kick it off here
+    // only when nothing is animating yet, instead of forcing a repaint on
+    // every single tick.
+    if (!m_panAnimating) {
+        m_panAnimTarget = m_doc->panOffset;
+        m_panAnimClock.start();
+        m_panAnimating = true;
+        update();
+    }
+    m_panAnimTarget = clampedPanOffset(m_panAnimTarget + ndcDelta);
+}
+
+bool CanvasView::advancePanAnimation()
+{
+    if (!m_panAnimating || !m_doc) return false;
+
+    double vw, vh, cw, ch;
+    if (!viewportCanvasMetrics(vw, vh, cw, ch)) {
+        m_panAnimating = false;
+        return false;
+    }
+
+    // The target was clamped against the geometry at the time it was set;
+    // re-clamp against the current one so a zoom/resize mid-glide can never
+    // aim it out of range.
+    m_panAnimTarget = clampedPanOffset(m_panAnimTarget);
+
+    const double dt = std::clamp(m_panAnimClock.restart() / 1000.0, 0.0, 0.05);
+    const double alpha = 1.0 - std::exp(-dt / kViewEaseTimeConstant);
+
+    QPointF pan = m_doc->panOffset + (m_panAnimTarget - m_doc->panOffset) * alpha;
+
+    // Half a device pixel is imperceptible at any window size — settle there
+    // instead of asymptotically crawling toward the target forever.
+    const bool settled = std::abs(m_panAnimTarget.x() - pan.x()) * vw * 0.5 < 0.5
+                       && std::abs(m_panAnimTarget.y() - pan.y()) * vh * 0.5 < 0.5;
+    if (settled) {
+        pan = m_panAnimTarget;
+        m_panAnimating = false;
+    }
+
+    m_doc->panOffset = pan;
+    return true;
+}
+
+void CanvasView::cancelPanAnimation()
+{
+    m_panAnimating = false;
 }
 
 void CanvasView::leaveEvent(QEvent* e)
@@ -3664,6 +4387,13 @@ void CanvasView::toggleQuickMask()
             m_doc, m_quickMaskBefore, after,
             true, afterActive, "quick_mask_edit"));
     }
+    // The flag also lives on the document so the Channels panel can list the
+    // temporary channel and the renderer can draw its overlay — one state, read
+    // by three places, instead of a copy each. The temporary channel is NEVER
+    // promoted to a stored Alpha: leaving the mode converts it back to a
+    // selection, and keeping it takes an explicit Save Selection.
+    if (m_controller)
+        m_controller->setQuickMaskActive(m_quickMaskMode);
     markSelectMaskDirty();
     update();
 }
@@ -3733,6 +4463,15 @@ void CanvasView::keyPressEvent(QKeyEvent* e)
         cancelAiRemoveLasso();
         if (m_aiRemoveController)
             m_aiRemoveController->cancel();
+        e->accept();
+        return;
+    }
+
+    // Esc cancels an armed colour-dialog eyedropper. The dialog stays open with
+    // the colour it already had — only the pick is called off.
+    if (e->key() == Qt::Key_Escape && m_colorPickArmed) {
+        setColorPickArmed(false);
+        emit colorPickCancelled();
         e->accept();
         return;
     }
@@ -4093,6 +4832,10 @@ void CanvasView::keyPressEvent(QKeyEvent* e)
                 validIndices.push_back(idx);
                 beforeXfs.push_back(node->transform);
                 translateNodeByDocumentDelta(node, QPointF(dx, dy));
+                // dx/dy are whole pixels, so this only matters for a layer that
+                // was already off-grid: the nudge then also realigns it instead
+                // of carrying the fractional offset (and its softness) along.
+                snapNodeToPixelGrid(node);
                 afterXfs.push_back(node->transform);
             }
             if (!validIndices.empty())
@@ -4341,6 +5084,23 @@ void CanvasView::setHueSatPickMode(int mode)
         unsetCursor();
 }
 
+void CanvasView::setColorPickArmed(bool armed)
+{
+    if (m_colorPickArmed == armed)
+        return;
+    m_colorPickArmed = armed;
+    m_colorPickDragging = false;
+    if (armed) {
+        // The eyedropper cursor, not Qt::CrossCursor: the pick samples pixels
+        // exactly like the Eyedropper tool, so it should look like it too.
+        setViewportCursor(m_cursors[static_cast<int>(Tool::Eyedropper)]);
+    } else {
+        hideEyedropperReadout();
+        updateToolCursor();
+        update();
+    }
+}
+
 void CanvasView::mousePressEvent(QMouseEvent* e)
 {
     // Drop the OS's synthetic pen-mouse twin: tabletEvent already drove this input.
@@ -4352,6 +5112,9 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         PointerInputEvent me = CanvasInputMapper::fromMouseEvent(e, PointerPhase::Press);
         m_inputState.noteMouseEvent(me);
     }
+    // A new interaction takes over from a leftover wheel-pan glide immediately,
+    // the same way touching a surface stops inertial scrolling elsewhere.
+    cancelPanAnimation();
     // Space-bar temporary Hand: while Space is held, a left-drag pans the view
     // regardless of the active tool — without switching tools, so a crop /
     // transform / text session in progress is preserved. The generic m_panning
@@ -4361,6 +5124,20 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         m_rightButtonDown = false;
         m_lastMousePos = e->position();
         setCursor(Qt::ClosedHandCursor);
+        e->accept();
+        return;
+    }
+
+    // A colour dialog's eyedropper is armed: sample the pixel under the cursor and
+    // keep sampling while the button is held, so dragging over the image previews
+    // every colour it crosses. The press is consumed — the active tool must not
+    // paint, select or move anything while the user is picking a colour.
+    if (m_colorPickArmed && e->button() == Qt::LeftButton && m_doc) {
+        m_colorPickDragging = true;
+        const QColor sampled = eyedropperSampleColor(e->position());
+        updateEyedropperReadout(e->position(), sampled);
+        if (sampled.isValid())
+            emit colorPickSampled(sampled);
         e->accept();
         return;
     }
@@ -4453,11 +5230,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         return;
 
     if (tool == Tool::Zoom) {
-        float factor = 1.5f;
-        float newZoom = (e->modifiers() & Qt::AltModifier)
-            ? m_doc->zoom / factor
-            : m_doc->zoom * factor;
-        setZoom(newZoom);
+        // Ladder step (Alt = out), matching the wheel and the zoom buttons —
+        // anchored on the click, since picking the spot to magnify is the whole
+        // point of clicking with this tool.
+        stepZoomAnimated((e->modifiers() & Qt::AltModifier) ? -1 : 1, e->position());
         return;
     }
 
@@ -4487,6 +5263,18 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
             ndcStart.setY(std::clamp(static_cast<float>(ndcStart.y()), -1.0f, 1.0f));
         }
         update();
+        return;
+    }
+
+    // Text and Shape create vector LAYERS; a channel is grayscale document
+    // data with no layer behind it, so there is nothing for them to write to.
+    // Rejecting the press with a reason beats quietly adding a layer the user
+    // did not ask for while they were editing a channel.
+    if ((tool == Tool::Text || tool == Tool::Shape)
+        && m_controller && m_controller->hasArmedChannels()) {
+        m_controller->reportOperationBlocked(
+            tr("This tool cannot edit a channel. Select the composite channel "
+               "in the Channels panel first."));
         return;
     }
 
@@ -4962,6 +5750,16 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
     else if (tool == Tool::Brush || tool == Tool::Eraser
              || isCloneOrHealingTool()) {
         if (isCloneOrHealingTool()) {
+            // Clone and Healing sample and write LAYER pixels (RGBA, through
+            // the layer's own transform); they have no meaning on a grayscale
+            // channel, so the press is refused instead of silently landing on
+            // the layer the user left selected in the Layers panel.
+            if (m_controller && m_controller->hasArmedChannels()) {
+                m_controller->reportOperationBlocked(
+                    tr("This tool cannot edit a channel. Select the composite "
+                       "channel in the Channels panel first."));
+                return;
+            }
             const QPointF docPos = screenToDocument(e->position());
             if (e->modifiers() & Qt::AltModifier) {
                 setCloneSource(docPos);
@@ -4973,8 +5771,10 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
                 update();
                 return;
             }
-            if (!canPaintActiveRasterLayer())
-                return;
+            // No canPaintActiveRasterLayer() pre-check here: it rejects a RAW
+            // layer, which would swallow the click before the RAW gate inside
+            // beginCloneStampStroke could offer the raster copy. That function
+            // runs the same check itself, right after the gate.
             auto* cloneLayer = m_doc->activeLayer();
             if (!cloneLayer) { m_brushDrawing = false; return; }
             BrushInputState input;
@@ -4986,32 +5786,15 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         // Eyedropper override (see resolveTemporaryOverride()), so the press is
         // dispatched to the real Eyedropper branch below — which honours the
         // eyedropper sample-mode/size and Ctrl/right → background-colour rules.
-        if (m_quickMaskMode) {
-            // Paint on selection mask in Quick Mask mode
-            QPointF docPos = screenToDocument(e->position());
-            int cx = static_cast<int>(docPos.x());
-            int cy = static_cast<int>(docPos.y());
-            float radius = m_brushSettings.size * 0.5f;
-            if (radius < 1.0f) radius = 1.0f;
-            bool erasing = (tool == Tool::Eraser);
-
-            int mw = m_doc->selection.width();
-            int mh = m_doc->selection.height();
-            int r = static_cast<int>(radius);
-
-            for (int y = std::max(0, cy - r); y <= std::min(mh - 1, cy + r); ++y) {
-                uchar* row = m_doc->selection.image().scanLine(y);
-                for (int x = std::max(0, cx - r); x <= std::min(mw - 1, cx + r); ++x) {
-                    float dist = std::sqrt(static_cast<float>((x - cx) * (x - cx) + (y - cy) * (y - cy)));
-                    if (dist <= radius) {
-                        row[x] = erasing ? 0 : 255;
-                    }
-                }
-            }
-            m_doc->selection.setActive(!m_doc->selection.isEmpty());
-            markSelectMaskDirty();
-            m_quickMaskDabbed = true;
-            update();
+        if (grayscaleStrokeTarget()) {
+            // Quick Mask or armed channels: the real brush engine paints
+            // coverage into the document-space buffer, so pressure, flow,
+            // spacing, texture and the tip shape all behave as they do
+            // anywhere else. beginBrushStroke dispatches.
+            if (m_inputState.shouldIgnoreSyntheticMouse()) return;
+            BrushInputState input;
+            input.imagePos = screenToDocument(e->position());
+            beginBrushStroke(input, e->position());
         } else if (m_editingMask) {
             auto* layer = m_doc->activeLayer();
             if (!layer || layer->maskImage.isNull()) {
@@ -5054,6 +5837,16 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         // Requires an existing layer + mask; never auto-creates a pixel layer.
         // Bypasses checkDestructiveOp (a mask edit is not a pixel edit, and a
         // text/shape layer's mask is still fillable).
+        // Armed channels first: the bucket floods the channel's coverage, so
+        // it needs no pixel layer and must not auto-create one.
+        if (m_controller && m_controller->hasArmedChannels()) {
+            const QPointF docPos = screenToDocument(e->position());
+            m_controller->applyFillBucketToChannels(
+                QPoint(static_cast<int>(std::floor(docPos.x())),
+                       static_cast<int>(std::floor(docPos.y()))),
+                m_fillBucketColor, m_fillBucketTolerance / 255.0f);
+            return;
+        }
         {
             auto* node = m_doc->activeNode();
             auto* layer = m_doc->activeLayer();
@@ -5112,8 +5905,12 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
         // Check if click is inside existing selection (move mode)
         bool insideSelection = false;
         if (m_selectMode == SelectMode::Replace && m_doc->selection.active() && !m_doc->selection.isEmpty()) {
-            int sx = static_cast<int>(std::round(m_selectStart.x()));
-            int sy = static_cast<int>(std::round(m_selectStart.y()));
+            // Hit-test the pixel the click is in, not its neighbour: with
+            // round(), a click in the right/bottom part of an edge pixel tested
+            // the pixel outside the selection and started a new one instead of
+            // moving it (and the reverse one pixel further out).
+            const int sx = docPixelIndex(m_selectStart.x());
+            const int sy = docPixelIndex(m_selectStart.y());
             insideSelection = m_doc->selection.isSelected(sx, sy);
         }
 
@@ -5165,12 +5962,12 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
             if (m_controller) {
                 // Tool params are document coords (same convention as
                 // select_rect); the handler maps doc→layer itself for
-                // transformed layers. lround (not truncation) so negative
-                // coords don't shift by 1px.
+                // transformed layers. docPixelIndex, so the seed is the pixel
+                // under the cursor rather than its right/bottom neighbour.
                 QPointF docPos = screenToDocument(e->position());
                 m_controller->executeTool("select_magic_wand", {
-                    {"x", static_cast<double>(std::lround(docPos.x()))},
-                    {"y", static_cast<double>(std::lround(docPos.y()))},
+                    {"x", static_cast<double>(docPixelIndex(docPos.x()))},
+                    {"y", static_cast<double>(docPixelIndex(docPos.y()))},
                     {"tolerance", static_cast<double>(m_quickSelectTolerance)},
                     {"contiguous", 1.0},
                     {"mode", static_cast<double>(static_cast<int>(m_selectMode))}
@@ -5199,6 +5996,18 @@ void CanvasView::mousePressEvent(QMouseEvent* e)
 
 void CanvasView::mouseMoveEvent(QMouseEvent* e)
 {
+    // A colour dialog's eyedropper owns the pointer while it is armed: a held
+    // drag keeps sampling, and a plain hover only moves the read-out so the user
+    // can see what the next click would pick.
+    if (m_colorPickArmed) {
+        const QColor sampled = eyedropperSampleColor(e->position());
+        updateEyedropperReadout(e->position(), sampled);
+        if (m_colorPickDragging && sampled.isValid())
+            emit colorPickSampled(sampled);
+        update();
+        e->accept();
+        return;
+    }
     if (m_curvesTargetDragging) {
         emit curvesTargetDragged(
             static_cast<int>(m_curvesTargetStartY - e->position().y()));
@@ -5539,56 +6348,8 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         m_eyedropperScreenPos = e->position();
         m_eyedropperHoverColor = eyedropperSampleColor(e->position());
         setCursor(m_cursors[static_cast<int>(Tool::Eyedropper)]);
-        if (m_eyedropperHoverColor.isValid()) {
-            QColor c = m_eyedropperHoverColor;
-            QString hex = c.name(QColor::HexRgb).toUpper();
-            if (c.alpha() < 255)
-                hex = c.name(QColor::HexArgb).toUpper();
-            QString text = QStringLiteral("%1\nRGB(%2, %3, %4)\nA: %5")
-                .arg(hex)
-                .arg(c.red())
-                .arg(c.green())
-                .arg(c.blue())
-                .arg(c.alpha());
-            m_eyedropperOverlay->setText(text);
-            m_eyedropperOverlay->adjustSize();
-            QPoint pos = e->position().toPoint() + QPoint(16, 16);
-            if (pos.x() + m_eyedropperOverlay->width() > width())
-                pos.setX(e->position().toPoint().x() - m_eyedropperOverlay->width() - 8);
-            if (pos.y() + m_eyedropperOverlay->height() > height())
-                pos.setY(e->position().toPoint().y() - m_eyedropperOverlay->height() - 8);
-            m_eyedropperOverlay->move(pos);
-            m_eyedropperOverlay->setVisible(true);
-        } else {
-            m_eyedropperOverlay->setVisible(false);
-        }
+        updateEyedropperReadout(e->position(), m_eyedropperHoverColor);
         update();
-    }
-
-    if (m_quickMaskMode && (e->buttons() & Qt::LeftButton)
-        && (tool == Tool::Brush || tool == Tool::Eraser)) {
-        bool erasing = (tool == Tool::Eraser);
-        QPointF docPos = screenToDocument(e->position());
-        int cx = static_cast<int>(docPos.x());
-        int cy = static_cast<int>(docPos.y());
-        float radius = m_brushSettings.size * 0.5f;
-        if (radius < 1.0f) radius = 1.0f;
-        int r = static_cast<int>(radius);
-        int mw = m_doc->selection.width();
-        int mh = m_doc->selection.height();
-        for (int y = std::max(0, cy - r); y <= std::min(mh - 1, cy + r); ++y) {
-            uchar* row = m_doc->selection.image().scanLine(y);
-            for (int x = std::max(0, cx - r); x <= std::min(mw - 1, cx + r); ++x) {
-                float dist = std::sqrt(static_cast<float>((x - cx)*(x - cx) + (y - cy)*(y - cy)));
-                if (dist <= radius)
-                    row[x] = erasing ? 0 : 255;
-            }
-        }
-        m_doc->selection.setActive(!m_doc->selection.isEmpty());
-        markSelectMaskDirty();
-        m_quickMaskDabbed = true;
-        update();
-        return;
     }
 
     if (m_brushDrawing) {
@@ -5601,10 +6362,16 @@ void CanvasView::mouseMoveEvent(QMouseEvent* e)
         float dt = m_brushStrokeTimer.nsecsElapsed() / 1e9f;
         m_brushStrokeTimer.start();
 
-        auto* brushLayer = m_doc->activeLayer();
-        if (!brushLayer) { m_brushDrawing = false; return; }
         BrushInputState input;
-        input.imagePos = screenToImage(screenPos, brushLayer);
+        if (m_grayscaleStrokeActive) {
+            // A channel / Quick Mask stroke has no layer; its coordinates are
+            // the document's.
+            input.imagePos = screenToDocument(screenPos);
+        } else {
+            auto* brushLayer = m_doc->activeLayer();
+            if (!brushLayer) { m_brushDrawing = false; return; }
+            input.imagePos = screenToImage(screenPos, brushLayer);
+        }
 
         if (dt > 0.0f) {
             QPointF delta = screenPos - m_brushScreenLastPos;
@@ -5924,6 +6691,17 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* e)
         PointerInputEvent me = CanvasInputMapper::fromMouseEvent(e, PointerPhase::Release);
         m_inputState.noteMouseEvent(me);
     }
+    if (m_colorPickDragging && e->button() == Qt::LeftButton) {
+        m_colorPickDragging = false;
+        const QColor sampled = eyedropperSampleColor(e->position());
+        // Releasing ends the pick: the dialog disarms itself and un-presses its
+        // eyedropper button. An invalid sample (released off the image) keeps the
+        // colour the drag last reported rather than clearing it.
+        emit colorPickFinished(sampled);
+        e->accept();
+        return;
+    }
+
     if (m_curvesTargetDragging) {
         m_curvesTargetDragging = false;
         emit curvesTargetEnded();
@@ -6574,10 +7352,22 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
         m_brushScreenLastPos = ev.widgetPos;
         m_brushStrokeTimer.start();
         if (isCloneOrHealingTool()) {
+            // Same gate as the mouse path: these tools write layer pixels and
+            // have no channel equivalent.
+            if (m_controller && m_controller->hasArmedChannels()) {
+                m_controller->reportOperationBlocked(
+                    tr("This tool cannot edit a channel. Select the composite "
+                       "channel in the Channels panel first."));
+                updateBrushCursorFromPointer(ev);
+                break;
+            }
             if (!m_cloneSourceDefined) {
                 m_cloneNeedsSourceFeedback = true;
                 update();
-            } else if (canPaintActiveRasterLayer()) {
+            } else {
+                // beginCloneStampStroke runs the RAW gate and then
+                // canPaintActiveRasterLayer() itself — pre-checking the latter
+                // here would hide a RAW layer's raster-copy offer.
                 beginCloneStampStroke(input, ev.widgetPos, ev.canvasPos);
             }
         } else {
@@ -6586,6 +7376,15 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
             // pen's eraser tip — is excluded: there is nothing to erase on a fresh
             // empty layer, so it only strokes when a layer already exists.
             const bool isEraser = (effectiveTool() == Tool::Eraser) || forceErase;
+            if (grayscaleStrokeTarget()) {
+                // Channels / Quick Mask need no pixel layer at all — creating
+                // one here would leave an empty layer behind after every
+                // channel stroke.
+                input.imagePos = screenToDocument(ev.widgetPos);
+                beginBrushStroke(input, ev.widgetPos);
+                updateBrushCursorFromPointer(ev);
+                break;
+            }
             const bool ready = isEraser ? (m_doc->activeLayer() != nullptr)
                                         : ensurePaintTargetLayer(tr("Brush Stroke"));
             if (ready) {
@@ -6612,6 +7411,8 @@ void CanvasView::dispatchBrushPointer(const PointerInputEvent& ev)
                 input.direction = std::atan2(delta.y(), delta.x());
             }
             m_brushScreenLastPos = ev.widgetPos;
+            if (m_grayscaleStrokeActive)
+                input.imagePos = screenToDocument(ev.widgetPos);
             if (isCloneOrHealingTool())
                 continueCloneStampStroke(input, ev.widgetPos, ev.canvasPos);
             else
@@ -6993,14 +7794,27 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         update();
         return;
     }
+    // RAW gate (Clone Stamp + Healing, mouse and pen alike). Runs before
+    // canPaintActiveRasterLayer() — which rejects a RAW layer — so the user gets
+    // the raster-copy offer instead of a silently ignored click, and before
+    // cloneSourceSnapshot() below so the sample sees the final layer stack.
+    if (!ensureRasterCopyForRawTarget()) {
+        m_brushDrawing = false;
+        return;
+    }
     auto* layer = m_doc->activeLayer();
     if (!layer || !canPaintActiveRasterLayer()) {
         m_brushDrawing = false;
         return;
     }
 
-    if (layer->isDistortLayer())
+    if (layer->isDistortLayer()) {
         layer->distortData.reset();
+        // Changes what the layer renders without bumping compositionGeneration,
+        // which is what the snapshot cache below keys on — drop it by hand or the
+        // stroke would sample the pre-reset distort.
+        invalidateClonePreviewCache();
+    }
 
     layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
     m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
@@ -7008,15 +7822,32 @@ void CanvasView::beginCloneStampStroke(const BrushInputState& input,
         return;
 
     if (!m_cloneAligned || !m_cloneOffsetValid) {
-        m_cloneSourceOffset = documentPos - m_cloneSourcePoint;
+        // Snap to the nearest whole document pixel (same reasoning as
+        // snapNodeToPixelGrid for a moved layer): Clone Stamp is a pure
+        // translation, no scale/rotate, so a fractional offset buys no extra
+        // detail and only forces drawCloneDabToRasterTiles's bilinear sampler
+        // to blend neighbouring source texels on every dab — filtering that
+        // has no filtering purpose. A whole offset is what lands the sampler on
+        // exact texel centres (it shifts the document coordinate by half a
+        // texel for that), where it copies instead of filtering. The correction
+        // is at most half a pixel and persists for the stroke (and every
+        // aligned stroke after it, since m_cloneOffsetValid keeps this offset
+        // alive across strokes).
+        const QPointF rawOffset = documentPos - m_cloneSourcePoint;
+        m_cloneSourceOffset = QPointF(std::round(rawOffset.x()), std::round(rawOffset.y()));
         m_cloneOffsetValid = true;
     }
 
-    // Snapshot converted ONCE here: both the dab sampler and the per-event
-    // source preview read it as RGBA8888, so neither pays a full-document
-    // format conversion during the stroke.
-    m_cloneStrokeContext.sourceImage =
-        cloneSourceSnapshot().convertToFormat(QImage::Format_RGBA8888);
+    // Through the shared cache, not cloneSourceSnapshot() directly: the worker
+    // started as soon as the previous stroke ended (requestCloneSourceSnapshot),
+    // so by the time the user presses again this is normally just a fetch. Only
+    // a press that beats the worker pays for a composite here, and even then it
+    // joins the build already running instead of starting a second one.
+    //
+    // Already RGBA8888: both the dab sampler and the per-event source preview
+    // read it that way, so neither pays a full-document format conversion
+    // during the stroke.
+    m_cloneStrokeContext.sourceImage = cloneSourceSnapshotBlocking();
     m_cloneStrokeContext.sourceOffset = m_cloneSourceOffset;
     m_cloneStrokeContext.documentSize = m_doc->size;
     m_cloneStrokeContext.healing = m_stampHealing;
@@ -7097,10 +7928,25 @@ void CanvasView::continueCloneStampStroke(const BrushInputState& input,
 void CanvasView::beginBrushStroke(const BrushInputState& input,
                                   QPointF screenPos)
 {
+    // Channels / Quick Mask first: the target is a document-space grayscale
+    // buffer, so none of the layer machinery below (locks, raster tiles, GPU
+    // mask FBO, expansion) applies. Dispatching here instead of at each call
+    // site keeps mouse, pen and the airbrush timer on one path.
+    if (grayscaleStrokeTarget()) {
+        beginGrayscaleStroke(input, screenPos);
+        return;
+    }
+
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
     m_brushUsingRasterTiles = false;
+    // RAW gate (Eraser, and any Brush press that reaches here without having
+    // gone through ensurePaintTargetLayer; a no-op for a mask stroke).
+    if (!ensureRasterCopyForRawTarget()) {
+        m_brushDrawing = false;
+        return;
+    }
     // Lock gate (evaluated once, at the call site). Mask painting only honours
     // Lock All; image painting honours Lock Image Pixels / Lock All (and rejects
     // Text/Shape) — both routed through the controller's central guards so the
@@ -7116,11 +7962,33 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
             return;
         }
     }
+    // A colour-component edit target (the Channels panel has a subset of
+    // R/G/B armed) paints normally and then keeps only the armed components:
+    // the unarmed ones and the ALPHA are restored from this snapshot in
+    // endBrushStroke. That is what makes the edit land in the real editable
+    // layer — not in a flattened raster — and what keeps the layer's
+    // transparency intact, since a component edit must not create new opaque
+    // pixels. Expansion is suppressed below for the same reason: nothing can
+    // appear outside the pixels the layer already has.
+    m_componentStrokeActive = false;
+    if (!m_editingMask && m_controller && m_controller->hasArmedColorSubset()
+        && !layer->cpuImage.isNull()) {
+        m_componentStrokeActive = true;
+        for (int c = 0; c < 3; ++c)
+            m_componentStrokeMask[c] = m_doc->channelState.colorSelected[c];
+        m_componentStrokeBefore =
+            layer->cpuImage.convertToFormat(QImage::Format_RGBA8888);
+    }
+
     // Painting on a distort layer forfeits its re-editability (pixels diverge
     // from the source warp), so drop the distort metadata before the stroke.
     if (!m_editingMask && layer->isDistortLayer())
         layer->distortData.reset();
-    if (!m_editingMask && !layer->isTextLayer() && !layer->isShapeLayer()) {
+    // A component stroke stays off the raster-tile path: the merge at the end
+    // needs one canvas-aligned buffer, and the tile storage reports its content
+    // bounds rather than the layer grid.
+    if (!m_editingMask && !m_componentStrokeActive
+        && layer->hasDirectlyEditablePixels()) {
         layer->enableRasterStorage(m_doc ? m_doc->tileSize() : 256);
         m_brushUsingRasterTiles = layer->rasterStorage.isEnabled();
         if (m_brushUsingRasterTiles)
@@ -7159,7 +8027,7 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
         doneCurrent();
     }
 
-    if (!m_brushUsingRasterTiles)
+    if (!m_brushUsingRasterTiles && !m_componentStrokeActive)
         expandLayer(input.imagePos);
     layer = m_doc->activeLayer();
     if (!layer) return;
@@ -7167,9 +8035,14 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     BrushInputState state = input;
     state.imagePos = screenToImage(screenPos, layer);
 
-    if (m_editingMask && !pointInsideMaskBounds(layer, state.imagePos)) {
+    // A mask stroke needs a mask buffer to write into; the cursor's position is
+    // NOT a gate. A dab centred past the mask edge still covers mask pixels with
+    // the rest of its footprint, so drawMaskDab clips it to the buffer instead of
+    // dropping it — the same rule the raster-tile and channel dabs already
+    // follow. Refusing the press by position is what used to force the user to
+    // keep the cursor inside the canvas to paint its border.
+    if (m_editingMask && layer->maskImage.isNull())
         return;
-    }
 
     makeCurrent();
     if (!m_editingMask || layer->maskImage.isNull()) {
@@ -7191,7 +8064,7 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
         m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, layer,
                                selTex, selW, selH, selImage);
     }
-    previewAdjustmentMaskEdit(layer);
+    previewBakedMaskEdit(layer);
     doneCurrent();
 
     m_brushDrawing = true;
@@ -7225,19 +8098,25 @@ void CanvasView::beginBrushStroke(const BrushInputState& input,
     update();
 }
 
-void CanvasView::previewAdjustmentMaskEdit(Layer* layer)
+void CanvasView::previewBakedMaskEdit(Layer* layer)
 {
     // A mask painted on the GPU FBO is invisible until synced back whenever the
     // mask is baked into a CPU "effected" image rather than sampled live by the
-    // GPU mask uniform. Two such cases involve adjustment layers:
+    // GPU mask uniform. Three such cases:
     //   1. Editing a Single-Layer-Mode adjustment's own mask — baked into the
     //      parent layer's effected image. (Normal-Mode/stack adjustments sample
     //      the GPU mask directly and are already live.)
     //   2. Editing the mask of a layer that *hosts* Single-Layer-Mode
     //      adjustments — that layer renders through its effected image, so its
     //      own mask is baked too.
-    // In both cases sync GPU→CPU + invalidate the bake each dab so the effect
-    // previews in real time.
+    //   3. Editing the mask of a layer carrying layer styles or filters: it
+    //      renders from effectedTexture/styledBaseTexture, both of which bake
+    //      the mask in (computeStyledBaseImage starts from maskedBaseImage).
+    //      Without this the dab only appeared when the stroke ended, which is
+    //      when endBrushStroke() does the same sync.
+    // In every case sync GPU→CPU + invalidate the bake each dab so the result
+    // previews in real time. The re-bake itself stays off the UI thread
+    // (StyleBakePool), exactly like a pixel dab on a styled layer.
     if (!m_editingMask || !m_controller || !layer || layer->maskImage.isNull())
         return;
     auto* node = m_doc ? m_doc->activeNode() : nullptr;
@@ -7250,8 +8129,8 @@ void CanvasView::previewAdjustmentMaskEdit(Layer* layer)
         maskIsBaked = node->parent
                    && node->parent->type == LayerTreeNode::Type::Layer;
     } else if (node->type == LayerTreeNode::Type::Layer) {
-        // Case 2: layer hosting Single-Layer-Mode adjustments.
-        maskIsBaked = node->hasVisibleAdjustmentChildren();
+        // Cases 2 and 3 — both are exactly "this layer bakes its own mask".
+        maskIsBaked = node->usesEffectedPipeline();
     }
     if (!maskIsBaked)
         return;
@@ -7263,10 +8142,15 @@ void CanvasView::previewAdjustmentMaskEdit(Layer* layer)
 void CanvasView::continueBrushStroke(const BrushInputState& input,
                                      QPointF screenPos)
 {
+    if (m_grayscaleStrokeActive) {
+        continueGrayscaleStroke(input, screenPos);
+        return;
+    }
+
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
-    if (!m_brushUsingRasterTiles)
+    if (!m_brushUsingRasterTiles && !m_componentStrokeActive)
         expandLayer(input.imagePos);
     layer = m_doc->activeLayer();
     if (!layer) return;
@@ -7274,11 +8158,12 @@ void CanvasView::continueBrushStroke(const BrushInputState& input,
     BrushInputState state = input;
     state.imagePos = screenToImage(screenPos, layer);
 
-    if (m_editingMask) {
-        if (!pointInsideMaskBounds(layer, state.imagePos)) {
-            return;
-        }
-    }
+    // No position gate here either (see beginBrushStroke). Returning early while
+    // the cursor is off the mask also skipped the engine's spacing and last-point
+    // bookkeeping, so a stroke leaving and re-entering the canvas resumed with a
+    // straight jump instead of continuing along the path the user drew.
+    if (m_editingMask && layer->maskImage.isNull())
+        return;
 
     m_airbrushLastPos = state.imagePos;
     m_airbrushLastState = state;
@@ -7307,13 +8192,18 @@ void CanvasView::continueBrushStroke(const BrushInputState& input,
         m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, layer,
                                selTex, selW, selH, selImage);
     }
-    previewAdjustmentMaskEdit(layer);
+    previewBakedMaskEdit(layer);
 
     update();
 }
 
 void CanvasView::endBrushStroke()
 {
+    if (m_grayscaleStrokeActive) {
+        endGrayscaleStroke();
+        return;
+    }
+
     m_brushDrawing = false;
     if (m_airbrushTimer)
         m_airbrushTimer->stop();
@@ -7373,11 +8263,30 @@ void CanvasView::endBrushStroke()
             layer->dirtyRegion.clear();
         }
 
+        // Colour-component target: keep only the armed components, restore the
+        // rest and the alpha. Done once, at the end of the stroke, so the dabs
+        // themselves still go through the one brush rasterizer rather than a
+        // second component-aware dab path.
+        if (m_componentStrokeActive)
+            restoreUnarmedColorComponents(layer);
+
         clearSnapBoundsCache();
         invalidateMultiOutlineCache();
         if (m_doc) ++m_doc->compositionGeneration;
 
-        if (m_editingMask && !layer->maskImage.isNull()) {
+        // A mask stroke whose dabs were all clipped away (the cursor never came
+        // close enough to the mask for any of its footprint to land, zero
+        // pressure throughout) changed nothing, and must not leave an undo entry
+        // behind — the raster-tile branch below already skips an empty change
+        // set the same way.
+        const bool maskUntouched = m_editingMask
+            && m_brushBeforeOrigin == layer->maskOrigin
+            && m_brushBeforeImage == layer->maskImage
+            // ...and the layer image did not grow under the stroke — restoring
+            // its size is what the composite entry below carries.
+            && (m_maskStrokeBeforeCpu.isNull()
+                || m_maskStrokeBeforeCpu.size() == layer->cpuImage.size());
+        if (m_editingMask && !layer->maskImage.isNull() && !maskUntouched) {
             // If a flat-image layer was expanded during the stroke, include the layer
             // image restoration in the undo so the layer size is fully reverted.
             if (!m_maskStrokeBeforeCpu.isNull() &&
@@ -7400,6 +8309,8 @@ void CanvasView::endBrushStroke()
                     m_doc->activeFlatIndex, m_brushBeforeImage,
                     m_brushBeforeOrigin, layer->maskOrigin);
             }
+        } else if (m_editingMask) {
+            // Nothing painted into the mask: no history entry (see above).
         } else if (m_brushUsingRasterTiles && layer->rasterStorage.isEnabled()) {
             auto changes = layer->rasterStorage.endChangeTracking();
             m_controller->pushRasterTileSnapshot("brush_stroke",
@@ -7413,7 +8324,46 @@ void CanvasView::endBrushStroke()
         m_controller->history().endMacro();
     }
     m_brushUsingRasterTiles = false;
+    m_componentStrokeActive = false;
+    m_componentStrokeBefore = QImage();
     m_cloneStrokeContext = CloneStampContext();
+}
+
+// Keeps a colour-component stroke inside the components the Channels panel has
+// armed. The stroke painted all three (plus alpha) through the normal brush
+// path; this puts the others back from the pre-stroke snapshot, which is what
+// §5.1's "other components must be preserved" and "the layer's transparency is
+// still respected" come down to in pixels.
+void CanvasView::restoreUnarmedColorComponents(Layer* layer)
+{
+    if (!layer || m_componentStrokeBefore.isNull())
+        return;
+
+    if (layer->cpuImage.format() != QImage::Format_RGBA8888)
+        layer->cpuImage = layer->cpuImage.convertToFormat(QImage::Format_RGBA8888);
+    if (layer->cpuImage.size() != m_componentStrokeBefore.size())
+        return;  // geometry moved under us; leave the stroke as painted
+
+    const int w = layer->cpuImage.width();
+    for (int y = 0; y < layer->cpuImage.height(); ++y) {
+        const uchar* before = m_componentStrokeBefore.constScanLine(y);
+        uchar* dst = layer->cpuImage.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            uchar* px = dst + x * 4;
+            const uchar* bp = before + x * 4;
+            for (int c = 0; c < 3; ++c) {
+                if (!m_componentStrokeMask[c])
+                    px[c] = bp[c];
+            }
+            px[3] = bp[3];
+        }
+    }
+    layer->textureOutdated = true;
+    layer->pendingGpuUpload = true;
+    if (layer->owner) {
+        layer->owner->invalidateEffects();
+        layer->owner->thumbnailDirty = true;
+    }
 }
 
 QPointF CanvasView::constrainedGradientPoint(QPointF start, QPointF current,
@@ -7497,6 +8447,48 @@ void CanvasView::endGradientDrag(QPointF screenPos, Qt::KeyboardModifiers modifi
     m_gradientDragging = false;
     if (m_gradientOverlay)
         m_gradientOverlay->finish();
+
+    // Armed channels take the gradient instead of a layer: the ramp is
+    // rendered once in document space and written as grayscale coverage, so no
+    // pixel layer is created and none is touched.
+    if (screenDist >= 1.0 && m_controller->hasArmedChannels()) {
+        QPointF startDoc = screenToDocument(m_gradientStartScreen);
+        QPointF endDoc = screenToDocument(constrainedScreen);
+        if ((modifiers & Qt::AltModifier)
+            && (m_gradientDefinition.kind == GradientKind::Linear
+                || m_gradientDefinition.kind == GradientKind::Reflected)) {
+            startDoc = startDoc - (endDoc - startDoc);
+        }
+        if (std::hypot(endDoc.x() - startDoc.x(), endDoc.y() - startDoc.y()) >= 1.0) {
+            GradientRenderRequest request;
+            request.definition = m_gradientDefinition;
+            request.definition.normalize();
+            request.targetSize = m_doc->size;
+            request.startPoint = startDoc;
+            request.endPoint = endDoc;
+            request.opacity = 1.0;
+            const QImage ramp = GradientRenderer::renderGradientToImage(request);
+            if (!ramp.isNull()) {
+                const QImage rgba = ramp.convertToFormat(QImage::Format_RGBA8888);
+                QImage coverage(rgba.size(), QImage::Format_Grayscale8);
+                for (int y = 0; y < rgba.height(); ++y) {
+                    const uchar* src = rgba.constScanLine(y);
+                    uchar* dst = coverage.scanLine(y);
+                    for (int x = 0; x < rgba.width(); ++x) {
+                        // Luminance, scaled by the ramp's own alpha so a
+                        // transparent stop reads as "no change" rather than
+                        // as black.
+                        const int lum = (src[x * 4] * 299 + src[x * 4 + 1] * 587
+                                         + src[x * 4 + 2] * 114) / 1000;
+                        dst[x] = static_cast<uchar>(lum * src[x * 4 + 3] / 255);
+                    }
+                }
+                m_controller->applyGradientToArmedChannels(coverage, tr("Gradient"));
+            }
+        }
+        update();
+        return;
+    }
 
     if (screenDist >= 1.0 && ensurePaintTargetLayer(tr("Gradient"))) {
         // Recompute both endpoints against the layer that is active now (the
@@ -7676,6 +8668,21 @@ void CanvasView::fillBucket(QPointF screenPos)
 void CanvasView::onAirbrushTick()
 {
     if (!m_brushDrawing) return;
+
+    if (m_grayscaleStrokeActive) {
+        BrushInputState s = m_airbrushLastState;
+        s.imagePos = m_airbrushLastPos;
+        s.velocity = 0.0f;
+        const QImage* selImage = (m_doc->selection.active()
+                                  && !m_doc->selection.isEmpty())
+            ? &m_doc->selection.image() : nullptr;
+        m_brushEngine.airbrushDab(s, m_brushSettings, m_brushRenderer, nullptr,
+                                  0, 0, 0, selImage);
+        flushGrayscaleStrokeDamage();
+        update();
+        return;
+    }
+
     auto* layer = m_doc->activeLayer();
     if (!layer) return;
 
@@ -7712,6 +8719,203 @@ void CanvasView::onAirbrushTick()
     }
 
     update();
+}
+
+
+// ── Grayscale strokes: channels and Quick Mask ─────────────────
+//
+// One path for both, because they are the same operation on different buffers:
+// coverage painted into a document-space 8-bit plane. Quick Mask's plane is the
+// live selection (there is only one quick-mask model in the app); a channel's
+// is its own data. Neither touches the layer that happens to be selected in the
+// Layers panel — that separation is the whole point of the Channels edit
+// target.
+//
+// Values are written LITERALLY: the brush colour's luminance, flipped for the
+// Eraser (BrushRenderer::drawChannelDab). An Alpha channel's Masked/Selected
+// Areas setting changes which side the overlay tints and nothing else, so
+// switching it cannot invert a stored selection.
+
+QImage CanvasView::documentCompositeImage() const
+{
+    return m_gpuViewport ? m_gpuViewport->projectionBaseImage() : QImage();
+}
+
+bool CanvasView::grayscaleStrokeTarget() const
+{
+    if (!m_doc || !m_controller)
+        return false;
+    // A layer-mask edit keeps its own (GPU) path; it is a layer's mask, not a
+    // document channel.
+    if (m_editingMask)
+        return false;
+    if (m_doc->quickMask.active)
+        return true;
+    return !m_doc->channelState.selectedChannels.empty();
+}
+
+void CanvasView::beginGrayscaleStroke(const BrushInputState& input,
+                                      QPointF screenPos)
+{
+    if (!m_doc || !m_controller)
+        return;
+
+    m_grayscalePaint = ChannelPaintTarget();
+    m_grayscaleStrokeChannels.clear();
+    m_grayscaleStrokeBefore.clear();
+    m_grayscaleStrokeIsQuickMask = m_doc->quickMask.active;
+
+    if (m_grayscaleStrokeIsQuickMask) {
+        if (m_doc->selection.image().isNull()
+            || m_doc->selection.image().size() != m_doc->size)
+            m_doc->selection.resize(m_doc->size.width(), m_doc->size.height());
+        if (m_doc->selection.image().format() != QImage::Format_Grayscale8) {
+            m_doc->selection.image() =
+                m_doc->selection.image().convertToFormat(QImage::Format_Grayscale8);
+        }
+        m_quickMaskBefore = m_doc->selection.image().copy();
+        m_grayscalePaint.buffers.push_back(&m_doc->selection.image());
+    } else {
+        for (uint64_t id : m_doc->channelState.selectedChannels) {
+            const int index = m_doc->channelIndexById(id);
+            if (index < 0)
+                continue;
+            DocumentChannel& ch = m_doc->channels[static_cast<size_t>(index)];
+            if (ch.data.isNull() || ch.data.size() != m_doc->size)
+                m_doc->ensureChannelBuffers();
+            if (ch.data.format() != QImage::Format_Grayscale8)
+                ch.data = ch.data.convertToFormat(QImage::Format_Grayscale8);
+            m_grayscaleStrokeChannels.push_back(index);
+            m_grayscaleStrokeBefore.push_back(ch.data.copy());
+            m_grayscalePaint.buffers.push_back(&ch.data);
+        }
+    }
+
+    if (m_grayscalePaint.buffers.empty())
+        return;
+
+    BrushInputState state = input;
+    // Document space: a channel has no layer transform to map through.
+    state.imagePos = screenToDocument(screenPos);
+
+    m_brushRenderer.updateStamp(m_brushSettings);
+    m_brushRenderer.beginStroke();
+    m_brushEngine.beginChannelStroke(state, &m_grayscalePaint);
+
+    const QImage* selImage = (m_doc->selection.active() && !m_grayscaleStrokeIsQuickMask
+                              && !m_doc->selection.isEmpty())
+        ? &m_doc->selection.image() : nullptr;
+    m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, nullptr,
+                           0, 0, 0, selImage);
+    flushGrayscaleStrokeDamage();
+
+    m_grayscaleStrokeActive = true;
+    m_brushDrawing = true;
+    m_brushScreenLastPos = screenPos;
+    m_airbrushLastPos = state.imagePos;
+    m_airbrushLastState = state;
+    m_brushStrokeTimer.start();
+
+    if (m_brushSettings.airbrush) {
+        if (!m_airbrushTimer) {
+            m_airbrushTimer = new QTimer(this);
+            connect(m_airbrushTimer, &QTimer::timeout, this, &CanvasView::onAirbrushTick);
+        }
+        m_airbrushTimer->start(std::max(5,
+            static_cast<int>(std::lround(1000.0f / std::max(1.0f, m_brushSettings.airbrushRate)))));
+    }
+
+    update();
+}
+
+void CanvasView::continueGrayscaleStroke(const BrushInputState& input,
+                                         QPointF screenPos)
+{
+    if (!m_doc || m_grayscalePaint.buffers.empty())
+        return;
+
+    BrushInputState state = input;
+    state.imagePos = screenToDocument(screenPos);
+    m_airbrushLastPos = state.imagePos;
+    m_airbrushLastState = state;
+
+    const QImage* selImage = (m_doc->selection.active() && !m_grayscaleStrokeIsQuickMask
+                              && !m_doc->selection.isEmpty())
+        ? &m_doc->selection.image() : nullptr;
+    m_brushEngine.strokeTo(state, m_brushSettings, m_brushRenderer, nullptr,
+                           0, 0, 0, selImage);
+    flushGrayscaleStrokeDamage();
+    update();
+}
+
+void CanvasView::endGrayscaleStroke()
+{
+    m_brushDrawing = false;
+    m_grayscaleStrokeActive = false;
+    if (m_airbrushTimer)
+        m_airbrushTimer->stop();
+    m_brushEngine.endStroke();
+    m_brushRenderer.endStroke();
+    flushGrayscaleStrokeDamage();
+
+    if (m_controller) {
+        if (m_grayscaleStrokeIsQuickMask) {
+            // Quick Mask edits the live selection, so its undo entry is the
+            // selection's — the same command the mask stays in when the mode is
+            // switched off, which is what keeps one quick-mask model.
+            m_doc->selection.image();   // drop the cached isEmpty()/bounds
+            m_doc->selection.setActive(!m_doc->selection.isEmpty());
+            markSelectMaskDirty();
+            m_controller->pushCommand(std::make_unique<SelectionCommand>(
+                m_doc, m_quickMaskBefore, m_doc->selection.image().copy(),
+                true, m_doc->selection.active(), "quick_mask_edit"));
+            m_quickMaskDabbed = true;
+        } else {
+            // One entry per channel, grouped when several were armed: the user
+            // made one stroke.
+            const bool group = m_grayscaleStrokeChannels.size() > 1;
+            if (group)
+                m_controller->history().beginMacro(tr("Brush Stroke"));
+            for (size_t i = 0; i < m_grayscaleStrokeChannels.size(); ++i) {
+                m_controller->pushChannelPixelSnapshot(
+                    m_grayscaleStrokeChannels[i], m_grayscaleStrokeBefore[i],
+                    QStringLiteral("brush_stroke"));
+            }
+            if (group)
+                m_controller->history().endMacro();
+        }
+    }
+
+    m_grayscalePaint = ChannelPaintTarget();
+    m_grayscaleStrokeChannels.clear();
+    m_grayscaleStrokeBefore.clear();
+    m_quickMaskBefore = QImage();
+    update();
+}
+
+void CanvasView::flushGrayscaleStrokeDamage()
+{
+    if (!m_doc || m_grayscalePaint.dirty.isNull())
+        return;
+    const QRect dirty = m_grayscalePaint.dirty;
+    m_grayscalePaint.dirty = QRect();
+
+    if (m_grayscaleStrokeIsQuickMask) {
+        // The dabs wrote straight into the mask buffer, bypassing the mutating
+        // accessors, so SelectionMask's cached isEmpty()/bounds has to be
+        // dropped before it is read again. The non-const image() does that.
+        m_doc->selection.image();
+        m_doc->selection.setActive(!m_doc->selection.isEmpty());
+        markSelectMaskDirty(dirty);
+    } else {
+        for (int index : m_grayscaleStrokeChannels) {
+            if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+                m_doc->channels[static_cast<size_t>(index)].thumbDirty = true;
+        }
+    }
+    // Only the painted rect is re-derived from the cached base composite; the
+    // layer stack did not change, so nothing recomposites.
+    m_doc->markChannelViewDirty(dirty);
 }
 
 // ── Selection Methods ────────────────────────────────────────
@@ -7988,8 +9192,8 @@ QPointF CanvasView::snapToEdge(QPointF docPos)
 
     // The edge map is in document space; convert the screen-px search radius
     // to doc px so the magnet feels the same at any zoom.
-    int cx = static_cast<int>(std::round(docPos.x()));
-    int cy = static_cast<int>(std::round(docPos.y()));
+    int cx = docPixelIndex(docPos.x());
+    int cy = docPixelIndex(docPos.y());
     const float zoom = m_doc->zoom > 0.01f ? m_doc->zoom : 1.0f;
     int radius = std::max(1, static_cast<int>(std::round(m_magneticSearchRadius / zoom)));
 
@@ -8089,17 +9293,25 @@ QRect CanvasView::doQuickSelectDab(const QPointF& docPos)
         inv12 = sh * 0.5 * (1.0 + invT.m12() - invT.m22() - invT.m32());
     }
 
+    // Fold half a pixel into the translation so the map takes doc-pixel CENTRES
+    // to layer space; flooring that is the layer pixel a doc pixel sits on. The
+    // reads below used to round a corner-mapped coordinate instead, which is
+    // half a layer pixel off as soon as the layer is scaled or rotated (exact
+    // for an untransformed layer, where this is a no-op).
+    const double inv02c = inv02 + 0.5 * (inv00 + inv01);
+    const double inv12c = inv12 + 0.5 * (inv10 + inv11);
+
     // Dab center in doc-pixel coords
-    int cx = static_cast<int>(std::round(docPos.x()));
-    int cy = static_cast<int>(std::round(docPos.y()));
+    int cx = docPixelIndex(docPos.x());
+    int cy = docPixelIndex(docPos.y());
     int brushR = static_cast<int>(m_brushSettings.size * 0.5f);
     if (brushR < 1) brushR = 1;
 
     // Seed color: map dab center (doc-pixel) to layer pixel and read
-    double seedLx = inv00 * cx + inv01 * cy + inv02;
-    double seedLy = inv10 * cx + inv11 * cy + inv12;
-    int seedLxI = std::clamp(static_cast<int>(seedLx + 0.5), 0, sw - 1);
-    int seedLyI = std::clamp(static_cast<int>(seedLy + 0.5), 0, sh - 1);
+    double seedLx = inv00 * cx + inv01 * cy + inv02c;
+    double seedLy = inv10 * cx + inv11 * cy + inv12c;
+    int seedLxI = std::clamp(docPixelIndex(seedLx), 0, sw - 1);
+    int seedLyI = std::clamp(docPixelIndex(seedLy), 0, sh - 1);
     const uchar* sp = srcBits + (seedLyI * sw + seedLxI) * 4;
     int sR = sp[0], sG = sp[1], sB = sp[2], sA = sp[3];
 
@@ -8128,10 +9340,10 @@ QRect CanvasView::doQuickSelectDab(const QPointF& docPos)
             const int dx = x - cx;
             if (dx * dx + dy * dy > brushR2) continue;
             // Map doc-pixel to layer-pixel for color reading
-            double lx = inv00 * x + inv01 * y + inv02;
-            double ly = inv10 * x + inv11 * y + inv12;
-            int lxI = std::clamp(static_cast<int>(lx + 0.5), 0, sw - 1);
-            int lyI = std::clamp(static_cast<int>(ly + 0.5), 0, sh - 1);
+            double lx = inv00 * x + inv01 * y + inv02c;
+            double ly = inv10 * x + inv11 * y + inv12c;
+            int lxI = std::clamp(docPixelIndex(lx), 0, sw - 1);
+            int lyI = std::clamp(docPixelIndex(ly), 0, sh - 1);
             const uchar* px = srcBits + (lyI * sw + lxI) * 4;
             if (SelectionMask::colorMatches(px, sR, sG, sB, sA,
                                             m_quickSelectTolerance)) {
@@ -9087,6 +10299,13 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
         const QTransform before = node->transform;
         const QTransform after = transformWithDocumentDelta(node, startTransform, adjustedDeltaDoc);
         node->transform = after;
+        // Quantise the drag to whole document pixels (see snapNodeToPixelGrid):
+        // the mouse delta is continuous, and leaving the layer on a fractional
+        // offset makes both compositors resample it from here on. Applied every
+        // frame, not only on release, so the live preview shows exactly the
+        // pixels that get committed. Stable because `after` is always recomputed
+        // from startTransform rather than accumulated.
+        snapNodeToPixelGrid(node);
         if (snapDebugEnabled()) {
             qInfo().noquote()
                 << "[Snap][apply-node]"
@@ -9096,7 +10315,9 @@ bool CanvasView::applySnapMoveFromStart(QPointF currentMouseScreen,
                 << "startTx" << startTransform.m31()
                 << "startTy" << startTransform.m32()
                 << "afterTx" << after.m31()
-                << "afterTy" << after.m32();
+                << "afterTy" << after.m32()
+                << "gridTx" << node->transform.m31()
+                << "gridTy" << node->transform.m32();
         }
     };
 
@@ -9154,6 +10375,35 @@ void CanvasView::translateNodeByDocumentDelta(LayerTreeNode* node, QPointF delta
                 t.m21(), t.m22(), t.m23(),
                 t.m31() + localDx, t.m32() + localDy, t.m33());
     node->transform = t;
+}
+
+void CanvasView::snapNodeToPixelGrid(LayerTreeNode* node)
+{
+    if (!m_doc || !node)
+        return;
+
+    // Why this exists: a move writes a continuous screen delta into the node
+    // transform, so the layer lands on a fractional document offset and every
+    // compositor — CPU projection and GPU preview alike — has to resample it.
+    // The softness then persists for as long as the layer stays there, which is
+    // why a single drag made a freshly pasted (sharp) layer blurry "forever".
+    // GIMP never hits this because layer offsets are integers by construction
+    // (gint, gimp_item_get_offset / gimp_item_translate).
+    //
+    // Only the translation is corrected, by at most half a pixel. A scaled or
+    // rotated layer is resampled regardless, so for those this is neither a fix
+    // nor a regression — their sharpness is a transform-quality problem.
+    const QRectF bounds = nodeDocumentBounds(node);
+    if (bounds.isNull() && bounds.isEmpty())
+        return;
+
+    const QPointF tl = bounds.topLeft();
+    const QPointF correction(std::round(tl.x()) - tl.x(),
+                             std::round(tl.y()) - tl.y());
+    if (std::abs(correction.x()) < 1e-6 && std::abs(correction.y()) < 1e-6)
+        return;
+
+    translateNodeByDocumentDelta(node, correction);
 }
 
 void CanvasView::applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers)
@@ -9544,9 +10794,9 @@ bool CanvasView::activeLayerSupportsDistort() const
     if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
         return false;
     if (node->isPositionLocked()) return false;
-    // Text/shape keep their own non-destructive model; only raster or an
+    // Text/shape/RAW keep their own non-destructive model; only raster or an
     // existing distort layer qualifies.
-    if (node->layer->isTextLayer() || node->layer->isShapeLayer())
+    if (!node->layer->hasDirectlyEditablePixels())
         return false;
     return !node->layer->compositeImage().isNull();
 }
@@ -9647,14 +10897,18 @@ static TransformQuad remapQuadByTransformDelta(const TransformQuad& quad,
     return out;
 }
 
-// Warp `src` (whose full rect maps onto `srcQuadDoc` in document px) into the
+// Warp `srcPm` (whose full rect maps onto `srcQuadDoc` in document px) into the
 // quad `dstQuadDoc`. Returns the rendered RGBA image and its document-px origin.
+// `srcPm` must be Format_RGBA8888_Premultiplied — resampling straight alpha
+// bleeds the colour of transparent pixels into every soft edge as a dark fringe
+// (the rule and the 8-bit trade-off are stated in engine/ImageEngine.hpp). The
+// caller keeps the premultiplied copy so a live drag converts it only once.
 // `highQuality` selects cubic (commit/idle) vs linear (live drag) interpolation.
 // `previewScale` (≤1.0) renders into a proportionally smaller buffer for live
 // drags — the GPU upsamples it to the same document footprint, so distorting a
 // huge layer stays cheap. `outFootprint` reports the full document-px footprint
 // the result covers (independent of the buffer's pixel size), used to place it.
-static QImage warpDistort(const QImage& src,
+static QImage warpDistort(const QImage& srcPm,
                           const TransformQuad& srcQuadDoc,
                           const TransformQuad& dstQuadDoc,
                           bool highQuality,
@@ -9662,7 +10916,7 @@ static QImage warpDistort(const QImage& src,
                           QPoint* outOrigin,
                           QSize* outFootprint)
 {
-    if (src.isNull() || !dstQuadDoc.isValid())
+    if (srcPm.isNull() || !dstQuadDoc.isValid())
         return QImage();
 
     QRect dstBounds = dstQuadDoc.toPolygon().boundingRect().toAlignedRect();
@@ -9684,8 +10938,8 @@ static QImage warpDistort(const QImage& src,
     const double sx = static_cast<double>(outW) / dstBounds.width();
     const double sy = static_cast<double>(outH) / dstBounds.height();
 
-    const QImage srcRgba = src.format() == QImage::Format_RGBA8888
-        ? src : src.convertToFormat(QImage::Format_RGBA8888);
+    const QImage srcRgba = srcPm.format() == QImage::Format_RGBA8888_Premultiplied
+        ? srcPm : srcPm.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
 
     // Source points: where srcQuadDoc lands in source-image pixels. srcQuadDoc
     // maps the image's full rect, so invert that rect→quad map and apply it to
@@ -9715,6 +10969,14 @@ static QImage warpDistort(const QImage& src,
                         cv::Size(outW, outH),
                         highQuality ? cv::INTER_CUBIC : cv::INTER_LINEAR,
                         cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+
+    // Back to straight alpha, the format cpuImage is in. Done through the
+    // shared helper rather than Qt's conversion because cubic has negative
+    // lobes: a channel can overshoot past alpha, and qUnpremultiply() assumes
+    // it never does — it masks instead of clamping, so colour 255 at alpha 100
+    // computes 651 and stores 651 & 0xff = 139, a dark speck on a white edge.
+    // unpremultiplyInPlace() clamps colour to alpha first.
+    ImageEngine::unpremultiplyInPlace(dstMat);
 
     QImage out(dstMat.data, dstMat.cols, dstMat.rows,
                static_cast<int>(dstMat.step), QImage::Format_RGBA8888);
@@ -9773,7 +11035,13 @@ void CanvasView::renderDistortLayer(bool highQuality)
             const QRect fp = dd.quad.toPolygon().boundingRect().toAlignedRect();
             previewScale = distortPreviewScale(fp);
         }
-        warped = warpDistort(dd.sourceImage, dd.sourceQuad, dd.quad,
+        if (m_distortPremulSource.isNull()
+            || m_distortPremulKey != dd.sourceImage.cacheKey()) {
+            m_distortPremulSource = dd.sourceImage.convertToFormat(
+                QImage::Format_RGBA8888_Premultiplied);
+            m_distortPremulKey = dd.sourceImage.cacheKey();
+        }
+        warped = warpDistort(m_distortPremulSource, dd.sourceQuad, dd.quad,
                              highQuality, previewScale, &origin, &footprint);
     }
     if (warped.isNull()) return;
@@ -10094,6 +11362,8 @@ void CanvasView::commitDistort()
     m_distortBeforeData = nullptr;
     m_distortDragBeforeImage = QImage();
     m_distortDragBeforeData = nullptr;
+    m_distortPremulSource = QImage();
+    m_distortPremulKey = 0;
     if (m_distortOverlay) m_distortOverlay->finish();
     if (m_doc) ++m_doc->compositionGeneration;
 
@@ -10119,6 +11389,8 @@ void CanvasView::cancelDistort()
     m_distortBeforeData = nullptr;
     m_distortDragBeforeImage = QImage();
     m_distortDragBeforeData = nullptr;
+    m_distortPremulSource = QImage();
+    m_distortPremulKey = 0;
     if (m_distortOverlay) m_distortOverlay->finish();
 
     if (m_controller && stepsToUndo > 0) {
@@ -10599,6 +11871,64 @@ void CanvasView::eyedropperSample(QPointF screenPos, Qt::MouseButton button,
         emit colorSampled(color);
 }
 
+void CanvasView::updateEyedropperReadout(QPointF screenPos, const QColor& color)
+{
+    if (!m_eyedropperOverlay)
+        return;
+    if (!color.isValid()) {
+        m_eyedropperOverlay->setVisible(false);
+        return;
+    }
+
+    QString hex = color.name(QColor::HexRgb).toUpper();
+    if (color.alpha() < 255)
+        hex = color.name(QColor::HexArgb).toUpper();
+    const QString text = QStringLiteral("%1\nRGB(%2, %3, %4)\nA: %5")
+        .arg(hex)
+        .arg(color.red())
+        .arg(color.green())
+        .arg(color.blue())
+        .arg(color.alpha());
+    m_eyedropperOverlay->setText(text);
+    m_eyedropperOverlay->adjustSize();
+
+    if (m_eyedropperSwatch) {
+        auto* th = ThemeManager::instance()->current();
+        QPixmap swatch(m_eyedropperSwatch->size());
+        swatch.fill(Qt::transparent);
+        QPainter sp(&swatch);
+        const QRect sr = swatch.rect().adjusted(0, 0, -1, -1);
+        // Paint the sample over the panel colour so a translucent pixel reads as
+        // washed out rather than as a different, darker colour.
+        sp.fillRect(sr, th->colorBackgroundPrimary);
+        sp.fillRect(sr, color);
+        sp.setPen(th->colorBorder);
+        sp.drawRect(sr);
+        sp.end();
+        m_eyedropperSwatch->setPixmap(swatch);
+        // Vertically centred against the right edge, inside the padding reserved
+        // for it at construction.
+        m_eyedropperSwatch->move(
+            m_eyedropperOverlay->width() - m_eyedropperSwatch->width() - th->spaceSM,
+            (m_eyedropperOverlay->height() - m_eyedropperSwatch->height()) / 2);
+    }
+
+    QPoint pos = screenPos.toPoint() + QPoint(16, 16);
+    if (pos.x() + m_eyedropperOverlay->width() > width())
+        pos.setX(screenPos.toPoint().x() - m_eyedropperOverlay->width() - 8);
+    if (pos.y() + m_eyedropperOverlay->height() > height())
+        pos.setY(screenPos.toPoint().y() - m_eyedropperOverlay->height() - 8);
+    m_eyedropperOverlay->move(pos);
+    m_eyedropperOverlay->setVisible(true);
+}
+
+void CanvasView::hideEyedropperReadout()
+{
+    m_eyedropperHovering = false;
+    if (m_eyedropperOverlay)
+        m_eyedropperOverlay->setVisible(false);
+}
+
 QColor CanvasView::eyedropperSampleColor(QPointF screenPos)
 {
     if (!m_doc || m_doc->size.isEmpty()) return {};
@@ -10618,8 +11948,10 @@ QColor CanvasView::eyedropperSampleColor(QPointF screenPos)
     if (node->type != LayerTreeNode::Type::Layer) return {};
 
     QPointF imgPos = screenToImage(screenPos, layer);
-    int px = static_cast<int>(std::round(imgPos.x()));
-    int py = static_cast<int>(std::round(imgPos.y()));
+    // Same conversion ColorSamplerService::sampleLayer does internally, so the
+    // bounds check and the sample can never disagree about the pixel.
+    const int px = docPixelIndex(imgPos.x());
+    const int py = docPixelIndex(imgPos.y());
 
     int lw = layer->cpuImage.width();
     int lh = layer->cpuImage.height();

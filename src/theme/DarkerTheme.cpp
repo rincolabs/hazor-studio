@@ -105,6 +105,7 @@ DarkerTheme::DarkerTheme(QObject *parent)
     // ============================================================
 
     canvasBackground = tone(baseColor, -27);
+    canvasDotColor = tone(canvasBackground, +14);
 
     m_componentTheme = QtTheme{};
     populateComponentTheme();

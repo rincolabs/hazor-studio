@@ -31,6 +31,16 @@
 
 #include <utility>
 
+static QFrame* makeHorizontalDivider(QWidget* parent)
+{
+    auto* divider = new QFrame(parent);
+    divider->setFrameShape(QFrame::NoFrame);
+    divider->setFixedHeight(1);
+    divider->setStyleSheet(QStringLiteral("background: %1; border: none;")
+                               .arg(ThemeManager::instance()->current()->colorBorder.name()));
+    return divider;
+}
+
 // ── CollapsibleSection ───────────────────────────────────────────────────────
 // Lightweight collapsible section: a clickable header with a disclosure
 // arrow that collapses/expands its body. Kept local to the panel — it carries no
@@ -58,16 +68,18 @@ public:
             "QToolButton { border: none; padding: %1px %2px; color: %3; "
             "font-weight: bold; text-align: left; background: transparent; }"
             "QToolButton:hover { color: %4; }")
-            .arg(t->spaceSM).arg(t->spaceMD)
+            .arg(t->spaceMD).arg(t->spaceMD)
             .arg(t->colorTextSecondary.name())
             .arg(t->colorTextBright.name()));
         root->addWidget(m_header);
 
         m_body = new QWidget(this);
         m_bodyLay = new QVBoxLayout(m_body);
-        m_bodyLay->setContentsMargins(t->spaceMD, t->spaceXS, t->spaceMD, t->spaceMD);
+        m_bodyLay->setContentsMargins(t->spaceMD, t->spaceSM,
+                                     t->spaceMD, t->spaceLG);
         m_bodyLay->setSpacing(t->spaceSM);
         root->addWidget(m_body);
+        root->addWidget(makeHorizontalDivider(this));
 
         connect(m_header, &QToolButton::toggled, this, [this](bool on) {
             m_body->setVisible(on);
@@ -84,11 +96,11 @@ private:
 };
 
 // Builds a 28×24 icon button matching the Align bar's affordances.
-static QPushButton* makeIconButton(const QString& iconName, const QString& tooltip,
+static QPushButton* makeIconButton(const QString& iconFile, const QString& tooltip,
                                    QWidget* parent)
 {
     auto* btn = new QPushButton(parent);
-    btn->setIcon(makeIcon(QStringLiteral(":/icons/%1.png").arg(iconName)));
+    btn->setIcon(makeIcon(QStringLiteral(":/icons/%1").arg(iconFile)));
     btn->setIconSize(QSize(20, 20));
     btn->setFixedSize(28, 24);
     btn->setToolTip(tooltip);
@@ -149,25 +161,32 @@ PropertiesPanel::PropertiesPanel(QWidget* parent)
     connect(ThemeManager::instance(), &ThemeManager::themeChanged,
             this, &PropertiesPanel::applyWrapperSurface);
 
+    auto* t = ThemeManager::instance()->current();
     auto* contentLay = new QVBoxLayout(content);
-    contentLay->setContentsMargins(0, 0, 0, 0);
+    // Symmetric gutter on top of each section's own inset, so controls never
+    // sit flush against the viewport edge or the vertical scrollbar.
+    contentLay->setContentsMargins(t->spaceXS, 0, t->spaceXS, 0);
 
     // The adjustment editors live alongside the default layer view; only one
     // view is visible at a time (showCurvesEditor / showColorBalanceEditor /
     // showHueSaturationEditor / showLayerProperties).
     m_curvesEditor = new CurvesEditorWidget(content);
+    m_curvesEditor->layout()->setSpacing(t->spaceSM);
     m_curvesEditor->setVisible(false);
     contentLay->addWidget(m_curvesEditor);
 
     m_colorBalanceEditor = new ColorBalanceAdjustmentWidget(content);
+    m_colorBalanceEditor->layout()->setSpacing(t->spaceSM);
     m_colorBalanceEditor->setVisible(false);
     contentLay->addWidget(m_colorBalanceEditor);
 
     m_hueSaturationEditor = new HueSaturationAdjustmentWidget(content);
+    m_hueSaturationEditor->layout()->setSpacing(t->spaceSM);
     m_hueSaturationEditor->setVisible(false);
     contentLay->addWidget(m_hueSaturationEditor);
 
     m_solidColorEditor = new SolidColorAdjustmentWidget(content);
+    m_solidColorEditor->layout()->setSpacing(t->spaceSM);
     m_solidColorEditor->setVisible(false);
     contentLay->addWidget(m_solidColorEditor);
 
@@ -192,6 +211,48 @@ PropertiesPanel::PropertiesPanel(QWidget* parent)
     buildTransformInterface(lay);
 
     // ── Layer Mask section ──
+    // ── Smart Object ──────────────────────────────────────────────
+    // Hidden unless the active layer is one. Read-only facts plus the three
+    // operations that make sense from here; creation and storage conversion
+    // live in Layer ▸ Smart Object, where they apply to a selection.
+    m_smartObjectSection = new CollapsibleSection(tr("Smart Object"), m_layerSection);
+    m_smartObjectSection->setVisible(false);
+    {
+        auto* soLay = m_smartObjectSection->body();
+        auto addRow = [&](const QString& title) -> QLabel* {
+            auto* row = new QHBoxLayout();
+            row->addWidget(new QLabel(title, m_smartObjectSection));
+            auto* value = new QLabel(QString(), m_smartObjectSection);
+            value->setWordWrap(true);
+            value->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            row->addWidget(value, 1);
+            soLay->addLayout(row);
+            return value;
+        };
+        m_smartObjectNameLabel = addRow(tr("Document:"));
+        m_smartObjectModeLabel = addRow(tr("Storage:"));
+        m_smartObjectPathLabel = addRow(tr("File:"));
+        m_smartObjectSizeLabel = addRow(tr("Source:"));
+        m_smartObjectInstancesLabel = addRow(tr("Instances:"));
+
+        m_smartObjectEditButton = new QPushButton(tr("Edit Contents"), m_smartObjectSection);
+        soLay->addWidget(m_smartObjectEditButton);
+        connect(m_smartObjectEditButton, &QPushButton::clicked,
+                this, &PropertiesPanel::smartObjectEditRequested);
+
+        m_smartObjectUpdateButton =
+            new QPushButton(tr("Update Modified Content"), m_smartObjectSection);
+        soLay->addWidget(m_smartObjectUpdateButton);
+        connect(m_smartObjectUpdateButton, &QPushButton::clicked,
+                this, &PropertiesPanel::smartObjectUpdateRequested);
+
+        m_smartObjectRelinkButton = new QPushButton(tr("Relink..."), m_smartObjectSection);
+        soLay->addWidget(m_smartObjectRelinkButton);
+        connect(m_smartObjectRelinkButton, &QPushButton::clicked,
+                this, &PropertiesPanel::smartObjectRelinkRequested);
+    }
+    lay->addWidget(m_smartObjectSection);
+
     m_maskSection = new CollapsibleSection(tr("Layer Mask"), m_layerSection);
     m_maskSection->setVisible(false);
     auto* maskLay = m_maskSection->body();
@@ -278,25 +339,20 @@ void PropertiesPanel::buildTransformInterface(QVBoxLayout* parentLayout)
     headerLay->addWidget(m_headerIcon);
     headerLay->addWidget(m_headerLabel, 1);
     parentLayout->addWidget(m_headerRow);
+    parentLayout->addWidget(makeHorizontalDivider(m_layerSection));
 
     // ── Transform section ──
     m_transformSection = new CollapsibleSection(tr("Transform"), m_layerSection);
     {
         m_transformFields = new TransformFieldsWidget(
             TransformFieldsMode::PropertiesPanel, m_transformSection);
-        m_transformSection->body()->addWidget(m_transformFields, 0, Qt::AlignHCenter);
+        m_transformSection->body()->addWidget(m_transformFields, 0, Qt::AlignLeft);
 
-        // Rotation + flip row.
-        auto* rotRow = new QHBoxLayout();
-        rotRow->setSpacing(t->spaceSM);
-        m_flipHButton = makeIconButton(QStringLiteral("flip-horizontal"),
-                                       tr("Flip horizontal"), m_transformSection);
-        m_flipVButton = makeIconButton(QStringLiteral("flip-vertical"),
-                                       tr("Flip vertical"), m_transformSection);
-        rotRow->addWidget(m_flipHButton);
-        rotRow->addWidget(m_flipVButton);
-        rotRow->addStretch();
-        m_transformSection->body()->addLayout(rotRow);
+        m_flipHButton = makeIconButton(QStringLiteral("flip-horizontal.png"),
+                                       tr("Flip horizontal"), m_transformFields);
+        m_flipVButton = makeIconButton(QStringLiteral("flip-vertical.png"),
+                                       tr("Flip vertical"), m_transformFields);
+        m_transformFields->setRotationActions(m_flipHButton, m_flipVButton);
     }
     parentLayout->addWidget(m_transformSection);
 
@@ -399,6 +455,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
     headerLay->addWidget(docIcon);
     headerLay->addWidget(docLabel, 1);
     parentLayout->addWidget(header);
+    parentLayout->addWidget(makeHorizontalDivider(m_documentSection));
 
     // ── Canvas section ──
     auto* canvasSection = new CollapsibleSection(tr("Canvas"), m_documentSection);
@@ -418,27 +475,33 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
             return std::pair<QLabel*, QDoubleSpinBox*>(l, input);
         };
 
-        auto [wLabel, wInput] = makeField(tr("W"), 1.0, 100000.0, 0, tr(" px"));
-        auto [hLabel, hInput] = makeField(tr("H"), 1.0, 100000.0, 0, tr(" px"));
-        auto [xLabel, xInput] = makeField(tr("X"), -100000.0, 100000.0, 0, tr(" px"));
-        auto [yLabel, yInput] = makeField(tr("Y"), -100000.0, 100000.0, 0, tr(" px"));
+        auto [wLabel, wInput] = makeField(tr("W"), 1.0, 100000.0, 2, tr(" px"));
+        auto [hLabel, hInput] = makeField(tr("H"), 1.0, 100000.0, 2, tr(" px"));
+        auto [xLabel, xInput] = makeField(tr("X"), -100000.0, 100000.0, 2, tr(" px"));
+        auto [yLabel, yInput] = makeField(tr("Y"), -100000.0, 100000.0, 2, tr(" px"));
         m_canvasWInput = wInput;
         m_canvasHInput = hInput;
         m_canvasXInput = xInput;
         m_canvasYInput = yInput;
-        for (auto* input : { m_canvasWInput, m_canvasHInput, m_canvasXInput, m_canvasYInput })
-            input->setFixedWidth(100);
+        // Keep the same sizing policy as the layer Transform fields so both
+        // W/H/X/Y grids respond identically when the dock width changes.
+        for (auto* input : { m_canvasWInput, m_canvasHInput, m_canvasXInput, m_canvasYInput }) {
+            input->setMaximumWidth(100);
+            input->setMinimumWidth(52);
+        }
 
-        m_canvasLinkButton = makeIconButton(QStringLiteral("constrain-proportions"),
+        m_canvasLinkButton = makeIconButton(QStringLiteral("constrain-proportions.svg"),
                                             tr("Link width and height (constrain proportions)"),
                                             canvasSection);
+        m_canvasLinkButton->setIconSize(QSize(18, 18));
         m_canvasLinkButton->setCheckable(true);
 
         auto* canvasGridWrap = new QWidget(canvasSection);
+        canvasGridWrap->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         auto* grid = new QGridLayout(canvasGridWrap);
         grid->setContentsMargins(0, 0, 0, 0);
         grid->setHorizontalSpacing(t->spaceSM);
-        grid->setVerticalSpacing(t->spaceXS);
+        grid->setVerticalSpacing(t->spaceSM);
         grid->addWidget(m_canvasLinkButton, 0, 0, 2, 1);
         grid->addWidget(wLabel, 0, 1);
         grid->addWidget(m_canvasWInput, 0, 2, Qt::AlignLeft);
@@ -448,47 +511,12 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         grid->addWidget(m_canvasHInput, 1, 2, Qt::AlignLeft);
         grid->addWidget(yLabel, 1, 3);
         grid->addWidget(m_canvasYInput, 1, 4, Qt::AlignLeft);
-        canvasSection->body()->addWidget(canvasGridWrap, 0, Qt::AlignHCenter);
+        canvasSection->body()->addWidget(canvasGridWrap, 0, Qt::AlignLeft);
 
         // The canvas has no offset concept — X/Y are informative only.
         m_canvasXInput->setEnabled(false);
         m_canvasYInput->setEnabled(false);
 
-        // Resolution / Mode / Bit depth rows.
-        auto* formWrap = new QWidget(canvasSection);
-        formWrap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        auto* form = new QGridLayout(formWrap);
-        form->setContentsMargins(0, 0, 0, 0);
-        form->setHorizontalSpacing(t->spaceSM);
-        form->setVerticalSpacing(t->spaceXS);
-        form->setColumnStretch(2, 1);
-
-        m_resolutionInput = new ScrubbableValueInput(QString(), 1.0, 10000.0, 300.0,
-                                                     tr(" px/in"), 1.0, canvasSection);
-        m_resolutionInput->setDecimals(0);
-        m_resolutionUnitCombo = new AppComboBox(canvasSection);
-        m_resolutionUnitCombo->addItem(tr("Pixels/Inch"));
-        m_resolutionUnitCombo->addItem(tr("Pixels/Centimeter"));
-        form->addWidget(secondaryLabel(tr("Resolution"), canvasSection), 0, 0);
-        form->addWidget(m_resolutionInput, 0, 1, Qt::AlignLeft);
-        form->addWidget(m_resolutionUnitCombo, 0, 2, Qt::AlignLeft);
-
-        m_modeCombo = new AppComboBox(canvasSection);
-        m_modeCombo->addItem(tr("RGB Color"), QStringLiteral("RGB Color"));
-        m_modeCombo->addItem(tr("CMYK Color"), QStringLiteral("CMYK Color"));
-        m_modeCombo->addItem(tr("Grayscale"), QStringLiteral("Grayscale"));
-        m_modeCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        form->addWidget(secondaryLabel(tr("Mode"), canvasSection), 1, 0);
-        form->addWidget(m_modeCombo, 1, 1, 1, 2);
-
-        m_depthCombo = new AppComboBox(canvasSection);
-        m_depthCombo->addItem(tr("8 Bits/Channel"), 8);
-        m_depthCombo->addItem(tr("16 Bits/Channel"), 16);
-        m_depthCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        form->addWidget(secondaryLabel(tr("Depth"), canvasSection), 2, 0);
-        form->addWidget(m_depthCombo, 2, 1, 1, 2);
-
-        canvasSection->body()->addWidget(formWrap);
     }
     parentLayout->addWidget(canvasSection);
 
@@ -497,7 +525,6 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
     {
         auto* orientRow = new QHBoxLayout();
         orientRow->setSpacing(t->spaceXS);
-        orientRow->addStretch();
 
         m_portraitButton = makeToggleButton(QStringLiteral("canvas-portrait"),
                                             tr("Portrait orientation"), aspectSection);
@@ -522,34 +549,6 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
     connect(m_canvasHInput, &QDoubleSpinBox::editingFinished, this, [this]() {
         emit canvasSizeEdited(FieldHeight, m_canvasHInput->value());
     });
-    connect(m_resolutionInput, &ScrubbableValueInput::editingFinished, this, [this](double v) {
-        const double dpi = (m_resolutionUnitCombo && m_resolutionUnitCombo->currentIndex() == 1)
-                               ? v * 2.54
-                               : v;
-        emit canvasResolutionEdited(dpi);
-    });
-    connect(m_resolutionUnitCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-        if (!m_resolutionInput)
-            return;
-        QSignalBlocker block(m_resolutionInput);
-        m_resolutionInput->setSuffix(idx == 1 ? tr(" px/cm") : tr(" px/in"));
-        m_resolutionInput->setValue(idx == 1
-                                        ? m_documentResolutionDpi / 2.54
-                                        : m_documentResolutionDpi);
-    });
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-        if (idx < 0)
-            return;
-        emit canvasColorModeChanged(m_modeCombo->itemData(idx).toString());
-    });
-    connect(m_depthCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int idx) {
-        if (idx < 0)
-            return;
-        emit canvasBitDepthChanged(m_depthCombo->itemData(idx).toInt());
-    });
     connect(m_portraitButton, &QToolButton::clicked, this, [this]() {
         emit canvasPortraitRequested();
     });
@@ -572,6 +571,7 @@ void PropertiesPanel::buildDocumentInterface(QVBoxLayout* parentLayout)
         unitRow->setHorizontalSpacing(t->spaceSM);
         unitRow->setColumnStretch(1, 1);
         m_unitCombo = new AppComboBox(rulersSection);
+        m_unitCombo->setMinimumWidth(64);
         // Order matches the RulerUnit enum (Pixels, Percent, Inches, Centimeters,
         // Millimeters) so the combo index maps directly onto the enum value.
         m_unitCombo->addItem(tr("Pixels"));
@@ -673,6 +673,36 @@ void PropertiesPanel::openSolidColorPicker()
         m_solidColorEditor->openColorPicker();
 }
 
+void PropertiesPanel::setSmartObjectInfo(const SmartObjectInfo& info)
+{
+    if (!m_smartObjectSection)
+        return;
+    m_smartObjectSection->setVisible(info.valid);
+    if (!info.valid)
+        return;
+
+    m_smartObjectNameLabel->setText(info.documentName);
+    QString storage = info.linked ? tr("Linked") : tr("Embedded");
+    if (info.linkBroken)
+        storage += tr(" — file not found");
+    m_smartObjectModeLabel->setText(storage);
+
+    // The file row is meaningless for embedded content, which has no file of
+    // its own — it lives in the project.
+    m_smartObjectPathLabel->setText(info.linked ? info.path : tr("—"));
+    m_smartObjectSizeLabel->setText(
+        tr("%1 × %2 px at %3 DPI")
+            .arg(info.sourceSize.width())
+            .arg(info.sourceSize.height())
+            .arg(info.sourceDpi, 0, 'f', 0));
+    m_smartObjectInstancesLabel->setText(QString::number(info.instanceCount));
+
+    // Update/Relink are Linked-only: embedded content is never out of date and
+    // has nothing to re-point at.
+    m_smartObjectUpdateButton->setEnabled(info.linked);
+    m_smartObjectRelinkButton->setEnabled(info.linked);
+}
+
 void PropertiesPanel::showLayerProperties()
 {
     if (m_curvesEditor->isVisible())
@@ -713,8 +743,7 @@ bool PropertiesPanel::canvasProportionsLocked() const
     return m_canvasLinkButton && m_canvasLinkButton->isChecked();
 }
 
-void PropertiesPanel::setDocumentInfo(int widthPx, int heightPx, double resolutionDpi,
-                                      const QString& colorMode, int bitDepth,
+void PropertiesPanel::setDocumentInfo(int widthPx, int heightPx,
                                       bool portraitActive, bool landscapeActive)
 {
     // setValue does not emit, but the orientation toggles drive on `clicked`
@@ -723,26 +752,6 @@ void PropertiesPanel::setDocumentInfo(int widthPx, int heightPx, double resoluti
     m_canvasHInput->setValue(heightPx);
     m_canvasXInput->setValue(0.0);
     m_canvasYInput->setValue(0.0);
-    m_documentResolutionDpi = resolutionDpi;
-    {
-        QSignalBlocker block(m_resolutionInput);
-        const bool pxPerCm = m_resolutionUnitCombo && m_resolutionUnitCombo->currentIndex() == 1;
-        m_resolutionInput->setSuffix(pxPerCm ? tr(" px/cm") : tr(" px/in"));
-        m_resolutionInput->setValue(pxPerCm ? resolutionDpi / 2.54 : resolutionDpi);
-    }
-    if (m_modeCombo) {
-        QSignalBlocker block(m_modeCombo);
-        const int idx = m_modeCombo->findData(colorMode);
-        if (idx >= 0)
-            m_modeCombo->setCurrentIndex(idx);
-    }
-    if (m_depthCombo) {
-        QSignalBlocker block(m_depthCombo);
-        const int idx = m_depthCombo->findData(bitDepth);
-        if (idx >= 0)
-            m_depthCombo->setCurrentIndex(idx);
-    }
-
     {
         QSignalBlocker pb(m_portraitButton);
         QSignalBlocker lb(m_landscapeButton);
@@ -838,4 +847,5 @@ void PropertiesPanel::clear()
     showLayerProperties();
     setLayerTransformInfo(LayerKind::None, 0, 0, 0, 0, 0, false);
     setMaskInfo(false, 1.0f, 0.0f);
+    setSmartObjectInfo(SmartObjectInfo{});
 }

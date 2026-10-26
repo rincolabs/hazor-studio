@@ -1,14 +1,19 @@
 #pragma once
 
-#include <QColor>
+#include "ColorTrack.hpp"
+
 #include <QList>
 #include <QWidget>
 
 class QSpinBox;
 
 // Horizontal gradient slider with an integrated spin box. Gradient stops are
-// fully configurable; dimensions and handle style follow the SpectrumSlider
-// standard (track height 8 px, min widget height 22 px).
+// fully configurable (rendering is delegated to ColorTrack); dimensions and
+// handle style follow the SpectrumSlider standard (track height 8 px, min
+// widget height 22 px). Clicking anywhere on the track jumps the handle to
+// that position and keeps dragging while the button stays down — see Track in
+// the .cpp for the interaction (QSlider's own groove click is a page step,
+// not a jump).
 //
 // setValue() is always silent (no signals emitted). Signals:
 //   valueChanged(int)  – slider position changed (use for live preview)
@@ -17,7 +22,7 @@ class QSpinBox;
 class GradientSlider : public QWidget {
     Q_OBJECT
 public:
-    struct Stop { qreal pos; QColor color; };
+    using Stop = ColorTrack::Stop;
 
     explicit GradientSlider(QWidget* parent = nullptr);
 

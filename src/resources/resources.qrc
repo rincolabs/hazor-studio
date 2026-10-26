@@ -1,5 +1,9 @@
 <RCC>
     <qresource prefix="/">
+        <file>fonts/Inter-Regular.ttf</file>
+        <file>fonts/Inter-Medium.ttf</file>
+        <file>fonts/Inter-SemiBold.ttf</file>
+        <file>fonts/Inter-Bold.ttf</file>
         <file>icons/move.png</file>
         <file>icons/skew.png</file>
         <file>icons/brush.png</file>
@@ -54,6 +58,9 @@
         <file>icons/cursor-eyedropper.png</file>
         <file>icons/cursor-shape.png</file>
         <file>icons/text.png</file>
+        <file>icons/raw-layer.png</file>
+        <file>icons/smart-object.png</file>
+        <file>icons/smart-object-linked.png</file>
         <file>icons/cursor-text.png</file>
         <file>icons/select-rect.png</file>
         <file>icons/select-ellipse.png</file>
@@ -91,6 +98,7 @@
         <file>icons/window-maximize.png</file>
         <file>icons/window-restore.png</file>
         <file>icons/window-close.png</file>
+        <file alias="icons/sponsor-heart.png">shapes/material-design-icons-2.1.3/action/ios/ic_favorite_white_18pt.imageset/ic_favorite_white_18pt.png</file>
         <file>icons/zoom-fit.png</file>
         <file>icons/zoom-1-1.png</file>
         <file>icons/layer-mask.png</file>
@@ -154,6 +162,7 @@
         <file>icons/add-group.png</file>
         <file>icons/check-blue.xpm</file>
         <file>icons/app-logo.png</file>
+        <file alias="icons/home-logo.png">../../assets/logo.png</file>
         <file>icons/splash.jpg</file>
         <file>icons/app-icon.png</file>
         <file>icons/text-bold.png</file>
@@ -164,7 +173,7 @@
         <file>icons/format-align-center.png</file>
         <file>icons/format-align-right.png</file>
         <file>icons/prop-pixel-layer.png</file>
-        <file>icons/constrain-proportions.png</file>
+        <file>icons/constrain-proportions.svg</file>
         <file>icons/flip-horizontal.png</file>
         <file>icons/flip-vertical.png</file>
         <file>icons/prop-document.png</file>

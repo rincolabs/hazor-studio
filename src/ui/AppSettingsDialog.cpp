@@ -47,6 +47,14 @@ int AppSettingsDialog::selectedPage() const
     return m_sidebar ? m_sidebar->currentRow() : 0;
 }
 
+void AppSettingsDialog::setCurrentPage(int page)
+{
+    if (!m_sidebar || page < 0 || page >= m_sidebar->count())
+        return;
+    m_sidebar->setCurrentRow(page);
+    onPageSelected(page);
+}
+
 void AppSettingsDialog::setupUi()
 {
     auto *mainLay = new QVBoxLayout(this);

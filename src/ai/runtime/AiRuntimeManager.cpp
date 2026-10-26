@@ -1,5 +1,6 @@
 #include "AiRuntimeManager.hpp"
 
+#include "ai/compat/AiCudaLibraryProbe.hpp"
 #include "ai/onnx/OnnxRuntimeBackend.hpp"
 #include "ai/models/AiModelRegistry.hpp"
 #include "ai/runtime/AiSessionBundle.hpp"
@@ -144,17 +145,29 @@ QList<AiExecutionProviderInfo> AiRuntimeManager::availableProviders() const
         info.displayName = AiProvider::displayName(id);
         info.supportedByPlatform = AiProvider::supportedOnThisPlatform(id);
         info.compiledInRuntime = runtimeProviders.contains(id);
-        info.dependenciesAvailable = info.compiledInRuntime; // best-effort
+        // The CUDA and TensorRT provider libraries ship with the editor, the
+        // CUDA stack does not: being compiled into the runtime says nothing
+        // about this machine being able to load it. Probed lazily, so a build
+        // without those providers never pays for it.
+        const bool needsCudaLibraries = (id == QLatin1String(AiProvider::kCuda)
+                                         || id == QLatin1String(AiProvider::kTensorRt));
+        info.dependenciesAvailable = info.compiledInRuntime
+            && (!needsCudaLibraries || AiCudaLibraryProbe::probe().loadable);
         info.sessionCreationWorks = (id == m_activeProvider);
 
         if (!isRuntimeAvailable())
             info.status = QStringLiteral("Not available in this build");
         else if (!info.supportedByPlatform)
             info.status = QStringLiteral("Not supported on this platform");
-        else if (info.compiledInRuntime)
-            info.status = info.sessionCreationWorks ? QStringLiteral("Active") : QStringLiteral("Available");
-        else
+        else if (!info.compiledInRuntime)
             info.status = QStringLiteral("Not installed");
+        else if (!info.dependenciesAvailable) {
+            info.status = QStringLiteral("Not usable — CUDA libraries missing");
+            info.errorMessage = QStringLiteral("Could not load: %1")
+                                    .arg(AiCudaLibraryProbe::probe().missing.join(QStringLiteral(", ")));
+        } else {
+            info.status = info.sessionCreationWorks ? QStringLiteral("Active") : QStringLiteral("Available");
+        }
 
         out << info;
     }

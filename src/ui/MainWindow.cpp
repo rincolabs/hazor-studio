@@ -2,13 +2,17 @@
 #include <QAbstractSpinBox>
 #include "core/AdjustmentTypes.hpp"
 #include "core/AppPaths.hpp"
+#include "core/CrashHandler.hpp"
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
 #include "transform/TransformController.hpp"
 #include "core/ViewportCamera.hpp"
 #include "renderer/CanvasView.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ui/LayerPanel.hpp"
+#include "ui/ChannelsPanel.hpp"
+#include "ui/dialogs/ChannelDialogs.hpp"
 #include "ui/LayerStylesDialog.hpp"
 #include "ui/PropertiesPanel.hpp"
 #include "ui/CurvesEditorWidget.hpp"
@@ -30,8 +34,10 @@
 #include "brush/BrushPresetManager.hpp"
 #include "ui/CustomShapesPanel.hpp"
 #include "ui/TitleBar.hpp"
+#include "ui/HomeWorkspace.hpp"
 #include "ui/NewDocumentDialog.hpp"
 #include "ui/ExportImageDialog.hpp"
+#include "ui/RawDevelopWindow.hpp"
 #include "ui/AgentConfigWidget.hpp"
 #include "ui/AiUpscaleDialog.hpp"
 #include "ui/FillLayerDialog.hpp"
@@ -69,13 +75,26 @@
 #include "core/SwatchManager.hpp"
 #include "core/GuideTypes.hpp"
 #include "colorpicker/ColorPickerDialog.hpp"
+#include "colorpicker/CanvasColorPickSource.hpp"
 
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include "core/LayerEffect.hpp"
 #include "io/ImageIO.hpp"
 #include "io/ProjectFileService.hpp"
+#include "smartobject/ContainerRegistry.hpp"
+#include "smartobject/DocumentContainer.hpp"
+#include "smartobject/SmartObjectTransfer.hpp"
+#include "io/RecentFilesManager.hpp"
+#include "io/PsdImportService.hpp"
 #include "color/ColorManagementService.hpp"
+#include "color/ColorProfile.hpp"
+#include "raw/RawDevelopParams.hpp"
+#include "raw/RawDevelopService.hpp"
+#include "raw/RawEngine.hpp"
+#include "raw/RawImageBuffer.hpp"
+#include "raw/RawLayerData.hpp"
+#include "raw/RawSession.hpp"
 #include "ui/color/AssignProfileDialog.hpp"
 #include "ui/color/ConvertToProfileDialog.hpp"
 #include "ui/color/MissingProfileDialog.hpp"
@@ -109,6 +128,8 @@
 #include <QDesktopServices>
 #include <QFontDialog>
 #include <QMessageBox>
+#include <QOpenGLWidget>
+#include <QPushButton>
 #include <QLabel>
 #include <QPainter>
 #include <QImage>
@@ -128,21 +149,38 @@
 #include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QEventLoop>
+#include <QFile>
 #include <QFutureWatcher>
 #include <QtConcurrent>
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <optional>
-#include <QToolButton>
-#include <QHBoxLayout>
 #include <QDockWidget>
 #include <QTabBar>
 
-static QString tabLabel(const QString& name)
+static QString formattedZoomPercent(float zoom)
 {
-    constexpr int kMaxTabChars = 30;
-    return name.size() > kMaxTabChars ? name.left(kMaxTabChars) + QChar(0x2026) : name;
+    const double percent = std::max(0.0, static_cast<double>(zoom) * 100.0);
+    QString value = QString::number(percent, 'f', 1);
+    if (value.endsWith(QStringLiteral(".0")))
+        value.chop(2);
+    return value;
+}
+
+static QString documentColorModeLabel(const QString& colorMode)
+{
+    if (colorMode == QStringLiteral("RGB Color"))
+        return QStringLiteral("RGB");
+    if (colorMode == QStringLiteral("CMYK Color"))
+        return QStringLiteral("CMYK");
+    if (colorMode == QStringLiteral("Grayscale"))
+        return QStringLiteral("Gray");
+
+    QString label = colorMode.trimmed();
+    if (label.endsWith(QStringLiteral(" Color"), Qt::CaseInsensitive))
+        label.chop(6);
+    return label.isEmpty() ? QStringLiteral("RGB") : label;
 }
 
 static QString documentColorModeFromSetting(const QString& setting)
@@ -164,12 +202,6 @@ static QString documentColorModeSetting(const QString& colorMode, int bitDepth)
     return QStringLiteral("%1, %2 bit").arg(colorMode).arg(bitDepth);
 }
 
-static bool supportsCustomTitleBar()
-{
-    QString pf = QGuiApplication::platformName();
-    return pf != "cocoa" && pf != "wayland" && pf != "offscreen";
-}
-
 static int shapeToolTypeForPreset(const QString& presetId)
 {
     if (presetId == QLatin1String("ellipse")) return 1;
@@ -181,9 +213,26 @@ static int shapeToolTypeForPreset(const QString& presetId)
     return 0;
 }
 
+// PSD/PSB have no codec reader either: they go through PsdImportService, so
+// every place that dispatches a file by extension has to name them.
+static bool isPsdPath(const QString& path)
+{
+    return path.endsWith(QStringLiteral(".psd"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".psb"), Qt::CaseInsensitive);
+}
+
 static bool isSupportedDropImagePath(const QString& path)
 {
-    return imageCodecRegistry().findReader(path) != nullptr;
+    // .hazor isn't an image codec format — it's the project container, opened
+    // via loadProjectAsNewTab() — so it must be special-cased here or a
+    // dragged project is silently rejected before the drop even fires. .hzs
+    // is the old extension, still readable, so a dragged legacy project
+    // isn't rejected either. Same for .psd/.psb, which openPsdFileAsNewTab()
+    // handles.
+    return imageCodecRegistry().findReader(path) != nullptr
+        || path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+        || isPsdPath(path);
 }
 
 static QStringList extractValidDropImagePaths(const QMimeData* mime)
@@ -308,26 +357,6 @@ static std::optional<ColorManagedOpenResult> prepareImageForOpenWithDialogs(
     return result;
 }
 
-class DockTitleBar : public QWidget
-{
-public:
-    explicit DockTitleBar(QDockWidget* dock)
-        : QWidget(dock)
-    {
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addStretch();
-
-        auto* closeBtn = new QToolButton(this);
-        closeBtn->setText("×");
-
-        connect(closeBtn, &QToolButton::clicked,
-                dock, &QDockWidget::close);
-
-        // layout->addWidget(closeBtn);
-    }
-};
-
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
@@ -338,10 +367,19 @@ MainWindow::MainWindow(QWidget* parent)
     m_toolExecutor = new ToolExecutor(nullptr);
     m_colorEngine = new ColorEngine(this);
 
+    // The colour dialogs are opened from panels, tool options and adjustment
+    // editors, none of which knows about documents or tabs. Give them one way to
+    // reach the canvas the user is looking at: the resolver is consulted per
+    // call, so it keeps up with every tab switch on its own. The QPointer keeps
+    // a dialog that outlives this window from calling into freed memory.
+    CanvasColorPickSource::setResolver([self = QPointer<MainWindow>(this)]() -> CanvasView* {
+        return self ? self->m_canvas : nullptr;
+    });
+
     m_agentController = new AgentController(m_toolExecutor, this);
     m_presetManager = new AgentPresetManager(this);
 
-    m_useCustomTitleBar = supportsCustomTitleBar();
+    m_useCustomTitleBar = TitleBar::isSupportedPlatform();
 
     if (m_useCustomTitleBar) {
         setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -354,6 +392,16 @@ MainWindow::MainWindow(QWidget* parent)
         connect(m_titleBar, &TitleBar::maximizeClicked, this, &MainWindow::onMaximizeRestore);
         connect(m_titleBar, &TitleBar::closeClicked, this, &MainWindow::onCloseWindow);
     }
+
+    // Qt 6.4+ recreates an already-visible native window when its first
+    // QOpenGLWidget is added because the surface changes from RasterSurface to
+    // OpenGLSurface. Home deliberately starts without a document/CanvasView,
+    // so prime the widget hierarchy before MainWindow is shown. This hidden
+    // anchor owns no document and never initializes editor rendering resources.
+    auto* openGlSurfaceAnchor = new QOpenGLWidget(this);
+    openGlSurfaceAnchor->setObjectName(QStringLiteral("OpenGLSurfaceAnchor"));
+    openGlSurfaceAnchor->setFixedSize(0, 0);
+    openGlSurfaceAnchor->hide();
 
 
     // Build the main menu on a standalone QMenuBar. When the custom title bar is
@@ -376,6 +424,10 @@ MainWindow::MainWindow(QWidget* parent)
     ShortcutManager::instance()->registerAction("file.open", openAction);
     connect(openAction, &QAction::triggered, this, &MainWindow::onOpenFile);
 
+    m_openRecentMenu = fileMenu->addMenu(tr("Open &Recent"));
+    m_openRecentMenu->setToolTipsVisible(true);
+    connect(m_openRecentMenu, &QMenu::aboutToShow, this, &MainWindow::rebuildOpenRecentMenu);
+
     auto* saveAction = fileMenu->addAction(tr("&Save..."));
     saveAction->setShortcut(QKeySequence::Save);
     ShortcutManager::instance()->registerAction("file.save", saveAction);
@@ -390,6 +442,23 @@ MainWindow::MainWindow(QWidget* parent)
     exportAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     ShortcutManager::instance()->registerAction("file.export_as", exportAction);
     connect(exportAction, &QAction::triggered, this, &MainWindow::onExportFile);
+
+    fileMenu->addSeparator();
+
+    // Place lives in File because it brings an external document INTO the
+    // current one, which is a file operation, not a layer operation. The
+    // Layer ▸ Smart Objects submenu deliberately does not repeat it.
+    m_smartObjectPlaceEmbeddedAction = fileMenu->addAction(tr("Place Embedded..."));
+    ShortcutManager::instance()->registerAction("file.place_embedded",
+                                                m_smartObjectPlaceEmbeddedAction);
+    connect(m_smartObjectPlaceEmbeddedAction, &QAction::triggered,
+            this, [this]() { placeSmartObject(/*linked=*/false); });
+
+    m_smartObjectPlaceLinkedAction = fileMenu->addAction(tr("Place Linked..."));
+    ShortcutManager::instance()->registerAction("file.place_linked",
+                                                m_smartObjectPlaceLinkedAction);
+    connect(m_smartObjectPlaceLinkedAction, &QAction::triggered,
+            this, [this]() { placeSmartObject(/*linked=*/true); });
 
     fileMenu->addSeparator();
 
@@ -460,11 +529,9 @@ MainWindow::MainWindow(QWidget* parent)
     auto* colorSettingsAction = editMenu->addAction(tr("Color &Settings..."));
     ShortcutManager::instance()->registerAction("edit.color_settings", colorSettingsAction);
     connect(colorSettingsAction, &QAction::triggered, this, [this]() {
-        AppSettingsDialog dlg(AppSettingsDialog::PageColorManagement,
-                              m_presetManager,
-                              m_agentController ? m_agentController->client() : nullptr,
-                              this);
-        if (dlg.exec() == QDialog::Accepted) {
+        showAppSettings(AppSettingsDialog::PageColorManagement, [this](int result) {
+            if (result != QDialog::Accepted)
+                return;
             // Color/display settings (display CM, monitor profile, intent) change
             // how every open document is shown without touching composition —
             // invalidate each document's display cache and repaint its canvas.
@@ -475,7 +542,7 @@ MainWindow::MainWindow(QWidget* parent)
                     tab.canvas->update();
             }
             updateStatusFromDocument();
-        }
+        });
     });
 
     auto* assignProfileAction = editMenu->addAction(tr("Assign &Profile..."));
@@ -517,7 +584,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
 
         if (!m_ctrl->convertDocumentToProfile(destination, dlg.conversionOptions())) {
-            QMessageBox::warning(this, tr("Convert to Profile"),
+            AppMessageDialog::warning(this, tr("Convert to Profile"),
                 tr("The selected color conversion is not supported by the current color engine."));
             return;
         }
@@ -590,8 +657,12 @@ MainWindow::MainWindow(QWidget* parent)
         addArrange(QStringLiteral("layer.arrange.backward"), tr("Send &Backward"),  1);
         addArrange(QStringLiteral("layer.arrange.to_back"),  tr("Send to &Back"),   3);
     }
-    addLayerMenuAction(layerMenu, QStringLiteral("layer.clipping.toggle"),
-                       tr("Create/Release &Clipping Mask"), &MainWindow::toggleActiveClipping);
+    // One action, label swapped in updateLayerMenuState between "Create" and
+    // "Release" — the Layer menu reads as the two commands it is, while the
+    // single Ctrl+Alt+G toggle keeps working on whatever the selection is.
+    m_clippingMaskAction =
+        addLayerMenuAction(layerMenu, QStringLiteral("layer.clipping.toggle"),
+                           tr("Create &Clipping Mask"), &MainWindow::toggleActiveClipping);
 
     // New Adjustment Layer > <adjustment>. Populated from the adjustment
     // registry so new adjustments appear here automatically.
@@ -641,6 +712,67 @@ MainWindow::MainWindow(QWidget* parent)
     m_rasterizeLayerAction = layerMenu->addAction(tr("Rasterize &Layer"));
     ShortcutManager::instance()->registerAction("layer.rasterize", m_rasterizeLayerAction);
     connect(m_rasterizeLayerAction, &QAction::triggered, this, &MainWindow::onMenuRasterizeLayer);
+
+    // Layer ▸ Smart Objects — the name, order and grouping follow the
+    // convention this kind of editor established, so the muscle memory
+    // transfers. Place lives in File (above), and Rasterize stays where it is:
+    // it is the generic "drop the non-destructive payload" action shared with
+    // Text/Shape/RAW.
+    m_smartObjectMenu = layerMenu->addMenu(tr("Smart &Objects"));
+
+    m_smartObjectConvertAction = m_smartObjectMenu->addAction(tr("&Convert to Smart Object"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.convert",
+                                                m_smartObjectConvertAction);
+    connect(m_smartObjectConvertAction, &QAction::triggered,
+            this, &MainWindow::convertSelectionToSmartObject);
+
+    m_smartObjectViaCopyAction =
+        m_smartObjectMenu->addAction(tr("&New Smart Object via Copy"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.via_copy",
+                                                m_smartObjectViaCopyAction);
+    connect(m_smartObjectViaCopyAction, &QAction::triggered,
+            this, &MainWindow::newSmartObjectViaCopy);
+
+    m_smartObjectMenu->addSeparator();
+
+    m_smartObjectEditAction = m_smartObjectMenu->addAction(tr("&Edit Contents"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.edit",
+                                                m_smartObjectEditAction);
+    connect(m_smartObjectEditAction, &QAction::triggered, this, [this]() {
+        if (m_doc) editSmartObjectContents(m_doc->activeFlatIndex);
+    });
+
+    m_smartObjectReplaceAction = m_smartObjectMenu->addAction(tr("&Replace Contents..."));
+    ShortcutManager::instance()->registerAction("layer.smart_object.replace",
+                                                m_smartObjectReplaceAction);
+    connect(m_smartObjectReplaceAction, &QAction::triggered,
+            this, &MainWindow::replaceActiveSmartObjectContents);
+
+    m_smartObjectRelinkAction = m_smartObjectMenu->addAction(tr("Relink to &File..."));
+    ShortcutManager::instance()->registerAction("layer.smart_object.relink",
+                                                m_smartObjectRelinkAction);
+    connect(m_smartObjectRelinkAction, &QAction::triggered,
+            this, &MainWindow::relinkActiveSmartObject);
+
+    m_smartObjectUpdateAction = m_smartObjectMenu->addAction(tr("&Update Modified Content"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.update",
+                                                m_smartObjectUpdateAction);
+    connect(m_smartObjectUpdateAction, &QAction::triggered,
+            this, &MainWindow::updateActiveSmartObjectContent);
+
+    m_smartObjectMenu->addSeparator();
+
+    m_smartObjectToLinkedAction = m_smartObjectMenu->addAction(tr("Convert to &Linked..."));
+    ShortcutManager::instance()->registerAction("layer.smart_object.to_linked",
+                                                m_smartObjectToLinkedAction);
+    connect(m_smartObjectToLinkedAction, &QAction::triggered,
+            this, [this]() { convertActiveSmartObjectStorage(/*toLinked=*/true); });
+
+    m_smartObjectToEmbeddedAction = m_smartObjectMenu->addAction(tr("Embed Lin&ked"));
+    ShortcutManager::instance()->registerAction("layer.smart_object.embed_linked",
+                                                m_smartObjectToEmbeddedAction);
+    connect(m_smartObjectToEmbeddedAction, &QAction::triggered,
+            this, [this]() { convertActiveSmartObjectStorage(/*toLinked=*/false); });
 
     m_layerStylesAction = layerMenu->addAction(tr("Layer &Styles..."));
     ShortcutManager::instance()->registerAction("layer.styles", m_layerStylesAction);
@@ -798,6 +930,26 @@ MainWindow::MainWindow(QWidget* parent)
     ShortcutManager::instance()->registerAction("image.remove_bg", m_removeBgAction);
     connect(m_removeBgAction, &QAction::triggered, this, &MainWindow::onImageRemoveBg);
 
+    // Select: the selection ↔ channel round trip. New menu rather than extra
+    // Edit entries — these commands belong with the selection, and the panel
+    // buttons open the very same dialogs.
+    auto* selectMenu = mainMenuBar->addMenu(tr("&Select"));
+    auto* saveSelectionAction = selectMenu->addAction(tr("&Save Selection..."));
+    connect(saveSelectionAction, &QAction::triggered,
+            this, &MainWindow::showSaveSelectionDialog);
+    auto* loadSelectionAction = selectMenu->addAction(tr("&Load Selection..."));
+    connect(loadSelectionAction, &QAction::triggered,
+            this, &MainWindow::showLoadSelectionDialog);
+    selectMenu->addSeparator();
+    // No shortcut registered here on purpose: Q already reaches
+    // CanvasView::toggleQuickMask through the ShortcutManager dispatcher
+    // (canvas.quick_mask), and binding it to this QAction too would toggle the
+    // mode twice per press.
+    auto* quickMaskAction = selectMenu->addAction(tr("Edit in &Quick Mask Mode"));
+    connect(quickMaskAction, &QAction::triggered, this, [this]() {
+        if (m_canvas) m_canvas->toggleQuickMask();
+    });
+
     auto* viewMenu = mainMenuBar->addMenu(tr("&View"));
     auto* zoomInAction = viewMenu->addAction(tr("Zoom &In"));
     ShortcutManager::instance()->registerAction("view.zoom_in", zoomInAction);
@@ -896,7 +1048,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_showColorPaletteAction->setCheckable(true);
     {
         QSettings s;
-        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), true).toBool();
+        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), false).toBool();
         m_showColorPaletteAction->setChecked(visible);
     }
     connect(m_showColorPaletteAction, &QAction::toggled, this, [this](bool checked) {
@@ -968,14 +1120,12 @@ MainWindow::MainWindow(QWidget* parent)
     auto* snapSettingsAction = snapMenu->addAction(tr("Snap Settings..."));
     ShortcutManager::instance()->registerAction("view.snap_settings", snapSettingsAction);
     connect(snapSettingsAction, &QAction::triggered, this, [this]() {
-        AppSettingsDialog dlg(AppSettingsDialog::PageInterface,
-                              m_presetManager,
-                              m_agentController ? m_agentController->client() : nullptr,
-                              this);
-        if (dlg.exec() == QDialog::Accepted) {
+        showAppSettings(AppSettingsDialog::PageInterface, [this](int result) {
+            if (result != QDialog::Accepted)
+                return;
             reloadRulerGuideSettingsForTabs();
             updateRulerGuideActionStates();
-        }
+        });
     });
     updateRulerGuideActionStates();
 
@@ -996,9 +1146,10 @@ MainWindow::MainWindow(QWidget* parent)
     auto* windowGenFillAction = windowMenu->addAction(tr("&Generative Fill"));
     connect(windowGenFillAction, &QAction::triggered, this, &MainWindow::onGenerativeFill);
 
-    auto* workspacesMenu = windowMenu->addMenu(tr("&Workspaces"));
-    auto* resetLayoutAction = workspacesMenu->addAction(tr("&Reset Panel Layout"));
-    connect(resetLayoutAction, &QAction::triggered, this, &MainWindow::resetDockLayout);
+    // Rebuilt every time it opens (see rebuildWorkspacesMenu): the preset list
+    // and which commands apply both depend on state the menu cannot cache.
+    m_workspacesMenu = windowMenu->addMenu(tr("&Workspaces"));
+    connect(m_workspacesMenu, &QMenu::aboutToShow, this, &MainWindow::rebuildWorkspacesMenu);
 
     auto* helpMenu = mainMenuBar->addMenu(tr("&Help"));
     auto* docsAction = helpMenu->addAction(tr("Documentation"));
@@ -1078,6 +1229,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_tabWidget = new QTabWidget(centralHost);
     m_tabWidget->setTabsClosable(true);
     m_tabWidget->setMovable(true);
+    m_tabWidget->tabBar()->setElideMode(Qt::ElideRight);
+    m_homeWorkspace = new HomeWorkspace(m_tabWidget);
+    const int homeIndex = m_tabWidget->addTab(m_homeWorkspace, tr("Home"));
+    m_tabWidget->setTabToolTip(homeIndex, tr("Home"));
+    // QTabWidget owns one close button policy for all pages; clear the Home
+    // button after adding it so the fixed welcome page can never be closed.
+    m_tabWidget->tabBar()->setTabButton(homeIndex, QTabBar::LeftSide, nullptr);
+    m_tabWidget->tabBar()->setTabButton(homeIndex, QTabBar::RightSide, nullptr);
     setupTabBg(m_tabWidget, thInit->colorPanelBackground);
     centralLayout->addWidget(m_tabWidget, 1);
 
@@ -1144,6 +1303,15 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(m_tabWidget, &QTabWidget::tabCloseRequested, this, &MainWindow::onTabCloseRequested);
     connect(m_tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
+    connect(m_tabWidget->tabBar(), &QTabBar::tabMoved, this, &MainWindow::onTabMoved);
+    connect(m_homeWorkspace, &HomeWorkspace::newDocumentRequested,
+            this, &MainWindow::onNewFile);
+    connect(m_homeWorkspace, &HomeWorkspace::openDocumentRequested,
+            this, &MainWindow::onOpenFile);
+    connect(m_homeWorkspace, &HomeWorkspace::recentDocumentRequested,
+            this, &MainWindow::onOpenRecentFile);
+    connect(m_homeWorkspace, &HomeWorkspace::templateRequested,
+            this, &MainWindow::onHomeTemplateRequested);
 
     // Minimal, stable docking config. GroupedDragging keeps the ability to drag
     // a floating panel onto another to group them as tabs. We deliberately do
@@ -1162,6 +1330,7 @@ MainWindow::MainWindow(QWidget* parent)
     setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
 
     auto* toolsDock = new QDockWidget(tr("Tools"), this);
+    toolsDock->setObjectName(QStringLiteral("ToolsDock"));
     toolsDock->setAllowedAreas(Qt::LeftDockWidgetArea);
     toolsDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
     toolsDock->setTitleBarWidget(new QWidget(toolsDock));
@@ -1170,6 +1339,7 @@ MainWindow::MainWindow(QWidget* parent)
     addDockWidget(Qt::LeftDockWidgetArea, toolsDock);
 
     m_historyPanel = new HistoryPanel(this);
+    m_channelsPanel = new ChannelsPanel(this);
     m_agentPanel = new AgentPanel(m_agentController, this);
     m_propsPanel = new PropertiesPanel(this);
     m_histogramPanel = new HistogramPanel(this);
@@ -1189,24 +1359,12 @@ MainWindow::MainWindow(QWidget* parent)
                              QWidget* content) -> QDockWidget* {
         auto* dock = new QDockWidget(title, this);
         dock->setObjectName(objName);
-        // dock->setTitleBarWidget(new DockTitleBar(dock));
         dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea | Qt::BottomDockWidgetArea);
         dock->setFeatures(QDockWidget::DockWidgetMovable |
                           QDockWidget::DockWidgetFloatable |
                           QDockWidget::DockWidgetClosable);
         dock->setWidget(content);
-
-        connect(dock, &QDockWidget::dockLocationChanged, this, [this, dock] {
-            QTimer::singleShot(0, this, [this, dock] {
-                updateDockTitleBar(dock);
-            });
-        });
-
-        connect(dock, &QDockWidget::topLevelChanged, this, [this, dock] {
-            QTimer::singleShot(0, this, [this, dock] {
-                updateDockTitleBar(dock);
-            });
-        });
+        watchDockTitleBar(dock);
 
         themePanelBg(content, thInit);
         windowMenu->addAction(dock->toggleViewAction()); // reopen after close
@@ -1220,6 +1378,18 @@ MainWindow::MainWindow(QWidget* parent)
     m_propsDock     = makePanelDock(tr("Properties"), QStringLiteral("PropertiesDock"), m_propsPanel);
     m_colorDock     = makePanelDock(tr("Color"),      QStringLiteral("ColorDock"),      m_colorMixerPanel);
     m_swatchesDock  = makePanelDock(tr("Swatches"),   QStringLiteral("SwatchesDock"),   m_swatchesPanel);
+    m_channelsDock  = makePanelDock(tr("Channels"),   QStringLiteral("ChannelsDock"),   m_channelsPanel);
+
+    connect(m_channelsPanel, &ChannelsPanel::splitChannelsRequested,
+            this, &MainWindow::splitChannelsIntoDocuments);
+    connect(m_channelsPanel, &ChannelsPanel::mergeChannelsRequested,
+            this, &MainWindow::mergeChannelsFromDocuments);
+    connect(m_channelsPanel, &ChannelsPanel::duplicateChannelRequested,
+            this, &MainWindow::duplicateChannelWithDialog);
+    connect(m_channelsPanel, &ChannelsPanel::saveSelectionDialogRequested,
+            this, &MainWindow::showSaveSelectionDialog);
+    connect(m_channelsPanel, &ChannelsPanel::loadSelectionDialogRequested,
+            this, &MainWindow::showLoadSelectionDialog);
     m_historyDock   = makePanelDock(tr("History"),    QStringLiteral("HistoryDock"),    m_historyPanel);
 
     connect(m_propsPanel, &PropertiesPanel::maskDensityChanged, this, [this](float density) {
@@ -1291,25 +1461,18 @@ MainWindow::MainWindow(QWidget* parent)
         showAiUpscaleDialog(UpscaleTarget::CurrentLayer);
     });
 
+    // ── Smart Object section ──
+    connect(m_propsPanel, &PropertiesPanel::smartObjectEditRequested, this, [this]() {
+        if (m_doc) editSmartObjectContents(m_doc->activeFlatIndex);
+    });
+    connect(m_propsPanel, &PropertiesPanel::smartObjectUpdateRequested,
+            this, &MainWindow::updateActiveSmartObjectContent);
+    connect(m_propsPanel, &PropertiesPanel::smartObjectRelinkRequested,
+            this, &MainWindow::relinkActiveSmartObject);
+
     // ── Document / Canvas page: all shortcuts to existing document logic. ──
     connect(m_propsPanel, &PropertiesPanel::canvasSizeEdited,
             this, &MainWindow::applyCanvasSizeEdit);
-    connect(m_propsPanel, &PropertiesPanel::canvasResolutionEdited,
-            this, &MainWindow::applyCanvasResolutionEdit);
-    connect(m_propsPanel, &PropertiesPanel::canvasColorModeChanged, this,
-            [this](const QString& colorMode) {
-        if (!m_doc || m_doc->colorMode == colorMode)
-            return;
-        m_doc->colorMode = colorMode;
-        markActiveTabDirty(true);
-    });
-    connect(m_propsPanel, &PropertiesPanel::canvasBitDepthChanged, this,
-            [this](int bitDepth) {
-        if (!m_doc || m_doc->bitDepth == bitDepth)
-            return;
-        m_doc->bitDepth = bitDepth;
-        markActiveTabDirty(true);
-    });
     connect(m_propsPanel, &PropertiesPanel::canvasPortraitRequested,
             this, [this]() { applyCanvasOrientation(true); });
     connect(m_propsPanel, &PropertiesPanel::canvasLandscapeRequested,
@@ -1340,10 +1503,10 @@ MainWindow::MainWindow(QWidget* parent)
         });
     }
 
-    // Minimum width: 25% of screen, applied to each group's anchor dock. The
+    // Minimum width: 12.5% of screen, applied to each group's anchor dock. The
     // actual default arrangement is applied once via resetDockLayout() at the end
-    // of construction (shared with Window → Reset Panel Layout).
-    int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 6;
+    // of construction (shared with Window → Workspaces → Reset Workspace).
+    int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 8;
     m_histogramDock->setMinimumWidth(minW);
     m_layersDock->setMinimumWidth(minW);
 
@@ -1468,13 +1631,28 @@ MainWindow::MainWindow(QWidget* parent)
     // floating group) so they can never be re-merged into a crash.
     for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock, m_generativeFillDock,
                             m_layersDock, m_agentDock, m_histogramDock, m_propsDock,
-                            m_colorDock, m_swatchesDock, m_historyDock }) {
+                            m_colorDock, m_swatchesDock, m_historyDock,
+                            m_channelsDock }) {
         // connect(d, &QDockWidget::topLevelChanged, this, [this](bool) { scheduleDockMaintenance(); });
         // connect(d, &QDockWidget::visibilityChanged, this, [this](bool) { scheduleDockMaintenance(); });
     }
 
+    // The on-demand panels start floating but can be tabbed into the right-hand
+    // column like any other; the ones built by makePanelDock() are already wired.
+    for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock,
+                            m_customShapesPanelDock, m_generativeFillDock })
+        watchDockTitleBar(d);
+
     // Establish the default panel arrangement (also reused by the menu action).
     resetDockLayout();
+
+    // Every dock exists and is registered with QMainWindow by now, which is
+    // the precondition for restoreState(): only here can the stored workspace
+    // be put back. The default above is what stays on screen when there is
+    // nothing stored or the stored blob is rejected.
+    m_workspace = new WorkspaceManager(this, this, this);
+    m_workspace->restoreWorkingLayout();
+    m_workspace->watchDocks(panelDocks());
 
     connect(m_brushDynamics, &BrushDynamicsPanel::importBrushesRequested, this,
             [this]() { if (m_importBrushesAction) m_importBrushesAction->trigger(); });
@@ -1740,6 +1918,8 @@ MainWindow::MainWindow(QWidget* parent)
         m_ctrl->setActiveNode(flatIndex);
         showAiUpscaleDialog(UpscaleTarget::CurrentLayer);
     });
+    connect(m_layerPanel, &LayerPanel::exportNodeRequested,
+            this, &MainWindow::onExportNode);
     connect(m_layerPanel, &LayerPanel::solidColorRequested,
             this, &MainWindow::createSolidColorLayer);
     connect(m_layerPanel, &LayerPanel::solidColorEditRequested,
@@ -1753,6 +1933,12 @@ MainWindow::MainWindow(QWidget* parent)
             m_propsPanel->openSolidColorPicker();
         }
     });
+    connect(m_layerPanel, &LayerPanel::rawEditRequested,
+            this, [this](int flatIndex) { openHazorDevelop(flatIndex); });
+    connect(m_layerPanel, &LayerPanel::smartObjectEditRequested,
+            this, [this](int flatIndex) { editSmartObjectContents(flatIndex); });
+    connect(m_layerPanel, &LayerPanel::smartObjectCommandRequested,
+            this, &MainWindow::runSmartObjectCommand);
 
     connect(m_toolBar, &ToolOptionsBar::aiOpenSettingsRequested, this, &MainWindow::onOpenAiSettings);
     connect(m_toolBar, &ToolOptionsBar::brushSizeChanged, this, &MainWindow::onBrushSizeChanged);
@@ -1894,6 +2080,18 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_toolBar, &ToolOptionsBar::textUnderlineChanged, this, &MainWindow::onTextUnderlineChanged);
     connect(m_toolBar, &ToolOptionsBar::textStrikethroughChanged, this, &MainWindow::onTextStrikethroughChanged);
     connect(m_toolBar, &ToolOptionsBar::textColorChanged, this, &MainWindow::onTextColorChanged);
+    // The text colour dialog previews on the canvas while it is open: every
+    // intermediate colour repaints the selected text undo-lessly, and the one
+    // undo step (or the restore) lands when the dialog closes.
+    connect(m_toolBar, &ToolOptionsBar::textColorPreviewChanged, this, [this](const QColor& c) {
+        if (m_canvas) m_canvas->previewTextColor(c);
+    });
+    connect(m_toolBar, &ToolOptionsBar::textColorPreviewFinished, this, [this](bool keep) {
+        if (!m_canvas) return;
+        m_canvas->endTextColorPreview(keep);
+        refreshLayerPanel();
+        refreshHistoryPanel();
+    });
     connect(m_toolBar, &ToolOptionsBar::textAlignChanged, this, &MainWindow::onTextAlignChanged);
     connect(m_toolBar, &ToolOptionsBar::textTrackingChanged, this, &MainWindow::onTextTrackingChanged);
     connect(m_toolBar, &ToolOptionsBar::textLeadingChanged, this, &MainWindow::onTextLeadingChanged);
@@ -1997,9 +2195,35 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_toolBar, &ToolOptionsBar::shapeTypeChanged, this, [this](int type) {
         if (m_canvas) m_canvas->setShapeType(type);
     });
+    // Same mutation as updateActiveShape, but through the controller's preview
+    // session: a colour dialog repaints the selected shape on every intermediate
+    // value and still leaves a single undo step behind.
+    auto previewActiveShape = [this](auto mutate) {
+        if (!m_doc || !m_ctrl) return;
+        const int activeIndex = m_doc->activeFlatIndex;
+        auto* node = m_doc->nodeAt(activeIndex);
+        if (!node || !node->layer || !node->layer->shapeData) return;
+        m_ctrl->beginShapeDataPreview(activeIndex);
+        ShapeData data = *node->layer->shapeData;
+        mutate(data);
+        m_ctrl->previewShapeData(data);
+    };
+
     connect(m_toolBar, &ToolOptionsBar::shapeFillColorChanged, this, [this, updateActiveShape](const QColor& c) {
         if (m_canvas) m_canvas->setShapeFillColor(c);
+        // A live preview already applied this colour and commits its own single
+        // undo step when the dialog closes; editing again here would duplicate
+        // the history entry.
+        if (m_ctrl && m_ctrl->shapeDataPreviewActive()) return;
         updateActiveShape([&](ShapeData& data) {
+            data.style.fillEnabled = true;
+            data.style.fillColor = c;
+        });
+    });
+    connect(m_toolBar, &ToolOptionsBar::shapeFillColorPreviewChanged, this,
+            [this, previewActiveShape](const QColor& c) {
+        if (m_canvas) m_canvas->setShapeFillColor(c);
+        previewActiveShape([&](ShapeData& data) {
             data.style.fillEnabled = true;
             data.style.fillColor = c;
         });
@@ -2010,10 +2234,25 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_toolBar, &ToolOptionsBar::shapeStrokeColorChanged, this, [this, updateActiveShape](const QColor& c) {
         if (m_canvas) m_canvas->setShapeStrokeColor(c);
+        if (m_ctrl && m_ctrl->shapeDataPreviewActive()) return;
         updateActiveShape([&](ShapeData& data) {
             data.style.strokeEnabled = true;
             data.style.strokeColor = c;
         });
+    });
+    connect(m_toolBar, &ToolOptionsBar::shapeStrokeColorPreviewChanged, this,
+            [this, previewActiveShape](const QColor& c) {
+        if (m_canvas) m_canvas->setShapeStrokeColor(c);
+        previewActiveShape([&](ShapeData& data) {
+            data.style.strokeEnabled = true;
+            data.style.strokeColor = c;
+        });
+    });
+    connect(m_toolBar, &ToolOptionsBar::shapeColorPreviewFinished, this, [this](bool keep) {
+        if (m_ctrl) m_ctrl->endShapeDataPreview(keep);
+        if (m_canvas) { m_canvas->syncLayersToGpu(); m_canvas->update(); }
+        refreshLayerPanel();
+        refreshHistoryPanel();
     });
     connect(m_toolBar, &ToolOptionsBar::shapeStrokeEnabledChanged, this, [this, updateActiveShape](bool enabled) {
         if (m_canvas) m_canvas->setShapeStrokeEnabled(enabled);
@@ -2243,6 +2482,22 @@ MainWindow::MainWindow(QWidget* parent)
     shortcuts->registerCallback(QStringLiteral("selection.crop_to_selection"), [this]() {
         if (m_ctrl) m_ctrl->executeTool("crop_to_selection", {});
     });
+    // Channel edit target. The panel's row click and these go through the same
+    // controller calls, so the keys and the mouse cannot drift apart; a plain
+    // click/key selects AND shows that channel, which is why no visibility
+    // handling lives here.
+    shortcuts->registerCallback(QStringLiteral("channel.select.composite"), [this]() {
+        if (m_ctrl) m_ctrl->selectCompositeChannel();
+    });
+    const char* const kComponentShortcutIds[3] = {"channel.select.red",
+                                                  "channel.select.green",
+                                                  "channel.select.blue"};
+    for (int component = 0; component < 3; ++component) {
+        shortcuts->registerCallback(QString::fromLatin1(kComponentShortcutIds[component]),
+                                    [this, component]() {
+            if (m_ctrl) m_ctrl->selectColorComponent(component, false);
+        });
+    }
     shortcuts->registerCallback(QStringLiteral("panel.brush_settings.toggle"), [this]() {
         showBrushSettingsPanel();
     });
@@ -2439,6 +2694,43 @@ MainWindow::MainWindow(QWidget* parent)
         applyViewportStatusBarTheme();
     });
 
+    // Home is the initial page, but currentChanged was connected only after
+    // that page was inserted. Apply its temporary dock state once construction
+    // has finished and every dock has been registered with QMainWindow.
+    setHomeDockMode(true);
+}
+
+QList<QDockWidget*> MainWindow::panelDocks() const
+{
+    return { m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
+             m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
+             m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
+             m_generativeFillDock };
+}
+
+bool MainWindow::isDockTabbedInMainWindow(QDockWidget* dock) const
+{
+    // A hidden dock has no tab, and a floating one owns its window: both need
+    // their title bar (it is the only handle Qt gives a floating panel here).
+    if (!dock || dock->isHidden() || dock->isFloating())
+        return false;
+
+    // Docks grouped inside a floating QDockWidgetGroupWindow are reparented
+    // onto that container and are no longer part of the main window's dock
+    // area layout, so tabifiedDockWidgets() knows nothing about them. They keep
+    // the title bar too: the group window is frameless on X11/Wayland, so
+    // without it the whole group would become unmovable and unclosable.
+    if (dock->parentWidget() != this)
+        return false;
+
+    // Qt lists tab mates that are currently closed as well; only a visible one
+    // actually puts a second tab on screen.
+    const QList<QDockWidget*> tabMates = tabifiedDockWidgets(dock);
+    for (QDockWidget* mate : tabMates) {
+        if (mate && !mate->isHidden())
+            return true;
+    }
+    return false;
 }
 
 void MainWindow::updateDockTitleBar(QDockWidget* dock)
@@ -2446,16 +2738,96 @@ void MainWindow::updateDockTitleBar(QDockWidget* dock)
     if (!dock)
         return;
 
-    // Desabilitado por enquanto, precisa validar a logica.
-    // const bool hasTabs = !tabifiedDockWidgets(dock).isEmpty();
+    const bool collapse = isDockTabbedInMainWindow(dock);
+    QWidget* current = dock->titleBarWidget();
+    if (collapse == (current != nullptr))
+        return; // already in the wanted state
 
-    // if (hasTabs) {
-    //     dock->setTitleBarWidget(new DockTitleBar(dock)); // no label
-    // } else {
-    //     dock->setTitleBarWidget(nullptr); // default title bar with title
-    // }
+    if (collapse) {
+        // An empty, zero-height title bar widget removes the bar entirely; the
+        // tab above stays the drag handle for the panel.
+        auto* collapsed = new QWidget(dock);
+        collapsed->setFixedHeight(0);
+        dock->setTitleBarWidget(collapsed);
+    } else {
+        dock->setTitleBarWidget(nullptr); // back to Qt's title bar, with title
+        current->deleteLater();           // setTitleBarWidget() only detaches it
+    }
+}
 
-    dock->setTitleBarWidget(nullptr); // default title bar with title
+void MainWindow::refreshDockTitleBars()
+{
+    for (QDockWidget* dock : panelDocks())
+        updateDockTitleBar(dock);
+
+    // This runs after every grouping change, which is exactly when Qt has
+    // created or destroyed the tab bars the workspace autosave listens to.
+    if (m_workspace)
+        m_workspace->watchDockTabBars();
+}
+
+void MainWindow::scheduleRestoredDockChromeRefresh()
+{
+    // restoreState() recreates Qt's private dock tab bars/group windows,
+    // but those new widgets do not reliably inherit the already-applied
+    // application stylesheet. Re-polish them after the layout settles so
+    // the native light frame/base never leaks around the restored column.
+    QTimer::singleShot(0, this, [this]() {
+        // restoreState() rebuilds the tab groups, so which docks deserve a
+        // title bar changes with it.
+        refreshDockTitleBars();
+
+        for (QTabBar* tabBar : findChildren<QTabBar*>()) {
+            tabBar->setDrawBase(false);
+            tabBar->style()->unpolish(tabBar);
+            tabBar->style()->polish(tabBar);
+            tabBar->update();
+        }
+        for (QWidget* widget : findChildren<QWidget*>()) {
+            if (qstrcmp(widget->metaObject()->className(),
+                        "QDockWidgetGroupWindow") != 0)
+                continue;
+            widget->setAttribute(Qt::WA_StyledBackground, true);
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+            widget->update();
+        }
+    });
+}
+
+void MainWindow::scheduleDockTitleBarRefresh()
+{
+    if (m_dockTitleBarRefreshScheduled)
+        return;
+    m_dockTitleBarRefreshScheduled = true;
+
+    // Swapping a title bar widget re-runs the dock layout, so stay out of Qt's
+    // way while a drag is still in flight (mouse button held) and retry after.
+    const int delayMs = (QApplication::mouseButtons() != Qt::NoButton) ? 100 : 0;
+    QTimer::singleShot(delayMs, this, [this]() {
+        m_dockTitleBarRefreshScheduled = false;
+        if (QApplication::mouseButtons() != Qt::NoButton) {
+            scheduleDockTitleBarRefresh();
+            return;
+        }
+        refreshDockTitleBars();
+    });
+}
+
+void MainWindow::watchDockTitleBar(QDockWidget* dock)
+{
+    if (!dock)
+        return;
+
+    // Every one of these means the tab grouping may have changed — and not only
+    // for this dock: when a tab is dragged out of a group, the docks left behind
+    // emit nothing at all, so each signal refreshes the whole set.
+    connect(dock, &QDockWidget::dockLocationChanged, this,
+            [this](Qt::DockWidgetArea) { scheduleDockTitleBarRefresh(); });
+    connect(dock, &QDockWidget::topLevelChanged, this,
+            [this](bool) { scheduleDockTitleBarRefresh(); });
+    connect(dock, &QDockWidget::visibilityChanged, this,
+            [this](bool) { scheduleDockTitleBarRefresh(); });
 }
 
 void MainWindow::applyViewportStatusBarTheme()
@@ -2508,12 +2880,138 @@ void MainWindow::showViewportStatusMessage(const QString& message, int timeoutMs
     }
 }
 
+MainWindow::DroppedImageAction MainWindow::askDroppedImageAction()
+{
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("Cancel"), QMessageBox::RejectRole },
+        { tr("Insert into Canvas"), QMessageBox::ActionRole },
+        { tr("Open Image"), QMessageBox::AcceptRole },
+    };
+    const int clicked = AppMessageDialog::choice(
+        this, tr("Open Image"), tr("How do you want to use this image?"),
+        AppMessageDialog::Icon::Question, buttons, /*defaultIndex=*/1);
+    if (clicked == 1) return DroppedImageAction::InsertIntoCanvas;
+    if (clicked == 2) return DroppedImageAction::OpenAsNewDocument;
+    return DroppedImageAction::Cancel;
+}
+
+bool MainWindow::openDroppedImagesAsNewDocument(const QStringList& paths)
+{
+    if (paths.isEmpty()) return false;
+
+    // A dropped .hazor (or legacy .hzs) opens through the same project path
+    // as File > Open — there is no "insert into canvas" or flatten-on-import
+    // interpretation for a whole project, so it is dispatched before anything
+    // else below.
+    if (paths.front().endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+        || paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)) {
+        if (!loadProjectAsNewTab(paths.front())) {
+            AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
+            return false;
+        }
+        return true;
+    }
+
+    // A RAW file gets its own non-destructive RAW Layer and opens straight
+    // into Hazor Develop, same as File > Open — not the generic
+    // flatten-on-import codec path below.
+    if (RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(paths.front()).suffix()).toStdString())) {
+        openRawFileAsNewTab(paths.front());
+        return true;
+    }
+
+    // A dropped PSD/PSB takes the same PsdImportService route File > Open
+    // takes: the generic codec path below cannot read it at all, and even if
+    // it could it would flatten away the layers, masks, text and adjustments.
+    // The import runs asynchronously and reports its own failures, so there
+    // is nothing left to decide here.
+    if (isPsdPath(paths.front())) {
+        openPsdFileAsNewTab(paths.front());
+        return true;
+    }
+
+    const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
+    std::optional<ColorManagedOpenResult> colorManaged;
+    if (loaded.ok) {
+        colorManaged = prepareImageForOpenWithDialogs(
+            this,
+            loaded.image,
+            ColorManagementService::instance().defaultOpenContext(paths.front()));
+        if (!colorManaged)
+            return false;
+    }
+    const QImage probe = colorManaged
+        ? convertDocumentImageToQImage(colorManaged->image)
+        : QImage();
+    const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
+
+    const QString title = QFileInfo(paths.front()).fileName();
+    auto& tab = createTab(title, s);
+    tab.isDirty = false;
+    tab.currentProjectPath.clear();
+    if (m_doc) {
+        m_doc->size = s;
+        m_doc->selection.resize(s.width(), s.height());
+        m_doc->selection.clear();
+        m_doc->selection.setActive(false);
+        if (colorManaged && colorManaged->finalDocumentProfile.isValid()) {
+            m_doc->setColorProfile(colorManaged->finalDocumentProfile);
+            m_doc->setProfileSource(colorManaged->finalDocumentProfile.source());
+        }
+    }
+
+    // New, empty document: there is no prior pan/zoom state to place the drop
+    // relative to, so every imported path lands centered (dropCanvasNdc = origin).
+    QList<int> rawLayerFlatIndices;
+    if (m_ctrl && !m_ctrl->importExternalImages(paths, QPointF(0.0, 0.0), &rawLayerFlatIndices)) {
+        AppMessageDialog::warning(this, tr("Import Image"),
+            tr("No supported image could be imported from the dropped files."));
+    }
+
+    refreshLayerPanel();
+    refreshPropertiesPanel();
+    updateLayerMenuState();
+    updateStatusFromDocument();
+    if (colorManaged && !colorManaged->warningMessage.isEmpty())
+        showViewportStatusMessage(colorManaged->warningMessage, 7000);
+    for (int flatIndex : rawLayerFlatIndices)
+        openHazorDevelop(flatIndex);
+    return true;
+}
+
 MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize& size)
 {
-    auto doc = std::make_unique<Document>();
+    auto doc = std::make_shared<Document>();
     doc->name = name;
     doc->size = size;
     doc->zoom = 1.0f;
+
+    // Every tab is backed by a container, even a brand-new untitled document
+    // with no Smart Object in it: that way "save the container" is the only
+    // save path there is, and adding the first Smart Object later needs no
+    // migration (see DocumentContainer.hpp).
+    auto container = std::make_shared<DocumentContainer>(doc);
+    return createTabForDocument(name, container, container->rootId());
+}
+
+MainWindow::DocumentTab& MainWindow::createTabForDocument(
+    const QString& name,
+    const std::shared_ptr<DocumentContainer>& container,
+    const SmartObjectDocId& docId)
+{
+    // A tab editing a Smart Object's contents gets the container's open EDIT
+    // SESSION — the isolated working copy — and not the stored document: its
+    // edits must stay out of the project until Ctrl+S commits them. Every other
+    // tab (the root, a linked project's own tab) borrows the stored document
+    // itself, so an edit there is an edit in the container.
+    std::shared_ptr<Document> doc;
+    if (container) {
+        doc = container->editSession(docId);
+        if (!doc)
+            doc = container->document(docId);
+    }
+    Q_ASSERT(doc);
 
     auto ctrl = std::make_unique<ImageController>();
     auto* ctrlPtr = ctrl.get();
@@ -2529,6 +3027,26 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     pageLayout->addWidget(canvas);
     canvas->reloadRulerGuideSettings();
     ctrlPtr->setDocument(doc.get());
+    // The controller needs the container to resolve a Smart Object's docId.
+    // Shared, never owned: the registry is the only owner.
+    ctrlPtr->setDocumentContainer(container, docId);
+
+    // Editing ANY document of the container can invalidate Smart Object
+    // instances of it — including in other documents of the same file. The
+    // refresh is debounced and always driven by the container's root
+    // controller, so one cascade owner exists per file no matter how many tabs
+    // are open on it.
+    connect(ctrlPtr, &ImageController::imageChanged,
+            this, &MainWindow::scheduleSmartObjectRefresh);
+    connect(ctrlPtr, &ImageController::documentChanged,
+            this, &MainWindow::scheduleSmartObjectRefresh);
+    connect(ctrlPtr, &ImageController::smartObjectRenderCommitted, this,
+            [this, ctrlPtr](const SmartObjectDocId&, const QStringList& affected,
+                            bool marksDirty) {
+        onSmartObjectRenderCommitted(ctrlPtr->documentContainerPtr(), affected, marksDirty);
+    });
+    connect(ctrlPtr, &ImageController::smartObjectLinkStateChanged, this,
+            [this](int, bool) { refreshLayerPanel(); });
 
     // Adjustment editors bracket a live slider/curve drag through the controller
     // so the canvas previews on the GPU per-layer compositor instead of
@@ -2663,7 +3181,20 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
         m_toolBar->setTextAlign(static_cast<int>(ps.alignment));
         m_toolBar->setTextLeading(ps.lineHeight);
     });
-    connect(canvas, &CanvasView::zoomChanged, this, &MainWindow::onZoomChanged);
+    connect(canvas, &CanvasView::zoomChanged, this, [this, canvas](float zoom) {
+        if (canvas == m_canvas)
+            onZoomChanged(zoom);
+        updateDirtyUi();
+    });
+    // The Channels panel builds its RGB / R-G-B thumbnails from this canvas'
+    // CPU projection, which is composited off thread and therefore lands after
+    // the imageChanged() that triggered it. Without this the thumbnails stayed
+    // one edit behind until the next composition change. Only the active tab's
+    // canvas feeds the panel.
+    connect(canvas, &CanvasView::projectionUpdated, this, [this, canvas]() {
+        if (canvas == m_canvas && m_channelsPanel)
+            m_channelsPanel->refresh();
+    });
     connect(canvas, &CanvasView::brushSizeChanged, this, [this](float size) {
         if (m_toolBar)
             m_toolBar->setBrushSize(qRound(size));
@@ -2735,50 +3266,42 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     connect(canvas, &CanvasView::externalImagesDropped, this, [this, canvas](const QStringList& paths, QPointF screenPos) {
         if (!canvas || paths.isEmpty()) return;
 
-        if (!m_ctrl || !m_doc) {
-            const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
-            std::optional<ColorManagedOpenResult> colorManaged;
-            if (loaded.ok) {
-                colorManaged = prepareImageForOpenWithDialogs(
-                    this,
-                    loaded.image,
-                    ColorManagementService::instance().defaultOpenContext(paths.front()));
-                if (!colorManaged)
-                    return;
-            }
-            const QImage probe = colorManaged
-                ? convertDocumentImageToQImage(colorManaged->image)
-                : QImage();
-            const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
-            auto& tab = createTab(tr("Untitled"), s);
-            tab.isDirty = false;
-            tab.currentProjectPath.clear();
-            if (m_doc) {
-                m_doc->size = s;
-                m_doc->selection.resize(s.width(), s.height());
-                m_doc->selection.clear();
-                m_doc->selection.setActive(false);
-                if (colorManaged && colorManaged->finalDocumentProfile.isValid()) {
-                    m_doc->setColorProfile(colorManaged->finalDocumentProfile);
-                    m_doc->setProfileSource(colorManaged->finalDocumentProfile.source());
-                }
-            }
-            updateStatusFromDocument();
-            if (colorManaged && !colorManaged->warningMessage.isEmpty())
-                showViewportStatusMessage(colorManaged->warningMessage, 7000);
-            updateLayerMenuState();
+        // A project file — and a PSD/PSB, which is just as much a layered
+        // document — always opens as its own document: skip the
+        // Insert-into-Canvas/Open-Image question below, which only makes
+        // sense for a plain image.
+        if (paths.front().endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+            || paths.front().endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+            || isPsdPath(paths.front())) {
+            openDroppedImagesAsNewDocument(paths);
+            return;
         }
 
-        if (!m_ctrl || !m_doc) return;
+        // No document open: nothing to offer a choice for, open directly.
+        if (!m_ctrl || !m_doc) {
+            openDroppedImagesAsNewDocument(paths);
+            return;
+        }
+
+        const DroppedImageAction action = askDroppedImageAction();
+        if (action == DroppedImageAction::Cancel) return;
+        if (action == DroppedImageAction::OpenAsNewDocument) {
+            openDroppedImagesAsNewDocument(paths);
+            return;
+        }
+
         const QPointF ndc = canvas->screenToCanvasNdc(screenPos);
-        if (!m_ctrl->importExternalImages(paths, ndc)) {
-            QMessageBox::warning(this, tr("Import Image"),
+        QList<int> rawLayerFlatIndices;
+        if (!m_ctrl->importExternalImages(paths, ndc, &rawLayerFlatIndices)) {
+            AppMessageDialog::warning(this, tr("Import Image"),
                 tr("No supported image could be imported from the dropped files."));
             return;
         }
         refreshLayerPanel();
         refreshPropertiesPanel();
         updateLayerMenuState();
+        for (int flatIndex : rawLayerFlatIndices)
+            openHazorDevelop(flatIndex);
     });
 
     connect(ctrlPtr, &ImageController::imageChanged, canvas, [canvas]() {
@@ -2814,6 +3337,7 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
                 }
             }
         }
+        updateDirtyUi();
     });
     connect(ctrlPtr, &ImageController::activeLayerChanged, this, [this](int idx) {
         Q_UNUSED(idx)
@@ -2840,6 +3364,7 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
         }
         updateDistortControls();
         if (m_canvas) m_canvas->update();
+        updateDirtyUi();
     });
 
     // Multi-selection changes (e.g. box-select on canvas) don't necessarily fire
@@ -2876,12 +3401,14 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
         // page's W/H/Resolution fields in sync with the active document.
         refreshPropertiesPanel();
         markActiveTabDirty(true);
+        updateDirtyUi();
     });
 
     connect(ctrlPtr, &ImageController::maskEditingChanged, this, [this](bool editing) {
         Q_UNUSED(editing)
         refreshPropertiesPanel();
         updateLayerMenuState();
+        updateDirtyUi();
     });
 
     // Keep the Properties panel's Show Overlay checkbox in sync when the
@@ -2926,7 +3453,7 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
             [this](uint64_t jobId, const QString& error) {
         if (jobId == m_activeProgressJobId) {
             closeProgress();
-            QMessageBox::warning(this, tr("Progress"), error);
+            AppMessageDialog::warning(this, tr("Progress"), error);
         }
     });
     connect(ctrlPtr, &ImageController::upscaleNewDocumentReady, this,
@@ -2950,26 +3477,33 @@ MainWindow::DocumentTab& MainWindow::createTab(const QString& name, const QSize&
     // Window-scope delete handler via event filter (catches Delete even when LayerPanel has focus)
     qApp->installEventFilter(this);
 
-    int idx = m_tabWidget->addTab(page, tabLabel(name));
-    m_tabWidget->setTabToolTip(idx, name);
-    m_tabWidget->setCurrentIndex(idx);
+    const int tabWidgetIndex = m_tabWidget->addTab(page, name);
+    m_tabWidget->setTabToolTip(tabWidgetIndex, name);
 
     DocumentTab tab;
     tab.name = name;
-    tab.currentProjectPath.clear();
+    tab.currentProjectPath = container ? container->path() : QString();
     tab.isDirty = false;
+    tab.container = container;
     tab.document = std::move(doc);
+    tab.docId = docId;
     tab.page = page;
     tab.canvas = canvas;
     tab.controller = std::move(ctrl);
     m_tabs.push_back(std::move(tab));
-    m_activeTabIndex = idx;
+    m_activeTabIndex = static_cast<int>(m_tabs.size()) - 1;
     m_doc = m_tabs.back().document.get();
     m_canvas = m_tabs.back().canvas;
     m_ctrl = m_tabs.back().controller.get();
 
+    // Selecting the page emits currentChanged synchronously. Register its
+    // DocumentTab first so onTabChanged never observes the new canvas as a
+    // transient "no document" state and clears the surrounding workspace.
+    m_tabWidget->setCurrentIndex(tabWidgetIndex);
+
     m_toolExecutor->setController(m_ctrl);
     m_layerPanel->setController(m_ctrl);
+    syncChannelsPanel();
     m_propsPanel->setController(m_ctrl);
     m_histogramPanel->setController(m_ctrl);
     syncGenerativeFillPanelController();
@@ -3038,7 +3572,7 @@ void MainWindow::updateRulerGuideActionStates()
 
     if (m_showColorPaletteAction) {
         QSettings s;
-        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), true).toBool();
+        const bool visible = s.value(QStringLiteral("View/colorPaletteVisible"), false).toBool();
         setCheckedQuietly(m_showColorPaletteAction, visible);
         if (m_colorPaletteBar)
             m_colorPaletteBar->setVisible(visible);
@@ -3074,6 +3608,95 @@ void MainWindow::syncGenerativeFillPanelController()
         m_generativeFillPanel->setController(m_ctrl);
 }
 
+int MainWindow::tabWidgetIndexForDocument(int documentIndex) const
+{
+    return documentIndex < 0 ? -1 : documentIndex + 1;
+}
+
+int MainWindow::documentIndexForTabWidget(int tabWidgetIndex) const
+{
+    return tabWidgetIndex <= 0 ? -1 : tabWidgetIndex - 1;
+}
+
+void MainWindow::syncDocumentTabOrder()
+{
+    std::vector<DocumentTab> ordered;
+    ordered.reserve(m_tabs.size());
+    std::vector<bool> moved(m_tabs.size(), false);
+
+    for (int tabWidgetIndex = 1; tabWidgetIndex < m_tabWidget->count(); ++tabWidgetIndex) {
+        QWidget* page = m_tabWidget->widget(tabWidgetIndex);
+        for (int documentIndex = 0; documentIndex < static_cast<int>(m_tabs.size()); ++documentIndex) {
+            if (!moved[documentIndex] && m_tabs[documentIndex].page == page) {
+                ordered.push_back(std::move(m_tabs[documentIndex]));
+                moved[documentIndex] = true;
+                break;
+            }
+        }
+    }
+    if (ordered.size() == m_tabs.size())
+        m_tabs = std::move(ordered);
+}
+
+void MainWindow::onTabMoved(int from, int to)
+{
+    Q_UNUSED(from)
+    Q_UNUSED(to)
+    if (!m_tabWidget || !m_homeWorkspace || m_restoringHomeTab)
+        return;
+
+    const int homeIndex = m_tabWidget->indexOf(m_homeWorkspace);
+    if (homeIndex > 0) {
+        m_restoringHomeTab = true;
+        m_tabWidget->tabBar()->moveTab(homeIndex, 0);
+        m_restoringHomeTab = false;
+    }
+
+    syncDocumentTabOrder();
+    onTabChanged(m_tabWidget->currentIndex());
+}
+
+void MainWindow::setHomeDockMode(bool homeActive)
+{
+    const QList<QDockWidget*> editingDocks = {
+        m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
+        m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
+        m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
+        m_generativeFillDock
+    };
+
+    if (homeActive) {
+        if (!m_homeDockMode) {
+            // QMainWindow's native state includes visibility, tabification,
+            // dock sizes and floating geometry. Keeping it only in memory
+            // makes the Home layout temporary rather than a workspace change.
+            m_documentDockState = saveState(WorkspaceManager::kStateVersion);
+            m_homeDockMode = true;
+        }
+        for (QDockWidget* dock : editingDocks) {
+            if (dock)
+                dock->hide();
+        }
+        return;
+    }
+
+    if (!m_homeDockMode)
+        return;
+
+    m_homeDockMode = false;
+    if (!m_documentDockState.isEmpty()) {
+        const QByteArray snapshot = m_documentDockState;
+        m_documentDockState.clear();
+        // A snapshot that no longer restores (a workspace preset parked here
+        // while Home was active, saved by an older build) must not leave the
+        // user with whatever half-state Qt stopped at.
+        if (restoreState(snapshot, WorkspaceManager::kStateVersion))
+            scheduleRestoredDockChromeRefresh();
+        else
+            resetDockLayout();
+    }
+}
+
 void MainWindow::onTabChanged(int index)
 {
     clearSelectRefinePreview();
@@ -3081,14 +3704,17 @@ void MainWindow::onTabChanged(int index)
         m_canvas->cancelFreeTransform();
     }
 
-    if (index >= 0 && index < static_cast<int>(m_tabs.size())) {
-        m_activeTabIndex = index;
-        m_doc = m_tabs[index].document.get();
-        m_canvas = m_tabs[index].canvas;
-        m_ctrl = m_tabs[index].controller.get();
+    const int documentIndex = documentIndexForTabWidget(index);
+    setHomeDockMode(documentIndex < 0);
+    if (documentIndex >= 0 && documentIndex < static_cast<int>(m_tabs.size())) {
+        m_activeTabIndex = documentIndex;
+        m_doc = m_tabs[documentIndex].document.get();
+        m_canvas = m_tabs[documentIndex].canvas;
+        m_ctrl = m_tabs[documentIndex].controller.get();
 
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
+        syncChannelsPanel();
         m_histogramPanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
 
@@ -3146,6 +3772,7 @@ void MainWindow::onTabChanged(int index)
 
         m_toolExecutor->setController(nullptr);
         m_layerPanel->setController(nullptr);
+        syncChannelsPanel();
         m_histogramPanel->setController(nullptr);
         m_propsPanel->setController(nullptr);
         syncGenerativeFillPanelController();
@@ -3164,13 +3791,72 @@ void MainWindow::onTabChanged(int index)
 
 void MainWindow::onTabCloseRequested(int index)
 {
+    CrashHandler::breadcrumb("onTabCloseRequested: tabWidget index", index);
+    index = documentIndexForTabWidget(index);
     if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
+
+    const auto container = m_tabs[index].container;
+    const bool closingRoot = container && m_tabs[index].docId == container->rootId();
+
+    // Closing a project closes the tabs editing its Smart Object contents too,
+    // and those hold isolated working copies — so each one is asked FIRST, in
+    // its own terms ("commit into the Smart Object?"). The order matters: a
+    // commit makes the project unsaved, and the project's own prompt, right
+    // after, is then the one that offers to write it to disk.
+    if (closingRoot) {
+        for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+            if (i == index || m_tabs[i].container != container)
+                continue;
+            if (!ensureTabCanBeDiscardedOrSaved(i))
+                return;
+        }
+    }
+
     if (!ensureTabCanBeDiscardedOrSaved(index)) return;
+    CrashHandler::breadcrumb("onTabCloseRequested: prompts cleared", index);
+
+    // They are views into the same file, and one left open would offer to
+    // "Save" a project the user just closed.
+    if (closingRoot) {
+        for (int i = static_cast<int>(m_tabs.size()) - 1; i >= 0; --i) {
+            if (i == index || m_tabs[i].container != container)
+                continue;
+            closeTabAt(i);
+            if (i < index)
+                --index;
+        }
+        // The registry stops handing this file out. The container itself lives
+        // on for as long as a Linked reference from another open project still
+        // holds a shared_ptr to it — which is exactly the point of refcounting
+        // it rather than deleting it here.
+        if (!container->path().isEmpty())
+            ContainerRegistry::instance().forget(container->path());
+    }
+
+    closeTabAt(index);
+}
+
+void MainWindow::closeTabAt(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_tabs.size())) return;
+
+    CrashHandler::breadcrumb("closeTabAt: enter", index);
 
     auto& tab = m_tabs[index];
-    if (tab.canvas)
+    // The isolated working copy exists for exactly as long as the tab editing
+    // it: dropping the session here is what discards uncommitted content edits
+    // (the user was asked first, in ensureTabCanBeDiscardedOrSaved) and what
+    // makes the next Edit Contents start from the committed document again.
+    if (tab.container && tab.docId != tab.container->rootId()) {
+        CrashHandler::breadcrumb("closeTabAt: endEditSession");
+        tab.container->endEditSession(tab.docId);
+    }
+    if (tab.canvas) {
+        CrashHandler::breadcrumb("closeTabAt: cleanupDocumentLayers");
         tab.canvas->cleanupDocumentLayers();
-    QWidget* page = tab.page ? tab.page : m_tabWidget->widget(index);
+    }
+    const int tabWidgetIndex = tabWidgetIndexForDocument(index);
+    QWidget* page = tab.page ? tab.page : m_tabWidget->widget(tabWidgetIndex);
 
     bool activeTabRemoved = (index == m_activeTabIndex);
     if (m_activeTabIndex > index)
@@ -3181,18 +3867,34 @@ void MainWindow::onTabCloseRequested(int index)
     // properties panel holds the adjustment editors (Curves/Color Balance),
     // which keep a pointer + documentChanged subscription to the controller —
     // detach them here too so they never touch the destroyed controller.
+    CrashHandler::breadcrumb("closeTabAt: detach panels");
     m_toolExecutor->setController(nullptr);
     m_layerPanel->setController(nullptr);
+    // Detached by hand rather than through syncChannelsPanel(): that helper
+    // re-reads m_canvas/m_ctrl, which still point at the tab being closed, so
+    // it would ATTACH the panel to the very controller the lines below destroy.
+    // ChannelsPanel::setController then disconnects from whatever it last held
+    // — freed memory by the time the panel is pointed anywhere else.
+    if (m_channelsPanel) {
+        m_channelsPanel->setCanvas(nullptr);
+        m_channelsPanel->setController(nullptr);
+    }
     m_histogramPanel->setController(nullptr);
     if (m_propsPanel)
         m_propsPanel->setController(nullptr);
 
+    CrashHandler::breadcrumb("closeTabAt: removeTab", tabWidgetIndex);
     m_tabWidget->blockSignals(true);
-    m_tabWidget->removeTab(index);
+    m_tabWidget->removeTab(tabWidgetIndex);
     m_tabWidget->blockSignals(false);
+
+    CrashHandler::breadcrumb("closeTabAt: delete page");
     delete page;
 
+    CrashHandler::breadcrumb("closeTabAt: erase tab (destroys controller)");
     m_tabs.erase(m_tabs.begin() + index);
+    CrashHandler::breadcrumb("closeTabAt: tab erased, remaining",
+                             static_cast<long long>(m_tabs.size()));
 
     if (m_tabs.empty()) {
         m_activeTabIndex = -1;
@@ -3201,6 +3903,7 @@ void MainWindow::onTabCloseRequested(int index)
         m_ctrl = nullptr;
         m_toolExecutor->setController(nullptr);
         m_layerPanel->setController(nullptr);
+        syncChannelsPanel();
         m_histogramPanel->setController(nullptr);
         syncGenerativeFillPanelController();
         m_propsPanel->clear();
@@ -3210,10 +3913,15 @@ void MainWindow::onTabCloseRequested(int index)
         }
         m_coordLabel->setText(tr("X: —  Y: —"));
         m_sizeLabel->setText(tr("Size: —"));
+        CrashHandler::breadcrumb("closeTabAt: show Home page");
+        m_tabWidget->setCurrentIndex(0);
         updateDirtyUi();
+        CrashHandler::breadcrumb("closeTabAt: done (no tabs left)");
     } else {
         if (activeTabRemoved)
-            m_activeTabIndex = m_tabWidget->currentIndex();
+            m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
+        if (m_activeTabIndex < 0)
+            m_activeTabIndex = 0;
         if (m_activeTabIndex >= static_cast<int>(m_tabs.size()))
             m_activeTabIndex = static_cast<int>(m_tabs.size()) - 1;
         m_doc = m_tabs[m_activeTabIndex].document.get();
@@ -3221,55 +3929,92 @@ void MainWindow::onTabCloseRequested(int index)
         m_ctrl = m_tabs[m_activeTabIndex].controller.get();
         m_toolExecutor->setController(m_ctrl);
         m_layerPanel->setController(m_ctrl);
+        syncChannelsPanel();
         m_histogramPanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
         refreshPropertiesPanel();
         updateStatusFromDocument();
         m_canvas->update();
         updateDirtyUi();
+        CrashHandler::breadcrumb("closeTabAt: done (rebound to tab)",
+                                 m_activeTabIndex);
     }
 }
 
 void MainWindow::createDefaultDocument()
 {
-    auto& tab = createTab(tr("Untitled"), QSize(1024, 768));
-    tab.controller->newLayer();
-    tab.controller->fillActiveLayer(Qt::white);
-    tab.isDirty = false;
-    tab.currentProjectPath.clear();
-    updateLayerMenuState();
-    updateStatusFromDocument();
-    updateDirtyUi();
-
-    QSettings settings;
-    tab.controller->history().setMaxSteps(settings.value("undoLimit", 500).toInt());
-
-    // Select a default brush from the library now that the canvas exists (it's
-    // created here via createTab, not in the constructor). Without this the canvas
-    // paints with the hard-coded BrushSettings defaults, which match no library
-    // item, so the Brushes panel shows nothing selected. Applying the first preset
-    // makes the active brush a real list item (highlighted in the panel) and syncs
-    // the canvas + toolbar + settings panel. switchToBrushTool=false keeps the
-    // initial tool (Move) unchanged.
-    if (BrushPresetManager* pm = m_toolBar ? m_toolBar->presetManager() : nullptr) {
-        const auto& presets = pm->presets();
-        if (m_canvas && !presets.empty())
-            applyBrushPreset(presets.front(), /*switchToBrushTool=*/false);
-    }
+    // Kept as the public startup hook for callers built against older versions.
+    // "Default" is now the permanent Home page, not an unsaved raster document.
+    if (m_tabWidget)
+        m_tabWidget->setCurrentIndex(0);
 }
 
 void MainWindow::onNewFile()
 {
-    m_tabWidget->setUpdatesEnabled(false);
-    NewDocumentDialog dlg(this);
+    showNewDocumentDialog();
+}
 
-    if (dlg.exec() != QDialog::Accepted) {
-        m_tabWidget->setUpdatesEnabled(true);
+void MainWindow::onHomeTemplateRequested(const QString& name, int width, int height)
+{
+    if (width <= 0 || height <= 0)
+        return;
+
+    DocumentSettings settings;
+    settings.name = name;
+    settings.width = width;
+    settings.height = height;
+    settings.unit = QStringLiteral("px");
+    showNewDocumentDialog(&settings);
+}
+
+void MainWindow::showAppSettings(int page, std::function<void(int)> onFinished)
+{
+    if (m_settingsDlg) {
+        m_settingsDlg->setCurrentPage(page);
+        m_settingsDlg->raise();
+        m_settingsDlg->activateWindow();
         return;
     }
-    m_tabWidget->setUpdatesEnabled(true);
 
-    DocumentSettings s = dlg.settings();
+    auto* dlg = new AppSettingsDialog(page, m_presetManager,
+                                      m_agentController ? m_agentController->client() : nullptr,
+                                      this);
+    m_settingsDlg = dlg;
+    if (onFinished)
+        connect(dlg, &QDialog::finished, this, std::move(onFinished));
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
+}
+
+void MainWindow::showNewDocumentDialog(const DocumentSettings* initialSettings)
+{
+    if (m_newDocumentDlg) {
+        m_newDocumentDlg->raise();
+        m_newDocumentDlg->activateWindow();
+        return;
+    }
+
+    // Modeless: the Custom background colour opens a colour picker whose
+    // eyedropper samples the canvas, so an already-open document stays
+    // clickable. The document is still created only on OK.
+    auto* dlg = new NewDocumentDialog(this);
+    if (initialSettings)
+        dlg->setSettings(*initialSettings);
+    m_newDocumentDlg = dlg;
+    dlg->setWindowFlags(dlg->windowFlags() | Qt::Tool);
+    connect(dlg, &QDialog::accepted, this, [this, dlg]() {
+        createDocumentFromSettings(dlg->settings());
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
+}
+
+void MainWindow::createDocumentFromSettings(const DocumentSettings& s)
+{
 
     double ppi = (s.resolutionUnit.startsWith("Pixels/cm"))
                      ? s.resolution * 2.54
@@ -3311,45 +4056,134 @@ void MainWindow::onNewFile()
         }
     }
 
+    // Part of the document's initial state, not a first edit: the locked
+    // "Background" layer is seeded directly (newLayer() + fillActiveLayer()
+    // would push an "Add Layer" step, and the fill would be refused by the
+    // lock), so the new document opens with an empty Undo history.
     if (m_ctrl) {
-        m_ctrl->newLayer();
-        if (s.background != "Transparent") {
-            m_ctrl->fillActiveLayer(s.backgroundColor);
-        }
+        m_ctrl->initializeBackgroundLayer(
+            s.background == "Transparent" ? QColor(Qt::transparent)
+                                          : s.backgroundColor);
     }
     tab.isDirty = false;
     tab.currentProjectPath.clear();
 
-    m_tabWidget->setTabText(m_activeTabIndex, tabLabel(s.name));
-    m_tabWidget->setTabToolTip(m_activeTabIndex, s.name);
     refreshLayerPanel();
     refreshPropertiesPanel();
     updateStatusFromDocument();
     updateLayerMenuState();
+    // Open at Fit to Screen rather than 100%: a print-resolution preset is far
+    // larger than the viewport, and the zoom indicator should report the zoom
+    // the user is actually looking at. fitToView() emits zoomChanged(), which
+    // is what drives the status-bar zoom combo, and defers itself to the first
+    // resizeGL when the brand-new tab's canvas has no laid-out size yet.
+    m_canvas->fitToView();
     m_canvas->update();
     updateDirtyUi();
 }
 
 void MainWindow::onOpenFile()
 {
-    // Build a single combined filter: all image formats + project files (*.hzs)
+    // Build a single combined filter: all image formats + project files
+    // (*.hazor, plus the old *.hzs extension, still readable)
     QString combinedFilter = imageCodecRegistry().openFileFilter()
         .section(QStringLiteral(";;"), 0, 0);
     const int parenClose = combinedFilter.lastIndexOf(QLatin1Char(')'));
     if (parenClose != -1)
-        combinedFilter.insert(parenClose, QStringLiteral(" *.hzs *.HZS"));
+        combinedFilter.insert(parenClose, QStringLiteral(" *.hazor *.HAZOR *.hzs *.HZS *.psd *.PSD *.psb *.PSB"));
 
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open Project or Image"), {}, combinedFilter);
     if (path.isEmpty()) return;
 
-    if (path.endsWith(".hzs", Qt::CaseInsensitive)) {
+    openPathAsNewTab(path);
+}
+
+void MainWindow::openPathAsNewTab(const QString& path)
+{
+    if (path.endsWith(".hazor", Qt::CaseInsensitive) || path.endsWith(".hzs", Qt::CaseInsensitive)) {
         if (!loadProjectAsNewTab(path)) {
-            QMessageBox::warning(this, tr("Open Project"), tr("Failed to open project."));
+            AppMessageDialog::warning(this, tr("Open Project"), tr("Failed to open project."));
         }
         return;
     }
 
+    // RAW files get their own non-destructive RAW Layer (Fase 5) instead of
+    // the generic codec path below, which would flatten them on import.
+    if (RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(path).suffix()).toStdString())) {
+        openRawFileAsNewTab(path);
+        return;
+    }
+
+    // PSD/PSB are their own import pipeline (PsdImportService), not a codec:
+    // they carry layers, masks, text, shapes and adjustments the generic
+    // codec path would flatten away.
+    if (isPsdPath(path)) {
+        openPsdFileAsNewTab(path);
+        return;
+    }
+
+    openImageFileAsNewTab(path);
+}
+
+void MainWindow::onOpenRecentFile(const QString& path)
+{
+    const QString absolutePath = QFileInfo(path).absoluteFilePath();
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+        if (!m_tabs[i].sourcePath.isEmpty() && m_tabs[i].sourcePath == absolutePath) {
+            m_tabWidget->setCurrentIndex(tabWidgetIndexForDocument(i));
+            return;
+        }
+    }
+
+    if (!QFileInfo(path).isFile()) {
+        const QList<AppMessageDialog::ButtonSpec> buttons = {
+            { tr("Remove from List"), QMessageBox::DestructiveRole },
+            { tr("OK"), QMessageBox::AcceptRole },
+        };
+        const int clicked = AppMessageDialog::choice(
+            this, tr("File Not Found"),
+            tr("\"%1\" could not be found.").arg(QFileInfo(path).fileName()),
+            AppMessageDialog::Icon::Warning, buttons, /*defaultIndex=*/1,
+            tr("It may have been moved, renamed, or deleted. Remove it from the "
+               "Recent Files list?"));
+        if (clicked == 0)
+            RecentFilesManager::instance()->removeFile(path);
+        return;
+    }
+
+    openPathAsNewTab(path);
+}
+
+void MainWindow::rebuildOpenRecentMenu()
+{
+    m_openRecentMenu->clear();
+
+    const QStringList files = RecentFilesManager::instance()->files();
+    if (files.isEmpty()) {
+        QAction* noneAction = m_openRecentMenu->addAction(tr("No Recent Files"));
+        noneAction->setEnabled(false);
+    } else {
+        for (const QString& path : files) {
+            QAction* action = m_openRecentMenu->addAction(QFileInfo(path).fileName());
+            action->setToolTip(path);
+            connect(action, &QAction::triggered, this, [this, path]() {
+                onOpenRecentFile(path);
+            });
+        }
+    }
+
+    m_openRecentMenu->addSeparator();
+    QAction* clearAction = m_openRecentMenu->addAction(tr("Clear Recent Files"));
+    clearAction->setEnabled(!files.isEmpty());
+    connect(clearAction, &QAction::triggered, this, []() {
+        RecentFilesManager::instance()->clear();
+    });
+}
+
+void MainWindow::openImageFileAsNewTab(const QString& path)
+{
     beginProgressDelayed(tr("Progress"), tr("Opening Image"), false);
     auto* watcher = new QFutureWatcher<ImageLoadResult>(this);
     connect(watcher, &QFutureWatcher<ImageLoadResult>::finished, this, [this, watcher, path]() {
@@ -3358,7 +4192,7 @@ void MainWindow::onOpenFile()
         closeProgress();
 
         if (!loaded.ok) {
-            QMessageBox::warning(this, tr("Could Not Open Image"), loaded.errorMessage);
+            AppMessageDialog::warning(this, tr("Could Not Open Image"), loaded.errorMessage);
             return;
         }
 
@@ -3372,7 +4206,7 @@ void MainWindow::onOpenFile()
 
         QImage preview = convertDocumentImageToQImage(colorManaged->image).convertToFormat(QImage::Format_RGBA8888);
         if (preview.isNull()) {
-            QMessageBox::warning(this, tr("Could Not Open Image"),
+            AppMessageDialog::warning(this, tr("Could Not Open Image"),
                 tr("The image was decoded but could not be converted for the current document pipeline."));
             return;
         }
@@ -3414,7 +4248,9 @@ void MainWindow::onOpenFile()
         }
 
         tab.currentProjectPath.clear();
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
         tab.isDirty = false;
+        RecentFilesManager::instance()->addFile(path);
         m_tabWidget->setUpdatesEnabled(true);
         updateStatusFromDocument();
         if (!colorManaged->warningMessage.isEmpty())
@@ -3427,6 +4263,355 @@ void MainWindow::onOpenFile()
     watcher->setFuture(QtConcurrent::run([path]() {
         return imageCodecRegistry().readImage(path);
     }));
+}
+
+namespace {
+// Worker-thread result for openRawFileAsNewTab()'s QtConcurrent job: unlike
+// the generic open path, this carries the pieces a RawLayerData needs
+// (metadata, PP3, develop geometry), not just a flattened DocumentImage.
+struct RawOpenResult {
+    bool ok = false;
+    QString errorMessage;
+    QImage image;              // Format_RGBA8888 (RawDevelopService::convertToRgba8888)
+    RawMetadata metadata;
+    QString pp3;
+    QSize developedSize;
+    RawGeometry geometry;
+    // The session this develop ran on, kept alive instead of destroyed with the
+    // worker: opening a RAW goes straight into Hazor Develop, which needs a
+    // decoded session of its own, and decoding the same file twice in a row is
+    // seconds of CPU and a second few-hundred-MB allocation for nothing. Makes
+    // this result move-only, hence takeResult() below.
+    std::unique_ptr<RawSession> session;
+};
+} // namespace
+
+void MainWindow::openRawFileAsNewTab(const QString& path)
+{
+    if (!RawEngine::isAvailable()) {
+        AppMessageDialog::warning(this, tr("Open RAW Image"),
+            tr("RAW support is not built into this copy of Hazor."));
+        return;
+    }
+
+    beginProgressDelayed(tr("Progress"), tr("Opening RAW Image"), false);
+    auto* watcher = new QFutureWatcher<RawOpenResult>(this);
+    connect(watcher, &QFutureWatcher<RawOpenResult>::finished, this, [this, watcher, path]() {
+        // takeResult(), not result(): RawOpenResult carries the opened
+        // RawSession, so the future's result is move-only (same as the PSD path).
+        RawOpenResult loaded = watcher->future().takeResult();
+        watcher->deleteLater();
+        closeProgress();
+
+        if (!loaded.ok) {
+            AppMessageDialog::warning(this, tr("Could Not Open RAW Image"), loaded.errorMessage);
+            return;
+        }
+
+        const QImage& preview = loaded.image;
+        m_tabWidget->setUpdatesEnabled(false);
+        const QString title = QFileInfo(path).fileName();
+        auto& tab = createTab(title, QSize(preview.width(), preview.height()));
+        if (m_doc) {
+            // Camera defaults, no colour-management dialog (Fase 5 scope):
+            // rtengine always bakes its own output ICC profile (sRGB by
+            // default) into renderFull()'s result, so there is no embedded-
+            // profile question to ask the user about here.
+            m_doc->setColorProfile(ColorProfile::sRgb());
+            m_doc->setProfileSource(ColorProfileSource::GeneratedDefault);
+        }
+
+        if (m_ctrl) {
+            auto node = std::make_unique<LayerTreeNode>();
+            node->type = LayerTreeNode::Type::Layer;
+            node->name = title;
+            node->layer = std::make_shared<Layer>();
+            node->layer->name = title;
+            node->layer->cpuImage = preview;
+            node->layer->owner = node.get();
+            node->layer->resetTransform = node->transform;
+            node->layer->hasResetTransform = true;
+
+            auto source = std::make_shared<RawSource>();
+            source->path = path;
+            source->meta = loaded.metadata;
+            auto rawData = std::make_shared<RawLayerData>();
+            rawData->source = std::move(source);
+            rawData->state.pp3 = loaded.pp3;
+            rawData->state.developedSize = loaded.developedSize;
+            rawData->state.geometry = loaded.geometry;
+            rawData->mode = RawStorageMode::Linked;
+            node->layer->rawData = std::move(rawData);
+
+            m_doc->selection.resize(preview.width(), preview.height());
+            m_doc->roots.push_back(std::move(node));
+            m_doc->activeFlatIndex = 0;
+            m_doc->selectedFlatIndices.clear();
+            m_doc->selectedFlatIndices.insert(0);
+            m_canvas->syncLayersToGpu();
+            m_canvas->fitToView();
+            m_canvas->update();
+        }
+
+        tab.currentProjectPath.clear();
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
+        tab.isDirty = false;
+        RecentFilesManager::instance()->addFile(path);
+        m_tabWidget->setUpdatesEnabled(true);
+        updateStatusFromDocument();
+        refreshLayerPanel();
+        refreshPropertiesPanel();
+        updateLayerMenuState();
+        updateDirtyUi();
+        // Opening a RAW file always means developing it, so go straight to
+        // Hazor Develop instead of waiting for a thumbnail double-click — and
+        // hand it the session this open already decoded.
+        if (m_ctrl) openHazorDevelop(0, std::move(loaded.session));
+    });
+    watcher->setFuture(QtConcurrent::run([path]() {
+        RawEngine::applyBackgroundThreadPolicy();
+        RawOpenResult result;
+        std::string errorMessage;
+        std::unique_ptr<RawSession> session = RawEngine::openFile(path.toStdString(), &errorMessage);
+        if (!session) {
+            result.errorMessage = QString::fromStdString(errorMessage);
+            return result;
+        }
+
+        RawDevelopParams params = RawDevelopParams::cameraDefaults();
+        const RawImageBuffer buffer = session->renderFull(params);
+        if (buffer.isEmpty()) {
+            result.errorMessage = QStringLiteral("RAW develop failed.");
+            return result;
+        }
+
+        result.ok = true;
+        result.image = RawDevelopService::convertToRgba8888(buffer, /*dither=*/false);
+        result.metadata = session->metadata();
+        result.pp3 = QString::fromStdString(params.toPP3String());
+        result.developedSize = QSize(buffer.width, buffer.height);
+        result.geometry = buffer.geometry;
+        result.session = std::move(session);
+        return result;
+    }));
+}
+
+namespace {
+// Worker-thread result for openPsdFileAsNewTab()'s QtConcurrent job: parses
+// the file and converts it in one background pass (PsdImportService stays
+// independent of the UI thread entirely).
+struct PsdOpenResult {
+    bool ok = false;
+    QString errorMessage;
+    PsdImportResult import;
+};
+} // namespace
+
+void MainWindow::openPsdFileAsNewTab(const QString& path)
+{
+    beginProgressDelayed(tr("Importing PSD"), tr("Converting…"), false);
+    auto* watcher = new QFutureWatcher<PsdOpenResult>(this);
+    connect(watcher, &QFutureWatcher<PsdOpenResult>::finished, this, [this, watcher, path]() {
+        // takeResult(), not result(): PsdImportResult::roots is a vector of
+        // unique_ptr, so the future's result is move-only.
+        PsdOpenResult loaded = watcher->future().takeResult();
+        watcher->deleteLater();
+        closeProgress();
+
+        if (!loaded.ok) {
+            AppMessageDialog::warning(this, tr("Could Not Open PSD"), loaded.errorMessage);
+            return;
+        }
+
+        PsdImportResult& imp = loaded.import;
+        m_tabWidget->setUpdatesEnabled(false);
+        const QString title = QFileInfo(path).fileName();
+        auto& tab = createTab(title, imp.canvasSize);
+        if (m_doc) {
+            m_doc->resolutionDpi = imp.resolutionDpi;
+            m_doc->colorMode = imp.colorMode;
+            m_doc->bitDepth = imp.bitDepth;
+            m_doc->setColorProfile(imp.colorProfile);
+            m_doc->setProfileSource(imp.profileSource);
+            m_doc->guideManager.setGuides(std::move(imp.guides));
+            m_doc->selection.resize(imp.canvasSize.width(), imp.canvasSize.height());
+            // addChannel() rather than a plain assignment: it allocates the
+            // ids, sizes each buffer to the canvas and keeps the document's id
+            // counter ahead of them, so a channel created after the import
+            // cannot collide with an imported one.
+            for (auto& channel : imp.channels)
+                m_doc->addChannel(std::move(channel));
+            m_doc->roots = std::move(imp.roots);
+            m_doc->activeFlatIndex = m_doc->roots.empty() ? -1 : 0;
+            m_doc->selectedFlatIndices.clear();
+            if (!m_doc->roots.empty())
+                m_doc->selectedFlatIndices.insert(0);
+        }
+        // Smart Object layers each got a freshly built content Document;
+        // register them in this tab's own container now that it exists
+        // (PsdImportResult has none of its own — see PsdImportService.hpp).
+        if (tab.container) {
+            for (auto& [docId, content] : imp.embeddedSmartObjects)
+                tab.container->addDocumentWithId(docId, content);
+        }
+        if (m_ctrl)
+            m_ctrl->refreshAllSmartObjectInstances(/*afterLoad=*/true);
+        if (m_canvas) {
+            m_canvas->syncLayersToGpu();
+            m_canvas->fitToView();
+            m_canvas->update();
+        }
+
+        tab.currentProjectPath.clear();
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
+        tab.isDirty = false;
+        RecentFilesManager::instance()->addFile(path);
+        m_tabWidget->setUpdatesEnabled(true);
+        updateStatusFromDocument();
+        refreshLayerPanel();
+        refreshPropertiesPanel();
+        updateLayerMenuState();
+        updateDirtyUi();
+
+        if (!imp.warnings.isEmpty()) {
+            AppMessageDialog::warning(this, tr("PSD Import — Compatibility Report"),
+                tr("The document was imported successfully, but some features are not supported "
+                   "by Hazor Studio."),
+                imp.warnings.join(QLatin1Char('\n')));
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([path]() {
+        PsdOpenResult result;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            result.errorMessage = tr("Could not read \"%1\".").arg(QFileInfo(path).fileName());
+            return result;
+        }
+        result.import = PsdImportService::importFromBytes(file.readAll());
+        result.ok = result.import.ok;
+        if (!result.ok)
+            result.errorMessage = result.import.errorMessage;
+        return result;
+    }));
+}
+
+void MainWindow::openHazorDevelop(int flatIndex, std::unique_ptr<RawSession> session)
+{
+    if (!m_ctrl || !m_doc) return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer || !node->layer->rawData)
+        return;
+
+    m_ctrl->setActiveNode(flatIndex);
+
+    // One window per layer: a second double-click on the same thumbnail must
+    // raise the one already open, not start a second RawSession on the same
+    // file whose Apply would race the first one's.
+    if (auto existing = m_developWindows.constFind(node); existing != m_developWindows.constEnd()) {
+        (*existing)->show();
+        (*existing)->raise();
+        (*existing)->activateWindow();
+        return;
+    }
+
+    auto* develop = new RawDevelopWindow(*node->layer->rawData, node->layer->cpuImage, this,
+                                        std::move(session));
+    m_developWindows.insert(node, develop);
+    connect(develop, &QObject::destroyed, this, [this, node]() { m_developWindows.remove(node); });
+
+    // QPointer, not a raw one: this window outlives nothing it owns, but the
+    // document's tab can be closed from under it while it is open, and Apply
+    // would then reach a destroyed controller.
+    QPointer<ImageController> controller = m_ctrl;
+    // `node` is the layer's identity for the whole exchange. Hazor Develop is
+    // an independent window, so the user can reorder, insert or delete layers
+    // in the main window while it is open: a flat index captured here would
+    // silently re-reveal a *different* layer, and the completion filter below
+    // would never match the index ImageController re-resolves.
+    connect(develop, &RawDevelopWindow::applyRequested, develop,
+            [this, develop, controller, node](const RawDevelopParams& params) {
+        // Resolved against the controller's own document, not the active
+        // tab's: Hazor Develop keeps working while the user is looking at
+        // another document.
+        const int liveIndex = controller ? flatIndexOfNodeIn(controller->document(), node) : -1;
+        if (liveIndex < 0) {
+            AppMessageDialog::warning(develop, tr("Hazor Develop"),
+                tr("This RAW layer is no longer in its document."));
+            return;
+        }
+        // Donate Hazor Develop's warm preview session to the develop service
+        // BEFORE dispatching: requestDevelop() decides there and then whether it
+        // has to call RawEngine::openFile(), and the file this window has had
+        // decoded all along is the same one. Without this, Apply paid a second
+        // full decode — seconds of CPU and a few hundred MB resident next to the
+        // session still held by this (not yet destroyed) window, which is most of
+        // why Apply felt like the machine had stalled.
+        //
+        // Declined when a preview is still rendering (takeIdleSession()), and
+        // harmless on the failure path below: the session stays cached on the
+        // node for the retry, only this window's own next preview would re-decode.
+        QString donatedTempPath;
+        if (auto warm = develop->takeIdleSession(&donatedTempPath))
+            controller->adoptRawSession(liveIndex, std::move(warm), donatedTempPath);
+
+        if (!controller->rerevealRawLayer(liveIndex, params)) {
+            AppMessageDialog::warning(develop, tr("Hazor Develop"),
+                tr("Could not start RAW development. The layer may be locked or already processing."));
+            return;
+        }
+
+        // The render itself already runs off the UI thread (RawDevelopService);
+        // what froze the interface was keeping Develop open and disabled for
+        // the whole wait. Close it right away and hand the wait off to the
+        // main window's own loading dialog instead, same as opening a RAW file.
+        develop->close();
+        beginProgressDelayed(tr("Progress"), tr("Applying RAW Changes…"), false);
+
+        // Self-disconnecting rather than tied to `develop` (already gone) or
+        // to `this` for the controller's lifetime (would accumulate one stale
+        // connection per Apply click): fires once for *this* node's result,
+        // ignoring any other RAW layer's re-reveal that finishes first, then
+        // detaches itself.
+        auto connection = std::make_shared<QMetaObject::Connection>();
+        *connection = connect(controller, &ImageController::rawLayerDevelopFinished, this,
+                [this, node, connection](LayerTreeNode* completed, int, bool ok, const QString& message) {
+            if (completed != node)
+                return;
+            disconnect(*connection);
+            closeProgress();
+            if (!ok) {
+                AppMessageDialog::warning(this, tr("Hazor Develop"),
+                    message.isEmpty() ? tr("RAW development failed.") : message);
+                return;
+            }
+            if (!message.isEmpty())
+                AppMessageDialog::warning(this, tr("Hazor Develop"), message);
+        });
+    });
+    develop->show();
+    develop->raise();
+    develop->activateWindow();
+}
+
+int MainWindow::tabIndexForDocument(const DocumentContainer* container,
+                                    const SmartObjectDocId& docId) const
+{
+    if (!container || docId.isEmpty())
+        return -1;
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+        if (m_tabs[i].container.get() == container && m_tabs[i].docId == docId)
+            return i;
+    }
+    return -1;
+}
+
+int MainWindow::flatIndexOfNodeIn(const Document* doc, const LayerTreeNode* node)
+{
+    if (!doc || !node)
+        return -1;
+    const auto flat = doc->flatten();
+    const auto it = std::find(flat.begin(), flat.end(), node);
+    return it == flat.end() ? -1 : static_cast<int>(it - flat.begin());
 }
 
 void MainWindow::showProgress(const QString& title, const QString& message, bool cancelable)
@@ -3520,23 +4705,58 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
 {
     if (index < 0 || index >= static_cast<int>(m_tabs.size()))
         return false;
-    auto& tab = m_tabs[index];
-    if (!tab.document)
+    if (!m_tabs[index].document)
         return false;
 
+    // Ctrl+S in a content tab does NOT write the project to disk: it COMMITS
+    // the tab's isolated working copy into the embedded Smart Object, updates
+    // every instance and marks the project as needing a save. Saving the
+    // contents and writing the project are two different acts. Writing the
+    // whole .hazor here would also flush unrelated edits the user made in the
+    // main document and had not chosen to save yet.
+    if (m_tabs[index].container
+        && m_tabs[index].docId != m_tabs[index].container->rootId()) {
+        if (!saveAs)
+            return commitEmbeddedContent(index);
+        // Save As from a content tab still means "write the project somewhere
+        // else" — the container is the only thing there is a file for, and
+        // writing the contents alone is Convert to Linked. But the file has to
+        // match what the user is looking at, so the isolated edits are
+        // committed first instead of being silently left out of the copy.
+        if (m_tabs[index].isDirty && !commitEmbeddedContent(index))
+            return false;
+    }
+
+    // Save is a CONTAINER operation, not a document one: a .hazor holds the root
+    // document plus every embedded Smart Object document, and one file has one
+    // save path. The path/dirty bookkeeping belongs to the root tab — the tab
+    // that owns the file name.
+    const int targetIndex = rootTabIndexForContainer(m_tabs[index].container.get(), index);
+    auto& tab = m_tabs[targetIndex];
+    const auto container = tab.container;
+
     QString path = tab.currentProjectPath;
-    if (saveAs || path.isEmpty()) {
+    const bool choosingNewPath = saveAs || path.isEmpty();
+    if (choosingNewPath) {
         QString suggested = tab.name;
-        if (!suggested.endsWith(".hzs", Qt::CaseInsensitive))
-            suggested += ".hzs";
+        if (!suggested.endsWith(".hazor", Qt::CaseInsensitive))
+            suggested += ".hazor";
         path = QFileDialog::getSaveFileName(
             this, tr("Save Project As"), suggested,
-            tr("Hazor Studio (*.hzs)"));
+            tr("Hazor Studio (*.hazor)"));
         if (path.isEmpty())
             return false;
-        if (!path.endsWith(".hzs", Qt::CaseInsensitive))
-            path += ".hzs";
+        if (!path.endsWith(".hazor", Qt::CaseInsensitive))
+            path += ".hazor";
     }
+
+    // Linked Smart Object paths are stored relative to the .hazor that holds
+    // them, so writing the project somewhere else has to rewrite them BEFORE
+    // the save — otherwise the file goes out with links resolved against a
+    // location it no longer has. Not an undo step: it preserves the exact same
+    // references, expressed from the file's new home.
+    if (container && choosingNewPath)
+        smartobject::rebaseLinkedPaths(*container, path);
 
     beginProgressDelayed(tr("Progress"), tr("Saving Document"), false);
 
@@ -3544,9 +4764,13 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
     QEventLoop loop;
     connect(&watcher, &QFutureWatcher<QPair<bool, QString>>::finished,
             &loop, &QEventLoop::quit);
-    watcher.setFuture(QtConcurrent::run([doc = tab.document.get(), path]() {
+    // The container is captured by shared_ptr so the worker cannot outlive it.
+    watcher.setFuture(QtConcurrent::run(
+        [container, doc = tab.document.get(), path]() {
         QString err;
-        const bool ok = ProjectFileService::saveProject(*doc, path, &err);
+        const bool ok = container
+            ? ProjectFileService::saveContainer(*container, path, &err)
+            : ProjectFileService::saveProject(*doc, path, &err);
         return QPair<bool, QString>(ok, err);
     }));
     loop.exec();
@@ -3555,20 +4779,106 @@ bool MainWindow::saveProjectForTab(int index, bool saveAs)
     closeProgress();
 
     if (!result.first) {
-        QMessageBox::warning(this, tr("Save Project"),
+        AppMessageDialog::warning(this, tr("Save Project"),
             result.second.isEmpty() ? tr("Failed to save project.") : result.second);
         return false;
     }
 
+    // Re-key the registry before anything else: after a Save As the container is
+    // reachable at the new path and must no longer answer to the old one.
+    if (container)
+        ContainerRegistry::instance().registerContainer(container, path);
+
     tab.currentProjectPath = path;
     tab.name = QFileInfo(path).fileName();
     tab.isDirty = false;
-    if (index < m_tabWidget->count()) {
-        m_tabWidget->setTabText(index, tabLabel(tab.name));
-        m_tabWidget->setTabToolTip(index, tab.name);
+    if (choosingNewPath) {
+        tab.sourcePath = QFileInfo(path).absoluteFilePath();
+        RecentFilesManager::instance()->addFile(path);
+    }
+    // Other tabs of the same container were written along with it — but NOT a
+    // content tab with uncommitted edits: those live in a working copy the save
+    // deliberately did not pick up, so its asterisk has to stay. What reached
+    // the disk is everything that had been committed.
+    for (auto& other : m_tabs) {
+        if (other.container != container)
+            continue;
+        if (other.isDirty && other.docId != container->rootId())
+            continue;
+        other.isDirty = false;
     }
     updateDirtyUi();
+
+    if (m_homeWorkspace)
+        m_homeWorkspace->storeDocumentThumbnail(path, tab.document.get());
+
+    // A project that other open projects LINK to just changed on disk. Their
+    // instances have to re-render, and each of them is then unsaved in its own
+    // right: the cached render is part of a .hazor, so a dependent's file no
+    // longer matches what is in memory. Their files are deliberately NOT
+    // written — only the project the user asked to save was.
+    scheduleSmartObjectRefresh();
     return true;
+}
+
+bool MainWindow::commitEmbeddedContent(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+        return false;
+    auto& tab = m_tabs[index];
+    if (!tab.container || !tab.controller)
+        return false;
+
+    // Nothing to commit is not a failure, and it must not mark the project
+    // unsaved: Ctrl+S on an untouched content tab would otherwise make the
+    // whole .hazor look edited for no reason.
+    if (!tab.isDirty) {
+        showViewportStatusMessage(tr("Smart Object contents are already up to date."), 2000);
+        return true;
+    }
+
+    // THIS is where the content tab's isolated working copy becomes the
+    // project's content: it is copied into the stored document, every instance
+    // of it re-renders, and the project starts differing from its file. The
+    // commit is driven by the container's ROOT controller — one cascade owner
+    // per file, whichever tab asked (see flushSmartObjectRefresh).
+    const SmartObjectDocId docId = tab.docId;
+    const auto container = tab.container;
+    auto* root = rootControllerForContainer(container.get());
+    if (!root || !root->commitSmartObjectEditSession(docId)) {
+        AppMessageDialog::warning(this, tr("Smart Object"),
+            tr("This Smart Object's contents could not be committed: its document "
+               "is no longer part of the project."));
+        return false;
+    }
+
+    tab.isDirty = false;                    // the content is committed
+    markContainerRootDirty(container);      // the .hazor is not written yet
+    updateDirtyUi();
+    showViewportStatusMessage(
+        tr("Smart Object contents updated. Save the project to write them to disk."),
+        3000);
+    return true;
+}
+
+void MainWindow::markContainerRootDirty(const std::shared_ptr<DocumentContainer>& container)
+{
+    if (!container)
+        return;
+    const int rootTab = tabIndexForDocument(container.get(), container->rootId());
+    if (rootTab < 0 || m_tabs[rootTab].isDirty)
+        return;
+    m_tabs[rootTab].isDirty = true;
+    updateDirtyUi();
+}
+
+int MainWindow::rootTabIndexForContainer(const DocumentContainer* container,
+                                         int fallbackIndex) const
+{
+    if (!container)
+        return fallbackIndex;
+    const int rootTab = tabIndexForDocument(container, container->rootId());
+    return rootTab >= 0 ? rootTab : fallbackIndex;
 }
 
 bool MainWindow::ensureTabCanBeDiscardedOrSaved(int index)
@@ -3579,25 +4889,37 @@ bool MainWindow::ensureTabCanBeDiscardedOrSaved(int index)
     if (!tab.isDirty)
         return true;
 
-    const QString displayName = tab.currentProjectPath.isEmpty()
+    // A tab editing a Smart Object's contents edits a working copy that lives
+    // only as long as the tab, so closing it DOES discard uncommitted work —
+    // and the prompt's "Save" means "commit into the Smart Object", not "write
+    // the file". Before isolation there was nothing to ask here; now there is.
+    const bool isContentTab = tab.container && tab.docId != tab.container->rootId();
+
+    const QString displayName = isContentTab
         ? tab.name
-        : QFileInfo(tab.currentProjectPath).fileName();
+        : (tab.currentProjectPath.isEmpty() ? tab.name
+                                            : QFileInfo(tab.currentProjectPath).fileName());
 
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(tr("Unsaved Changes"));
-    box.setText(tr("The project \"%1\" has unsaved changes.").arg(displayName));
-    box.setInformativeText(tr("Do you want to save your changes?"));
-    auto* saveBtn = box.addButton(tr("Save"), QMessageBox::AcceptRole);
-    auto* discardBtn = box.addButton(tr("Discard"), QMessageBox::DestructiveRole);
-    auto* cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.exec();
+    const QList<AppMessageDialog::ButtonSpec> buttons = {
+        { isContentTab ? tr("Commit") : tr("Save"), QMessageBox::AcceptRole },
+        { tr("Discard"), QMessageBox::DestructiveRole },
+        { tr("Cancel"), QMessageBox::RejectRole },
+    };
+    const int clicked = AppMessageDialog::choice(
+        this, tr("Unsaved Changes"),
+        isContentTab
+            ? tr("The Smart Object contents \"%1\" have changes that are not in "
+                 "the project yet.").arg(displayName)
+            : tr("The project \"%1\" has unsaved changes.").arg(displayName),
+        AppMessageDialog::Icon::Warning, buttons, /*defaultIndex=*/0,
+        isContentTab ? tr("Do you want to commit them to the Smart Object?")
+                     : tr("Do you want to save your changes?"));
 
-    if (box.clickedButton() == saveBtn)
+    if (clicked == 0)
         return saveProjectForTab(index, false);
-    if (box.clickedButton() == discardBtn)
+    if (clicked == 1)
         return true;
-    return box.clickedButton() != cancelBtn ? true : false;
+    return false;
 }
 
 void MainWindow::markActiveTabDirty(bool dirty)
@@ -3605,68 +4927,127 @@ void MainWindow::markActiveTabDirty(bool dirty)
     if (m_activeTabIndex < 0 || m_activeTabIndex >= static_cast<int>(m_tabs.size()))
         return;
     auto& tab = m_tabs[m_activeTabIndex];
-    if (tab.isDirty == dirty)
-        return;
+    bool changed = tab.isDirty != dirty;
     tab.isDirty = dirty;
-    updateDirtyUi();
+
+    // The dirty mark stops HERE, deliberately: a content tab edits an isolated
+    // working copy, so the project it belongs to still matches its file. What
+    // marks the project unsaved is the commit (commitEmbeddedContent), not the
+    // edit — and the content tab's own asterisk is what says "these changes are
+    // not in the project yet". Closing the tab with the mark set prompts, so
+    // nothing is lost silently.
+
+    if (changed)
+        updateDirtyUi();
+}
+
+QString MainWindow::documentFileName(const DocumentTab& tab) const
+{
+    QString name;
+    if (!tab.currentProjectPath.isEmpty())
+        name = QFileInfo(tab.currentProjectPath).fileName();
+    else if (!tab.sourcePath.isEmpty())
+        name = QFileInfo(tab.sourcePath).fileName();
+    else if (!tab.name.isEmpty())
+        name = tab.name;
+    else if (tab.document)
+        name = tab.document->name;
+    return name.isEmpty() ? tr("Untitled") : name;
+}
+
+QString MainWindow::documentTabTitle(const DocumentTab& tab) const
+{
+    const QString fileName = documentFileName(tab);
+    if (!tab.document)
+        return tab.isDirty ? fileName + QStringLiteral(" *") : fileName;
+
+    const Document& document = *tab.document;
+    const float zoom = std::isfinite(document.zoomTarget)
+        ? document.zoomTarget : document.zoom;
+
+    QString layerName;
+    if (const auto* node = document.activeNode()) {
+        layerName = node->name;
+        if (layerName.isEmpty() && node->layer)
+            layerName = node->layer->name;
+    }
+
+    const QString colorContext = tab.controller && tab.controller->isEditingMask()
+        ? tr("Layer Mask")
+        : documentColorModeLabel(document.colorMode);
+    const QString details = layerName.isEmpty()
+        ? QStringLiteral("%1/%2").arg(colorContext).arg(document.bitDepth)
+        : QStringLiteral("%1, %2/%3")
+              .arg(layerName, colorContext)
+              .arg(document.bitDepth);
+
+    return QStringLiteral("%1 @ %2% (%3)%4")
+        .arg(fileName, formattedZoomPercent(zoom), details,
+             tab.isDirty ? QStringLiteral(" *") : QString());
 }
 
 void MainWindow::updateDirtyUi()
 {
-    auto makeTitle = [this]() -> QString {
-        if (m_activeTabIndex < 0 || m_activeTabIndex >= static_cast<int>(m_tabs.size()))
-            return tr("Hazor Studio");
-        auto& tab = m_tabs[m_activeTabIndex];
-        QString baseName = tab.currentProjectPath.isEmpty()
-            ? tab.name
-            : QFileInfo(tab.currentProjectPath).fileName();
-        if (baseName.isEmpty())
-            baseName = tr("Untitled");
-        const QString tabName = tab.isDirty ? tabLabel(baseName) + "*" : tabLabel(baseName);
-        if (m_activeTabIndex < m_tabWidget->count()) {
-            m_tabWidget->setTabText(m_activeTabIndex, tabName);
-            m_tabWidget->setTabToolTip(m_activeTabIndex, baseName);
-        }
-        return QStringLiteral("%1 - Hazor Studio").arg(tabName);
-    };
+    // EVERY tab's label is refreshed, not just the active one. A change can now
+    // reach a project the user is not looking at — committing a Smart Object's
+    // contents marks the main document unsaved, and saving a linked file marks
+    // the projects that display it unsaved — and an asterisk that only appears
+    // once you switch to the tab is an asterisk nobody sees in time.
+    QString activeTitle = tr("Hazor Studio");
 
-    QString title = makeTitle();
-    setWindowTitle(title);
+    for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i) {
+        const auto& tab = m_tabs[i];
+        const QString fullTabTitle = documentTabTitle(tab);
+        const int tabWidgetIndex = tabWidgetIndexForDocument(i);
+        if (tabWidgetIndex < m_tabWidget->count()) {
+            if (m_tabWidget->tabText(tabWidgetIndex) != fullTabTitle)
+                m_tabWidget->setTabText(tabWidgetIndex, fullTabTitle);
+            if (m_tabWidget->tabToolTip(tabWidgetIndex) != fullTabTitle)
+                m_tabWidget->setTabToolTip(tabWidgetIndex, fullTabTitle);
+        }
+        if (i == m_activeTabIndex) {
+            const QString windowDocumentName = documentFileName(tab)
+                + (tab.isDirty ? QStringLiteral(" *") : QString());
+            activeTitle = QStringLiteral("%1 - Hazor Studio").arg(windowDocumentName);
+        }
+    }
+
+    setWindowTitle(activeTitle);
 }
 
 bool MainWindow::loadProjectAsNewTab(const QString& path)
 {
-    const ProjectLoadResult loaded = ProjectFileService::loadProject(path);
-    if (!loaded.ok) {
-        QMessageBox::warning(this, tr("Open Project"),
-            loaded.error.isEmpty() ? tr("Invalid project file.") : loaded.error);
+    // Through the registry, never ProjectFileService directly: one container per
+    // physical file for the whole application. Opening a .hazor that a Linked
+    // Smart Object already pulled in adopts that same container instead of
+    // building a second Document for the same bytes (see ContainerRegistry.hpp).
+    QString error;
+    auto container = ContainerRegistry::instance().open(path, &error);
+    if (!container || !container->rootDocument()) {
+        AppMessageDialog::warning(this, tr("Open Project"),
+            error.isEmpty() ? tr("Invalid project file.") : error);
         return false;
+    }
+
+    // A second tab for the same (container, document) would give one Document
+    // two CommandHistories and two dirty flags. Reactivate instead — the same
+    // rule "Edit Contents" follows for an already-open Smart Object document.
+    const int existingTab = tabIndexForDocument(container.get(), container->rootId());
+    if (existingTab >= 0) {
+        m_tabWidget->setCurrentIndex(tabWidgetIndexForDocument(existingTab));
+        RecentFilesManager::instance()->addFile(path);
+        return true;
     }
 
     const QString tabName = QFileInfo(path).fileName();
-    auto& tab = createTab(tabName, loaded.canvasSize);
+    // The loaded document is adopted as-is — no clone of the layer tree. The
+    // previous code cloned it because loadProject() handed back loose roots the
+    // tab had to copy into its own Document; documentFromJson() now builds the
+    // real Document, and cloning it here would detach the tab from the
+    // container that has to save it.
+    auto& tab = createTabForDocument(tabName, container, container->rootId());
     if (!tab.document || !tab.controller)
         return false;
-
-    tab.document->name = loaded.projectName;
-    tab.document->size = loaded.canvasSize;
-    tab.document->roots.clear();
-    for (const auto& root : loaded.roots) {
-        auto clone = root->clone(true);
-        tab.document->roots.push_back(std::move(clone));
-    }
-    tab.document->activeFlatIndex = std::clamp(loaded.activeFlatIndex, 0, std::max(0, tab.document->flatCount() - 1));
-    tab.document->resolutionDpi = loaded.resolutionDpi;
-    tab.document->colorMode = loaded.colorMode;
-    tab.document->bitDepth = loaded.bitDepth;
-    tab.document->setColorProfile(loaded.colorProfile);
-    tab.document->setProfileSource(loaded.profileSource);
-    tab.document->zoom = loaded.zoom;
-    tab.document->panOffset = loaded.panOffset;
-    tab.document->guideManager.setGuides(loaded.guides);
-    tab.document->selection.resize(loaded.canvasSize.width(), loaded.canvasSize.height());
-    tab.document->selection.clear();
-    tab.document->selection.setActive(false);
 
     // NOTE: masks live in the layer's base-pixel space anchored by maskOrigin
     // (see Layer::maskTargetBounds / DocumentCompositor), and ProjectFileService
@@ -3676,9 +5057,11 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     // renderer still sampled them at layer size, so the mask shrank on reload).
 
     tab.currentProjectPath = path;
+    tab.sourcePath = QFileInfo(path).absoluteFilePath();
     tab.name = tabName;
     tab.isDirty = false;
-    m_activeTabIndex = m_tabWidget->currentIndex();
+    RecentFilesManager::instance()->addFile(path);
+    m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
     m_doc = tab.document.get();
     m_ctrl = tab.controller.get();
     m_canvas = tab.canvas;
@@ -3690,6 +5073,12 @@ bool MainWindow::loadProjectAsNewTab(const QString& path)
     updateLayerMenuState();
     updateStatusFromDocument();
     updateDirtyUi();
+    if (m_homeWorkspace)
+        m_homeWorkspace->storeDocumentThumbnail(path, tab.document.get());
+    // Validates every Smart Object reference in the file (so a Linked target
+    // that moved gets its broken badge) and re-renders only the genuinely stale
+    // ones — a persisted render is trusted.
+    tab.controller->refreshAllSmartObjectInstances(/*afterLoad=*/true);
     return true;
 }
 
@@ -3697,10 +5086,11 @@ int MainWindow::openProjectFiles(const QStringList& files)
 {
     int opened = 0;
     for (const QString& path : files) {
-        if (!path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
+        if (!path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+            && !path.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
             continue;
         if (!QFileInfo(path).isFile()) {
-            QMessageBox::warning(this, tr("Open Project"),
+            AppMessageDialog::warning(this, tr("Open Project"),
                 tr("File not found:\n%1").arg(path));
             continue;
         }
@@ -3712,16 +5102,10 @@ int MainWindow::openProjectFiles(const QStringList& files)
     return opened;
 }
 
-void MainWindow::onExportFile()
+void MainWindow::runImageExport(const QString& format, const QString& suggestedBaseName,
+                                std::function<bool(const QString&, QString*)> save)
 {
-    if (!m_doc) return;
-
-    ExportImageDialog dlg(m_doc, this);
-    if (dlg.exec() != QDialog::Accepted) return;
-
-    auto opts = dlg.options();
-
-    QString defaultExt = normalizeImageExtension(opts.format);
+    QString defaultExt = normalizeImageExtension(format);
     if (defaultExt == QLatin1String("jpeg"))
         defaultExt = QStringLiteral("jpg");
     if (defaultExt.isEmpty())
@@ -3730,11 +5114,10 @@ void MainWindow::onExportFile()
     // Lock the save dialog to the format chosen in the export dialog, so the
     // user cannot pick a different type here and the extension is applied
     // automatically — like professional editors.
-    const QString lockedFilter =
-        imageCodecRegistry().saveFilterForFormat(opts.format);
+    const QString lockedFilter = imageCodecRegistry().saveFilterForFormat(format);
 
     QString path = QFileDialog::getSaveFileName(
-        this, tr("Export Image"), QString(), lockedFilter, nullptr,
+        this, tr("Export Image"), suggestedBaseName, lockedFilter, nullptr,
         QFileDialog::DontConfirmOverwrite);
     if (path.isEmpty()) return;
 
@@ -3750,25 +5133,11 @@ void MainWindow::onExportFile()
 
     // Manual overwrite check (only same full path)
     if (QFile::exists(path)) {
-        auto ret = QMessageBox::question(this, tr("Confirm Save As"),
-            tr("%1 already exists.\nDo you want to replace it?")
-                .arg(QFileInfo(path).fileName()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ret != QMessageBox::Yes) return;
+        if (!AppMessageDialog::confirm(this, tr("Confirm Save As"),
+                tr("%1 already exists.\nDo you want to replace it?")
+                    .arg(QFileInfo(path).fileName())))
+            return;
     }
-
-    ExportOptions eopts;
-    eopts.quality     = opts.quality;
-    eopts.compression = opts.compression;
-    eopts.progressive = opts.progressive;
-    eopts.preserveAlpha = opts.transparency;
-    // Encode with the format chosen in the export dialog; the path's suffix is
-    // now guaranteed to match it.
-    eopts.format      = normalizeImageExtension(opts.format);
-    eopts.colorMode   = opts.colorMode;
-    eopts.colorSelectedProfile = opts.colorSelectedProfile;
-    if (opts.resizeEnabled && opts.targetSize.isValid())
-        eopts.resizeTo = opts.targetSize;
 
     beginProgressDelayed(tr("Progress"), tr("Exporting Image"), false);
     auto* watcher = new QFutureWatcher<QPair<bool, QString>>(this);
@@ -3777,14 +5146,96 @@ void MainWindow::onExportFile()
         watcher->deleteLater();
         closeProgress();
         if (!result.first)
-            QMessageBox::warning(this, tr("Could Not Export Image"),
+            AppMessageDialog::warning(this, tr("Could Not Export Image"),
                 result.second.isEmpty() ? tr("Failed to export image.") : result.second);
     });
-    watcher->setFuture(QtConcurrent::run([doc = m_doc, path, eopts]() {
+    watcher->setFuture(QtConcurrent::run([path, save]() {
         QString errorMessage;
-        const bool ok = saveImage(doc, path, eopts, &errorMessage);
+        const bool ok = save(path, &errorMessage);
         return QPair<bool, QString>(ok, errorMessage);
     }));
+}
+
+void MainWindow::onExportFile()
+{
+    if (!m_doc) return;
+
+    // A raster export is the flattened colour composite: it carries no extra
+    // channels, and it deliberately does not promote an alpha channel to the
+    // image's transparency (a saved selection is not the image's alpha). Say
+    // so before the file is written instead of dropping them silently — the
+    // document keeps its channels either way, and .hazor preserves them.
+    if (!m_doc->channels.empty()) {
+        const QString text = tr("This document has %n extra channel(s), which "
+                                "image formats cannot store. They stay in the "
+                                "document; the exported file will contain the "
+                                "colour composite only.",
+                                nullptr, static_cast<int>(m_doc->channels.size()));
+        const int answer = AppMessageDialog::choice(
+            this, tr("Export"), text, AppMessageDialog::Icon::Warning,
+            {{tr("Export Anyway"), QMessageBox::AcceptRole},
+             {tr("Cancel"), QMessageBox::RejectRole}}, 0);
+        if (answer != 0)
+            return;
+    }
+
+    ExportImageDialog dlg(m_doc, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    auto opts = dlg.options();
+
+    ExportOptions eopts;
+    eopts.quality     = opts.quality;
+    eopts.compression = opts.compression;
+    eopts.progressive = opts.progressive;
+    eopts.preserveAlpha = opts.transparency;
+    // Encode with the format chosen in the export dialog; the path's suffix is
+    // guaranteed to match it (runImageExport locks the save dialog to it).
+    eopts.format      = normalizeImageExtension(opts.format);
+    eopts.colorMode   = opts.colorMode;
+    eopts.colorSelectedProfile = opts.colorSelectedProfile;
+    if (opts.resizeEnabled && opts.targetSize.isValid())
+        eopts.resizeTo = opts.targetSize;
+
+    Document* doc = m_doc;
+    runImageExport(opts.format, QString(), [doc, eopts](const QString& path, QString* errorMessage) {
+        return saveImage(doc, path, eopts, errorMessage);
+    });
+}
+
+void MainWindow::onExportNode(int flatIndex)
+{
+    if (!m_doc) return;
+    LayerTreeNode* node = m_doc->nodeAt(flatIndex);
+    if (!node || !node->hasIsolatedExportContent()) {
+        AppMessageDialog::information(this, tr("Export Layer"),
+            tr("This adjustment has no content of its own to export — it only "
+               "modifies the layers beneath it."));
+        return;
+    }
+
+    ExportImageDialog dlg(m_doc, node, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    auto opts = dlg.options();
+
+    ExportOptions eopts;
+    eopts.quality     = opts.quality;
+    eopts.compression = opts.compression;
+    eopts.progressive = opts.progressive;
+    eopts.preserveAlpha = opts.transparency;
+    eopts.format      = normalizeImageExtension(opts.format);
+    eopts.colorMode   = opts.colorMode;
+    eopts.colorSelectedProfile = opts.colorSelectedProfile;
+    if (opts.resizeEnabled && opts.targetSize.isValid())
+        eopts.resizeTo = opts.targetSize;
+
+    Document* doc = m_doc;
+    const bool layerBounds = opts.layerBoundsMode;
+    runImageExport(opts.format, node->name,
+                   [doc, node, eopts, layerBounds](const QString& path, QString* errorMessage) {
+        return saveNodeImage(doc, node, path, eopts, layerBounds, errorMessage);
+    });
 }
 
 void MainWindow::onImportImage()
@@ -3802,7 +5253,7 @@ void MainWindow::onImportImage()
         closeProgress();
 
         if (!loaded.ok) {
-            QMessageBox::warning(this, tr("Could Not Import Image"), loaded.errorMessage);
+            AppMessageDialog::warning(this, tr("Could Not Import Image"), loaded.errorMessage);
             return;
         }
 
@@ -3821,7 +5272,7 @@ void MainWindow::onImportImage()
 
         QImage img = convertDocumentImageToQImage(colorManaged->image).convertToFormat(QImage::Format_RGBA8888);
         if (img.isNull()) {
-            QMessageBox::warning(this, tr("Could Not Import Image"),
+            AppMessageDialog::warning(this, tr("Could Not Import Image"),
                 tr("The image was decoded but could not be converted for the current document pipeline."));
             return;
         }
@@ -3862,7 +5313,7 @@ void MainWindow::onEditDocument()
     if (!m_doc) return;
 
     m_tabWidget->setUpdatesEnabled(false);
-    NewDocumentDialog dlg(this);
+    NewDocumentDialog dlg(this, NewDocumentDialog::Mode::Edit);
 
     DocumentSettings s;
     s.name = m_doc->name;
@@ -3909,12 +5360,23 @@ void MainWindow::onEditDocument()
     }
     QSize newSize(wPx, hPx);
 
+    const QString newColorMode = documentColorModeFromSetting(s.colorMode);
+    const int newBitDepth = documentBitDepthFromSetting(s.colorMode);
+    const bool metadataChanged = m_doc->name != s.name
+        || !qFuzzyCompare(m_doc->resolutionDpi, ppi)
+        || m_doc->colorMode != newColorMode
+        || m_doc->bitDepth != newBitDepth;
+
     m_doc->name = s.name;
-    if (m_activeTabIndex >= 0 && m_activeTabIndex < m_tabWidget->count())
-        m_tabWidget->setTabText(m_activeTabIndex, tabLabel(s.name));
+    if (m_activeTabIndex >= 0
+        && m_activeTabIndex < static_cast<int>(m_tabs.size())
+        && m_tabs[m_activeTabIndex].currentProjectPath.isEmpty()
+        && m_tabs[m_activeTabIndex].sourcePath.isEmpty()) {
+        m_tabs[m_activeTabIndex].name = s.name;
+    }
     m_doc->resolutionDpi = ppi;
-    m_doc->colorMode = documentColorModeFromSetting(s.colorMode);
-    m_doc->bitDepth = documentBitDepthFromSetting(s.colorMode);
+    m_doc->colorMode = newColorMode;
+    m_doc->bitDepth = newBitDepth;
 
     if (m_ctrl && m_doc->size != newSize)
         m_ctrl->resizeDocument(newSize);
@@ -3939,6 +5401,9 @@ void MainWindow::onEditDocument()
     refreshLayerPanel();
     refreshPropertiesPanel();
     updateStatusFromDocument();
+    if (metadataChanged)
+        markActiveTabDirty(true);
+    updateDirtyUi();
 }
 
 void MainWindow::onAddLayer()
@@ -3994,12 +5459,31 @@ void MainWindow::arrangeActiveLayer(int kind)
 void MainWindow::toggleActiveClipping()
 {
     if (!m_ctrl || !m_doc) return;
+    auto* node = m_doc->activeNode();
+    if (!node) return;
+
+    // Two mechanisms share this one command, because the user is asking for one
+    // thing ("clip this to the layer below") and the model stores it differently
+    // per node type:
+    //  - a Layer node carries a `clipped` flag and the compositors read the base
+    //    layer's alpha straight off its sibling (LayerTreeNode::isClippedLayer);
+    //  - an Adjustment node clips by BECOMING its host layer's child, which is
+    //    Single Layer Mode and is handled below.
+    if (node->type == LayerTreeNode::Type::Layer && node->layer) {
+        std::vector<int> indices(m_doc->selectedFlatIndices.begin(),
+                                 m_doc->selectedFlatIndices.end());
+        if (indices.empty() && m_doc->activeFlatIndex >= 0)
+            indices.push_back(m_doc->activeFlatIndex);
+        m_ctrl->toggleClippingMask(indices);
+        refreshLayersUi();
+        return;
+    }
+
     // "Single-Layer-Mode" here is a parent relationship: a clipped adjustment is
     // a child of its host Layer. The toggle moves the active adjustment between
     // the host's child list and the normal stack (both ops push an atomic
-    // LayerTreeStateCommand). Clipping is adjustment-only in this model.
-    auto* node = m_doc->activeNode();
-    if (!node || !node->isAdjustmentLayer()) return;
+    // LayerTreeStateCommand).
+    if (!node->isAdjustmentLayer()) return;
     const int adjIdx = m_doc->activeFlatIndex;
     const auto flat = m_doc->flatten();
     if (node->parent && node->parent->type == LayerTreeNode::Type::Layer) {
@@ -4216,6 +5700,59 @@ void MainWindow::updateLayerMenuState()
     m_mergeLayersAction->setEnabled(hasLayer && hasMultiple && !m_ctrl->anyFullyLockedVisibleLayer());
     m_flattenImageAction->setEnabled(hasDoc && m_ctrl && m_doc->flatCount() >= 1 && !m_ctrl->anyFullyLockedVisibleLayer());
     m_rasterizeLayerAction->setEnabled(hasLayer && !isAdjustment && !pixelsLocked);
+
+    // Clipping Mask: the label states which of the two commands the current
+    // selection would run, and the entry is disabled when neither applies (no
+    // layer below to clip to, and nothing clipped to release).
+    if (m_clippingMaskAction) {
+        const int activeIdx = hasDoc ? m_doc->activeFlatIndex : -1;
+        const bool clipped  = m_ctrl && m_ctrl->isClippingMask(activeIdx);
+        const bool isBase   = m_ctrl && m_ctrl->isClippingMaskBase(activeIdx);
+        const bool canClip  = m_ctrl && m_ctrl->canCreateClippingMask(activeIdx);
+        // An adjustment keeps the Single-Layer-Mode meaning of this command, so
+        // it stays enabled for one whenever a host layer exists below it.
+        const bool adjustmentClip = isAdjustment && activeNode
+            && (activeNode->parent
+                    ? activeNode->parent->type == LayerTreeNode::Type::Layer
+                    : hasMultiple);
+        m_clippingMaskAction->setText((clipped || isBase)
+                                          ? tr("Release &Clipping Mask")
+                                          : tr("Create &Clipping Mask"));
+        m_clippingMaskAction->setEnabled(clipped || isBase || canClip || adjustmentClip);
+    }
+
+    // Smart Objects. Per-item gating, not one "is this a Smart Object?" switch:
+    // it is what tells the user WHY something is unavailable — Embed Linked
+    // greys out on an embedded instance, not on every Smart Object.
+    if (m_smartObjectMenu) {
+        const auto smartData = (hasDoc && m_ctrl)
+            ? m_ctrl->smartObjectDataAt(m_doc->activeFlatIndex) : nullptr;
+        const bool isSmartObject = smartData != nullptr;
+        const bool isLinked = isSmartObject
+            && smartData->mode == SmartObjectStorageMode::Linked;
+        const bool isEmbedded = isSmartObject && !isLinked;
+
+        m_smartObjectMenu->setEnabled(hasDoc);
+        // Converting a Smart Object into another one is legal — that is how
+        // you nest them.
+        m_smartObjectConvertAction->setEnabled(
+            (hasLayer || isAdjustment || isGroupNode || multiSelected) && !fullyLocked);
+        m_smartObjectViaCopyAction->setEnabled(isSmartObject);
+        m_smartObjectEditAction->setEnabled(isSmartObject);
+        m_smartObjectReplaceAction->setEnabled(isSmartObject && !pixelsLocked);
+        // Relink / Update / Embed Linked are Linked-only: embedded content has
+        // no file to re-point at and can never be out of date, because editing
+        // it invalidates its instances immediately.
+        m_smartObjectRelinkAction->setEnabled(isLinked && !pixelsLocked);
+        m_smartObjectUpdateAction->setEnabled(isLinked);
+        m_smartObjectToEmbeddedAction->setEnabled(isLinked && !pixelsLocked);
+        m_smartObjectToLinkedAction->setEnabled(isEmbedded && !pixelsLocked);
+    }
+    // Place is a File-menu action: it needs an open document and nothing else.
+    if (m_smartObjectPlaceEmbeddedAction)
+        m_smartObjectPlaceEmbeddedAction->setEnabled(hasDoc);
+    if (m_smartObjectPlaceLinkedAction)
+        m_smartObjectPlaceLinkedAction->setEnabled(hasDoc);
     if (m_layerStylesAction) m_layerStylesAction->setEnabled(hasLayer && !isAdjustment && !fullyLocked);
     m_layerMaskAddAction->setEnabled(hasLayer && !hasMask && !fullyLocked);
     m_layerMaskRemoveAction->setEnabled(hasLayer && hasMask && !fullyLocked);
@@ -4736,13 +6273,23 @@ void MainWindow::resetDockLayout()
 {
     if (!m_layersDock) return; // docks not built yet
 
+    // A reset is a change to the *editing* layout, but on the Home tab every
+    // editing dock is hidden and showing them below would spill panels over
+    // the Home page. Step out of Home mode, lay the default out, then step
+    // back in: re-entering snapshots the fresh arrangement for the next
+    // document tab and hides the docks again, all within one event loop
+    // iteration so nothing is ever painted in between.
+    const bool homeActive = m_homeDockMode;
+    if (homeActive)
+        setHomeDockMode(false);
+
     // Pull every right-side panel back into the right dock area, docked and
     // visible, so the regrouping below starts from a known state regardless of
     // where the user dragged / floated / closed them. Histogram is hidden again
     // after tabification so it only appears when opened from Window.
     const QList<QDockWidget*> panels = {
         m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
-        m_historyDock, m_layersDock, m_agentDock
+        m_historyDock, m_layersDock, m_channelsDock, m_agentDock
     };
     for (QDockWidget* d : panels) {
         addDockWidget(Qt::RightDockWidgetArea, d);
@@ -4759,21 +6306,25 @@ void MainWindow::resetDockLayout()
     tabifyDockWidget(m_propsDock, m_colorDock);
     tabifyDockWidget(m_colorDock, m_swatchesDock);
     tabifyDockWidget(m_swatchesDock, m_historyDock);
+    // Channels sits with Layers: they are the two views of the same document
+    // and the user switches between them constantly.
+    tabifyDockWidget(m_layersDock, m_channelsDock);
     tabifyDockWidget(m_layersDock, m_agentDock);
 
     resizeDocks({m_histogramDock, m_layersDock}, {3, 7}, Qt::Vertical);
+
+    // Force the right column's default width down to its minimum; otherwise
+    // Qt's dock layout sizes it from the panels' sizeHint(), which ignores
+    // setMinimumWidth() above and renders wider than intended.
+    const int minW = QGuiApplication::primaryScreen()->availableGeometry().width() / 8;
+    resizeDocks({m_layersDock}, {minW}, Qt::Horizontal);
+
     m_propsDock->raise(); // default active tab per group
     m_layersDock->raise();
     m_histogramDock->hide();
 
     QTimer::singleShot(0, this, [this]() {
-        updateDockTitleBar(m_histogramDock);
-        updateDockTitleBar(m_propsDock);
-        updateDockTitleBar(m_colorDock);
-        updateDockTitleBar(m_swatchesDock);
-        updateDockTitleBar(m_historyDock);
-        updateDockTitleBar(m_layersDock);
-        updateDockTitleBar(m_agentDock);
+        refreshDockTitleBars();
 
         // tabifyDockWidget() creates new internal QTabBar instances that are
         // not re-polished automatically, so all stylesheet rules are ignored.
@@ -4795,6 +6346,9 @@ void MainWindow::resetDockLayout()
         d->setFloating(true);
         d->hide();
     }
+
+    if (homeActive)
+        setHomeDockMode(true);
 }
 
 void MainWindow::applyBrushPressureEnabled(bool on)
@@ -4934,11 +6488,17 @@ void MainWindow::onTextStrikethroughChanged(bool strikethrough)
 
 void MainWindow::onTextColorChanged(const QColor& color)
 {
-    if (m_colorEngine) {
-        m_colorEngine->setForegroundColor(color);
-    } else if (m_canvas) {
+    // The text colour control is an explicit instruction to recolour the
+    // selected text, so it applies whatever the active tool is — unlike the
+    // foreground swatch, which only recolours text under the Move tool (see the
+    // ColorEngine::foregroundColorChanged handler). Routing this through the
+    // foreground alone used to swallow the change for every other tool, the Text
+    // tool itself included.
+    if (m_canvas)
         m_canvas->setTextColor(color);
-    }
+    // Keep the foreground in sync: it is what the next text layer is created with.
+    if (m_colorEngine)
+        m_colorEngine->setForegroundColor(color);
 }
 
 void MainWindow::onTextAlignChanged(int align)
@@ -5136,6 +6696,383 @@ void MainWindow::refreshLayerPanel()
         m_layerPanel->refresh();
 }
 
+void MainWindow::syncChannelsPanel()
+{
+    if (!m_channelsPanel)
+        return;
+    // Canvas first: the panel reads the composite through it, and a refresh
+    // triggered by setController would otherwise build its thumbnails against
+    // the previous tab's canvas.
+    m_channelsPanel->setCanvas(m_canvas);
+    m_channelsPanel->setController(m_ctrl);
+}
+
+// ── Channels commands that span documents ──────────────────────
+//
+// The Channels panel owns everything that happens inside one document; these
+// four need more than that — a new tab, another tab's document, or a dialog
+// listing the open documents — which only MainWindow can provide. They still
+// end in ImageController, so the undo entry and the data model are the same
+// ones the panel's own commands produce.
+
+namespace {
+
+// Display label for a document in the channel dialogs' document combos.
+QString documentComboLabel(const QString& name, bool dirty)
+{
+    return dirty ? name + QStringLiteral(" *") : name;
+}
+
+std::vector<QString> channelLabelsFor(const Document* doc)
+{
+    std::vector<QString> labels;
+    if (!doc)
+        return labels;
+    for (const auto& ch : doc->channels)
+        labels.push_back(ch.name);
+    return labels;
+}
+
+} // namespace
+
+std::vector<QString> MainWindow::openDocumentLabels() const
+{
+    std::vector<QString> labels;
+    for (const auto& tab : m_tabs)
+        labels.push_back(documentComboLabel(tab.name, tab.isDirty));
+    return labels;
+}
+
+void MainWindow::splitChannelsIntoDocuments()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    // Splitting consumes a flattened image, so it is only offered for a
+    // document whose channels are the colour components alone; anything else
+    // would silently drop the extra channels.
+    if (!m_doc->channels.empty()) {
+        AppMessageDialog::warning(this, tr("Split Channels"),
+            tr("Split Channels works on the colour channels only. Delete or "
+               "merge the document's alpha and spot channels first."));
+        return;
+    }
+    const std::vector<QImage> planes = m_ctrl->splitColorChannels();
+    if (planes.empty()) {
+        AppMessageDialog::warning(this, tr("Split Channels"),
+            tr("This document has nothing to split."));
+        return;
+    }
+
+    static const char* kComponentSuffix[3] = {"Red", "Green", "Blue"};
+    const QString baseName = QFileInfo(m_doc->name).completeBaseName().isEmpty()
+        ? m_doc->name : QFileInfo(m_doc->name).completeBaseName();
+
+    for (int i = 0; i < static_cast<int>(planes.size()); ++i) {
+        const QImage& plane = planes[static_cast<size_t>(i)];
+        const QString name = QStringLiteral("%1.%2").arg(baseName)
+            .arg(tr(kComponentSuffix[std::min(i, 2)]));
+        auto& tab = createTab(name, plane.size());
+        if (!tab.document)
+            continue;
+        tab.document->colorMode = QStringLiteral("Grayscale");
+
+        // One flattened layer per component, which is what a split produces:
+        // the separation is an image in its own right, not a channel of one.
+        auto node = std::make_unique<LayerTreeNode>();
+        node->type = LayerTreeNode::Type::Layer;
+        node->name = tr("Background");
+        node->layer = std::make_shared<Layer>();
+        node->layer->name = node->name;
+        node->layer->cpuImage = plane.convertToFormat(QImage::Format_RGBA8888);
+        node->layer->owner = node.get();
+        node->layer->textureOutdated = true;
+        tab.document->roots.push_back(std::move(node));
+        tab.document->activeFlatIndex = 0;
+        tab.document->selectedFlatIndices = {0};
+        ++tab.document->compositionGeneration;
+        tab.isDirty = true;
+        if (tab.canvas) {
+            tab.canvas->syncLayersToGpu();
+            tab.canvas->update();
+        }
+    }
+    updateDirtyUi();
+    refreshLayerPanel();
+    syncChannelsPanel();
+}
+
+void MainWindow::mergeChannelsFromDocuments()
+{
+    if (m_tabs.size() < 3) {
+        AppMessageDialog::warning(this, tr("Merge Channels"),
+            tr("Merging channels needs at least three open grayscale documents, "
+               "one per colour component."));
+        return;
+    }
+
+    MergeChannelsDialog dialog(openDocumentLabels(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const std::vector<int> sources = dialog.componentSources();
+    std::vector<QImage> planes;
+    QSize size;
+    for (int index : sources) {
+        if (index < 0 || index >= static_cast<int>(m_tabs.size()))
+            return;
+        auto* doc = m_tabs[static_cast<size_t>(index)].document.get();
+        auto* ctrl = m_tabs[static_cast<size_t>(index)].controller.get();
+        if (!doc || !ctrl)
+            return;
+        const std::vector<QImage> split = ctrl->splitColorChannels();
+        if (split.empty())
+            return;
+        // A grayscale source has identical components, so taking the first is
+        // the same as taking its luminance — and it keeps a colour document
+        // from contributing only part of itself without saying so.
+        if (size.isValid() && split.front().size() != size) {
+            AppMessageDialog::warning(this, tr("Merge Channels"),
+                tr("The selected documents must all have the same pixel "
+                   "dimensions."));
+            return;
+        }
+        size = split.front().size();
+        planes.push_back(split.front());
+    }
+
+    const QImage merged = ImageController::mergeColorChannels(planes);
+    if (merged.isNull()) {
+        AppMessageDialog::warning(this, tr("Merge Channels"),
+            tr("The selected documents could not be merged."));
+        return;
+    }
+
+    auto& tab = createTab(tr("Merged"), merged.size());
+    if (!tab.document)
+        return;
+    auto node = std::make_unique<LayerTreeNode>();
+    node->type = LayerTreeNode::Type::Layer;
+    node->name = tr("Background");
+    node->layer = std::make_shared<Layer>();
+    node->layer->name = node->name;
+    node->layer->cpuImage = merged;
+    node->layer->owner = node.get();
+    node->layer->textureOutdated = true;
+    tab.document->roots.push_back(std::move(node));
+    tab.document->activeFlatIndex = 0;
+    tab.document->selectedFlatIndices = {0};
+    ++tab.document->compositionGeneration;
+    tab.isDirty = true;
+    if (tab.canvas) {
+        tab.canvas->syncLayersToGpu();
+        tab.canvas->update();
+    }
+    updateDirtyUi();
+    refreshLayerPanel();
+    syncChannelsPanel();
+}
+
+void MainWindow::duplicateChannelWithDialog(int channelIndex)
+{
+    if (!m_ctrl || !m_doc || channelIndex < 0
+        || channelIndex >= static_cast<int>(m_doc->channels.size()))
+        return;
+
+    const DocumentChannel& source = m_doc->channels[static_cast<size_t>(channelIndex)];
+    DuplicateChannelDialog dialog(
+        m_doc->uniqueChannelName(source.kind) , openDocumentLabels(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int destination = dialog.destinationIndex();
+    if (destination < 0) {
+        // "New": a fresh grayscale document holding the channel's coverage, so
+        // the duplicate is editable on its own instead of landing nowhere.
+        QImage plane = m_doc->channelCoverageMask(channelIndex);
+        if (plane.isNull())
+            return;
+        if (dialog.invertContents()) {
+            for (int y = 0; y < plane.height(); ++y) {
+                uchar* row = plane.scanLine(y);
+                for (int x = 0; x < plane.width(); ++x)
+                    row[x] = static_cast<uchar>(255 - row[x]);
+            }
+        }
+        auto& tab = createTab(dialog.channelName().isEmpty() ? source.name
+                                                             : dialog.channelName(),
+                              plane.size());
+        if (!tab.document)
+            return;
+        tab.document->colorMode = QStringLiteral("Grayscale");
+        auto node = std::make_unique<LayerTreeNode>();
+        node->type = LayerTreeNode::Type::Layer;
+        node->name = tr("Background");
+        node->layer = std::make_shared<Layer>();
+        node->layer->name = node->name;
+        node->layer->cpuImage = plane.convertToFormat(QImage::Format_RGBA8888);
+        node->layer->owner = node.get();
+        node->layer->textureOutdated = true;
+        tab.document->roots.push_back(std::move(node));
+        tab.document->activeFlatIndex = 0;
+        tab.document->selectedFlatIndices = {0};
+        ++tab.document->compositionGeneration;
+        tab.isDirty = true;
+        if (tab.canvas) {
+            tab.canvas->syncLayersToGpu();
+            tab.canvas->update();
+        }
+        updateDirtyUi();
+        return;
+    }
+
+    Document* target = m_doc;
+    int targetTab = m_activeTabIndex;
+    if (destination < static_cast<int>(m_tabs.size())) {
+        target = m_tabs[static_cast<size_t>(destination)].document.get();
+        targetTab = destination;
+    }
+    const int created = m_ctrl->duplicateChannel(channelIndex, dialog.channelName(),
+                                                 dialog.invertContents(), target);
+    if (created >= 0 && target != m_doc && targetTab >= 0
+        && targetTab < static_cast<int>(m_tabs.size())) {
+        // The destination document changed, so ITS tab is the dirty one.
+        m_tabs[static_cast<size_t>(targetTab)].isDirty = true;
+        updateDirtyUi();
+    }
+    syncChannelsPanel();
+}
+
+void MainWindow::showSaveSelectionDialog()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    if (!m_doc->selection.active() || m_doc->selection.isEmpty()) {
+        AppMessageDialog::warning(this, tr("Save Selection"),
+            tr("There is no active selection to save."));
+        return;
+    }
+
+    SaveSelectionDialog dialog(openDocumentLabels(),
+                               channelLabelsFor(m_doc),
+                               m_doc->uniqueChannelName(ChannelKind::Alpha), this);
+    // Only documents with the same pixel dimensions can receive the mask; the
+    // combo lists them all and the operation validates on accept.
+    connect(&dialog, &SaveSelectionDialog::destinationDocumentChanged,
+            this, [this, &dialog](int index) {
+        const Document* target = (index >= 0 && index < static_cast<int>(m_tabs.size()))
+            ? m_tabs[static_cast<size_t>(index)].document.get() : nullptr;
+        dialog.setChannelLabels(channelLabelsFor(target));
+    });
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int docIndex = dialog.destinationDocumentIndex();
+    Document* target = (docIndex >= 0 && docIndex < static_cast<int>(m_tabs.size()))
+        ? m_tabs[static_cast<size_t>(docIndex)].document.get() : m_doc;
+    ImageController* targetCtrl = (docIndex >= 0
+                                   && docIndex < static_cast<int>(m_tabs.size()))
+        ? m_tabs[static_cast<size_t>(docIndex)].controller.get() : m_ctrl;
+    if (!target || !targetCtrl)
+        return;
+    if (target->size != m_doc->size) {
+        AppMessageDialog::warning(this, tr("Save Selection"),
+            tr("The destination document must have the same pixel dimensions."));
+        return;
+    }
+
+    const int channelIndex = dialog.destinationChannelIndex();
+    if (target == m_doc) {
+        if (channelIndex < 0)
+            m_ctrl->saveSelectionAsChannel(dialog.channelName());
+        else
+            m_ctrl->saveSelectionIntoChannel(channelIndex, dialog.combineMode());
+    } else {
+        // Across documents the mask is carried over by hand: the destination's
+        // own controller owns the change and its own history records it.
+        DocumentChannel ch;
+        ch.kind = ChannelKind::Alpha;
+        ch.name = dialog.channelName().isEmpty()
+            ? target->uniqueChannelName(ChannelKind::Alpha) : dialog.channelName();
+        ch.data = m_doc->selection.image()
+            .convertToFormat(QImage::Format_Grayscale8).copy();
+        if (channelIndex < 0) {
+            target->addChannel(std::move(ch));
+        } else {
+            // Combining into an existing channel of another document reuses the
+            // destination controller so the rule (and the history entry) is the
+            // destination's.
+            const QImage saved = target->selection.image();
+            const bool savedActive = target->selection.active();
+            target->selection.resize(target->size.width(), target->size.height());
+            target->selection.image() = ch.data;
+            target->selection.setActive(true);
+            targetCtrl->saveSelectionIntoChannel(channelIndex, dialog.combineMode());
+            target->selection.image() = saved;
+            target->selection.setActive(savedActive);
+        }
+        if (docIndex >= 0 && docIndex < static_cast<int>(m_tabs.size()))
+            m_tabs[static_cast<size_t>(docIndex)].isDirty = true;
+        updateDirtyUi();
+    }
+    syncChannelsPanel();
+}
+
+void MainWindow::showLoadSelectionDialog()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+
+    LoadSelectionDialog dialog(openDocumentLabels(),
+                               channelLabelsFor(m_doc),
+                               m_doc->selection.active() && !m_doc->selection.isEmpty(),
+                               this);
+    connect(&dialog, &LoadSelectionDialog::sourceDocumentChanged,
+            this, [this, &dialog](int index) {
+        const Document* source = (index >= 0 && index < static_cast<int>(m_tabs.size()))
+            ? m_tabs[static_cast<size_t>(index)].document.get() : nullptr;
+        dialog.setChannelLabels(channelLabelsFor(source));
+    });
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int docIndex = dialog.sourceDocumentIndex();
+    const int channelIndex = dialog.sourceChannelIndex();
+    if (channelIndex < 0) {
+        AppMessageDialog::warning(this, tr("Load Selection"),
+            tr("The selected document has no channel to load."));
+        return;
+    }
+    Document* source = (docIndex >= 0 && docIndex < static_cast<int>(m_tabs.size()))
+        ? m_tabs[static_cast<size_t>(docIndex)].document.get() : m_doc;
+    if (!source)
+        return;
+
+    if (source == m_doc) {
+        m_ctrl->loadChannelAsSelection(channelIndex, dialog.combineMode(),
+                                       dialog.invert());
+    } else {
+        if (source->size != m_doc->size) {
+            AppMessageDialog::warning(this, tr("Load Selection"),
+                tr("The source document must have the same pixel dimensions."));
+            return;
+        }
+        // Copy the channel in, then load it from here, so the result lands in
+        // THIS document's selection and history.
+        DocumentChannel ch = source->channels[static_cast<size_t>(channelIndex)];
+        ch.id = 0;
+        ch.visible = false;
+        ch.data = ch.data.copy();
+        const int temp = m_doc->addChannel(std::move(ch));
+        if (temp < 0)
+            return;
+        m_ctrl->loadChannelAsSelection(temp, dialog.combineMode(), dialog.invert());
+        m_doc->deleteChannel(temp);
+    }
+    syncChannelsPanel();
+    if (m_canvas)
+        m_canvas->update();
+}
+
 namespace {
 // W/H/X/Y/rotation a layer's Transform panel should display, derived from the
 // node's VISUAL frame (the same oriented box the canvas draws via
@@ -5251,6 +7188,27 @@ void MainWindow::refreshPropertiesPanel()
 
     m_propsPanel->setLayerTransformInfo(kind, m.wPx, m.hPx, m.xPx, m.yPx, m.rotDeg,
                                         node->canTransform() && !node->isPositionLocked());
+
+    PropertiesPanel::SmartObjectInfo smartInfo;
+    if (const auto data = m_ctrl ? m_ctrl->smartObjectDataAt(m_doc->activeFlatIndex)
+                                 : nullptr) {
+        smartInfo.valid = true;
+        smartInfo.linked = data->mode == SmartObjectStorageMode::Linked;
+        smartInfo.linkBroken = data->linkBroken;
+        smartInfo.path = m_ctrl->smartObjectLinkedPathAt(m_doc->activeFlatIndex);
+        smartInfo.sourceSize = data->state.sourceSize;
+        smartInfo.sourceDpi = data->state.sourceDpi;
+        smartInfo.instanceCount = m_ctrl->smartObjectInstanceCountAt(m_doc->activeFlatIndex);
+        if (auto* container = m_ctrl->documentContainer()) {
+            if (const auto referenced = container->document(data->docId))
+                smartInfo.documentName = referenced->name;
+        }
+        if (smartInfo.documentName.isEmpty()) {
+            smartInfo.documentName = smartInfo.linked
+                ? QFileInfo(data->linkedPath).completeBaseName() : node->name;
+        }
+    }
+    m_propsPanel->setSmartObjectInfo(smartInfo);
 
     bool hasMask = node->layer && !node->layer->maskImage.isNull();
     m_propsPanel->setMaskInfo(hasMask, node->layer->maskDensity, node->layer->maskFeather);
@@ -5411,8 +7369,7 @@ void MainWindow::refreshPropertiesDocumentPage()
     const int w = std::max(1, m_doc->size.width());
     const int h = std::max(1, m_doc->size.height());
     // Highlight the orientation matching the current aspect (neutral when square).
-    m_propsPanel->setDocumentInfo(w, h, m_doc->resolutionDpi,
-                                  m_doc->colorMode, m_doc->bitDepth,
+    m_propsPanel->setDocumentInfo(w, h,
                                   /*portraitActive*/ h > w,
                                   /*landscapeActive*/ w > h);
     const RulerGuideSettings rg = RulerGuideSettings::load();
@@ -5466,21 +7423,6 @@ void MainWindow::applyCanvasSizeEdit(int field, double value)
         m_ctrl->resizeCanvasAsync(options);
     else
         m_ctrl->resizeCanvas(options);
-}
-
-void MainWindow::applyCanvasResolutionEdit(double dpi)
-{
-    if (!m_ctrl || !m_doc || dpi <= 0.0)
-        return;
-
-    // Resolution-only change: keep the pixel dimensions, update DPI (print size).
-    ImageResizeOptions options;
-    options.targetSize = m_doc->size;
-    options.resampleImage = false;
-    options.updateResolution = true;
-    options.resolutionDpi = dpi;
-    if (!m_ctrl->resizeImage(options))
-        refreshPropertiesDocumentPage();  // rejected (no change) → restore display
 }
 
 void MainWindow::applyCanvasOrientation(bool portrait)
@@ -5584,56 +7526,11 @@ void MainWindow::dropEvent(QDropEvent* e)
         return;
     }
 
-    const ImageLoadResult loaded = imageCodecRegistry().readImage(paths.front());
-    std::optional<ColorManagedOpenResult> colorManaged;
-    if (loaded.ok) {
-        colorManaged = prepareImageForOpenWithDialogs(
-            this,
-            loaded.image,
-            ColorManagementService::instance().defaultOpenContext(paths.front()));
-        if (!colorManaged) {
-            e->ignore();
-            return;
-        }
-    }
-    const QImage probe = colorManaged
-        ? convertDocumentImageToQImage(colorManaged->image)
-        : QImage();
-    const QSize s = probe.isNull() ? QSize(1024, 768) : probe.size();
-    auto& tab = createTab(tr("Untitled"), s);
-    tab.isDirty = false;
-    tab.currentProjectPath.clear();
-    if (m_doc) {
-        m_doc->size = s;
-        m_doc->selection.resize(s.width(), s.height());
-        m_doc->selection.clear();
-        m_doc->selection.setActive(false);
-        if (colorManaged && colorManaged->finalDocumentProfile.isValid()) {
-            m_doc->setColorProfile(colorManaged->finalDocumentProfile);
-            m_doc->setProfileSource(colorManaged->finalDocumentProfile.source());
-        }
-    }
-
-    if (!m_ctrl || !m_canvas) {
+    // No document open at all: nothing to offer a choice for, open directly.
+    if (!openDroppedImagesAsNewDocument(paths)) {
         e->ignore();
         return;
     }
-
-    const QPoint localOnCanvas = m_canvas->mapFrom(this, e->position().toPoint());
-    const QPointF ndc = m_canvas->screenToCanvasNdc(localOnCanvas);
-    if (!m_ctrl->importExternalImages(paths, ndc)) {
-        QMessageBox::warning(this, tr("Import Image"),
-            tr("No supported image could be imported from the dropped files."));
-        e->ignore();
-        return;
-    }
-
-    refreshLayerPanel();
-    refreshPropertiesPanel();
-    updateLayerMenuState();
-    updateStatusFromDocument();
-    if (colorManaged && !colorManaged->warningMessage.isEmpty())
-        showViewportStatusMessage(colorManaged->warningMessage, 7000);
     e->acceptProposedAction();
 }
 
@@ -5767,6 +7664,14 @@ void MainWindow::closeEvent(QCloseEvent* e)
             return;
         }
     }
+    // Put the real editing layout back before persisting it: the Home-only
+    // all-hidden state must never be what the next session restores.
+    setHomeDockMode(false);
+    // Final, undebounced write, and the one that catches changes no signal
+    // reports in time — a tab reordered inside its group moments before
+    // quitting, or a window moved without being resized.
+    if (m_workspace)
+        m_workspace->saveNow();
     e->accept();
 }
 
@@ -5818,7 +7723,7 @@ void MainWindow::onGenerativeFill()
 {
     if (!m_ctrl) return;
     if (m_presetManager->presetNames(Generative).isEmpty()) {
-        QMessageBox::information(this, tr("Generative Fill"),
+        AppMessageDialog::information(this, tr("Generative Fill"),
             tr("No Generative preset is configured. Open the AI Agent settings "
                "and create a preset of type \"Generative\" first."));
         return;
@@ -5840,10 +7745,9 @@ void MainWindow::onGenerativeFill()
 
 void MainWindow::onConfigureAgent()
 {
-    AppSettingsDialog dlg(AppSettingsDialog::PageAIAgent,
-                           m_presetManager, m_agentController ? m_agentController->client() : nullptr,
-                           this);
-    if (dlg.exec() == QDialog::Accepted) {
+    showAppSettings(AppSettingsDialog::PageAIAgent, [this](int result) {
+        if (result != QDialog::Accepted)
+            return;
         m_presetManager->loadAll();
         m_agentPanel->setAgentList(m_presetManager->presetNames(Assistant));
         if (m_generativeFillPanel)
@@ -5857,7 +7761,7 @@ void MainWindow::onConfigureAgent()
         } else if (!assistants.isEmpty()) {
             onAgentSelected(assistants.first());
         }
-    }
+    });
 }
 
 void MainWindow::applyMcpSettings()
@@ -5887,29 +7791,27 @@ void MainWindow::applyMcpSettings()
 
 void MainWindow::onSettings()
 {
-    AppSettingsDialog dlg(AppSettingsDialog::PageGeneral,
-                           m_presetManager, m_agentController ? m_agentController->client() : nullptr,
-                           this);
-    if (dlg.exec() == QDialog::Accepted) {
+    showAppSettings(AppSettingsDialog::PageGeneral, [this](int result) {
+        if (result != QDialog::Accepted)
+            return;
         reloadRulerGuideSettingsForTabs();
         updateRulerGuideActionStates();
-    }
+    });
 }
 
 void MainWindow::onOpenAiSettings()
 {
-    AppSettingsDialog dlg(AppSettingsDialog::PageAIMachineLearning,
-                          m_presetManager, m_agentController ? m_agentController->client() : nullptr,
-                          this);
-    dlg.exec();
-    // Provider/model settings may have changed: reset AI caches/sessions and
-    // refresh the tool's availability + model list.
-    if (m_canvas) {
-        if (auto* ai = m_canvas->aiSelectionController())
-            ai->onProviderOrSettingsChanged();
-        m_toolBar->bindAiController(m_canvas->aiSelectionController());
-        ensureAiControllerConnected();
-    }
+    showAppSettings(AppSettingsDialog::PageAIMachineLearning, [this](int) {
+        // Provider/model settings may have changed: reset AI caches/sessions and
+        // refresh the tool's availability + model list. Runs on cancel too, as it
+        // did when this was an exec() whose result was ignored.
+        if (m_canvas) {
+            if (auto* ai = m_canvas->aiSelectionController())
+                ai->onProviderOrSettingsChanged();
+            m_toolBar->bindAiController(m_canvas->aiSelectionController());
+            ensureAiControllerConnected();
+        }
+    });
 }
 
 void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
@@ -5940,11 +7842,8 @@ void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
             QString newName = QInputDialog::getText(
                 this, tr("Rename"), tr("Name:"),
                 QLineEdit::Normal, node->name, &ok);
-            if (ok && !newName.isEmpty()) {
-                node->name = newName;
-                if (node->layer) node->layer->name = newName;
-                refreshLayerPanel();
-            }
+            if (ok)
+                m_ctrl->renameNode(idx, newName);
         });
 
         menu.addAction(m_duplicateLayerAction);
@@ -5953,6 +7852,39 @@ void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
         auto* convertAction = menu.addAction(tr("Convert Layer"));
         convertAction->setEnabled(m_rasterizeLayerAction->isEnabled());
         connect(convertAction, &QAction::triggered, this, &MainWindow::onMenuRasterizeLayer);
+
+        // ── Smart Objects ────────────────────────────────────────────
+        // Flat entries, not the submenu, and only the ones that apply to this
+        // layer — a context menu answers "what can I do with THIS?", so a
+        // common layer offers only Convert, and Relink never appears on
+        // embedded content. The actions themselves are the very same QActions
+        // the Layer menu uses, so there is one implementation and one place
+        // (updateLayerMenuState) deciding what is enabled.
+        if (m_smartObjectMenu && m_ctrl) {
+            updateLayerMenuState();
+            const auto smartData = m_ctrl->smartObjectDataAt(idx);
+            const bool isLinked = smartData
+                && smartData->mode == SmartObjectStorageMode::Linked;
+
+            menu.addSeparator();
+            if (!smartData) {
+                menu.addAction(m_smartObjectConvertAction);
+            } else {
+                menu.addAction(m_smartObjectEditAction);
+                menu.addAction(m_smartObjectViaCopyAction);
+                menu.addAction(m_smartObjectReplaceAction);
+                if (isLinked) {
+                    menu.addAction(m_smartObjectRelinkAction);
+                    menu.addAction(m_smartObjectUpdateAction);
+                    menu.addAction(m_smartObjectToEmbeddedAction);
+                } else {
+                    menu.addAction(m_smartObjectToLinkedAction);
+                }
+                // No Rasterize entry here: "Convert Layer" above is already
+                // this menu's rasterize action, and offering both would be two
+                // names for one command.
+            }
+        }
 
         menu.addSeparator();
 
@@ -6082,4 +8014,313 @@ void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)
     }
 
     menu.exec(globalPos);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Smart Objects
+// ─────────────────────────────────────────────────────────────────────────
+
+ImageController* MainWindow::rootControllerForContainer(const DocumentContainer* container) const
+{
+    if (!container)
+        return nullptr;
+    const int rootTab = tabIndexForDocument(container, container->rootId());
+    if (rootTab < 0)
+        return nullptr;
+    return m_tabs[rootTab].controller.get();
+}
+
+void MainWindow::scheduleSmartObjectRefresh()
+{
+    if (!m_smartObjectRefreshTimer) {
+        m_smartObjectRefreshTimer = new QTimer(this);
+        m_smartObjectRefreshTimer->setSingleShot(true);
+        connect(m_smartObjectRefreshTimer, &QTimer::timeout,
+                this, &MainWindow::flushSmartObjectRefresh);
+    }
+    // Restarted on every change, so a stroke or a slider drag produces exactly
+    // one refresh once the user pauses.
+    m_smartObjectRefreshTimer->start(200);
+}
+
+void MainWindow::flushSmartObjectRefresh()
+{
+    // Every open project is rechecked, not just the one that reported a change.
+    // Two cases need it and neither names a document:
+    //   • a Linked Smart Object in A.hazor watching B.hazor, when the user edits
+    //     (or saves) B.hazor in its own tab — A's container never hears about it;
+    //   • undo/redo of Replace Contents, which swaps the document stored under
+    //     a docId without any particular document "changing".
+    // The pass is O(nodes) with no file I/O and only dispatches genuinely stale
+    // instances, so running it wholesale once the user pauses is cheaper than
+    // the bookkeeping needed to narrow it.
+    for (auto& tab : m_tabs) {
+        if (!tab.container || !tab.controller)
+            continue;
+        // One controller drives a container's cascade: the root document's.
+        // Letting each tab drive its own would mean several render services
+        // compositing the same documents, each unaware of the others' commits.
+        if (tab.docId != tab.container->rootId())
+            continue;
+        tab.controller->refreshAllSmartObjectInstances();
+    }
+}
+
+void MainWindow::onSmartObjectRenderCommitted(
+    const std::shared_ptr<DocumentContainer>& container,
+    const QStringList& affectedDocuments, bool marksDirty)
+{
+    if (!container)
+        return;
+    for (auto& tab : m_tabs) {
+        if (tab.container != container || !affectedDocuments.contains(tab.docId))
+            continue;
+        if (tab.canvas) {
+            tab.canvas->syncLayersToGpu();
+            tab.canvas->update();
+        }
+    }
+    // The render that just landed IS part of the file (it is what an
+    // unresolvable link falls back to), so a document whose instances changed
+    // no longer matches its .hazor. `marksDirty` is false only for the pass that
+    // regenerates renders already stored on disk, right after a load —
+    // flagging a project as edited just for opening it would be wrong.
+    if (marksDirty && !affectedDocuments.isEmpty())
+        markContainerRootDirty(container);
+    // The instance's thumbnail and the Properties page both read the payload,
+    // which just changed.
+    refreshLayerPanel();
+    refreshPropertiesPanel();
+}
+
+void MainWindow::editSmartObjectContents(int flatIndex)
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const auto data = m_ctrl->smartObjectDataAt(flatIndex);
+    if (!data)
+        return;
+    m_ctrl->setActiveNode(flatIndex);
+
+    if (data->mode == SmartObjectStorageMode::Linked) {
+        // A Linked Smart Object's content is just another project: open it as a
+        // normal tab (loadProjectAsNewTab reactivates the existing one when the
+        // file is already open, which is the same container either way).
+        const QString path = m_ctrl->smartObjectLinkedPathAt(flatIndex);
+        if (path.isEmpty() || !QFileInfo(path).isFile()) {
+            AppMessageDialog::warning(this, tr("Smart Object"),
+                tr("The linked file \"%1\" could not be found. Use Relink… to point "
+                   "this Smart Object at its file.")
+                    .arg(QFileInfo(data->linkedPath).fileName()));
+            return;
+        }
+        loadProjectAsNewTab(path);
+        return;
+    }
+
+    auto container = m_ctrl->documentContainerPtr();
+    if (!container)
+        return;
+    auto content = container->document(data->docId);
+    if (!content) {
+        AppMessageDialog::warning(this, tr("Smart Object"),
+            tr("This Smart Object's document is missing from the project."));
+        return;
+    }
+
+    // One tab per document: a second one would give the same Document two
+    // command histories, and an undo in either would surprise the other.
+    const int existing = tabIndexForDocument(container.get(), data->docId);
+    if (existing >= 0) {
+        m_tabWidget->setCurrentIndex(tabWidgetIndexForDocument(existing));
+        return;
+    }
+
+    // The tab works on a COPY of the document, the way editing a separate
+    // content document does. Until Ctrl+S commits it, the instances keep
+    // showing the stored content and the project is genuinely unmodified —
+    // which is also what makes "close the content tab and lose the
+    // experiment" a real option.
+    container->beginEditSession(data->docId, smartobject::cloneDocument(*content));
+
+    auto& tab = createTabForDocument(content->name, container, data->docId);
+    // The content tab has no file of its own — Ctrl+S commits into the
+    // container, and only saving the project writes the .hazor (saveProjectForTab).
+    tab.currentProjectPath.clear();
+    tab.sourcePath.clear();
+    tab.isDirty = false;
+    m_activeTabIndex = documentIndexForTabWidget(m_tabWidget->currentIndex());
+    m_doc = tab.document.get();
+    m_ctrl = tab.controller.get();
+    m_canvas = tab.canvas;
+    if (m_canvas) {
+        m_canvas->syncLayersToGpu();
+        m_canvas->update();
+    }
+    refreshLayerPanel();
+    refreshPropertiesPanel();
+    refreshHistoryPanel();
+    updateLayerMenuState();
+    updateStatusFromDocument();
+    updateDirtyUi();
+}
+
+void MainWindow::convertSelectionToSmartObject()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    std::vector<int> indices = m_doc->selectedList();
+    if (indices.empty() && m_doc->activeFlatIndex >= 0)
+        indices.push_back(m_doc->activeFlatIndex);
+    if (m_ctrl->convertToSmartObject(indices) < 0)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::placeSmartObject(bool linked)
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        linked ? tr("Place Linked") : tr("Place Embedded"),
+        QString(), tr("Hazor Studio (*.hazor *.hzs)"));
+    if (path.isEmpty())
+        return;
+
+    const int index = linked ? m_ctrl->placeLinkedDocument(path)
+                             : m_ctrl->placeEmbeddedDocument(path);
+    if (index < 0)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::runSmartObjectCommand(int flatIndex, LayerSmartObjectCommand command)
+{
+    if (!m_ctrl || !m_doc || flatIndex < 0)
+        return;
+    // Every slot below acts on the ACTIVE layer, so the layer the menu was
+    // opened on becomes active first. That also matches what the user sees: the
+    // row they right-clicked ends up selected.
+    if (m_doc->activeFlatIndex != flatIndex) {
+        m_ctrl->setActiveNode(flatIndex);
+        refreshLayerPanel();
+    }
+
+    switch (command) {
+    case LayerSmartObjectCommand::Convert:
+        convertSelectionToSmartObject();
+        break;
+    case LayerSmartObjectCommand::ViaCopy:
+        newSmartObjectViaCopy();
+        break;
+    case LayerSmartObjectCommand::EditContents:
+        editSmartObjectContents(flatIndex);
+        break;
+    case LayerSmartObjectCommand::ReplaceContents:
+        replaceActiveSmartObjectContents();
+        break;
+    case LayerSmartObjectCommand::RelinkToFile:
+        relinkActiveSmartObject();
+        break;
+    case LayerSmartObjectCommand::UpdateModified:
+        updateActiveSmartObjectContent();
+        break;
+    case LayerSmartObjectCommand::ConvertToLinked:
+        convertActiveSmartObjectStorage(/*toLinked=*/true);
+        break;
+    case LayerSmartObjectCommand::EmbedLinked:
+        convertActiveSmartObjectStorage(/*toLinked=*/false);
+        break;
+    case LayerSmartObjectCommand::Rasterize:
+        onMenuRasterizeLayer();
+        break;
+    }
+}
+
+void MainWindow::newSmartObjectViaCopy()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    if (m_ctrl->newSmartObjectViaCopy(m_doc->activeFlatIndex) < 0)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::replaceActiveSmartObjectContents()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const int flatIndex = m_doc->activeFlatIndex;
+    if (!m_ctrl->smartObjectDataAt(flatIndex))
+        return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Replace Contents"), QString(), tr("Hazor Studio (*.hazor *.hzs)"));
+    if (path.isEmpty())
+        return;
+    if (!m_ctrl->replaceSmartObjectContents(flatIndex, path))
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::relinkActiveSmartObject()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const int flatIndex = m_doc->activeFlatIndex;
+    if (!m_ctrl->smartObjectDataAt(flatIndex))
+        return;
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Relink Smart Object"), QString(), tr("Hazor Studio (*.hazor *.hzs)"));
+    if (path.isEmpty())
+        return;
+    if (!m_ctrl->relinkSmartObject(flatIndex, path))
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
+}
+
+void MainWindow::updateActiveSmartObjectContent()
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    if (m_ctrl->updateSmartObjectContent(m_doc->activeFlatIndex))
+        refreshLayersUi();
+}
+
+void MainWindow::convertActiveSmartObjectStorage(bool toLinked)
+{
+    if (!m_ctrl || !m_doc)
+        return;
+    const int flatIndex = m_doc->activeFlatIndex;
+    const auto data = m_ctrl->smartObjectDataAt(flatIndex);
+    if (!data)
+        return;
+
+    bool ok = false;
+    if (toLinked) {
+        // Converting to Linked has to produce the external file first, so it
+        // needs a path from the user before anything is changed.
+        QString suggested = m_doc->nodeAt(flatIndex) ? m_doc->nodeAt(flatIndex)->name
+                                                     : tr("Smart Object");
+        if (!suggested.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive))
+            suggested += QStringLiteral(".hazor");
+        QString path = QFileDialog::getSaveFileName(
+            this, tr("Convert to Linked"), suggested, tr("Hazor Studio (*.hazor)"));
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive))
+            path += QStringLiteral(".hazor");
+        ok = m_ctrl->convertSmartObjectToLinked(flatIndex, path);
+    } else {
+        ok = m_ctrl->convertSmartObjectToEmbedded(flatIndex);
+    }
+    if (!ok)
+        return;
+    markActiveTabDirty(true);
+    refreshLayersUi();
 }

@@ -154,7 +154,7 @@ RulerGuideSettingsPage::RulerGuideSettingsPage(QWidget* parent)
             updateColorButton();
         });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
 
     guidesForm->addRow(tr("Guide opacity:"), makeOpacityRow());
@@ -251,7 +251,7 @@ void RulerGuideSettingsPage::loadSettings()
     m_opacityLabel->setText(QStringLiteral("%1%").arg(opacityVal));
     th->iconOpacity = opacityVal / 100.0f;
 
-    m_showColorPaletteCb->setChecked(qs.value(QStringLiteral("View/colorPaletteVisible"), true).toBool());
+    m_showColorPaletteCb->setChecked(qs.value(QStringLiteral("View/colorPaletteVisible"), false).toBool());
 
     const RulerGuideSettings settings = RulerGuideSettings::load();
     m_showRulersCb->setChecked(settings.rulers.showRulers);

@@ -1,8 +1,7 @@
 #include "AiAlertService.hpp"
+#include "ui/AppMessageDialog.hpp"
 
 #include <QCoreApplication>
-#include <QMessageBox>
-#include <QPushButton>
 
 namespace AiAlertService {
 
@@ -15,24 +14,19 @@ QString tr(const char* s) { return QCoreApplication::translate("AiAlertService",
 AiAlertAction present(QWidget* parent, const QString& title, const QString& message,
                       const QString& details, bool offerUseCpu)
 {
-    QMessageBox box(parent);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(title);
-    box.setText(title);
-    box.setInformativeText(message);
-    if (!details.isEmpty())
-        box.setDetailedText(details);
+    QList<AppMessageDialog::ButtonSpec> buttons = {
+        { tr("AI Settings"), QMessageBox::AcceptRole },
+    };
+    if (offerUseCpu)
+        buttons.append({ tr("Use CPU"), QMessageBox::ActionRole });
+    buttons.append({ tr("Cancel"), QMessageBox::RejectRole });
 
-    QPushButton* settingsBtn = box.addButton(tr("AI Settings"), QMessageBox::AcceptRole);
-    QPushButton* useCpuBtn = offerUseCpu ? box.addButton(tr("Use CPU"), QMessageBox::ActionRole) : nullptr;
-    QPushButton* cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.setDefaultButton(settingsBtn);
+    const int clicked = AppMessageDialog::choice(
+        parent, title, title, AppMessageDialog::Icon::Warning, buttons,
+        /*defaultIndex=*/0, message, details);
 
-    box.exec();
-    QAbstractButton* clicked = box.clickedButton();
-    if (clicked == settingsBtn) return AiAlertAction::OpenSettings;
-    if (useCpuBtn && clicked == useCpuBtn) return AiAlertAction::UseCpu;
-    Q_UNUSED(cancelBtn);
+    if (clicked == 0) return AiAlertAction::OpenSettings;
+    if (offerUseCpu && clicked == 1) return AiAlertAction::UseCpu;
     return AiAlertAction::Cancel;
 }
 

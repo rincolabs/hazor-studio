@@ -1,5 +1,6 @@
 #include "GPUViewport.hpp"
 #include "BlendShaderLib.hpp"
+#include "SamplingShaderLib.hpp"
 #include "ShaderCompat.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -42,8 +43,9 @@ void GPUViewport::initShaders()
         }
     )";
 
-    const char* fSrc = R"(
-        #version 330 core
+    const QByteArray fSrcRaw = QByteArray("#version 330 core\n")
+        + sampling_glsl::kLib
+        + R"(
         in vec2 vUV;
         out vec4 fragColor;
         uniform sampler2D uTexture;
@@ -53,70 +55,30 @@ void GPUViewport::initShaders()
         uniform float uMaskDensity;
         uniform float uSourcePremultiplied;
         uniform float uAlphaWeightedSampling;
+        uniform float uSharpMagnify;
+        uniform int uMipLevels;
         uniform vec2 uUVScale;
         uniform vec2 uUVOffset;
         uniform vec2 uMaskUVScale;
         uniform vec2 uMaskUVOffset;
-        vec4 unpremultiply(vec4 c) {
-            if (c.a > 0.0) {
-                c.rgb /= c.a;
-            } else {
-                c.rgb = vec3(0.0);
-            }
-            return c;
-        }
-        vec4 premulTexel(sampler2D tex, ivec2 p, float straightAlpha) {
-            vec4 c = texelFetch(tex, p, 0);
-            if (straightAlpha > 0.5)
-                c.rgb *= c.a;
-            return c;
-        }
-        vec4 samplePremultipliedAt(sampler2D tex, vec2 p, float straightAlpha) {
-            ivec2 ts = textureSize(tex, 0);
-            ivec2 hi = ts - ivec2(1);
-            ivec2 i0 = ivec2(floor(p));
-            ivec2 i1 = i0 + ivec2(1);
-            vec2 f = fract(p);
-
-            ivec2 p00 = clamp(i0, ivec2(0), hi);
-            ivec2 p10 = clamp(ivec2(i1.x, i0.y), ivec2(0), hi);
-            ivec2 p01 = clamp(ivec2(i0.x, i1.y), ivec2(0), hi);
-            ivec2 p11 = clamp(i1, ivec2(0), hi);
-
-            vec4 c00 = premulTexel(tex, p00, straightAlpha);
-            vec4 c10 = premulTexel(tex, p10, straightAlpha);
-            vec4 c01 = premulTexel(tex, p01, straightAlpha);
-            vec4 c11 = premulTexel(tex, p11, straightAlpha);
-
-            vec4 c0 = mix(c00, c10, f.x);
-            vec4 c1 = mix(c01, c11, f.x);
-            return mix(c0, c1, f.y);
-        }
-        vec4 sampleAlphaWeighted(sampler2D tex, vec2 uv, float straightAlpha) {
-            ivec2 ts = textureSize(tex, 0);
-            vec2 p = uv * vec2(ts) - vec2(0.5);
-            vec2 footprint = max(fwidth(uv) * vec2(ts), vec2(1.0));
-            if (max(footprint.x, footprint.y) <= 1.25)
-                return unpremultiply(samplePremultipliedAt(tex, p, straightAlpha));
-
-            vec2 stepPx = footprint / 4.0;
-            vec2 first = p - footprint * 0.5 + stepPx * 0.5;
-            vec4 sum = vec4(0.0);
-            for (int y = 0; y < 4; ++y) {
-                for (int x = 0; x < 4; ++x) {
-                    sum += samplePremultipliedAt(
-                        tex, first + vec2(float(x), float(y)) * stepPx, straightAlpha);
-                }
-            }
-            return unpremultiply(sum * 0.0625);
-        }
+        // Clipping mask (docs/RENDER-PIPELINE.md §4.6): the base layer's own
+        // alpha, captured into a canvas-sized texture. Indexed by gl_FragCoord
+        // rather than by a UV, because the clip lives in DOCUMENT space while
+        // this quad's UVs are in the layer's — every live layer draw happens
+        // inside a canvas-sized FBO (LayerCompositor::composite), the same
+        // property Dissolve's dither relies on, so the fragment grid IS the
+        // document grid. Both buffers are GL render targets, so no V flip.
+        uniform sampler2D uClipTexture;
+        uniform float uHasClip;
+        uniform vec2 uClipSize;
         vec4 sampleSource(sampler2D tex, vec2 uv) {
             vec4 c = texture(tex, uv);
             if (uAlphaWeightedSampling > 0.5)
-                return sampleAlphaWeighted(
-                    tex, uv, uSourcePremultiplied > 0.5 ? 0.0 : 1.0);
+                return sm_sampleSurface(
+                    tex, uv, uSourcePremultiplied > 0.5 ? 0.0 : 1.0,
+                    uSharpMagnify, uMipLevels);
             if (uSourcePremultiplied > 0.5)
-                return unpremultiply(c);
+                return sm_unpremultiply(c);
             return c;
         }
         void main() {
@@ -130,12 +92,18 @@ void GPUViewport::initShaders()
                 maskAlpha = texture(uMaskTexture, maskUV).r;
             }
             maskAlpha = mix(1.0, maskAlpha, uMaskDensity);
-            fragColor = vec4(c.rgb, c.a * uOpacity * maskAlpha);
+            float clipAlpha = 1.0;
+            if (uHasClip > 0.5)
+                clipAlpha = texture(uClipTexture, gl_FragCoord.xy / uClipSize).a;
+            // Straight-alpha out (sampleSource unpremultiplies), so the clip is
+            // one more factor on the alpha — alphaClipped = alphaSource × alphaBase
+            // — and the fixed-function blend below does the compositing.
+            fragColor = vec4(c.rgb, c.a * uOpacity * maskAlpha * clipAlpha);
         }
     )";
 
     const QByteArray mainVSrc = shader_compat::adaptSource(vSrc);
-    const QByteArray mainFSrc = shader_compat::adaptSource(fSrc);
+    const QByteArray mainFSrc = shader_compat::adaptSource(fSrcRaw.constData());
     shader_compat::bindInstancedAttributes(m_mainProg);
 
     if (!m_mainProg->addShaderFromSourceCode(QOpenGLShader::Vertex, mainVSrc) ||
@@ -189,6 +157,7 @@ void GPUViewport::initShaders()
     // (renderer/BlendShaderLib.hpp), mirrored line-for-line by the CPU
     // compositor's renderer/BlendMath.hpp — do not re-implement formulas here.
     const QByteArray blendFSrcRaw = QByteArray("#version 330 core\n")
+        + sampling_glsl::kLib
         + blend_glsl::kLib
         + R"(
             in vec2 vUV;
@@ -203,65 +172,25 @@ void GPUViewport::initShaders()
             uniform vec2 uMaskUVScale;
             uniform vec2 uMaskUVOffset;
             uniform int uBlendMode;
+            // Fill Opacity (docs/RENDER-PIPELINE.md §4.7). Its own uniform
+            // rather than folded into uOpacity because for eight modes it is a
+            // term *inside* bm_blendFilled, not a factor on the coverage — the
+            // main shader, which only ever draws Normal, does fold it in.
+            uniform float uFillOpacity;
             uniform float uSrcPremultiplied;
             uniform float uDstPremultiplied;
+            uniform float uSharpMagnify;
+            uniform int uMipLevels;
+            // Clipping mask — see the main shader for why this is indexed by
+            // gl_FragCoord and not by a UV.
+            uniform sampler2D uClipTexture;
+            uniform float uHasClip;
+            uniform vec2 uClipSize;
 
-            vec4 unpremultiply(vec4 c) {
-                if (c.a > 0.0) {
-                    c.rgb /= c.a;
-                } else {
-                    c.rgb = vec3(0.0);
-                }
-                return c;
-            }
-            vec4 premulTexel(sampler2D tex, ivec2 p, float straightAlpha) {
-                vec4 c = texelFetch(tex, p, 0);
-                if (straightAlpha > 0.5)
-                    c.rgb *= c.a;
-                return c;
-            }
-            vec4 samplePremultipliedAt(sampler2D tex, vec2 p, float straightAlpha) {
-                ivec2 ts = textureSize(tex, 0);
-                ivec2 hi = ts - ivec2(1);
-                ivec2 i0 = ivec2(floor(p));
-                ivec2 i1 = i0 + ivec2(1);
-                vec2 f = fract(p);
-
-                ivec2 p00 = clamp(i0, ivec2(0), hi);
-                ivec2 p10 = clamp(ivec2(i1.x, i0.y), ivec2(0), hi);
-                ivec2 p01 = clamp(ivec2(i0.x, i1.y), ivec2(0), hi);
-                ivec2 p11 = clamp(i1, ivec2(0), hi);
-
-                vec4 c00 = premulTexel(tex, p00, straightAlpha);
-                vec4 c10 = premulTexel(tex, p10, straightAlpha);
-                vec4 c01 = premulTexel(tex, p01, straightAlpha);
-                vec4 c11 = premulTexel(tex, p11, straightAlpha);
-
-                vec4 c0 = mix(c00, c10, f.x);
-                vec4 c1 = mix(c01, c11, f.x);
-                return mix(c0, c1, f.y);
-            }
-            vec4 sampleAlphaWeighted(sampler2D tex, vec2 uv, float straightAlpha) {
-                ivec2 ts = textureSize(tex, 0);
-                vec2 p = uv * vec2(ts) - vec2(0.5);
-                vec2 footprint = max(fwidth(uv) * vec2(ts), vec2(1.0));
-                if (max(footprint.x, footprint.y) <= 1.25)
-                    return unpremultiply(samplePremultipliedAt(tex, p, straightAlpha));
-
-                vec2 stepPx = footprint / 4.0;
-                vec2 first = p - footprint * 0.5 + stepPx * 0.5;
-                vec4 sum = vec4(0.0);
-                for (int y = 0; y < 4; ++y) {
-                    for (int x = 0; x < 4; ++x) {
-                        sum += samplePremultipliedAt(
-                            tex, first + vec2(float(x), float(y)) * stepPx, straightAlpha);
-                    }
-                }
-                return unpremultiply(sum * 0.0625);
-            }
             vec4 sampleSource(sampler2D tex, vec2 uv) {
-                return sampleAlphaWeighted(
-                    tex, uv, uSrcPremultiplied > 0.5 ? 0.0 : 1.0);
+                return sm_sampleSurface(
+                    tex, uv, uSrcPremultiplied > 0.5 ? 0.0 : 1.0,
+                    uSharpMagnify, uMipLevels);
             }
             void main() {
                 vec2 st = gl_FragCoord.xy / uViewportSize;
@@ -282,18 +211,53 @@ void GPUViewport::initShaders()
                     ? dst.rgb
                     : dst.rgb * dst.a;
                 vec3 srcColor = src.rgb;
-                src.a *= uOpacity * maskAlpha;
-
-                float sa = src.a, da = dst.a;
-                vec3 Cr = clamp(bm_blend(uBlendMode, dstColor, srcColor), 0.0, 1.0);
+                float clipAlpha = 1.0;
+                if (uHasClip > 0.5)
+                    clipAlpha = texture(uClipTexture, gl_FragCoord.xy / uClipSize).a;
+                // The source's coverage before Fill. Both coverages below are
+                // factors on *this* — taking one off the other would spend
+                // Fill twice wherever the two agree (BlendMath.hpp).
+                float cov = src.a * uOpacity * maskAlpha * clipAlpha;
+                // Dissolve: coverage becomes a per-pixel 0/1 dither keyed on
+                // the document pixel. gl_FragCoord is in the render target, so
+                // Y is flipped into the CPU compositor's row order; the live
+                // stack is always isolated into a canvas-sized FBO
+                // (LayerCompositor::composite), which makes that target the
+                // document grid and keeps the pattern stable under pan/zoom.
+                // It runs on each coverage, after its Fill factor, the way the
+                // CPU dithers the coverage it ends up spending; Dissolve is not
+                // one of the eight, so the two decisions are the same one.
+                vec2 ditherPix = vec2(gl_FragCoord.x,
+                                      uViewportSize.y - gl_FragCoord.y);
+                // Fill fades the source's bare, no-backdrop coverage while the
+                // blend term keeps its full one — the regrouped composite in
+                // BlendMath.hpp, mirrored by
+                // DocumentCompositor::compositeManual. saBare == sa at Fill 1.
+                float sa = bm_coverage(
+                    uBlendMode,
+                    cov * bm_fillBlendCoverage(uBlendMode, uFillOpacity),
+                    ditherPix);
+                float saBare = bm_coverage(
+                    uBlendMode,
+                    cov * bm_fillBareCoverage(uBlendMode, uFillOpacity),
+                    ditherPix);
+                float da = dst.a;
+                vec3 B = clamp(bm_blendFilled(uBlendMode, dstColor, srcColor,
+                                              uFillOpacity), 0.0, 1.0);
                 // Blend modes are only meaningful where a backdrop exists. Over a
                 // transparent backdrop (da < 1) — e.g. the bottom layer of an
                 // isolated group, drawn against the freshly-cleared group FBO —
-                // fade the blended color back toward the source so darken-type modes
+                // the source shows through as itself so darken-type modes
                 // (Multiply/Darken/ColorBurn/Overlay…) don't collapse to black.
-                // W3C compositing: Cs' = (1.0 - ab)*Cs + ab*B(Cb, Cs).
-                Cr = mix(srcColor, Cr, da);
-                fragColor = vec4(dstPremul * (1.0 - sa) + Cr * sa, da + sa * (1.0 - da));
+                // W3C compositing, grouped by the backdrop alpha:
+                //   Co = (1-ab)·saBare·Cs + ab·sa·B(Cb,Cs) + (1-sa)·premul(Cb)
+                //   ao = (1-ab)·saBare    + ab
+                // The backdrop term keeps the premultiplied value rather than
+                // re-multiplying dstColor, which would round-trip through the
+                // divide above for nothing.
+                fragColor = vec4((1.0 - da) * saBare * srcColor + da * sa * B
+                                     + (1.0 - sa) * dstPremul,
+                                 (1.0 - da) * saBare + da);
             }
         )";
     const QByteArray blendFSrc = shader_compat::adaptSource(blendFSrcRaw.constData());
@@ -309,6 +273,7 @@ void GPUViewport::initShaders()
     m_blendU.maskTexture  = m_blendProg->uniformLocation("uMaskTexture");
     m_blendU.blendMode    = m_blendProg->uniformLocation("uBlendMode");
     m_blendU.opacity      = m_blendProg->uniformLocation("uOpacity");
+    m_blendU.fillOpacity  = m_blendProg->uniformLocation("uFillOpacity");
     m_blendU.viewportSize = m_blendProg->uniformLocation("uViewportSize");
     m_blendU.hasMask       = m_blendProg->uniformLocation("uHasMask");
     m_blendU.maskDensity  = m_blendProg->uniformLocation("uMaskDensity");
@@ -316,6 +281,11 @@ void GPUViewport::initShaders()
     m_blendU.maskUvOffset = m_blendProg->uniformLocation("uMaskUVOffset");
     m_blendU.srcPremultiplied = m_blendProg->uniformLocation("uSrcPremultiplied");
     m_blendU.dstPremultiplied = m_blendProg->uniformLocation("uDstPremultiplied");
+    m_blendU.sharpMagnify = m_blendProg->uniformLocation("uSharpMagnify");
+    m_blendU.mipLevels   = m_blendProg->uniformLocation("uMipLevels");
+    m_blendU.clipTexture = m_blendProg->uniformLocation("uClipTexture");
+    m_blendU.hasClip     = m_blendProg->uniformLocation("uHasClip");
+    m_blendU.clipSize    = m_blendProg->uniformLocation("uClipSize");
 
     // ── Selection / Marching Ants program ──
     m_selectProg = new QOpenGLShaderProgram();
@@ -495,6 +465,13 @@ void GPUViewport::initShaders()
             uniform sampler2D uCurveLut;
             uniform vec2 uViewportSize;
             uniform float uOpacity;
+            // Fill Opacity (docs/RENDER-PIPELINE.md §4.7) — the share of the
+            // adjustment's contribution that reaches the composite. Its own
+            // uniform rather than folded into uOpacity because the Solid Color
+            // branch runs a real blend, where for eight modes Fill is a term
+            // *inside* bm_blendFilled and not a factor on the coverage. The
+            // backdrop-transform branches are Normal-mode mixes and do fold it.
+            uniform float uFillOpacity;
             uniform float uHasMask;
             uniform float uMaskDensity;
             uniform int uAdjustmentType;
@@ -659,27 +636,59 @@ void GPUViewport::initShaders()
                 }
                 maskAlpha = mix(1.0, maskAlpha, uMaskDensity);
                 float f = clamp(uOpacity * maskAlpha, 0.0, 1.0);
+                float fill = clamp(uFillOpacity, 0.0, 1.0);
                 if (uAdjustmentType == 4) {
                     // Solid Color — a fill, not a backdrop transform. Composite a
                     // premultiplied colour over the backdrop with the node's blend
                     // mode (mirrors the blend shader + DocumentCompositor so the
                     // live frame matches the CPU projection for every mode). f folds
                     // opacity*mask; uSolidColor.a folds the colour's own alpha.
-                    float sa = clamp(uSolidColor.a * f, 0.0, 1.0);
+                    // Coverage before Fill: each of the two coverages below is
+                    // a factor on this one, never on the other (BlendMath.hpp).
+                    float cov = clamp(uSolidColor.a * f, 0.0, 1.0);
+                    // Dissolve dithers the fill's coverage — same hash, same
+                    // document pixel as the blend shader and the CPU path, and
+                    // run on each coverage after its Fill factor. Dissolve is
+                    // not one of the eight, so the two decisions coincide.
+                    vec2 ditherPix = vec2(gl_FragCoord.x,
+                                          uViewportSize.y - gl_FragCoord.y);
+                    float sa = bm_coverage(
+                        uSolidBlendMode,
+                        cov * bm_fillBlendCoverage(uSolidBlendMode, fill),
+                        ditherPix);
                     vec3 srcColor = uSolidColor.rgb;
                     float da = dst.a;                         // backdrop alpha
                     vec3 dstColor = da > 0.0039 ? dst.rgb / da : dst.rgb;
-                    // bm_blend returns srcColor for -1 (Normal) / unmapped ids.
-                    vec3 Cr = clamp(bm_blend(uSolidBlendMode, dstColor, srcColor),
-                                    0.0, 1.0);
-                    // W3C: blend modes only meaningful over an existing backdrop;
-                    // fade back to the source where the backdrop is transparent.
-                    Cr = mix(srcColor, Cr, da);
-                    // Source-over with premultiplied output (dst.rgb is premul).
-                    fragColor = vec4(dst.rgb * (1.0 - sa) + Cr * sa,
-                                     da + sa * (1.0 - da));
+                    // Fill fades the source's bare, no-backdrop coverage while
+                    // the blend term keeps its full one — the regrouped
+                    // composite the blend shader and
+                    // DocumentCompositor::compositeManual run, and the identity
+                    // the previous `mix(srcColor, Cr, da)` form was already a
+                    // Fill-1 case of. saBare == sa at Fill 1.
+                    float saBare = bm_coverage(
+                        uSolidBlendMode,
+                        cov * bm_fillBareCoverage(uSolidBlendMode, fill),
+                        ditherPix);
+                    // bm_blendFilled returns srcColor for -1 (Normal) / unmapped
+                    // ids, and takes Fill inside the formula for the eight modes
+                    // that need it there.
+                    vec3 B = clamp(bm_blendFilled(uSolidBlendMode, dstColor,
+                                                  srcColor, fill),
+                                   0.0, 1.0);
+                    // W3C grouped by the backdrop alpha, premultiplied output:
+                    //   Co = (1-ab)·saBare·Cs + ab·sa·B(Cb,Cs) + (1-sa)·premul(Cb)
+                    //   ao = (1-ab)·saBare    + ab
+                    // Blend modes are only meaningful over an existing backdrop,
+                    // which is what the (1-da) term carries: the source shows
+                    // through as itself where there is nothing to blend against.
+                    fragColor = vec4((1.0 - da) * saBare * srcColor + da * sa * B
+                                         + (1.0 - sa) * dst.rgb,
+                                     (1.0 - da) * saBare + da);
                 } else {
-                    fragColor = vec4(mix(dst.rgb, adjusted, f), dst.a);
+                    // A backdrop transform is a Normal-mode mix, where Fill and
+                    // Opacity are the same factor on the adjustment's
+                    // contribution, so one product covers both (§4.7).
+                    fragColor = vec4(mix(dst.rgb, adjusted, f * fill), dst.a);
                 }
             }
         )";
@@ -695,6 +704,7 @@ void GPUViewport::initShaders()
     m_adjustU.maskTexture    = m_adjustProg->uniformLocation("uMaskTexture");
     m_adjustU.viewportSize   = m_adjustProg->uniformLocation("uViewportSize");
     m_adjustU.opacity        = m_adjustProg->uniformLocation("uOpacity");
+    m_adjustU.fillOpacity    = m_adjustProg->uniformLocation("uFillOpacity");
     m_adjustU.hasMask        = m_adjustProg->uniformLocation("uHasMask");
     m_adjustU.maskDensity    = m_adjustProg->uniformLocation("uMaskDensity");
     m_adjustU.adjustmentType = m_adjustProg->uniformLocation("uAdjustmentType");
@@ -746,6 +756,97 @@ void GPUViewport::initShaders()
     }
     m_displayU.scene = m_displayProg->uniformLocation("uScene");
     m_displayU.lut   = m_displayProg->uniformLocation("uLut");
+
+    // ── Pasteboard dot pattern program ──
+    // Fullscreen pass drawn right after the clear, before canvas decorations
+    // and the canvas quad — so it only ends up visible in the pasteboard area
+    // around the canvas, where nothing else overdraws it. The grid is
+    // computed straight from gl_FragCoord so it stays a fixed screen-space
+    // size independent of document pan/zoom, like the dotted mat in other
+    // image editors.
+    m_dotProg = new QOpenGLShaderProgram();
+    const QByteArray dotVSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            layout(location = 0) in vec2 pos;
+            void main() { gl_Position = vec4(pos, 0.0, 1.0); }
+        )");
+    const QByteArray dotFSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            out vec4 fragColor;
+            uniform vec4 uBgColor;
+            uniform vec4 uDotColor;
+            uniform float uSpacing;
+            uniform float uRadius;
+            void main() {
+                vec2 cell = mod(gl_FragCoord.xy, uSpacing) - uSpacing * 0.5;
+                float d = length(cell);
+                float dot = 1.0 - smoothstep(uRadius - 0.75, uRadius + 0.75, d);
+                fragColor = mix(uBgColor, uDotColor, dot);
+            }
+        )");
+    m_dotProg->bindAttributeLocation("pos", 0);
+    if (!m_dotProg->addShaderFromSourceCode(QOpenGLShader::Vertex, dotVSrc) ||
+        !m_dotProg->addShaderFromSourceCode(QOpenGLShader::Fragment, dotFSrc) ||
+        !m_dotProg->link()) {
+        qWarning("Dot pattern shader failed: %s", qPrintable(m_dotProg->log()));
+    }
+    m_dotU.bgColor      = m_dotProg->uniformLocation("uBgColor");
+    m_dotU.dotColor     = m_dotProg->uniformLocation("uDotColor");
+    m_dotU.spacing      = m_dotProg->uniformLocation("uSpacing");
+    m_dotU.radius       = m_dotProg->uniformLocation("uRadius");
+
+    // ── Canvas drop-shadow program ──
+    // Fullscreen pass, like the dot pattern above: the falloff is evaluated
+    // analytically from gl_FragCoord against the canvas's on-screen rect, so
+    // it is correct and symmetric on all four edges (and their corners)
+    // without needing separate geometry per side. The math is the exact
+    // closed-form 2D Gaussian blur of an axis-aligned rectangle, which
+    // separates into the product of two independent 1D blurred edges —
+    // erf() is the blurred step function for one edge pair.
+    m_shadowProg = new QOpenGLShaderProgram();
+    const QByteArray shadowVSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            layout(location = 0) in vec2 pos;
+            void main() { gl_Position = vec4(pos, 0.0, 1.0); }
+        )");
+    const QByteArray shadowFSrc = shader_compat::adaptSource(R"(
+            #version 330 core
+            out vec4 fragColor;
+            uniform vec2 uRectCenter;
+            uniform vec2 uRectHalfSize;
+            uniform float uSigma;
+            uniform vec4 uColor;
+            // Abramowitz-Stegun rational approximation of erf(), accurate to
+            // ~1e-4 — plenty for a soft-shadow falloff.
+            float erfApprox(float x) {
+                float s = sign(x);
+                float a = abs(x);
+                float y = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+                float y2 = y * y;
+                return s - s / (y2 * y2);
+            }
+            // Gaussian (sigma) blur of a 1D box of half-size `halfSize`, sampled at t.
+            float blurredEdge(float t, float halfSize, float sigma) {
+                float inv = 0.70710678 / max(sigma, 1e-3);
+                return 0.5 * (erfApprox((t + halfSize) * inv) - erfApprox((t - halfSize) * inv));
+            }
+            void main() {
+                vec2 p = gl_FragCoord.xy - uRectCenter;
+                float a = blurredEdge(p.x, uRectHalfSize.x, uSigma)
+                        * blurredEdge(p.y, uRectHalfSize.y, uSigma);
+                fragColor = vec4(uColor.rgb, uColor.a * a);
+            }
+        )");
+    m_shadowProg->bindAttributeLocation("pos", 0);
+    if (!m_shadowProg->addShaderFromSourceCode(QOpenGLShader::Vertex, shadowVSrc) ||
+        !m_shadowProg->addShaderFromSourceCode(QOpenGLShader::Fragment, shadowFSrc) ||
+        !m_shadowProg->link()) {
+        qWarning("Canvas shadow shader failed: %s", qPrintable(m_shadowProg->log()));
+    }
+    m_shadowU.rectCenter   = m_shadowProg->uniformLocation("uRectCenter");
+    m_shadowU.rectHalfSize = m_shadowProg->uniformLocation("uRectHalfSize");
+    m_shadowU.sigma        = m_shadowProg->uniformLocation("uSigma");
+    m_shadowU.color        = m_shadowProg->uniformLocation("uColor");
 }
 
 void GPUViewport::collectUniforms()
@@ -758,9 +859,14 @@ void GPUViewport::collectUniforms()
     m_mainU.maskDensity = m_mainProg->uniformLocation("uMaskDensity");
     m_mainU.sourcePremultiplied = m_mainProg->uniformLocation("uSourcePremultiplied");
     m_mainU.alphaWeightedSampling = m_mainProg->uniformLocation("uAlphaWeightedSampling");
+    m_mainU.sharpMagnify = m_mainProg->uniformLocation("uSharpMagnify");
+    m_mainU.mipLevels   = m_mainProg->uniformLocation("uMipLevels");
     m_mainU.uvScale     = m_mainProg->uniformLocation("uUVScale");
     m_mainU.uvOffset    = m_mainProg->uniformLocation("uUVOffset");
     m_mainU.maskUvScale = m_mainProg->uniformLocation("uMaskUVScale");
     m_mainU.maskUvOffset = m_mainProg->uniformLocation("uMaskUVOffset");
     m_mainU.instanced   = m_mainProg->uniformLocation("uInstanced");
+    m_mainU.clipTexture = m_mainProg->uniformLocation("uClipTexture");
+    m_mainU.hasClip     = m_mainProg->uniformLocation("uHasClip");
+    m_mainU.clipSize    = m_mainProg->uniformLocation("uClipSize");
 }

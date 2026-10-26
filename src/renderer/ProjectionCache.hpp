@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QRect>
 #include <QSize>
 #include <cstdint>
 #include <functional>
@@ -41,7 +42,15 @@ public:
 
     unsigned int texture() const { return m_texture; }
     QSize        size()    const { return m_size; }
+    // Highest level of the premultiplied mip pyramid on the texture (0 until
+    // one has been uploaded). Passed to the sampler as uMipLevels.
+    int          mipLevels() const { return m_mipLevels; }
     const QImage& image()  const { return m_image; }
+    // The composite BEFORE the channel view. What the Channels panel
+    // builds its RGB/R/G/B thumbnails from: the channel view is a display
+    // transform, so a thumbnail derived from it would show the overlay
+    // instead of the component it is supposed to preview.
+    const QImage& baseImage() const { return m_baseImage; }
 
     // Invoked (on the UI thread) when an async projection result becomes
     // available — the host repaints so the next update() uploads + displays it.
@@ -51,6 +60,7 @@ public:
     void invalidate()
     {
         m_generation = kInvalidGen;
+        m_channelGeneration = kInvalidGen;
         m_doc = nullptr;
         m_size = QSize();
         m_inFlightDoc = nullptr;
@@ -62,7 +72,14 @@ public:
 
 private:
     void uploadTexture();
+    // Re-derives m_image from m_baseImage through the channel view. `full`
+    // repaints the whole canvas and re-uploads the texture; otherwise only
+    // `rect` is recomputed and uploaded as a sub-image, so a dab painted into
+    // a channel costs the dab's area instead of the canvas.
+    void applyChannelView(Document* doc, bool full, const QRect& rect);
+    void uploadSubImage(const QRect& rect);
     void ensureBuilder();
+    static int maxMipLevel(const QSize& s);
     // Builds a thread-safe COW snapshot of `doc` for off-thread compositing.
     std::shared_ptr<Document> makeSnapshot(const Document* doc) const;
     // A single full-canvas texture can't represent documents larger than the
@@ -72,11 +89,18 @@ private:
 
     static constexpr uint64_t kInvalidGen = ~0ull;
 
+    // The composite as DocumentCompositor produced it, before any channel
+    // view. Kept apart from m_image so toggling an eye or editing a channel
+    // never re-runs the layer composite — the single reason a visibility
+    // change is cheap.
+    QImage        m_baseImage;
     QImage        m_image;
     const void*   m_doc        = nullptr;
     unsigned int  m_texture    = 0;
     uint64_t      m_generation = kInvalidGen;
+    uint64_t      m_channelGeneration = kInvalidGen;
     QSize         m_size;
+    int           m_mipLevels = 0;
     int           m_maxTextureSize = 0; // cached GL_MAX_TEXTURE_SIZE
 
     std::unique_ptr<AsyncProjectionBuilder> m_builder;

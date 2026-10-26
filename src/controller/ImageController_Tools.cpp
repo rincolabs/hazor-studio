@@ -8,8 +8,11 @@
 #include "shape/ShapeCommands.hpp"
 #include "async/AsyncJobSystem.hpp"
 #include "processing/FilterProcessor.hpp"
+#include "raw/RawDevelopParams.hpp"
+#include "raw/RawLayerData.hpp"
 
 #include <QImage>
+#include <QMargins>
 #include <QPainter>
 #include <QImageReader>
 #include <QFileInfo>
@@ -180,6 +183,49 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         "threshold", "remove_background",
         "rotate", "flip_horizontal", "flip_vertical", "resize_layer", "crop"
     };
+    // Channels take the grayscale-compatible filters and adjustments: with a
+    // channel armed, the edit target is its 8-bit plane, not the active
+    // layer's pixels. The filter runs on an RGBA view of the plane and the
+    // result comes back as luminance, so the one FilterProcessor
+    // implementation is reused instead of growing a grayscale twin.
+    static const std::unordered_set<std::string> kChannelFilterTools = {
+        "adjust_brightness", "adjust_contrast", "adjust_color",
+        "gaussian_blur", "median_blur", "box_blur", "bilateral_blur",
+        "motion_blur", "radial_blur", "zoom_blur",
+        "sharpen", "edge_detect", "noise_reduce", "posterize", "threshold",
+        "invert_colors"
+    };
+    if (hasArmedChannels() && kChannelFilterTools.count(toolName)) {
+        QVariantMap filterParams;
+        for (const auto& [key, value] : params) {
+            if (std::holds_alternative<double>(value))
+                filterParams[QString::fromStdString(key)] = std::get<double>(value);
+            else if (std::holds_alternative<std::string>(value))
+                filterParams[QString::fromStdString(key)] =
+                    QString::fromStdString(std::get<std::string>(value));
+        }
+        const std::string filterName = toolName;
+        applyToArmedChannels([&filterName, filterParams](QImage& buffer) {
+            const QImage rgba = buffer.convertToFormat(QImage::Format_RGBA8888);
+            const QImage filtered = processing::FilterProcessor::processFull(rgba, filterName,
+                                                                  filterParams);
+            if (filtered.isNull())
+                return;
+            const QImage out = filtered.convertToFormat(QImage::Format_RGBA8888);
+            for (int y = 0; y < buffer.height() && y < out.height(); ++y) {
+                const uchar* src = out.constScanLine(y);
+                uchar* dst = buffer.scanLine(y);
+                for (int x = 0; x < buffer.width() && x < out.width(); ++x) {
+                    dst[x] = static_cast<uchar>(
+                        (src[x * 4] * 299 + src[x * 4 + 1] * 587
+                         + src[x * 4 + 2] * 114) / 1000);
+                }
+            }
+        }, QString::fromStdString(toolName));
+        emit toolExecuted(QString::fromStdString(toolName), true);
+        return true;
+    }
+
     if (toolName == "set_clone_source") {
         emit cloneSourceRequested(QPointF(get("x"), get("y")));
         emit toolExecuted(QString::fromStdString(toolName), true);
@@ -406,9 +452,51 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             job->targetFlatIndex = m_doc->activeFlatIndex;
             job->beforeImage = layer->cpuImage.copy();
             job->beforeTransform = n->transform;
-            job->sourceImage = layer->cpuImage.copy();
             job->weakLayer = layer;
             job->retileRasterStorage = flushedRaster;
+
+            for (const auto& [k, v] : params) {
+                if (std::holds_alternative<double>(v))
+                    job->params[QString::fromStdString(k)] = QVariant(std::get<double>(v));
+                else if (std::holds_alternative<std::string>(v))
+                    job->params[QString::fromStdString(k)] = QVariant(QString::fromStdString(std::get<std::string>(v)));
+            }
+
+            // ── Room for the effect ──
+            // A filter that displaces or spreads pixels (zoom/radial/motion
+            // blur, every convolution blur) writes outside the layer's current
+            // image rect, and that part of its output is simply cropped — the
+            // effect ends in a straight line at the old layer bounds instead of
+            // falling off past them. Grow the buffer first, then re-normalize
+            // the parameters that are relative to the image (the blur centre) so
+            // the effect still pivots on the same pixel. The before snapshot is
+            // already captured above and FilterCommand restores the transform
+            // with the pixels, so undo puts the smaller layer back.
+            const QSize preGrowSize = layer->cpuImage.size();
+            // Cheap reject before the content-bounds alpha scan: the reach
+            // measured from the whole image rect is an upper bound for any
+            // tighter content, so a null one settles it for every point filter.
+            const bool mayReachOutside = !processing::FilterProcessor::outwardReach(
+                toolName, job->params, preGrowSize, QRect()).isNull();
+            const QRect grownTo = mayReachOutside
+                ? filterTargetRect(layer, preGrowSize, layer->cpuContentBounds(),
+                                   toolName, job->params)
+                : QRect(QPoint(0, 0), preGrowSize);
+            const QImage preGrowMask = layer->maskImage;
+            const QPoint preGrowMaskOrigin = layer->maskOrigin;
+            QPoint growOffset;
+            const bool grew = growLayerForFilter(layer, grownTo, &growOffset);
+            if (grew) {
+                job->params = processing::FilterProcessor::paramsForGrownImage(
+                    toolName, job->params, preGrowSize,
+                    QMargins(growOffset.x(), growOffset.y(),
+                             layer->cpuImage.width()  - preGrowSize.width()  - growOffset.x(),
+                             layer->cpuImage.height() - preGrowSize.height() - growOffset.y()));
+                job->beforeMask = preGrowMask;
+                job->beforeMaskOrigin = preGrowMaskOrigin;
+            }
+
+            job->sourceImage = layer->cpuImage.copy();
             if (toolName == "delete_selected") {
                 auto countOpaque = [](const QImage& img) -> int {
                     if (img.isNull()) return -1;
@@ -445,13 +533,6 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                 }
             }
 
-            for (const auto& [k, v] : params) {
-                if (std::holds_alternative<double>(v))
-                    job->params[QString::fromStdString(k)] = QVariant(std::get<double>(v));
-                else if (std::holds_alternative<std::string>(v))
-                    job->params[QString::fromStdString(k)] = QVariant(QString::fromStdString(std::get<std::string>(v)));
-            }
-
             // delete_selected must NOT use the progressive tile path: that path
             // runs applyImageEngine() per tile, which has no delete_selected
             // case and ignores job->maskImage — clearing the whole layer (or
@@ -465,7 +546,10 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             {
                 job->type = AsyncJobType::FilterApplyProgressive;
                 QRect dirty = layer->dirtyRegion.boundingRect();
-                if (dirty.isEmpty())
+                // A buffer that just grew has no meaningful dirty region: the
+                // filter has to cover the new border too, or the room it was
+                // given stays empty and the crop is back.
+                if (dirty.isEmpty() || grew)
                     dirty = QRect(0, 0, layer->cpuImage.width(), layer->cpuImage.height());
                 auto tiles = layer->tileManager.visibleTiles(dirty);
                 job->tileRects.clear();
@@ -584,6 +668,10 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
     else if (toolName == "set_layer_opacity") {
         int idx = getInt("index", m_doc->activeFlatIndex);
         setNodeOpacity(idx, static_cast<float>(get("opacity", 1.0)));
+    }
+    else if (toolName == "set_layer_fill_opacity") {
+        int idx = getInt("index", m_doc->activeFlatIndex);
+        setNodeFillOpacity(idx, static_cast<float>(get("fill_opacity", 1.0)));
     }
     else if (toolName == "set_layer_visibility") {
         int idx = getInt("index", m_doc->activeFlatIndex);
@@ -737,6 +825,9 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         // Sync fallback path: reached when a selection is active or the layer is
         // not tiled (the no-selection async path is handled above). radial/zoom
         // are non-tileable globals, so they always land here when sync.
+        // No layer growth here (unlike the async dispatch): with a selection
+        // active the selection IS the clip the user asked for, so there is
+        // nothing to make room for outside the layer.
         if (!layer) { success = false; }
         else if (canApplyTiled(layer, toolName)) {
             applyFilterTiled(layer, toolName, params);
@@ -907,8 +998,12 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
             auto before = captureBefore(m_doc->activeFlatIndex);
             int oldW = layer->cpuImage.width();
             int oldH = layer->cpuImage.height();
-            int w = getInt("width", oldW);
-            int h = getInt("height", oldH);
+            // Clamped: the tool surface is driven by the chat agent and the MCP
+            // server, so width/height arrive unvalidated. A zero would both
+            // collapse the transform scale below and leave resize() nothing to
+            // produce.
+            int w = std::max(1, getInt("width", oldW));
+            int h = std::max(1, getInt("height", oldH));
             cv::Mat cvImg = ImageEngine::toCvMat(layer->cpuImage);
             cv::Mat result = ImageEngine::resize(cvImg, w, h);
             layer->cpuImage = ImageEngine::toQImage(result);
@@ -1014,6 +1109,66 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         if (idx >= 0) {
             rasterizeNode(idx);
         } else { success = false; }
+    }
+    else if (toolName == "smart_object_create") {
+        int idx = getInt("index", -1);
+        std::vector<int> indices;
+        if (idx >= 0)
+            indices.push_back(idx);
+        else if (m_doc)
+            indices = m_doc->selectedList();
+        success = convertToSmartObject(indices) >= 0;
+    }
+    else if (toolName == "smart_object_place_embedded") {
+        success = placeEmbeddedDocument(QString::fromStdString(getStr("path"))) >= 0;
+    }
+    else if (toolName == "smart_object_place_linked") {
+        success = placeLinkedDocument(QString::fromStdString(getStr("path"))) >= 0;
+    }
+    else if (toolName == "smart_object_via_copy") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        success = idx >= 0 && newSmartObjectViaCopy(idx) >= 0;
+    }
+    else if (toolName == "smart_object_replace") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        success = idx >= 0
+            && replaceSmartObjectContents(idx, QString::fromStdString(getStr("path")));
+    }
+    else if (toolName == "smart_object_update") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        success = idx >= 0 && updateSmartObjectContent(idx);
+    }
+    else if (toolName == "smart_object_rasterize") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        auto* node = m_doc ? m_doc->nodeAt(idx) : nullptr;
+        if (!node || !node->layer || !node->layer->isSmartObjectLayer()) {
+            success = false;
+        } else {
+            rasterizeNode(idx);
+        }
+    }
+    else if (toolName == "raw_develop") {
+        int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
+        auto* node = m_doc ? m_doc->nodeAt(idx) : nullptr;
+        if (!node || !node->layer || !node->layer->rawData) {
+            success = false;
+        } else {
+            RawDevelopParams params = RawDevelopParams::fromPP3String(
+                node->layer->rawData->state.pp3.toStdString());
+
+            RawDevelopParams::WhiteBalance wb = params.whiteBalance();
+            wb.temperatureKelvin = getInt("white_balance_temperature", wb.temperatureKelvin);
+            wb.green = get("white_balance_green", wb.green);
+            wb.method = getStr("white_balance_method", wb.method);
+            params.setWhiteBalance(wb);
+
+            RawDevelopParams::Exposure exposure = params.exposure();
+            exposure.compensationEv = get("exposure_compensation", exposure.compensationEv);
+            exposure.autoExposure = getInt("auto_exposure", exposure.autoExposure ? 1 : 0) != 0;
+            params.setExposure(exposure);
+
+            success = rerevealRawLayer(idx, params);
+        }
     }
     else if (toolName == "layer_mask_add") {
         int idx = getInt("index", m_doc ? m_doc->activeFlatIndex : -1);
@@ -1329,33 +1484,105 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
         } else { success = false; }
     }
     else if (toolName == "select_save_channel") {
-        QString name = QString::fromStdString(getStr("name", "Channel"));
-        if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
-            QImage before = m_doc->selection.image().copy();
-            bool beforeActive = m_doc->selection.active();
-            m_doc->saveSelectionToChannel(name);
-            m_history.push(std::make_unique<SelectionCommand>(
-                m_doc, before, m_doc->selection.image().copy(),
-                beforeActive, m_doc->selection.active(),
-                "select_save_channel"));
-            emit selectionChanged();
-            emit imageChanged();
-        } else { success = false; }
+        // Routed through saveSelectionAsChannel so the undo entry is the
+        // channel's creation. It used to push a SelectionCommand, which undid
+        // the (unchanged) selection and left the new channel behind.
+        success = saveSelectionAsChannel(
+            QString::fromStdString(getStr("name", ""))) >= 0;
     }
     else if (toolName == "select_load_channel") {
-        int index = getInt("index", 0);
-        SelectMode mode = static_cast<SelectMode>(getInt("mode", 0));
+        const int index = getInt("index", 0);
         if (index >= 0 && index < static_cast<int>(m_doc->channels.size())) {
-            QImage before = m_doc->selection.image().copy();
-            bool beforeActive = m_doc->selection.active();
-            m_doc->loadChannelToSelection(index, mode);
-            m_history.push(std::make_unique<SelectionCommand>(
-                m_doc, before, m_doc->selection.image().copy(),
-                beforeActive, m_doc->selection.active(),
-                "select_load_channel"));
-            emit selectionChanged();
-            emit imageChanged();
-        }
+            loadChannelAsSelection(index, static_cast<SelectMode>(getInt("mode", 0)),
+                                   getInt("invert", 0) != 0);
+        } else { success = false; }
+    }
+    // Channels. Each one forwards to the same ImageController entry point the
+    // panel uses, so the automation surface and the UI share one
+    // implementation and one history entry per operation.
+    else if (toolName == "channel_new") {
+        success = newAlphaChannel(
+            QString::fromStdString(getStr("name", "")),
+            getInt("selected_areas", 0) != 0
+                ? ChannelMaskRepresentation::SelectedAreas
+                : ChannelMaskRepresentation::MaskedAreas,
+            QColor(255, 0, 0),
+            static_cast<float>(get("opacity", 0.5))) >= 0;
+    }
+    else if (toolName == "channel_new_spot") {
+        success = newSpotChannel(QString::fromStdString(getStr("name", "")),
+                                 QColor(255, 0, 255),
+                                 static_cast<float>(get("solidity", 0.0))) >= 0;
+    }
+    else if (toolName == "channel_duplicate") {
+        success = duplicateChannel(getInt("index", 0),
+                                   QString::fromStdString(getStr("name", "")),
+                                   getInt("invert", 0) != 0) >= 0;
+    }
+    else if (toolName == "channel_delete") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            deleteChannelAt(index);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_rename") {
+        const int index = getInt("index", 0);
+        const QString name = QString::fromStdString(getStr("name", ""));
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size())
+            && !name.isEmpty())
+            renameChannel(index, name);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_reorder") {
+        reorderChannel(getInt("from", 0), getInt("to", 0));
+    }
+    else if (toolName == "channel_set_visible") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            setChannelVisible(index, getInt("visible", 1) != 0);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_select") {
+        const int index = getInt("index", -1);
+        if (index < 0)
+            selectCompositeChannel();
+        else if (index < static_cast<int>(m_doc->channels.size()))
+            selectChannelAt(index, getInt("add", 0) != 0);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_invert") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            invertChannelAt(index);
+        else
+            success = false;
+    }
+    else if (toolName == "channel_fill") {
+        if (hasArmedChannels())
+            fillArmedChannels(static_cast<float>(get("value", 1.0)), tr("Fill"));
+        else
+            success = false;
+    }
+    else if (toolName == "channel_merge_spot") {
+        success = mergeSpotChannel(getInt("index", 0));
+    }
+    else if (toolName == "channel_save_selection") {
+        const int index = getInt("index", 0);
+        if (index >= 0 && index < static_cast<int>(m_doc->channels.size()))
+            saveSelectionIntoChannel(index, static_cast<SelectMode>(getInt("mode", 0)));
+        else
+            success = false;
+    }
+    else if (toolName == "set_group_pass_through") {
+        int idx = getInt("index", m_doc->activeFlatIndex);
+        if (idx < 0) idx = m_doc->activeFlatIndex;
+        setNodeGroupBlendMode(idx, getInt("pass_through", 1) != 0
+            ? LayerTreeNode::GroupBlendMode::PassThrough
+            : LayerTreeNode::GroupBlendMode::Isolated);
     }
     else if (toolName == "float_selection") {
         bool cut = getInt("cut", 0) != 0;
@@ -1429,9 +1656,11 @@ bool ImageController::executeTool(const std::string& toolName, const JsonMap& pa
                     cv::Mat xform = (cv::Mat_<double>(2,3) << a00, a01, a02, a10, a11, a12);
 
                     cv::Mat layerMat = ImageEngine::toCvMat(l->cpuImage);
-                    cv::Mat canvas(dh, dw, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-                    cv::warpAffine(layerMat, canvas, xform, canvas.size(),
-                                   cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                    // Premultiplied cubic, as in extractSelectedDocRegion.
+                    cv::Mat canvas = ImageEngine::warpAffinePremultiplied(
+                        layerMat, xform, cv::Size(dw, dh), cv::INTER_CUBIC,
+                        cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                    if (canvas.empty()) continue;
                     mats.push_back(std::move(canvas));
                     ops.push_back(n->opacity);
                     vis.push_back(true);

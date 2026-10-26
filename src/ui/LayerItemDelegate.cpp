@@ -2,6 +2,7 @@
 #include "controller/ImageController.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
+#include "smartobject/SmartObjectData.hpp"
 #include "core/Document.hpp"
 #include "core/SolidColorData.hpp"
 #include "theme/Theme.hpp"
@@ -22,6 +23,13 @@ static constexpr int kItemHeight = 50;
 static constexpr int kThumbSize = 40;
 static constexpr int kMaskThumbSize = 40;
 static constexpr int kTextThumbIconSize = 24;
+// Corner badge over a Smart Object's thumbnail. Smaller than the type glyphs
+// above because it sits ON the thumbnail instead of replacing it.
+static constexpr int kSmartObjectBadgeSize = 13;
+// The badge glyph is white, so it dissolves into light thumbnails. It is drawn
+// on a dark themed plate, with padding so the glyph never touches the plate's
+// edge.
+static constexpr int kSmartObjectBadgePadding = 2;
 static constexpr int kEyeSize = 20;
 static constexpr int kLockIconSize = 20;
 static constexpr int kLockBtnSize = 24;
@@ -30,6 +38,12 @@ static constexpr int kGroupIconSize = 24;
 static constexpr int kGroupBtnSize = 26;
 static constexpr int kMargin = 6;
 static constexpr int kIndent = 16;
+// Extra left inset of a clipped layer's row, plus the width reserved inside it
+// for the "clipped to the layer below" arrow. Follows the convention this kind
+// of editor established: the clipped rows sit in from their base and carry a
+// downward-right arrow, so a clipping run reads as one unit at a glance.
+static constexpr int kClipIndent = 14;
+static constexpr int kClipArrowSize = 9;
 static constexpr int kGap = 4;
 static constexpr int kArrowSize = 12;
 static constexpr int kThumbToLabelPadding = 16;
@@ -85,6 +99,30 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
         painter->fillRect(r.left(), r.top(), extraIndent, r.height(), th->colorPanelBackground);
     int x = r.left() + extraIndent;
 
+    // Clipping indicator: an angled arrow pointing down-right at the base layer
+    // this row is clipped to, drawn in the inset childIndent() just reserved.
+    if (node->isClippedLayer()) {
+        const int cy = r.center().y();
+        const int cx = x - kClipIndent + (kClipIndent - kClipArrowSize) / 2;
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setOpacity(th->iconOpacity);
+        QPen pen(th->colorTextPrimary, 1.2);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        // Down, then right: the stem drops towards the base layer below and the
+        // head turns into the row, i.e. the standard elbow arrow. The whole
+        // glyph stays inside the kClipIndent gutter.
+        painter->drawLine(cx, cy - kClipArrowSize / 2, cx, cy + kClipArrowSize / 2);
+        painter->drawLine(cx, cy + kClipArrowSize / 2,
+                          cx + kClipArrowSize, cy + kClipArrowSize / 2);
+        painter->drawLine(cx + kClipArrowSize - 3, cy + kClipArrowSize / 2 - 3,
+                          cx + kClipArrowSize, cy + kClipArrowSize / 2);
+        painter->drawLine(cx + kClipArrowSize - 3, cy + kClipArrowSize / 2 + 3,
+                          cx + kClipArrowSize, cy + kClipArrowSize / 2);
+        painter->restore();
+    }
+
     QFont iconFont = painter->font();
     iconFont.setPixelSize(th->fontSizeMD);
     painter->setFont(iconFont);
@@ -120,7 +158,7 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
     // Expand/collapse arrow for a layer that hosts Single-Layer-Mode
     // adjustment children (groups draw their own arrow below).
     if (node->type == LayerTreeNode::Type::Layer
-        && node->hasVisibleAdjustmentChildren()) {
+        && node->hasAdjustmentChildren()) {
         QRect arrowR(x, r.center().y() - kArrowSize / 2, kArrowSize, kArrowSize);
         painter->setPen(th->colorTextPrimary);
         QFont arrowFont = painter->font();
@@ -225,6 +263,74 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
                 painter->setBrush(Qt::NoBrush);
                 painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
                 hasVisiblePixels = true;
+            } else if (node->layer->isRawLayer()) {
+                static QPixmap rawPix(":/icons/raw-layer.png");
+                painter->fillRect(innerThumb, th->colorBackgroundSecondary);
+                const QRect rawIconRect(
+                    thumbRect.center().x() - kTextThumbIconSize / 2,
+                    thumbRect.center().y() - kTextThumbIconSize / 2,
+                    kTextThumbIconSize,
+                    kTextThumbIconSize);
+                painter->save();
+                painter->setOpacity(th->iconOpacity);
+                painter->drawPixmap(rawIconRect, rawPix);
+                painter->restore();
+                painter->setPen(QPen(QColor(QStringLiteral("#ffffff")), 0));
+                painter->setBrush(Qt::NoBrush);
+                painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
+                hasVisiblePixels = true;
+            } else if (node->layer->isSmartObjectLayer()) {
+                // The thumbnail keeps showing the real pixels (it IS the
+                // referenced document's render), so the Smart Object marker is
+                // a corner BADGE over the thumbnail rather than a glyph
+                // replacing it — a Smart Object is identified by what it
+                // references, not by having nothing to show.
+                if (!node->cachedThumb.isNull()) {
+                    painter->drawPixmap(innerThumb, QPixmap::fromImage(node->cachedThumb));
+                    hasVisiblePixels = imageHasVisiblePixels(node->cachedThumb);
+                } else {
+                    painter->fillRect(innerThumb, th->colorBackgroundSecondary);
+                }
+                const auto& data = *node->layer->smartObjectData;
+                const bool linked = data.mode == SmartObjectStorageMode::Linked;
+                static QPixmap embeddedPix(":/icons/smart-object.png");
+                static QPixmap linkedPix(":/icons/smart-object-linked.png");
+                const int badge = kSmartObjectBadgeSize;
+                const int plate = badge + kSmartObjectBadgePadding * 2;
+                const QRect plateRect(thumbRect.right() - plate - 1,
+                                      thumbRect.bottom() - plate - 1, plate, plate);
+                const QRect badgeRect = plateRect.adjusted(kSmartObjectBadgePadding,
+                                                           kSmartObjectBadgePadding,
+                                                           -kSmartObjectBadgePadding,
+                                                           -kSmartObjectBadgePadding);
+                painter->save();
+                QColor plateColor = th->colorBackgroundPrimary;
+                plateColor.setAlpha(225);
+                painter->setRenderHint(QPainter::Antialiasing, true);
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(plateColor);
+                painter->drawRoundedRect(plateRect, th->radiusSM, th->radiusSM);
+                painter->setBrush(Qt::NoBrush);
+                painter->setRenderHint(QPainter::Antialiasing, false);
+                // A broken link is tinted with the theme's warning colour so
+                // "this Smart Object can no longer reach its document" is
+                // visible without opening the Properties panel. The pixels
+                // shown are the persisted render — the only thing left of the
+                // reference — which is why the layer still looks normal.
+                if (data.linkBroken) {
+                    QPixmap tinted(linkedPix.size());
+                    tinted.fill(Qt::transparent);
+                    QPainter tp(&tinted);
+                    tp.drawPixmap(0, 0, linkedPix);
+                    tp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+                    tp.fillRect(tinted.rect(), th->colorWarning);
+                    tp.end();
+                    painter->drawPixmap(badgeRect, tinted);
+                } else {
+                    painter->setOpacity(th->iconOpacity);
+                    painter->drawPixmap(badgeRect, linked ? linkedPix : embeddedPix);
+                }
+                painter->restore();
             } else {
                 // Thumbnails are ALWAYS baked off the UI thread by LayerPanel
                 // (scheduleThumbnailBuild): scaling a layer image here would freeze
@@ -244,7 +350,7 @@ void LayerItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opt
         }
 
         if (node->type != LayerTreeNode::Type::Adjustment
-            && !(node->layer && node->layer->isTextLayer())) {
+            && !(node->layer && (node->layer->isTextLayer() || node->layer->isRawLayer()))) {
             painter->setPen(QPen(QColor(QStringLiteral("#ffffff")), 0));
             painter->setBrush(Qt::NoBrush);
             painter->drawRect(thumbRect.adjusted(0, 0, -1, -1));
@@ -383,7 +489,7 @@ bool LayerItemDelegate::editorEvent(QEvent* event, QAbstractItemModel* model,
         auto* node = nodeFromIndex(index);
         // Layer hosting adjustment children: toggle expand via its arrow.
         if (node && node->type == LayerTreeNode::Type::Layer
-            && node->hasVisibleAdjustmentChildren()) {
+            && node->hasAdjustmentChildren()) {
             QRect ar = expandRect(option, index);
             if (ar.contains(mouseEvent->pos())) {
                 node->collapsed = !node->collapsed;
@@ -483,6 +589,34 @@ int LayerItemDelegate::handleSolidColorThumbDoubleClick(const QStyleOptionViewIt
     return flat;
 }
 
+int LayerItemDelegate::handleRawThumbDoubleClick(const QStyleOptionViewItem& option,
+                                                 const QModelIndex& index,
+                                                 const QPoint& pos)
+{
+    auto* node = nodeFromIndex(index);
+    if (!node || !node->layer || !node->layer->isRawLayer())
+        return -1;
+    if (!thumbRect(option, index).contains(pos))
+        return -1;
+    const int flat = index.data(Qt::UserRole).toInt();
+    emit rawThumbDoubleClicked(flat);
+    return flat;
+}
+
+int LayerItemDelegate::handleSmartObjectThumbDoubleClick(const QStyleOptionViewItem& option,
+                                                         const QModelIndex& index,
+                                                         const QPoint& pos)
+{
+    auto* node = nodeFromIndex(index);
+    if (!node || !node->layer || !node->layer->isSmartObjectLayer())
+        return -1;
+    if (!thumbRect(option, index).contains(pos))
+        return -1;
+    const int flat = index.data(Qt::UserRole).toInt();
+    emit smartObjectThumbDoubleClicked(flat);
+    return flat;
+}
+
 QWidget* LayerItemDelegate::createEditor(QWidget* parent,
                                           const QStyleOptionViewItem& option,
                                           const QModelIndex& index) const
@@ -536,12 +670,15 @@ LayerTreeNode* LayerItemDelegate::nodeFromIndex(const QModelIndex& index) const
 int LayerItemDelegate::childIndent(const QModelIndex& index) const
 {
     auto* node = nodeFromIndex(index);
+    // A clipping mask is a flag on a sibling, not a nesting level, so it does
+    // not come out of the parent walk — it is added on top of the real depth.
+    const int clipIndent = (node && node->isClippedLayer()) ? kClipIndent : 0;
     int depth = 0;
     while (node && node->parent) {
         ++depth;
         node = node->parent;
     }
-    return depth * kIndent;
+    return depth * kIndent + clipIndent;
 }
 
 QRect LayerItemDelegate::eyeRect(const QStyleOptionViewItem& option, const QModelIndex& index) const
@@ -572,7 +709,7 @@ int LayerItemDelegate::layerExpandArrowSpace(const QModelIndex& index) const
 {
     auto* node = nodeFromIndex(index);
     if (node && node->type == LayerTreeNode::Type::Layer
-        && node->hasVisibleAdjustmentChildren())
+        && node->hasAdjustmentChildren())
         return kArrowSize + kGap;
     return 0;
 }

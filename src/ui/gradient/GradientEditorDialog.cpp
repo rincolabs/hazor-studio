@@ -65,7 +65,10 @@ GradientEditorDialog::GradientEditorDialog(GradientPresetManager* presetManager,
 {
     m_definition.normalize();
     setWindowTitle(tr("Gradient Editor"));
-    setModal(true);
+    // Deliberately NOT modal: a stop's colour is picked with the colour dialog,
+    // whose eyedropper samples the canvas, and any modality here swallows every
+    // canvas click. The host (ToolOptionsBar::openGradientEditor) shows this
+    // modeless and applies the gradient on accepted().
     resize(760, 560);
     buildUi();
     refreshPresetList();
@@ -250,7 +253,7 @@ void GradientEditorDialog::buildUi()
             m_definition = m_stopEditor->gradient();
             updateStopControls();
         });
-        dialog->open();
+        dialog->showModeless();
     });
     connect(m_opacityInput, &ScrubbableValueInput::valueChanged, this, [this](double value) {
         if (m_stopEditor && m_stopEditor->activeStopType() == GradientStopEditor::StopType::Opacity)

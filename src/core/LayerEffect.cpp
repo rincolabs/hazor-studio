@@ -187,24 +187,32 @@ QImage sourceOver(const QImage& below, const QImage& above,
     return out;
 }
 
-QImage clippedFill(const QImage& input, const QBrush& brush, float opacity,
-                   QPainter::CompositionMode mode)
+QImage clippedFill(const QImage& content, const QImage& shape, const QBrush& brush,
+                   float opacity, QPainter::CompositionMode mode)
 {
-    QImage rgba = toRgba(input);
+    QImage rgba = toRgba(content);
     QImage fill(rgba.size(), QImage::Format_RGBA8888);
     fill.fill(Qt::transparent);
     {
         QPainter p(&fill);
         p.fillRect(fill.rect(), brush);
+        // Clipped to the SHAPE's alpha, never the content's: an overlay has to
+        // keep the layer's silhouette even where Fill Opacity has faded the
+        // pixels under it to nothing. The two images are the same at Fill 100%.
         p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-        p.drawImage(0, 0, rgba);
+        p.drawImage(0, 0, toRgba(shape));
     }
     return sourceOver(rgba, fill, mode, opacity);
 }
 
-QImage applyDropShadow(const QImage& input, const QVariantMap& params)
+// Each layer style below takes the content it composites over and, separately,
+// the shape its own geometry/alpha is derived from. The two differ only while
+// Fill Opacity is below 100%: the shape stays full strength so a shadow is still
+// cast by pixels the Fill has made invisible (docs/RENDER-PIPELINE.md §4.7).
+QImage applyDropShadow(const QImage& content, const QImage& shape,
+                       const QVariantMap& params)
 {
-    QImage base = toRgba(input);
+    QImage base = toRgba(content);
     QColor color = colorParam(params, QStringLiteral("color"), Qt::black);
     float opacity = floatParam(params, QStringLiteral("opacity"), 0.45f);
     float angle = floatParam(params, QStringLiteral("angle"), 120.0f) * float(M_PI) / 180.0f;
@@ -214,31 +222,33 @@ QImage applyDropShadow(const QImage& input, const QVariantMap& params)
     int dx = static_cast<int>(std::round(std::cos(angle) * distance));
     int dy = static_cast<int>(std::round(-std::sin(angle) * distance));
 
-    cv::Mat mask = blurMask(dilateMask(alphaMask(base), spread), blur);
+    cv::Mat mask = blurMask(dilateMask(alphaMask(shape), spread), blur);
     mask = offsetMask(mask, dx, dy);
     QImage shadow = solidFromMask(mask, color, opacity);
     return sourceOver(shadow, base);
 }
 
-QImage applyOuterGlow(const QImage& input, const QVariantMap& params)
+QImage applyOuterGlow(const QImage& content, const QImage& shape,
+                      const QVariantMap& params)
 {
-    QImage base = toRgba(input);
+    QImage base = toRgba(content);
     QColor color = colorParam(params, QStringLiteral("color"), QColor("#4C8DFF"));
     float opacity = floatParam(params, QStringLiteral("opacity"), 0.5f);
     int spread = intParam(params, QStringLiteral("spread"), 0);
     float blur = floatParam(params, QStringLiteral("blur"), 20.0f);
-    cv::Mat mask = blurMask(dilateMask(alphaMask(base), spread), blur);
+    cv::Mat mask = blurMask(dilateMask(alphaMask(shape), spread), blur);
     QImage glow = solidFromMask(mask, color, opacity);
     return sourceOver(glow, base);
 }
 
-QImage applyInnerGlow(const QImage& input, const QVariantMap& params)
+QImage applyInnerGlow(const QImage& content, const QImage& shape,
+                      const QVariantMap& params)
 {
-    QImage base = toRgba(input);
+    QImage base = toRgba(content);
     QColor color = colorParam(params, QStringLiteral("color"), QColor("#FFFFFF"));
     float opacity = floatParam(params, QStringLiteral("opacity"), 0.45f);
     float blur = floatParam(params, QStringLiteral("blur"), 12.0f);
-    cv::Mat a = alphaMask(base);
+    cv::Mat a = alphaMask(shape);
     cv::Mat edge;
     cv::subtract(a, erodeMask(a, std::max(1, static_cast<int>(blur * 0.35f))), edge);
     edge = blurMask(edge, blur);
@@ -247,9 +257,10 @@ QImage applyInnerGlow(const QImage& input, const QVariantMap& params)
     return sourceOver(base, glow, QPainter::CompositionMode_Screen);
 }
 
-QImage applyInnerShadow(const QImage& input, const QVariantMap& params)
+QImage applyInnerShadow(const QImage& content, const QImage& shape,
+                        const QVariantMap& params)
 {
-    QImage base = toRgba(input);
+    QImage base = toRgba(content);
     QColor color = colorParam(params, QStringLiteral("color"), Qt::black);
     float opacity = floatParam(params, QStringLiteral("opacity"), 0.35f);
     float angle = floatParam(params, QStringLiteral("angle"), 120.0f) * float(M_PI) / 180.0f;
@@ -258,7 +269,7 @@ QImage applyInnerShadow(const QImage& input, const QVariantMap& params)
     int dx = static_cast<int>(std::round(-std::cos(angle) * distance));
     int dy = static_cast<int>(std::round(std::sin(angle) * distance));
 
-    cv::Mat a = alphaMask(base);
+    cv::Mat a = alphaMask(shape);
     cv::Mat shifted = offsetMask(a, dx, dy);
     cv::Mat inner;
     cv::subtract(a, shifted, inner);
@@ -268,16 +279,17 @@ QImage applyInnerShadow(const QImage& input, const QVariantMap& params)
     return sourceOver(base, shadow, QPainter::CompositionMode_Multiply);
 }
 
-QImage applyStroke(const QImage& input, const QVariantMap& params)
+QImage applyStroke(const QImage& content, const QImage& shape,
+                   const QVariantMap& params)
 {
-    QImage base = toRgba(input);
+    QImage base = toRgba(content);
     QColor color = colorParam(params, QStringLiteral("color"), Qt::white);
     float opacity = floatParam(params, QStringLiteral("opacity"), 1.0f);
     int size = std::max(0, intParam(params, QStringLiteral("size"), 3));
     QString position = stringParam(params, QStringLiteral("position"), QStringLiteral("outside"));
     if (size <= 0) return base;
 
-    cv::Mat a = alphaMask(base);
+    cv::Mat a = alphaMask(shape);
     cv::Mat mask;
     if (position == QLatin1String("inside")) {
         cv::subtract(a, erodeMask(a, size), mask);
@@ -293,17 +305,19 @@ QImage applyStroke(const QImage& input, const QVariantMap& params)
     return sourceOver(base, stroke);
 }
 
-QImage applyColorOverlay(const QImage& input, const QVariantMap& params)
+QImage applyColorOverlay(const QImage& content, const QImage& shape,
+                         const QVariantMap& params)
 {
     QColor color = colorParam(params, QStringLiteral("color"), QColor("#4C8DFF"));
     float opacity = floatParam(params, QStringLiteral("opacity"), 1.0f);
     QString blend = stringParam(params, QStringLiteral("blendMode"), QStringLiteral("normal"));
-    return clippedFill(input, QBrush(color), opacity, painterBlendMode(blend));
+    return clippedFill(content, shape, QBrush(color), opacity, painterBlendMode(blend));
 }
 
-QImage applyGradientOverlay(const QImage& input, const QVariantMap& params)
+QImage applyGradientOverlay(const QImage& content, const QImage& shape,
+                            const QVariantMap& params)
 {
-    QImage base = toRgba(input);
+    QImage base = toRgba(content);
     QColor start = colorParam(params, QStringLiteral("startColor"), QColor("#4C8DFF"));
     QColor end = colorParam(params, QStringLiteral("endColor"), QColor("#35D6FF"));
     float opacity = floatParam(params, QStringLiteral("opacity"), 1.0f);
@@ -316,7 +330,7 @@ QImage applyGradientOverlay(const QImage& input, const QVariantMap& params)
     grad.setColorAt(0.0, start);
     grad.setColorAt(1.0, end);
     QString blend = stringParam(params, QStringLiteral("blendMode"), QStringLiteral("normal"));
-    return clippedFill(base, QBrush(grad), opacity, painterBlendMode(blend));
+    return clippedFill(base, shape, QBrush(grad), opacity, painterBlendMode(blend));
 }
 } // namespace
 
@@ -327,18 +341,56 @@ QImage LayerEffect::apply(const QImage& input) const
     return applyEffect(input, type, params);
 }
 
+QImage LayerEffect::applyOver(const QImage& content, const QImage& shape) const
+{
+    if (!enabled)
+        return content;
+    return applyEffectOver(content, shape, type, params);
+}
+
+QImage LayerEffect::scaleAlpha(const QImage& image, float factor)
+{
+    const float f = std::clamp(factor, 0.0f, 1.0f);
+    if (image.isNull() || f >= 1.0f)
+        return image;
+    // RGBA8888 is straight alpha, so the colour channels stay put and only the
+    // coverage changes — the layer's pixels are not altered, just weighted.
+    QImage out = toRgba(image);
+    const int scale = static_cast<int>(std::lround(f * 255.0f));
+    const int w = out.width();
+    const int h = out.height();
+    for (int y = 0; y < h; ++y) {
+        uchar* row = out.scanLine(y);
+        for (int x = 0; x < w; ++x) {
+            uchar& a = row[x * 4 + 3];
+            a = static_cast<uchar>((a * scale + 127) / 255);
+        }
+    }
+    return out;
+}
+
 QImage LayerEffect::applyEffect(const QImage& input, const QString& type,
                                  const QVariantMap& params)
 {
-    if (type == QLatin1String("drop_shadow"))      return applyDropShadow(input, params);
-    if (type == QLatin1String("inner_shadow"))     return applyInnerShadow(input, params);
-    if (type == QLatin1String("stroke"))           return applyStroke(input, params);
-    if (type == QLatin1String("color_overlay"))    return applyColorOverlay(input, params);
-    if (type == QLatin1String("gradient_overlay")) return applyGradientOverlay(input, params);
-    if (type == QLatin1String("outer_glow"))       return applyOuterGlow(input, params);
-    if (type == QLatin1String("inner_glow"))       return applyInnerGlow(input, params);
+    // Content and shape coincide: the Fill-100% case.
+    return applyEffectOver(input, input, type, params);
+}
 
-    cv::Mat cvImg = ImageEngine::toCvMat(input);
+QImage LayerEffect::applyEffectOver(const QImage& content, const QImage& shape,
+                                     const QString& type, const QVariantMap& params)
+{
+    if (type == QLatin1String("drop_shadow"))      return applyDropShadow(content, shape, params);
+    if (type == QLatin1String("inner_shadow"))     return applyInnerShadow(content, shape, params);
+    if (type == QLatin1String("stroke"))           return applyStroke(content, shape, params);
+    if (type == QLatin1String("color_overlay"))    return applyColorOverlay(content, shape, params);
+    if (type == QLatin1String("gradient_overlay")) return applyGradientOverlay(content, shape, params);
+    if (type == QLatin1String("outer_glow"))       return applyOuterGlow(content, shape, params);
+    if (type == QLatin1String("inner_glow"))       return applyInnerGlow(content, shape, params);
+
+    // Filters and adjustment effects transform the layer's own pixels rather
+    // than adding anything around them, so they *are* content: they run before
+    // the content/shape split (applyEffectStack) and `shape` is unused here.
+    cv::Mat cvImg = ImageEngine::toCvMat(content);
     cv::Mat result;
 
     auto get = [&](const QString& key, double def = 0.0) -> double {
@@ -400,9 +452,9 @@ QImage LayerEffect::applyEffect(const QImage& input, const QString& type,
     else if (type == "remove_background")
         result = ImageEngine::removeBackground(cvImg);
     else
-        return input;
+        return content;
 
-    return result.empty() ? input : ImageEngine::toQImage(result);
+    return result.empty() ? content : ImageEngine::toQImage(result);
 }
 
 bool LayerEffect::isLayerStyle(const QString& type)

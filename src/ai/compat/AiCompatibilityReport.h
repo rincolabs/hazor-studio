@@ -159,6 +159,8 @@ struct AiCudaInfo {
     QString cudnnMajor;                // major from libcudnn soname
     QString gpuName;
     QString computeCapability;
+
+    QStringList missingLibraries;      // CUDA libraries the loader could not resolve
 };
 
 // One row of the modular runtime/provider requirement table (spec §7). Lets the

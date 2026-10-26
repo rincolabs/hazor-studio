@@ -42,4 +42,5 @@ private:
     const Document* m_cachedDoc = nullptr;
     uint64_t m_cachedGeneration = kInvalidGeneration;
     uint64_t m_cachedDisplayGeneration = 0;
+    uint64_t m_cachedChannelGeneration = 0;
 };

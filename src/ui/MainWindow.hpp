@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QMainWindow>
 #include <QTabWidget>
 #include <QAction>
@@ -10,10 +11,13 @@ class QMenu;
 #include <cstdint>
 #include <functional>
 #include <QPointer>
+#include <QHash>
 #include "core/Document.hpp"
 #include "controller/ImageController.hpp"
 #include "tools/ToolCatalog.hpp"
 #include "agent/AgentConfig.hpp"
+#include "smartobject/SmartObjectData.hpp"
+#include "ui/WorkspaceManager.hpp"
 
 class QResizeEvent;
 class QEvent;
@@ -23,12 +27,18 @@ class QDragLeaveEvent;
 class QDropEvent;
 
 class CanvasView;
+class DocumentContainer;
+class RawDevelopWindow;
+class RawSession;
 class LayerPanel;
+// Defined in ui/LayerPanel.hpp; opaque here so this header stays light.
+enum class LayerSmartObjectCommand;
 class PropertiesPanel;
 class HistogramPanel;
 class BrushDynamicsPanel;
 class BrushPanel;
 class CustomShapesPanel;
+class ChannelsPanel;
 class HistoryPanel;
 class TitleBar;
 class QLabel;
@@ -44,6 +54,7 @@ class AppSettingsDialog;
 class ProgressDialog;
 class QTimer;
 class QDockWidget;
+class HomeWorkspace;
 
 class ImageController;
 class AgentController;
@@ -57,8 +68,12 @@ class ColorEngine;
 class GenerativeFillDialog;
 class AiObjectSelectionController;
 struct AiCompatibilityMessage;
+struct DocumentSettings;
 
-class MainWindow : public QMainWindow {
+// WorkspaceHost is implemented here rather than inside WorkspaceManager
+// because only MainWindow knows that the live dock layout is not always the
+// one that belongs to the workspace (see setHomeDockMode).
+class MainWindow : public QMainWindow, public WorkspaceHost {
     Q_OBJECT
 
 public:
@@ -76,10 +91,21 @@ public:
     bool isCustomShapeIconPreloadFinished() const { return m_customShapeIconPreloadFinished; }
     void openBrushImportDialog(const QStringList& files = {});
 
-    // Open one or more Hazor project files (*.hzs) as new tabs. Used when the OS
+    // Open one or more Hazor project files (*.hazor, or legacy *.hzs) as new
+    // tabs. Used when the OS
     // launches the app with file arguments (extension association) or via a
     // QFileOpenEvent (macOS "Open With"). Returns the number of files opened.
     int openProjectFiles(const QStringList& files);
+
+    // Shows the window in the geometry the previous session left behind, or
+    // maximized on a first run, and arms workspace autosave. main.cpp calls
+    // this instead of show()/showMaximized().
+    void showWithRestoredWorkspace();
+
+    // ── WorkspaceHost ────────────────────────────────────────────────
+    QByteArray captureWorkspaceState() const override;
+    bool applyWorkspaceState(const QByteArray& state) override;
+    void applyDefaultWorkspaceState() override;
 
 signals:
     void customShapeIconPreloadFinished();
@@ -90,6 +116,7 @@ private slots:
     void onSaveFile();
     void onSaveAsFile();
     void onExportFile();
+    void onExportNode(int flatIndex);
     void onImportImage();
     void onEditDocument();
     void onAddLayer();
@@ -180,9 +207,23 @@ private slots:
     // Restore every panel to its default position: the right-side panels back
     // into the default two-group split (Histogram hidden until Window menu),
     // and the on-demand floating panels (Brush Settings, Brushes, Generative
-    // Fill) back to their hidden floating state. Wired to Window → Reset Panel
-    // Layout.
+    // Fill) back to their hidden floating state. This is the layout a first
+    // run starts with and the fallback whenever a stored workspace cannot be
+    // restored; Window → Workspaces → Reset Workspace goes through
+    // WorkspaceManager so the reset is persisted too.
     void resetDockLayout();
+
+    // ── Window → Workspaces ──────────────────────────────────────────
+    // Rebuilt on every aboutToShow so the preset list, the check mark on the
+    // active one and the enablement of the preset-only commands are never
+    // stale.
+    void rebuildWorkspacesMenu();
+    void onLoadWorkspace(const QString& name);
+    void onSaveWorkspace();
+    void onSaveWorkspaceAs();
+    void onRenameWorkspace();
+    void onDeleteWorkspace();
+    void onResetWorkspace();
 
     void onTextFontChanged(const QFont& font);
     void onTextSizeChanged(int size);
@@ -267,8 +308,33 @@ private:
     struct DocumentTab {
         QString name;
         QString currentProjectPath;
+        // Absolute path of the file this tab was opened from (project, RAW or
+        // plain image) — empty for untitled/new documents. Used by Open Recent
+        // to detect an already-open file and activate its tab instead of
+        // reopening it. Distinct from currentProjectPath, which only tracks the
+        // .hazor Save/Save As target.
+        QString sourcePath;
         bool isDirty = false;
-        std::unique_ptr<Document> document;
+        // The .hazor this tab's document belongs to. Owned by ContainerRegistry;
+        // the tab only borrows a reference, which is what keeps the container
+        // (and every embedded document in it) alive while any of its tabs is
+        // open — and keeps it alive after they all close, if a Linked
+        // reference from another project still points at it.
+        std::shared_ptr<DocumentContainer> container;
+        // Shared, not unique: a project tab's document is also held by the
+        // container, so neither side may own it exclusively. An undo in the
+        // parent that removes a Smart Object instance must not invalidate the
+        // child tab, and closing the child tab must not destroy a document the
+        // file still has to save — refcount gives both.
+        //
+        // For a tab editing a Smart Object's CONTENTS this is the container's
+        // open edit session: an isolated working copy, not the stored document
+        // (DocumentContainer::beginEditSession). Ctrl+S commits it; closing the
+        // tab discards it.
+        std::shared_ptr<Document> document;
+        // Which document of `container` this tab edits. Equals
+        // container->rootId() for an ordinary project tab.
+        SmartObjectDocId docId;
         QWidget* page = nullptr;
         CanvasView* canvas = nullptr;
         std::unique_ptr<ImageController> controller;
@@ -278,13 +344,31 @@ private:
     void refreshLayerPanel();
     void refreshPropertiesPanel();
 
+    // Drag-and-drop of image file(s): when a document is already open, asks
+    // whether to open them as a new document or insert them into the active
+    // canvas as new layers. Cancel discards the drop.
+    enum class DroppedImageAction { OpenAsNewDocument, InsertIntoCanvas, Cancel };
+    DroppedImageAction askDroppedImageAction();
+    // Opens dropped image file(s) directly as a new document: reuses the same
+    // color-management-aware open pipeline as Open Image (prepareImageForOpenWithDialogs),
+    // then imports every path as a layer via ImageController::importExternalImages.
+    // Returns false if the user canceled before a tab was created.
+    bool openDroppedImagesAsNewDocument(const QStringList& paths);
+
+    // Shared tail of onExportFile/onExportNode: locks the save dialog to
+    // `format`, confirms overwrite, then runs `save` off the UI thread and
+    // reports the result. `suggestedBaseName` seeds the save dialog's file
+    // name (empty keeps the OS default).
+    void runImageExport(const QString& format, const QString& suggestedBaseName,
+                        std::function<bool(const QString& path, QString* errorMessage)> save);
+
     // Structural layer operations shared by the Layer menu actions and the
     // ShortcutManager callbacks (single source of truth for the behaviour).
     void refreshLayersUi();         // canvas sync + panel/properties/menu refresh
     void groupSelectedLayers();     // Ctrl+G
     void ungroupSelectedLayers();   // Ctrl+Shift+G
     void arrangeActiveLayer(int kind); // 0=forward 1=backward 2=front 3=back
-    void toggleActiveClipping();    // Ctrl+Alt+G (adjustment clipping)
+    void toggleActiveClipping();    // Ctrl+Alt+G (Create/Release Clipping Mask)
     // Applies a numeric Transform-panel edit (W/H/X/Y/rotation) to the active
     // layer through the centralized transform path. `field` is a
     // PropertiesPanel::TransformField; `value` is px or degrees.
@@ -295,10 +379,23 @@ private:
     void refreshPropertiesDocumentPage();
     // Document-page canvas edits — all routed through the existing resize logic.
     void applyCanvasSizeEdit(int field, double value);   // resize canvas (no resample)
-    void applyCanvasResolutionEdit(double dpi);
     void applyCanvasOrientation(bool portrait);          // swap W/H (resize canvas)
     void refreshHistoryPanel();
+    // Points the Channels panel at the active tab's controller AND canvas
+    // (the canvas supplies the composite its RGB/R/G/B thumbnails need).
+    void syncChannelsPanel();
+    // Channels commands that need more than one document: Split/Merge
+    // Channels create and consume tabs, Duplicate Channel can target
+    // another open document, and Save/Load Selection can cross documents.
+    void splitChannelsIntoDocuments();
+    void mergeChannelsFromDocuments();
+    void duplicateChannelWithDialog(int channelIndex);
+    std::vector<QString> openDocumentLabels() const;
+    void showSaveSelectionDialog();
+    void showLoadSelectionDialog();
     void updateStatusFromDocument();
+    QString documentFileName(const DocumentTab& tab) const;
+    QString documentTabTitle(const DocumentTab& tab) const;
     void updateDirtyUi();
     void markActiveTabDirty(bool dirty = true);
     bool ensureTabCanBeDiscardedOrSaved(int index);
@@ -343,14 +440,161 @@ private:
     void execToolDialog(class ToolDialog* dlg, const QString& toolName,
                          const QVariantMap& defaultParams);
 
+    // Opens Settings on `page`, modeless and single-instance, calling
+    // `onFinished` with the dialog's result when it closes. Modeless because the
+    // Interface page hosts a colour picker (guide colour) whose eyedropper has to
+    // click the canvas — exec() would swallow every one of those clicks. Follows
+    // execToolDialog's pattern: Qt::Tool + show() + deleteLater.
+    void showAppSettings(int page, std::function<void(int)> onFinished = {});
+
+    void showNewDocumentDialog(const DocumentSettings* initialSettings = nullptr);
+    void createDocumentFromSettings(const DocumentSettings& settings);
+    void onHomeTemplateRequested(const QString& name, int width, int height);
+    int tabWidgetIndexForDocument(int documentIndex) const;
+    int documentIndexForTabWidget(int tabWidgetIndex) const;
+    void onTabMoved(int from, int to);
+    void syncDocumentTabOrder();
+    void setHomeDockMode(bool homeActive);
+
     DocumentTab& createTab(const QString& name, const QSize& size);
+    // Opens an existing document of `container` in a new tab, sharing it rather
+    // than copying it (Smart Object "Edit Contents", and the tail of createTab).
+    DocumentTab& createTabForDocument(const QString& name,
+                                      const std::shared_ptr<DocumentContainer>& container,
+                                      const SmartObjectDocId& docId);
+    // Shared tail of onOpenFile() and Open Recent: dispatches `path` to the
+    // project (.hazor), RAW or plain-image open flow by extension. Centralizing
+    // this means both entry points register successful opens with
+    // RecentFilesManager the same way and never grow a parallel open path.
+    void openPathAsNewTab(const QString& path);
+    // Opens `path` as a plain image document (imageCodecRegistry() + the
+    // colour-management dialogs), off the UI thread. Extracted from
+    // onOpenFile() so Open Recent can reuse it verbatim.
+    void openImageFileAsNewTab(const QString& path);
+    // RAW extensions (RawEngine::isSupportedExtension()) are diverted here from
+    // onOpenFile() instead of going through imageCodecRegistry(): opens `path`
+    // off the UI thread with RawDevelopParams::cameraDefaults() and creates a
+    // new tab whose single layer carries RawLayerData (Fase 5), so it stays
+    // non-destructively re-revealable instead of a flattened import.
+    void openRawFileAsNewTab(const QString& path);
+    // .psd/.psb extensions are diverted here from onOpenFile(): parses the
+    // file with the psd library and converts it to a native document via
+    // PsdImportService, off the UI thread, behind an "Importing PSD" /
+    // "Converting…" progress dialog. Shows the compatibility report
+    // afterwards when PsdImportResult::warnings is non-empty.
+    void openPsdFileAsNewTab(const QString& path);
+    // File > Open Recent item handler: activates the tab already showing
+    // `path` if there is one, offers to remove `path` from the list if it no
+    // longer exists, otherwise opens it via openPathAsNewTab().
+    void onOpenRecentFile(const QString& path);
+    // Rebuilds the Open Recent submenu from RecentFilesManager::files() —
+    // connected to the submenu's aboutToShow() so it is always current.
+    void rebuildOpenRecentMenu();
+    // Opens the independent Hazor Develop window for the RAW Layer at
+    // `flatIndex`, or raises the one already open for it. Shared by every
+    // place a RAW Layer can come into being:
+    // LayerPanel::rawEditRequested (double-click), openRawFileAsNewTab(), and
+    // the drag-and-drop paths that land a RAW file via
+    // ImageController::importExternalImages()'s outRawLayerFlatIndices.
+    // `session`, when non-null, is an already-decoded RawSession for that
+    // layer's file, handed straight to the window so it does not decode the
+    // file a second time (openRawFileAsNewTab() has one by the time it gets
+    // here). See RawDevelopWindow's constructor.
+    void openHazorDevelop(int flatIndex, std::unique_ptr<RawSession> session = nullptr);
+    // Current flat index of `node` in `doc`, or -1 if it is no longer there.
+    // Needed because a non-modal window (Hazor Develop) outlives the index it
+    // was opened with, and may be applied while another tab is active.
+    // Index of the tab already editing (container, docId), or -1. One tab per
+    // document: a second one would mean two CommandHistories over the same
+    // Document.
+    int tabIndexForDocument(const DocumentContainer* container,
+                            const SmartObjectDocId& docId) const;
+    // Tab that owns `container`'s file name and dirty state (its root
+    // document's tab), or `fallbackIndex` when that tab is not open.
+    int rootTabIndexForContainer(const DocumentContainer* container,
+                                 int fallbackIndex) const;
+    // Tears one tab down (GL cleanup, panel detach, erase) with no save prompt
+    // and no companion-tab handling — onTabCloseRequested() owns those.
+    // Erasing the tab does NOT destroy its Document: the container holds it too.
+    void closeTabAt(int index);
+
+    // Ctrl+S on an embedded Smart Object's tab: commits the content (refreshes
+    // every instance of it) and marks the project unsaved, WITHOUT writing the
+    // .hazor. Embedded content reaches the disk when the project itself is saved
+    // — see saveProjectForTab().
+    bool commitEmbeddedContent(int index);
+    // Marks a container's root tab unsaved whichever tab is active. Used when a
+    // change reaches a project indirectly: committed embedded content, or a
+    // Smart Object render that changed a document's stored representation.
+    void markContainerRootDirty(const std::shared_ptr<DocumentContainer>& container);
+
+    // ── Smart Objects ───────────────────────────────────────────────────
+    // Opens (or reactivates) the tab that edits the Smart Object at
+    // `flatIndex`. Embedded content becomes a tab over the container's own
+    // document; a Linked one opens its .hazor as an ordinary project tab. Mirrors
+    // openHazorDevelop()'s wiring — identity by node, not by flat index.
+    void editSmartObjectContents(int flatIndex);
+    void convertSelectionToSmartObject();
+    void placeSmartObject(bool linked);
+    // Single entry point for the Layers-panel context menu: selects the layer
+    // the menu was opened on, then runs the same slot the Layer ▸ Smart Objects
+    // action runs. Nothing is reimplemented here.
+    void runSmartObjectCommand(int flatIndex, LayerSmartObjectCommand command);
+    void newSmartObjectViaCopy();
+    void replaceActiveSmartObjectContents();
+    void relinkActiveSmartObject();
+    void updateActiveSmartObjectContent();
+    void convertActiveSmartObjectStorage(bool toLinked);
+    // Coalesces "something changed" into one refresh pass. A Smart Object
+    // re-render is a full document composite, so a brush stroke on embedded
+    // content must not schedule one per dab.
+    void scheduleSmartObjectRefresh();
+    void flushSmartObjectRefresh();
+    void onSmartObjectRenderCommitted(const std::shared_ptr<DocumentContainer>& container,
+                                      const QStringList& affectedDocuments,
+                                      bool marksDirty);
+    // Controller of the tab that owns `container`'s cascade (its root
+    // document's tab), or null.
+    ImageController* rootControllerForContainer(const DocumentContainer* container) const;
+    static int flatIndexOfNodeIn(const Document* doc, const LayerTreeNode* node);
     CanvasView* activeCanvas() const;
     Document* activeDocument() const;
     ImageController* activeController() const;
 
     QTabWidget* m_tabWidget = nullptr;
+    HomeWorkspace* m_homeWorkspace = nullptr;
     std::vector<DocumentTab> m_tabs;
+    bool m_restoringHomeTab = false;
+    // In-memory only: entering Home temporarily hides the editing docks, while
+    // this snapshot preserves their visibility, tab groups, sizes and floating
+    // geometry for the next document tab. It is never written to QSettings
+    // directly — captureWorkspaceState() reads it so that a workspace saved
+    // from the Home tab still describes the editing layout.
+    QByteArray m_documentDockState;
+    bool m_homeDockMode = false;
+
+    WorkspaceManager* m_workspace = nullptr;
+    QMenu* m_workspacesMenu = nullptr;
+
+    // ── Smart Object refresh debounce (see scheduleSmartObjectRefresh) ──
+    QTimer* m_smartObjectRefreshTimer = nullptr;
+    QAction* m_smartObjectConvertAction = nullptr;
+    QAction* m_smartObjectPlaceEmbeddedAction = nullptr;
+    QAction* m_smartObjectPlaceLinkedAction = nullptr;
+    QAction* m_smartObjectViaCopyAction = nullptr;
+    QAction* m_smartObjectReplaceAction = nullptr;
+    QAction* m_smartObjectEditAction = nullptr;
+    QAction* m_smartObjectRelinkAction = nullptr;
+    QAction* m_smartObjectUpdateAction = nullptr;
+    QAction* m_smartObjectToEmbeddedAction = nullptr;
+    QAction* m_smartObjectToLinkedAction = nullptr;
+    QMenu* m_smartObjectMenu = nullptr;
     int m_activeTabIndex = -1;
+
+    // Open Hazor Develop windows, keyed by the RAW layer's node. Entries are
+    // removed by each window's own destroyed() signal, so a key is only ever
+    // compared against a live node, never dereferenced.
+    QHash<const LayerTreeNode*, RawDevelopWindow*> m_developWindows;
 
     Document* m_doc = nullptr;
     CanvasView* m_canvas = nullptr;
@@ -359,6 +603,7 @@ private:
     LayerPanel* m_layerPanel = nullptr;
     PropertiesPanel* m_propsPanel = nullptr;
     HistogramPanel* m_histogramPanel = nullptr;
+    ChannelsPanel* m_channelsPanel = nullptr;
     HistoryPanel* m_historyPanel = nullptr;
     ToolOptionsBar* m_toolBar = nullptr;
     ToolsPanel* m_toolsPanel = nullptr;
@@ -396,6 +641,7 @@ private:
     QDockWidget* m_propsDock = nullptr;
     QDockWidget* m_colorDock = nullptr;
     QDockWidget* m_swatchesDock = nullptr;
+    QDockWidget* m_channelsDock = nullptr;
     QDockWidget* m_historyDock = nullptr;
     QDockWidget* m_brushSettingsDock = nullptr;
 
@@ -422,6 +668,17 @@ private:
     uint64_t m_activeProgressJobId = 0;
     QPointer<ImageController> m_progressController;
 
+    // Dialogs that used to run under exec() and are now modeless, so that the
+    // colour pickers they host can reach the canvas with the eyedropper. Being
+    // modeless leaves their menu item clickable while one is open, so each gets a
+    // single-instance guard: a second invocation raises the open dialog.
+    // m_menuColorDlg covers the colour-only commands (Fill Layer, New Solid
+    // Color Layer).
+    QPointer<QDialog> m_menuColorDlg;
+    QPointer<class AppSettingsDialog> m_settingsDlg;
+    QPointer<QDialog> m_canvasSizeDlg;
+    QPointer<QDialog> m_newDocumentDlg;
+
     // AI Select loading dialog (separate from the ImageController-driven progress
     // above; cancellation routes to the AI controller, not a long-operation job).
     ProgressDialog* m_aiLoadingDialog = nullptr;
@@ -429,6 +686,7 @@ private:
     bool m_aiSelectBusy = false;
     QString m_aiLoadingMessage;
 
+    QMenu* m_openRecentMenu = nullptr;
     QAction* m_importAction = nullptr;
     QAction* m_importBrushesAction = nullptr;
     QAction* m_brushPressureAction = nullptr;
@@ -442,6 +700,9 @@ private:
     QAction* m_mergeLayersAction = nullptr;
     QAction* m_flattenImageAction = nullptr;
     QAction* m_rasterizeLayerAction = nullptr;
+    // Layer ▸ Create/Release Clipping Mask — one action whose label follows the
+    // selection (see updateLayerMenuState).
+    QAction* m_clippingMaskAction = nullptr;
     QAction* m_layerStylesAction = nullptr;
     QAction* m_flipHorizontalAction = nullptr;
     QAction* m_flipVerticalAction = nullptr;
@@ -489,5 +750,25 @@ private:
     // Guards the selectionChanged-driven base invalidation while the refine
     // itself is mutating the selection.
     bool m_inSelectRefine = false;
+
+    // ── Dock title bars ──────────────────────────────────────────────────────
+    // A dock tabified inside the main window already shows its name on the tab,
+    // so Qt's own title bar under it only repeats the information. Collapse it
+    // there and keep it everywhere else: for a floating panel the title bar is
+    // the only handle to move or close it (on X11/Wayland Qt draws no native
+    // frame for dock windows).
+    // Every panel dock that participates in this, in one place.
+    QList<QDockWidget*> panelDocks() const;
+    bool isDockTabbedInMainWindow(QDockWidget* dock) const;
     void updateDockTitleBar(QDockWidget* dock);
+    void refreshDockTitleBars();
+    // restoreState() rebuilds Qt's private dock tab bars and group windows,
+    // and those fresh widgets do not reliably inherit the application
+    // stylesheet. Every caller of restoreState() must queue this.
+    void scheduleRestoredDockChromeRefresh();
+    // Deferred + coalesced, and never swaps title bars mid-drag.
+    void scheduleDockTitleBarRefresh();
+    // Subscribes a dock to the signals that can change its tabbed state.
+    void watchDockTitleBar(QDockWidget* dock);
+    bool m_dockTitleBarRefreshScheduled = false;
 };

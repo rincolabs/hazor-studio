@@ -2,6 +2,7 @@
 
 #include "core/ColorEngine.hpp"
 #include "core/SwatchManager.hpp"
+#include "ui/AppMessageDialog.hpp"
 #include "ui/IconUtils.hpp"
 #include "ui/colorpicker/ColorPickerDialog.hpp"
 #include "theme/Theme.hpp"
@@ -16,7 +17,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
-#include <QMessageBox>
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
@@ -485,7 +485,7 @@ void SwatchesPanel::editColorItem(QListWidgetItem* item)
                 SwatchManager::instance()->setColor(collectionId, colorId, color, name);
             });
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 void SwatchesPanel::renameColorItem(QListWidgetItem* item)
@@ -567,7 +567,7 @@ void SwatchesPanel::onGridContextMenu(const QPoint& pos)
         connect(dlg, &ColorPickerDialog::colorAccepted, this,
                 [this](const QColor& color) { addColorToCurrent(color); });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     } else if (chosen == editAct) {
         editColorItem(item);
     } else if (chosen == renameAct) {
@@ -636,8 +636,7 @@ void SwatchesPanel::onDeleteSelected()
     const QString question = isFolder
         ? tr("Delete folder “%1” and all of its contents?").arg(node->name)
         : tr("Delete palette “%1”?").arg(node->name);
-    if (QMessageBox::question(this, tr("Delete"), question,
-                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
+    if (AppMessageDialog::confirm(this, tr("Delete"), question)) {
         SwatchManager::instance()->removeNode(id);
     }
 }

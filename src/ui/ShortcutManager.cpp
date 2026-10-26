@@ -148,6 +148,15 @@ void ShortcutManager::buildDefaults()
     add("select.border",        tr("Selection"), tr("&Border"),              {}, ShortcutScope::Canvas);
     add("select.smooth",        tr("Selection"), tr("&Smooth"),              {}, ShortcutScope::Canvas);
 
+    // ── Channels ──
+    // The edit target, so GlobalSafe: it has to work with the canvas or a panel
+    // focused (never while typing), the same scope the layer-targeting actions
+    // use. Ctrl+2 continues the Ctrl+0/Ctrl+1 view keys above.
+    add("channel.select.composite", tr("Channels"), tr("Select &Composite Channel"), QKeySequence(Qt::CTRL | Qt::Key_2), ShortcutScope::GlobalSafe);
+    add("channel.select.red",       tr("Channels"), tr("Select &Red Channel"),       QKeySequence(Qt::CTRL | Qt::Key_3), ShortcutScope::GlobalSafe);
+    add("channel.select.green",     tr("Channels"), tr("Select &Green Channel"),     QKeySequence(Qt::CTRL | Qt::Key_4), ShortcutScope::GlobalSafe);
+    add("channel.select.blue",      tr("Channels"), tr("Select &Blue Channel"),      QKeySequence(Qt::CTRL | Qt::Key_5), ShortcutScope::GlobalSafe);
+
     // ── Tools ──
     add("tool.move",            tr("Tools"), tr("&Move Tool"),             QKeySequence(Qt::Key_V),                 ShortcutScope::Tool);
     add("tool.brush",           tr("Tools"), tr("&Brush Tool"),            QKeySequence(Qt::Key_B),                 ShortcutScope::Tool);

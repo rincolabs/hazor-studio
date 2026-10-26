@@ -8,6 +8,7 @@
 #include "brush/BrushPresetManager.hpp"
 #include "gradient/GradientPresetManager.hpp"
 #include "gradient/GradientRenderer.hpp"
+#include "renderer/BlendRules.hpp"
 #include "ui/gradient/GradientEditorDialog.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -1764,15 +1765,28 @@ QWidget* ToolOptionsBar::createTextPage()
     lay->addWidget(m_textColorBtn);
     connect(m_textColorBtn, &QPushButton::clicked, this, [this]() {
         if (m_textColorDlg) { m_textColorDlg->raise(); m_textColorDlg->activateWindow(); return; }
-        auto* dlg = new ColorPickerDialog(m_foreground, ColorPickerMode::Foreground, this);
+        auto* dlg = new ColorPickerDialog(m_textColor, ColorPickerMode::Foreground, this);
         m_textColorDlg = dlg;
+        // The selected text follows the dialog while it is open (including its
+        // eyedropper), so the user judges the colour on the canvas instead of on
+        // a swatch. Cancel re-emits the original colour through the same signal;
+        // the `keep` verdict below turns the whole session into one undo step.
+        connect(dlg, &ColorPickerDialog::colorPreviewChanged, this, [this](const QColor& c) {
+            m_textColor = c;
+            m_textColorBtn->setStyleSheet(colorBtnStyle(c));
+            emit textColorPreviewChanged(c);
+        });
         connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& c) {
+            m_textColor = c;
             m_textColorBtn->setStyleSheet(colorBtnStyle(c));
             emit textColorChanged(c);
             emit foregroundColorChanged(c);
         });
+        connect(dlg, &QDialog::finished, this, [this](int result) {
+            emit textColorPreviewFinished(result == QDialog::Accepted);
+        });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
 
     lay->addWidget(new ToolBarSeparator(this));
@@ -1848,7 +1862,7 @@ bool ToolOptionsBar::textStrikethrough() const
 
 QColor ToolOptionsBar::textColor() const
 {
-    return m_foreground;
+    return m_textColor;
 }
 
 int ToolOptionsBar::textAlign() const
@@ -1916,6 +1930,8 @@ void ToolOptionsBar::setTextStrikethrough(bool strikethrough)
 
 void ToolOptionsBar::setTextColor(const QColor& color)
 {
+    if (color.isValid())
+        m_textColor = color;
     if (!m_textColorBtn) return;
     m_textColorBtn->blockSignals(true);
     m_textColorBtn->setStyleSheet(colorBtnStyle(color));
@@ -2342,7 +2358,7 @@ QWidget* ToolOptionsBar::createFillBucketPage()
             emit fillBucketColorChanged(c);
         });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
 
     return w;
@@ -2391,13 +2407,18 @@ QWidget* ToolOptionsBar::createGradientPage()
 
     lay->addWidget(new QLabel(tr("Mode:")));
     m_gradientBlendModeCombo = new QComboBox(this);
-    m_gradientBlendModeCombo->addItems({
-        tr("Normal"), tr("Multiply"), tr("Screen"), tr("Overlay"),
-        tr("Darken"), tr("Lighten"), tr("Color Dodge"), tr("Color Burn"),
-        tr("Hard Light"), tr("Soft Light"), tr("Difference"), tr("Exclusion"),
-        tr("Hue"), tr("Saturation"), tr("Color"), tr("Luminosity")
-    });
-    m_gradientBlendModeCombo->setFixedWidth(118);
+    // Same grouped picker as the layer panel (renderer/BlendRules.hpp); the
+    // BlendMode value rides in the item data, not in the row index.
+    for (const auto& e : blend::pickerEntries()) {
+        if (!e.label) {
+            m_gradientBlendModeCombo->insertSeparator(m_gradientBlendModeCombo->count());
+            continue;
+        }
+        m_gradientBlendModeCombo->addItem(tr(e.label), static_cast<int>(e.mode));
+    }
+    // Wider than the other tool combos: the grouped picker carries longer
+    // labels ("Linear Dodge (Add)").
+    m_gradientBlendModeCombo->setFixedWidth(140);
     lay->addWidget(m_gradientBlendModeCombo);
 
     lay->addWidget(new ToolBarSeparator(this));
@@ -2436,7 +2457,10 @@ QWidget* ToolOptionsBar::createGradientPage()
         emit gradientDefinitionChanged(m_gradientDefinition);
     });
     connect(m_gradientBlendModeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &ToolOptionsBar::gradientBlendModeChanged);
+            this, [this](int index) {
+        const QVariant mode = m_gradientBlendModeCombo->itemData(index);
+        if (mode.isValid()) emit gradientBlendModeChanged(mode.toInt());
+    });
     connect(m_gradientOpacityInput, &ScrubbableValueInput::valueChanged, this, [this](double value) {
         emit gradientOpacityChanged(scrubInt(value));
     });
@@ -2552,7 +2576,7 @@ void ToolOptionsBar::pickColor()
         emit foregroundColorChanged(c);
     });
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 QWidget* ToolOptionsBar::createEyedropperPage()
@@ -2599,6 +2623,7 @@ void ToolOptionsBar::setForegroundColor(const QColor& color)
 {
     m_foreground = color;
     // if (m_colorBtn) m_colorBtn->setStyleSheet(colorBtnStyle(color));
+    m_textColor = color;
     if (m_textColorBtn) m_textColorBtn->setStyleSheet(colorBtnStyle(color));
     if (m_fillColorBtn) m_fillColorBtn->setStyleSheet(colorBtnStyle(color));
     m_shapeFillColor = color;
@@ -2781,9 +2806,23 @@ void ToolOptionsBar::openGradientEditor()
     if (!m_gradientPresetManager)
         return;
 
-    GradientEditorDialog dialog(m_gradientPresetManager, m_gradientDefinition, this);
-    if (dialog.exec() == QDialog::Accepted)
-        setGradientDefinition(dialog.gradient());
+    if (m_gradientEditorDlg) {
+        m_gradientEditorDlg->raise();
+        m_gradientEditorDlg->activateWindow();
+        return;
+    }
+
+    auto* dialog = new GradientEditorDialog(m_gradientPresetManager,
+                                            m_gradientDefinition, this);
+    m_gradientEditorDlg = dialog;
+    connect(dialog, &QDialog::accepted, this, [this, dialog]() {
+        setGradientDefinition(dialog->gradient());
+    });
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowFlags(dialog->windowFlags() | Qt::Tool);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 QWidget* ToolOptionsBar::createShapePage()
@@ -2899,14 +2938,26 @@ QWidget* ToolOptionsBar::createShapePage()
         if (m_shapeFillDlg) { m_shapeFillDlg->raise(); m_shapeFillDlg->activateWindow(); return; }
         auto* dlg = new ColorPickerDialog(m_shapeFillColor, ColorPickerMode::Foreground, this);
         m_shapeFillDlg = dlg;
+        // A selected shape layer follows the dialog while it is open; Cancel
+        // re-emits the original colour through the same signal, and the `keep`
+        // verdict turns the whole session into one undo step.
+        connect(dlg, &ColorPickerDialog::colorPreviewChanged, this, [this](const QColor& c) {
+            if (m_shapeFillCb && !m_shapeFillCb->isChecked()) return;
+            m_shapeFillColor = c;
+            m_shapeFillColorBtn->setStyleSheet(colorBtnStyle(c));
+            emit shapeFillColorPreviewChanged(c);
+        });
         connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& c) {
             if (m_shapeFillCb && !m_shapeFillCb->isChecked()) return;
             m_shapeFillColor = c;
             m_shapeFillColorBtn->setStyleSheet(colorBtnStyle(c));
             emit shapeFillColorChanged(c);
         });
+        connect(dlg, &QDialog::finished, this, [this](int result) {
+            emit shapeColorPreviewFinished(result == QDialog::Accepted);
+        });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
 
     connect(m_shapeStrokeColorBtn, &QPushButton::clicked, this, [this]() {
@@ -2914,14 +2965,23 @@ QWidget* ToolOptionsBar::createShapePage()
         if (m_shapeStrokeDlg) { m_shapeStrokeDlg->raise(); m_shapeStrokeDlg->activateWindow(); return; }
         auto* dlg = new ColorPickerDialog(m_shapeStrokeColor, ColorPickerMode::Foreground, this);
         m_shapeStrokeDlg = dlg;
+        connect(dlg, &ColorPickerDialog::colorPreviewChanged, this, [this](const QColor& c) {
+            if (m_shapeStrokeCb && !m_shapeStrokeCb->isChecked()) return;
+            m_shapeStrokeColor = c;
+            m_shapeStrokeColorBtn->setStyleSheet(colorBtnStyle(c));
+            emit shapeStrokeColorPreviewChanged(c);
+        });
         connect(dlg, &ColorPickerDialog::colorAccepted, this, [this](const QColor& c) {
             if (m_shapeStrokeCb && !m_shapeStrokeCb->isChecked()) return;
             m_shapeStrokeColor = c;
             m_shapeStrokeColorBtn->setStyleSheet(colorBtnStyle(c));
             emit shapeStrokeColorChanged(c);
         });
+        connect(dlg, &QDialog::finished, this, [this](int result) {
+            emit shapeColorPreviewFinished(result == QDialog::Accepted);
+        });
         dlg->setAttribute(Qt::WA_DeleteOnClose);
-        dlg->open();
+        dlg->showModeless();
     });
 
     connect(m_shapeStrokeWidthSlider, &ScrubbableValueInput::valueChanged, this, [this](double v) {

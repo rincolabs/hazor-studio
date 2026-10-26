@@ -48,6 +48,13 @@ void GPUViewport::renderSelectionOverlay(const RenderParams& p,
         !m_selectProg || !m_selectProg->isLinked())
         return;
 
+    // In Quick Mask the selection IS the overlay the channel view already
+    // draws over the whole canvas (renderer/ChannelView.hpp), at the
+    // configured colour and opacity. Marching ants on top of it would double
+    // the feedback and hide the partial coverage the overlay exists to show.
+    if (p.doc->quickMask.active)
+        return;
+
     if (m_selectNeedsUpload || !m_selectMaskTexture)
         uploadSelectionTexture(p);
 

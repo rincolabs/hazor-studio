@@ -5,16 +5,19 @@
 #include <QPointF>
 #include <QColor>
 #include <QSize>
+#include <QHash>
 #include <QStringList>
 #include <memory>
 #include <string>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <atomic>
 #include "core/Document.hpp"
 #include "core/Clipboard.hpp"
 #include "core/LayerEffect.hpp"
+#include "controller/ChannelCommands.hpp"
 #include "controller/CommandHistory.hpp"
 #include "text/TextTypes.hpp"
 #include "core/ShapeTypes.hpp"
@@ -24,11 +27,19 @@
 #include "color/ColorProfile.hpp"
 #include "ai/AiRemoveTypes.hpp"
 #include "ai/upscale/UpscaleTypes.hpp"
+#include "raw/RawLayerData.hpp"
+#include "smartobject/SmartObjectRenderService.hpp"
 
 namespace cv { class Mat; }
 namespace nlohmann { class json; }
 class ImageGenProvider;
 class UpscaleService;
+class DocumentContainer;
+class RawDevelopService;
+class RawDevelopParams;
+class RawSession;
+class LayerTreeNode;
+struct RawDevelopResult;
 struct InpaintResult;
 struct InpaintError;
 struct GradientApplication;
@@ -80,11 +91,95 @@ public:
     Document* document() const { return m_doc; }
     CommandHistory& history() { return m_history; }
 
+    // ── Smart Objects ────────────────────────────────────────────────────
+    // The .hazor this controller's document belongs to, and which document of it
+    // this controller edits. Needed to resolve a Smart Object's docId; the
+    // container is shared (never owned) so the controller cannot outlive-dangle
+    // on it.
+    void setDocumentContainer(std::shared_ptr<DocumentContainer> container,
+                              const SmartObjectDocId& docId);
+    DocumentContainer* documentContainer() const { return m_container.get(); }
+    const std::shared_ptr<DocumentContainer>& documentContainerPtr() const { return m_container; }
+    const SmartObjectDocId& documentId() const { return m_docId; }
+
+    // Re-renders every STALE instance of `docId` anywhere in the container,
+    // then — once each render commits — chains to the documents those instances
+    // live in. The cascade is chained BY COMMIT, not merely ordered at
+    // enqueue time: if the outer document rendered concurrently with the inner
+    // one, its snapshot would still hold the inner instance's old pixels and it
+    // would bake stale content. Both outcomes of that race are bad (re-render
+    // thrash with a visible flash, or a permanently stale instance), so the
+    // next level is only scheduled after the previous one has committed.
+    // `force` re-renders even instances that look up to date — used when the
+    // user explicitly commits content and expects to see it propagate now.
+    void refreshSmartObjectInstances(const SmartObjectDocId& docId, bool force = false);
+    // Every document in the container. `afterLoad` marks the pass as "this is
+    // regenerating what is already on disk", so its commits do not flag any
+    // document as unsaved.
+    void refreshAllSmartObjectInstances(bool afterLoad = false);
+
+    // Commits the isolated working copy a content tab has been editing into the
+    // document it stands for, and pushes it through to every instance at once.
+    // This — not an edit in the content tab — is the moment the project's
+    // content actually changes; the caller is what marks the project unsaved.
+    // False when `docId` has no open edit session, or no stored document.
+    bool commitSmartObjectEditSession(const SmartObjectDocId& docId);
+
+    // The payload of the instance at `flatIndex`, or null when that layer is
+    // not a Smart Object. Returned as shared_ptr<const ...>: callers read it,
+    // they never mutate through it (see SmartObjectData.hpp).
+    std::shared_ptr<const SmartObjectData> smartObjectDataAt(int flatIndex) const;
+    SmartObjectDocId smartObjectDocIdAt(int flatIndex) const;
+    // How many instances in the whole container display the same document as
+    // the instance at `flatIndex` (for the Properties page). 0 when not a
+    // Smart Object.
+    int smartObjectInstanceCountAt(int flatIndex) const;
+    // Resolved absolute path of a Linked instance, empty otherwise.
+    QString smartObjectLinkedPathAt(int flatIndex) const;
+
+    // Moves the selected nodes into a NEW document in the container and leaves
+    // a single instance in their place, as one undo step. Returns the
+    // instance's flat index, or -1.
+    int convertToSmartObject(const std::vector<int>& flatIndices);
+    // Places another .hazor as a Smart Object. Embedded imports a private copy of
+    // its documents into this container; Linked keeps referencing the file.
+    int placeEmbeddedDocument(const QString& path);
+    int placeLinkedDocument(const QString& path);
+
+    // Duplicates the instance with an INDEPENDENT copy of its document (fresh
+    // docId), as opposed to Ctrl+J, which shares the same document. A Linked
+    // instance's copy comes back Embedded: a private copy is the only form of
+    // "independent" when the content lives in someone else's file.
+    int newSmartObjectViaCopy(int flatIndex);
+    // Replaces the content every instance of this document shows. On a Linked
+    // instance it is a relink; on an Embedded one the stored document is
+    // swapped under the same docId, so all instances follow at once.
+    bool replaceSmartObjectContents(int flatIndex, const QString& path);
+    // Re-points a Linked instance at another file.
+    bool relinkSmartObject(int flatIndex, const QString& path);
+    // "Update Modified Content": re-reads a Linked file and re-renders. There
+    // is no file watcher anywhere in Hazor, so this is the explicit refresh.
+    bool updateSmartObjectContent(int flatIndex);
+    // Storage conversion. These move documents between containers and change
+    // what gets persisted — they are not payload swaps, which is why they are
+    // three operations and not one flag.
+    bool convertSmartObjectToLinked(int flatIndex, const QString& path);
+    bool convertSmartObjectToEmbedded(int flatIndex);
+
     Layer* activeLayer() const;
     int activeLayerIndex() const { return m_doc ? m_doc->activeFlatIndex : -1; }
     void deselectActive() { setActiveNode(-1); }
 
     void newLayer();
+    // Seeds a brand-new, still empty document with its initial "Background"
+    // layer, filled with `fill` (an invalid colour means transparent) and
+    // locked. Deliberately NOT newLayer(): the layer belongs to the document's
+    // initial state, so it is written straight into the tree without a command
+    // — a new document opens with an empty Undo history, and there is no
+    // history step that can take the user back to a document with no layers.
+    // Leaves the document with nothing selected. No-op on a document that
+    // already has a layer.
+    void initializeBackgroundLayer(const QColor& fill);
     void newGroup();
     // Dissolves the selected Group node(s) (or the active node when it is a
     // group), promoting their children into the group's parent at the same
@@ -116,12 +211,32 @@ public:
     // the editor around the gesture. Applies `after` and pushes the command.
     void commitAdjustmentParams(int flatIndex, const QVariantMap& before,
                                 const QVariantMap& after, const QString& label);
-    // Brackets a live adjustment-param drag so the canvas renders through the GPU
+    // Brackets a live composite drag so the canvas renders through the GPU
     // per-layer compositor (fast) instead of a full CPU projection recomposite
-    // every frame. The editor calls true on gesture begin, false on commit.
-    void setAdjustmentLiveEdit(bool active) { emit adjustmentLiveEditChanged(active); }
+    // every frame, and the layer panel holds its last frame instead of re-baking
+    // thumbnails per step. The editor calls true on gesture begin, false on
+    // commit. Also used by the Layer Styles dialog's slider drags, which mutate
+    // the composite per frame in exactly the same way.
+    void setAdjustmentLiveEdit(bool active) {
+        m_liveCompositeEdit = active;
+        emit adjustmentLiveEditChanged(active);
+        // A style bake still running when the gesture ENDS is a wait the user
+        // should see; one in the middle of the gesture must not raise a modal
+        // dialog over the slider being dragged.
+        updateStyleBakeProgress();
+    }
+
+    // Renderer → UI: a layer-style bake (StyleBakePool) started or finished.
+    // Wired from CanvasView. Not every bake is a wait worth reporting — a brush
+    // stroke on a styled layer dispatches one per dab — so this only surfaces
+    // the app's delayed progress dialog while a Layer Styles edit is waiting
+    // for its result and no live gesture is in progress. The 220 ms delay in
+    // MainWindow::beginProgressDelayed keeps it invisible on layers whose bake
+    // is quick.
+    void setStyleBakeBusy(bool busy);
     void removeNode(int flatIndex);
     void duplicateNode(int flatIndex);
+    void renameNode(int flatIndex, const QString& name);
     void setActiveNode(int flatIndex);
     void setMultiSelectNode(int flatIndex, bool addToSelection);
     void selectNodeRange(int fromFlat, int toFlat);
@@ -141,6 +256,15 @@ public:
     void beginNodeOpacity(int flatIndex);
     void previewNodeOpacity(int flatIndex, float opacity);
     void commitNodeOpacity(int flatIndex, float opacity);
+    // Fill Opacity — the layer's own content, leaving its layer styles at full
+    // strength (LayerTreeNode::fillOpacity, docs/RENDER-PIPELINE.md §4.7). Same
+    // four-call shape as opacity, so a drag is one history step: begin on
+    // press, preview per step, commit on release. A Group has no Fill and these
+    // are no-ops on one.
+    void setNodeFillOpacity(int flatIndex, float fillOpacity);
+    void beginNodeFillOpacity(int flatIndex);
+    void previewNodeFillOpacity(int flatIndex, float fillOpacity);
+    void commitNodeFillOpacity(int flatIndex, float fillOpacity);
     void setNodeVisibility(int flatIndex, bool visible);
     // Solo/isolate (Alt+Click eye): hides every node outside the target's branch
     // (ancestors + the target subtree) and force-shows its ancestors so it
@@ -149,6 +273,24 @@ public:
     void toggleSoloVisibility(int flatIndex);
     bool isSoloVisibilityActive() const { return m_soloActive; }
     void setNodeBlendMode(int flatIndex, BlendMode mode);
+    // A Group's compositing model (Isolated / Pass Through). Shares the blend
+    // mode's control and history label because the two are one choice — see
+    // LayerTreeNode::GroupBlendMode. No-op on non-Group nodes.
+    void setNodeGroupBlendMode(int flatIndex, LayerTreeNode::GroupBlendMode mode);
+    // ── Clipping masks (LayerTreeNode::clipped) ──
+    // A clipped Layer node draws only where the base layer below it is opaque.
+    // Pure composite state: nothing is baked, so one history step is a flag flip
+    // per node. One Ctrl+Alt+G toggle, so one entry point:
+    //  - a clipped layer in the selection  → release it
+    //  - a base with a run clipped to it   → release the whole run
+    //  - anything else with a base below   → clip it
+    // Nodes without a resolvable base (the bottom of a container, a group below)
+    // are skipped; canCreateClippingMask reports that so the UI can grey out.
+    void toggleClippingMask(const std::vector<int>& flatIndices);
+    bool isClippingMask(int flatIndex) const;       // the node is clipped
+    bool isClippingMaskBase(int flatIndex) const;   // a run is clipped to it
+    bool canCreateClippingMask(int flatIndex) const;
+
     // Editing locks. setNodesLockBit toggles one LockFlag bit across a
     // (multi-)selection to a consistent on/off state; setNodeLockFlags sets the
     // full flag set on a single node. Both record one undoable history step.
@@ -171,6 +313,121 @@ public:
     void setEditingMask(bool editing);
     bool isEditingMask() const { return m_editingMask; }
 
+    // ── The one active edit target ───────────────────────────
+    //
+    // Exactly one destination receives a stroke: the active layer's PIXELS,
+    // that layer's MASK, or a CHANNEL (an extra channel, or a subset of the
+    // colour components). The three are stored in different places —
+    // m_editingMask here, Document::channelState on the document — so nothing
+    // structural stopped two of them from being armed at once, and when that
+    // happened the panels lied: the Channels panel showed Red armed while the
+    // brush still wrote into the layer mask, because every paint path tests
+    // the mask first.
+    //
+    // claimEditTarget() is the mutual exclusion, and it lives on the central
+    // path every caller already passes through — setEditingMask() and the
+    // channel selectors — rather than in the panels' click handlers, so the
+    // keyboard shortcuts and the tool/MCP surface cannot behave differently.
+    // Dropping a target changes only the ARMING: what is visible stays as the
+    // user left it (§3.3 of the channels model keeps those independent).
+    enum class EditTarget { LayerPixels, LayerMask, Channel };
+
+    // ── Channels ─────────────────────────────────────────────
+    // Creation. Both return the new channel's index, or -1 when the channel
+    // cap is reached. newSpotChannel fills the active selection with full ink
+    // (nothing when there is no selection), matching the panel command.
+    int newAlphaChannel(const QString& name,
+                        ChannelMaskRepresentation representation,
+                        const QColor& overlayColor, float overlayOpacity);
+    int newSpotChannel(const QString& name, const QColor& inkColor,
+                       float solidity, const QString& inkBook = QString());
+    // `invert` duplicates the channel with its coverage flipped. A null
+    // `targetDoc` duplicates inside this document.
+    int duplicateChannel(int index, const QString& newName, bool invert,
+                         Document* targetDoc = nullptr);
+    void deleteChannelAt(int index);
+    void renameChannel(int index, const QString& name);
+    void setChannelSettings(int index, const ChannelSettings& settings);
+    void reorderChannel(int fromIndex, int toIndex);
+    // Bakes a spot separation into the colour channels and drops the channel.
+    // Destructive: like the reference behaviour it flattens the layer stack,
+    // because the ink has to land in real pixels somewhere and the spot belongs
+    // to the document rather than to any one layer. Returns false when the
+    // index is not a spot channel.
+    bool mergeSpotChannel(int index);
+
+    // ── Channels ▸ selections ────────────────────────────────
+    // Save Selection as Channel. Creates "Alpha N" when `name` is empty.
+    int saveSelectionAsChannel(const QString& name = QString());
+    // Combines the live selection into an EXISTING channel's coverage.
+    void saveSelectionIntoChannel(int index, SelectMode mode);
+    void loadChannelAsSelection(int index, SelectMode mode, bool invert = false);
+    // Same, for a colour component: its intensity becomes the coverage.
+    void loadColorComponentAsSelection(int component, SelectMode mode,
+                                       bool invert = false);
+
+    // ── Channels ▸ view and edit state ───────────────────────
+    // View state only: none of these is a pixel edit, so none records history.
+    void setChannelVisible(int index, bool visible);
+    void setColorChannelVisible(int component, bool visible);
+    void setShowChannelsInColor(bool enabled);
+    // Clicking a row. `additive` is the Shift+click form, which extends the
+    // armed set instead of replacing it. Selecting a row also makes exactly
+    // that set visible, as the reference panel does; the eye can then be
+    // toggled independently.
+    void selectCompositeChannel();
+    void selectColorComponent(int component, bool additive);
+    void selectChannelAt(int index, bool additive);
+
+    // ── Channels ▸ pixels ────────────────────────────────────
+    // The buffers the pixel tools must write to right now: the armed extra
+    // channels. Empty means the tools work on layers as usual.
+    std::vector<QImage*> armedChannelBuffers();
+    bool hasArmedChannels() const;
+    // True when a colour-component subset is armed — painting then touches
+    // only those components of the active layer.
+    bool hasArmedColorSubset() const;
+    // Records one history entry for a finished channel edit (a brush stroke, a
+    // gradient, a fill, a filter): `before` is the pre-edit buffer, the
+    // channel's current data is the result.
+    void pushChannelPixelSnapshot(int index, const QImage& before,
+                                  const QString& commandName);
+    void invertChannelAt(int index);
+    // Fills the armed channels with `value` (0..1), honouring the selection.
+    void fillArmedChannels(float value, const QString& commandName);
+    void applyGradientToArmedChannels(const QImage& gradientCoverage,
+                                      const QString& commandName);
+    // Fill Bucket with a channel as the target: floods in channel space,
+    // or blends into an active selection by its coverage.
+    bool applyFillBucketToChannels(const QPoint& docPos, const QColor& color,
+                                   float tolerance);
+    // Copy/Paste with a channel as the target. Both return false when no
+    // channel is armed, which is the caller's signal to fall through to the
+    // layer behaviour.
+    bool copyArmedChannel();
+    bool pasteIntoArmedChannels();
+    // Reports a blocked operation from outside the controller (the canvas's
+    // tool gates), so every "you cannot do that here" message reaches the user
+    // through the same status path.
+    void reportOperationBlocked(const QString& reason) { emit operationBlocked(reason); }
+    // Filters/adjustments on a channel: `op` receives the grayscale buffer and
+    // rewrites it in place. Wrapped in one history entry.
+    void applyToArmedChannels(const std::function<void(QImage&)>& op,
+                              const QString& commandName);
+
+    // ── Channels ▸ split and merge ───────────────────────────
+    // One grayscale image per colour component of the flattened document, in
+    // component order. Empty when the document cannot be split.
+    std::vector<QImage> splitColorChannels() const;
+    // Builds an RGB composite from one grayscale image per component.
+    static QImage mergeColorChannels(const std::vector<QImage>& planes);
+
+    // ── Quick Mask ───────────────────────────────────────────
+    void setQuickMaskActive(bool active);
+    bool isQuickMaskActive() const;
+    void setQuickMaskSettings(ChannelMaskRepresentation representation,
+                              const QColor& color, float opacity);
+
     // ── Mask overlay (rubylith) — per-document view state ──
     void setMaskOverlayVisible(bool visible);
     void toggleMaskOverlay();
@@ -192,6 +449,17 @@ public:
                      float radius, float opacity, QColor color, bool eraser);
     void expandLayer(Layer* layer, QPointF imagePos, float brushRadius,
                      int margin = 20);
+    // The rect, in layer pixels, the layer buffer must cover for `toolName` not
+    // to crop its own output — see FilterProcessor::outwardReach. Clamped to the
+    // part of layer space this document can ever show, so a canvas-sized layer
+    // keeps its exact current result while a smaller or scaled-down one gets the
+    // room the effect needs. Returns the current image rect when nothing has to
+    // grow. `imageSize`/`contentBounds` describe the pixels the filter will run
+    // on (the flushed composite for a dab layer), not necessarily cpuImage.
+    QRect filterTargetRect(const Layer* layer, const QSize& imageSize,
+                           const QRect& contentBounds,
+                           const std::string& toolName,
+                           const QVariantMap& params) const;
     void syncLayerToGpu(Layer* layer);
     void syncLayerFromGpu(Layer* layer);
     void syncLayerMaskToGpu(Layer* layer);
@@ -258,6 +526,28 @@ public:
     // adjustment children. Returns -1 when there is no layer below.
     int mergeDownTargetFlat(int srcFlat) const;
     void rasterizeNode(int flatIndex);
+    // Re-reveals a RAW Layer's PP3 off the UI thread (RawDevelopService,
+    // Fase 4.8) and, on success, pushes a RawDevelopCommand so the result is
+    // undoable. No-op (returns false) when flatIndex isn't a RAW layer, the
+    // layer is pixel-locked, or a re-reveal for it is already in flight —
+    // callers retry once rawLayerDevelopFinished() fires for that layer.
+    bool rerevealRawLayer(int flatIndex, const RawDevelopParams& params);
+    // Hands an already-decoded RawSession for `flatIndex`'s RAW layer to the
+    // develop service, so the next rerevealRawLayer() does not re-decode the
+    // file. Hazor Develop donates its warm preview session when the user hits
+    // Apply. Purely an optimisation: dropping the session on the floor changes
+    // nothing but the cost of the next re-reveal. Must be called BEFORE
+    // rerevealRawLayer() for that re-reveal to benefit.
+    void adoptRawSession(int flatIndex, std::unique_ptr<RawSession> session,
+                         const QString& tempPath = QString());
+    // Creates the editable pixel copy a paint tool needs when the user aims it
+    // at a RAW Layer: the layer's already-developed pixels become a new Pixel
+    // Layer inserted directly above the RAW node, the RAW node is hidden with
+    // its RawLayerData/RawSource untouched (Hazor Develop keeps working on it),
+    // and the copy becomes the active/selected layer. Returns the copy's flat
+    // index, or -1 when nothing was created (not a RAW layer, pixel-locked, or
+    // a re-reveal is in flight — the last two report via operationBlocked()).
+    int rasterCopyRawLayer(int flatIndex);
     bool isLayerEmpty(int flatIndex) const;
     void flushGpuChanges();
 
@@ -300,11 +590,29 @@ public:
     // transform themselves).
     bool commitTextEdit(int flatIndex, const TextLayerData& before,
                         const QTransform& beforeTransform = QTransform());
-    bool importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc);
+    // RAW paths (RawEngine::isSupportedExtension()) get a non-destructive RAW
+    // Layer instead of a flattened import, same as the dedicated RAW open
+    // path. outRawLayerFlatIndices, when given, collects the final flat
+    // index of each one so the caller can open Hazor Develop for it.
+    bool importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc,
+                              QList<int>* outRawLayerFlatIndices = nullptr);
     bool importImage(const QImage& img, const QString& name);
 
     void createShapeLayer(const ShapeData& data);
     void modifyShapeLayer(int flatIndex, const ShapeData& newData);
+
+    // ── Live shape-data editing (colour dialogs) ──
+    // A colour dialog hands over dozens of intermediate values but deserves a
+    // single undo step, so it follows the same contract the Curves editor uses
+    // for adjustment params: begin snapshots the layer, previewShapeData applies
+    // values without touching history, and end pushes one ModifyShapeCommand
+    // (keep = true) or puts the snapshot back (keep = false). begin on a layer
+    // that already has an open session is a no-op, so the fill and stroke
+    // dialogs can be open at the same time.
+    void beginShapeDataPreview(int flatIndex);
+    void previewShapeData(const ShapeData& data);
+    void endShapeDataPreview(bool keep);
+    bool shapeDataPreviewActive() const { return m_shapePreviewActive; }
     void bakeShapeTransform(int flatIndex, const QTransform& beforeTransform);
     // Re-render a shape descendant at its effective WORLD scale/rotation (parent
     // group chain included), keeping its on-screen appearance unchanged. Mutates
@@ -353,9 +661,46 @@ signals:
     // Toggles the canvas live-edit render path during an adjustment-param drag.
     void adjustmentLiveEditChanged(bool active);
     void maskEditingChanged(bool editing);
+    // The Channels panel needs a repaint: a channel was created, deleted,
+    // renamed, reordered, re-armed, shown or hidden. Carries no dirty-state
+    // meaning of its own — the structural operations push a history entry,
+    // and that is what marks the document modified; arming or hiding a
+    // channel deliberately does neither.
+    void channelsChanged();
     void maskOverlayChanged();
     void guidesChanged();
     void operationBlocked(const QString& reason);
+    // RawDevelopService finished re-revealing `node`'s RAW layer (see
+    // rerevealRawLayer()). `ok` false means the render failed or the layer
+    // was gone by the time it finished; `message` carries the reason then,
+    // and on success is either empty or the non-fatal reframe warning below.
+    //
+    // `node` identifies the layer and is only ever meant to be *compared*,
+    // never dereferenced: Hazor Develop is an independent window, so the
+    // layer can be reordered (or deleted) between dispatch and completion,
+    // which is exactly why a flat index cannot identify it. `flatIndex` is
+    // the layer's index at completion time, or the dispatch-time index when
+    // the layer could no longer be resolved.
+    void rawLayerDevelopFinished(LayerTreeNode* node, int flatIndex, bool ok, QString message);
+    // A Smart Object render landed and every live instance of `docId` in the
+    // container was updated. Carries NO command and NO history entry (see
+    // docs/SMART-OBJECTS.md): updating a regenerable cache is not a
+    // destructive edit, and recording it would fight the invalidation check
+    // that triggers it — an undo would restore old pixels, the staleness test
+    // would immediately see them and re-render, undoing the undo.
+    // `affectedDocuments` are the container documents whose instances changed,
+    // so other tabs can repaint.
+    // `marksDirty` is false only for the pass that regenerates renders already
+    // stored on disk (right after a load); true whenever the render changed
+    // because something was edited, in which case the documents it landed in
+    // now differ from their files.
+    void smartObjectRenderCommitted(SmartObjectDocId docId,
+                                    QStringList affectedDocuments,
+                                    bool marksDirty);
+    // A Linked instance's reference became resolvable, or stopped being so.
+    // Panel badge only — not a pixel change and not a history step: the cached
+    // render is precisely what stays on screen when a link breaks.
+    void smartObjectLinkStateChanged(int flatIndex, bool broken);
     void progressOperationStarted(uint64_t jobId, const QString& message, bool cancelable);
     void progressOperationMessageChanged(uint64_t jobId, const QString& message);
     void progressOperationProgressChanged(uint64_t jobId, int progress);
@@ -379,6 +724,29 @@ signals:
                                  ColorProfile profile, ColorProfileSource source);
 
 private:
+    // One shape-raster rebuild: applies `newData` to the shape layer, rebuilds
+    // its raster and folds the user transform back on top, reporting the
+    // before/after pieces a ModifyShapeCommand needs. Returns false — layer
+    // untouched — when the node is not an editable shape layer or the data has
+    // no geometry. Shared by modifyShapeLayer (which pushes a command) and by
+    // the live preview path (which does not).
+    struct ShapeEdit {
+        ShapeData before;
+        ShapeData applied;
+        QImage beforeImage;
+        QImage rendered;
+        QTransform beforeTransform;
+        QTransform afterTransform;
+    };
+    bool applyShapeDataInPlace(int flatIndex, const ShapeData& newData, ShapeEdit& out);
+
+    // ── Live shape-data preview state (see beginShapeDataPreview) ──
+    bool m_shapePreviewActive = false;
+    int m_shapePreviewIndex = -1;
+    ShapeData m_shapePreviewBefore;
+    QImage m_shapePreviewBeforeImage;
+    QTransform m_shapePreviewBeforeTransform;
+
     // Non-destructive flip of a node set as a single rigid area: reflects every
     // target about the union bounding-box centre (canvas NDC) so groups and
     // multi-selections mirror as one block (not each layer about its own
@@ -388,6 +756,14 @@ private:
 
     void applyFilterWithSelection(Layer* layer, const std::string& toolName,
                                    const std::function<cv::Mat(const cv::Mat&)>& filter);
+    // Grows the layer buffer to `targetRect` (from filterTargetRect) so a
+    // spreading filter is not cropped by the layer's own bounds, carrying the
+    // node transform, the tile grid and the layer mask along with the shifted
+    // pixels. Returns true when the buffer actually grew; *outOffset receives
+    // the pixel offset existing content moved by. Must run on a flat cpuImage
+    // (rasterStorage flushed), like every other caller of ensureWritableRect.
+    bool growLayerForFilter(Layer* layer, const QRect& targetRect,
+                            QPoint* outOffset = nullptr);
     void applyFilterTiled(Layer* layer, const std::string& toolName,
                           const JsonMap& params);
     bool canApplyTiled(Layer* layer, const std::string& toolName) const;
@@ -401,6 +777,75 @@ private:
     bool anyFullyLockedLayer(bool visibleOnly = false) const;
     void onAsyncJobCompleted(uint64_t jobId);
     void onProgressiveBatch(uint64_t jobId, QVector<QRect> tileRects);
+    void onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopResult result);
+
+    // State captured at rerevealRawLayer() dispatch time, needed to build
+    // the RawDevelopCommand once onRawLayerDevelopFinished() fires. Keyed by
+    // node identity (not flatIndex, which may shift while the render runs).
+    struct PendingRawDevelop {
+        QImage beforeImage;
+        QTransform beforeTransform;
+        QImage beforeMask;
+        QPoint beforeMaskOrigin;
+        std::shared_ptr<RawLayerData> beforeData;
+        QString pp3;
+        int flatIndex = -1;
+    };
+    std::unordered_map<const LayerTreeNode*, PendingRawDevelop> m_pendingRawDevelops;
+
+    // ── Smart Object rendering ──
+    void onSmartObjectRenderFinished(SmartObjectRenderResult result);
+    // Which instances a dispatch should consider.
+    using SmartObjectInstanceFilter =
+        std::function<bool(const Document& host, LayerTreeNode*, const SmartObjectData&)>;
+    // Groups the matching STALE instances by render key and dispatches one job
+    // per key — not one per instance (see SmartObjectRenderKey). Also refreshes
+    // each visited instance's link state. `openLinked` allows loading a Linked
+    // target that is not open yet; false keeps the pass I/O-free.
+    // Returns the number of jobs dispatched.
+    int dispatchSmartObjectRenders(const SmartObjectInstanceFilter& filter,
+                                   bool force, bool openLinked, bool marksDirty);
+    void requestSmartObjectRenders(const SmartObjectDocId& docId,
+                                   bool force, bool marksDirty);
+    bool renderLinkedSmartObject(const LayerTreeNode* node, bool force);
+    // Embedded → a document of this container; Linked → the target file's
+    // document via ContainerRegistry, never a second copy of it.
+    std::shared_ptr<Document> resolveSmartObjectDocument(const SmartObjectData& data,
+                                                         bool openIfNeeded) const;
+    // Cheap existence test, no file read: tells "gone" apart from "not loaded".
+    bool smartObjectReferenceExists(const SmartObjectData& data) const;
+    void markSmartObjectLinkBroken(LayerTreeNode* node, bool broken);
+    // Every document whose instances a dispatch or a commit has to visit: the
+    // container's stored documents PLUS the uncommitted working copy of each
+    // open edit session. The working copies are in because a nested Smart
+    // Object inside one still has to re-render when its own content is
+    // committed — and out of everything persistence-related, because they are
+    // not part of the file (see DocumentContainer::beginEditSession).
+    std::vector<std::pair<SmartObjectDocId, std::shared_ptr<Document>>>
+        smartObjectHosts() const;
+    static SmartObjectRenderKey smartObjectRenderKey(const SmartObjectData& data,
+                                                     const Document& host);
+    std::unique_ptr<LayerTreeNode> makeSmartObjectNode(const SmartObjectDocId& docId,
+                                                       SmartObjectStorageMode mode,
+                                                       const QString& linkedPath,
+                                                       const Document& source,
+                                                       const QString& name);
+    int insertSmartObjectInstance(const SmartObjectDocId& docId,
+                                  SmartObjectStorageMode mode,
+                                  const QString& linkedPath,
+                                  const QString& name,
+                                  const QString& commandName);
+    SmartObjectRenderService* ensureSmartObjectRenderService();
+
+    std::unique_ptr<SmartObjectRenderService> m_smartObjectRenderService;
+    std::shared_ptr<DocumentContainer> m_container;
+    SmartObjectDocId m_docId;
+    // Newest jobGeneration already committed per key, so a result built from a
+    // state the document has already moved past is dropped instead of shown.
+    QHash<SmartObjectRenderKey, std::uint64_t> m_committedSmartObjectGenerations;
+
+    // Drops every edit target except `target`. See EditTarget above.
+    void claimEditTarget(EditTarget target);
 
     Document* m_doc = nullptr;
     CommandHistory m_history;
@@ -418,12 +863,23 @@ private:
 
     float  m_opacityBefore = -1.0f;
     int    m_opacityLayerIdx = -1;
+    float  m_fillOpacityBefore = -1.0f;
+    int    m_fillOpacityLayerIdx = -1;
+
+    // ── Layer-style bake progress (see setStyleBakeBusy) ──
+    void updateStyleBakeProgress();
+    bool m_styleEditPending = false;   // a style edit is waiting for its bake
+    bool m_styleBakeBusy = false;
+    bool m_liveCompositeEdit = false;  // a slider/curve drag is in progress
+    uint64_t m_styleBakeJobId = 0;     // non-zero while the progress op is open
+    uint64_t m_styleBakeIdleToken = 0;
 
     std::unordered_map<uint64_t, std::shared_ptr<AsyncJob>> m_pendingAsyncJobs;
     std::unordered_map<uint64_t, std::shared_ptr<std::atomic_bool>> m_pendingDocumentOperations;
     uint64_t m_nextDocumentOperationId = 1000000;
 
     std::unique_ptr<UpscaleService> m_upscaleService;
+    std::unique_ptr<RawDevelopService> m_rawDevelopService;
     std::unordered_map<uint64_t, UpscaleOptions> m_pendingUpscaleJobs;
     std::unordered_map<uint64_t, int> m_pendingUpscaleLayers;
 

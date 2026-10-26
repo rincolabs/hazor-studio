@@ -2,6 +2,7 @@
 
 #include "CommandHistory.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentChannel.hpp"
 #include "color/ColorProfile.hpp"
 #include "core/GuideTypes.hpp"
 #include "core/Layer.hpp"
@@ -9,12 +10,14 @@
 #include "core/ShapeTypes.hpp"
 #include "text/TextTypes.hpp"
 #include "text/TextRenderer.hpp"
+#include "smartobject/SmartObjectData.hpp"
 #include <QImage>
 #include <QPoint>
 #include <QTransform>
 #include <QSize>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -298,22 +301,42 @@ public:
     {}
 
     void execute() override {
-        apply(m_after, m_afterTransform);
+        apply(m_after, m_afterTransform, /*undoing=*/false);
     }
 
     void undo() override {
-        apply(m_before, m_beforeTransform);
+        apply(m_before, m_beforeTransform, /*undoing=*/true);
     }
 
     QString name() const override { return m_name; }
 
+    // Set when the filter grew the layer buffer to make room for an effect that
+    // reaches past the layer bounds (ImageController::growLayerForFilter): the
+    // mask moved with the pixels, and restoring the image and transform alone
+    // would leave it offset by the growth. Masks are only touched when this is
+    // called — every other filter leaves them alone.
+    void setMaskSnapshots(QImage before, QPoint beforeOrigin,
+                          QImage after, QPoint afterOrigin) {
+        m_beforeMask = std::move(before);
+        m_beforeMaskOrigin = beforeOrigin;
+        m_afterMask = std::move(after);
+        m_afterMaskOrigin = afterOrigin;
+        m_hasMaskSnapshots = true;
+    }
+
 private:
-    void apply(const QImage& img, const QTransform& t) {
+    void apply(const QImage& img, const QTransform& t, bool undoing) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (node && node->type == LayerTreeNode::Type::Layer && node->layer) {
             auto* l = node->layer.get();
             node->layer->cpuImage = img;
             node->transform = t;
+            if (m_hasMaskSnapshots && !l->maskImage.isNull()) {
+                l->maskImage = undoing ? m_beforeMask : m_afterMask;
+                l->maskOrigin = undoing ? m_beforeMaskOrigin : m_afterMaskOrigin;
+                l->maskTextureOutdated = true;
+                l->maskThumbDirty = true;
+            }
             // The before/after snapshots are full flat images (every creator
             // flushes tiles into cpuImage first), so the pixel state is fully
             // defined by `img` in both representations. If the layer currently
@@ -346,6 +369,11 @@ private:
     QImage m_after;
     QTransform m_afterTransform;
     QString m_name;
+    QImage m_beforeMask;
+    QPoint m_beforeMaskOrigin;
+    QImage m_afterMask;
+    QPoint m_afterMaskOrigin;
+    bool m_hasMaskSnapshots = false;
 };
 
 class RasterTileCommand : public Command {
@@ -735,6 +763,45 @@ private:
 
 // ── Text Commands ────────────────────────────────────────────
 
+class RenameNodeCommand : public Command {
+public:
+    RenameNodeCommand(Document* doc, int flatIndex,
+                      QString beforeName, QString afterName,
+                      bool beforeNameIsAuto, bool afterNameIsAuto,
+                      QString commandName)
+        : m_doc(doc)
+        , m_flatIndex(flatIndex)
+        , m_beforeName(std::move(beforeName))
+        , m_afterName(std::move(afterName))
+        , m_beforeNameIsAuto(beforeNameIsAuto)
+        , m_afterNameIsAuto(afterNameIsAuto)
+        , m_name(std::move(commandName))
+    {}
+
+    void execute() override { apply(m_afterName, m_afterNameIsAuto); }
+    void undo() override { apply(m_beforeName, m_beforeNameIsAuto); }
+    QString name() const override { return m_name; }
+
+private:
+    void apply(const QString& name, bool nameIsAuto) {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (!node)
+            return;
+        node->name = name;
+        node->nameIsAuto = nameIsAuto;
+        if (node->layer)
+            node->layer->name = name;
+    }
+
+    Document* m_doc;
+    int m_flatIndex;
+    QString m_beforeName;
+    QString m_afterName;
+    bool m_beforeNameIsAuto;
+    bool m_afterNameIsAuto;
+    QString m_name;
+};
+
 class TextEditCommand : public Command {
 public:
     TextEditCommand(Document* doc, int flatIndex,
@@ -794,6 +861,8 @@ public:
                      QImage beforeImage, QTransform beforeTransform,
                      std::shared_ptr<TextLayerData> beforeTextData,
                      std::shared_ptr<ShapeData> beforeShapeData,
+                     std::shared_ptr<RawLayerData> beforeRawData,
+                     std::shared_ptr<const SmartObjectData> beforeSmartObjectData,
                      QImage afterImage, QTransform afterTransform,
                      QString commandName)
         : m_doc(doc)
@@ -802,19 +871,28 @@ public:
         , m_beforeTransform(beforeTransform)
         , m_beforeTextData(std::move(beforeTextData))
         , m_beforeShapeData(std::move(beforeShapeData))
+        , m_beforeRawData(std::move(beforeRawData))
+        , m_beforeSmartObjectData(std::move(beforeSmartObjectData))
         , m_afterImage(std::move(afterImage))
         , m_afterTransform(afterTransform)
         , m_name(std::move(commandName))
     {}
 
-    void execute() override { apply(m_afterImage, m_afterTransform, nullptr, nullptr); }
-    void undo() override { apply(m_beforeImage, m_beforeTransform, m_beforeTextData, m_beforeShapeData); }
+    void execute() override {
+        apply(m_afterImage, m_afterTransform, nullptr, nullptr, nullptr, nullptr);
+    }
+    void undo() override {
+        apply(m_beforeImage, m_beforeTransform, m_beforeTextData, m_beforeShapeData,
+              m_beforeRawData, m_beforeSmartObjectData);
+    }
     QString name() const override { return m_name; }
 
 private:
     void apply(const QImage& img, const QTransform& t,
                std::shared_ptr<TextLayerData> textData,
-               std::shared_ptr<ShapeData> shapeData) {
+               std::shared_ptr<ShapeData> shapeData,
+               std::shared_ptr<RawLayerData> rawData,
+               std::shared_ptr<const SmartObjectData> smartObjectData) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
             return;
@@ -822,6 +900,13 @@ private:
         node->transform = t;
         node->layer->textData = textData;
         node->layer->shapeData = shapeData;
+        node->layer->rawData = rawData;
+        // Re-attaching the payload is all an undo needs: the referenced
+        // document was never touched by the rasterize (it still lives in the
+        // container), and the pixels restored above are the render it had.
+        // Going stale against a document edited in the meantime is handled by
+        // the ordinary obsolescence check, not here.
+        node->layer->smartObjectData = std::move(smartObjectData);
         node->layer->textureOutdated = true;
         node->invalidateEffects();
     }
@@ -832,6 +917,8 @@ private:
     QTransform m_beforeTransform;
     std::shared_ptr<TextLayerData> m_beforeTextData;
     std::shared_ptr<ShapeData> m_beforeShapeData;
+    std::shared_ptr<RawLayerData> m_beforeRawData;
+    std::shared_ptr<const SmartObjectData> m_beforeSmartObjectData;
     QImage m_afterImage;
     QTransform m_afterTransform;
     QString m_name;
@@ -894,6 +981,69 @@ private:
     QImage m_afterImage;
     QTransform m_afterTransform;
     std::shared_ptr<DistortData> m_afterData;
+    QString m_name;
+};
+
+// Non-destructive re-reveal: captures a RAW Layer's rendered pixels,
+// RawLayerData (PP3 + geometry + revision) and — when the reveal's framing
+// changed — the node transform/mask that RawDevelopService recomputed to
+// compensate (Fase 4.4), before/after a RawDevelopService render. The layer
+// remains a re-editable RAW layer (RawLayerData preserved, RawSource shared
+// — never copied, see RawLayerData.hpp).
+class RawDevelopCommand : public Command {
+public:
+    struct State {
+        QImage image;
+        QTransform transform;
+        QImage maskImage;
+        QPoint maskOrigin;
+        std::shared_ptr<RawLayerData> data;
+    };
+
+    RawDevelopCommand(Document* doc, int flatIndex,
+                      State before, State after,
+                      QString commandName)
+        : m_doc(doc)
+        , m_flatIndex(flatIndex)
+        , m_before(std::move(before))
+        , m_after(std::move(after))
+        , m_name(std::move(commandName))
+    {}
+
+    void execute() override { apply(m_after); }
+    void undo() override { apply(m_before); }
+    QString name() const override { return m_name; }
+
+private:
+    void apply(const State& s) {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
+            return;
+        Layer* layer = node->layer.get();
+        if (layer->rasterStorage.isEnabled())
+            layer->rasterStorage.clear();
+        layer->cpuImage = s.image;
+        layer->tiledSystem = false;
+        layer->tileManager.clear();
+        layer->dirtyRegion.clear();
+        layer->textureOutdated = true;
+        layer->pendingGpuUpload = true;
+        node->transform = s.transform;
+        layer->maskImage = s.maskImage;
+        layer->maskOrigin = s.maskOrigin;
+        layer->maskTextureOutdated = true;
+        layer->maskThumbDirty = true;
+        // Copies the small RawLayerData by value (shares the immutable
+        // RawSource) so later edits don't mutate the stored undo state.
+        layer->rawData = s.data ? std::make_shared<RawLayerData>(*s.data) : nullptr;
+        node->invalidateEffects();
+        ++m_doc->compositionGeneration;
+    }
+
+    Document* m_doc;
+    int m_flatIndex;
+    State m_before;
+    State m_after;
     QString m_name;
 };
 
@@ -1345,11 +1495,21 @@ private:
 
 class NodePropertyCommand : public Command {
 public:
+    // beforeGroupBlend/afterGroupBlend are the Group compositing model
+    // (Isolated vs Pass Through). They are optional because the combo that
+    // sets a group's Pass Through is the *same* control as the blend mode (see
+    // LayerTreeNode::GroupBlendMode), so those two properties change together
+    // and in one history step — while every other user of this command
+    // (opacity, visibility) must leave the model alone rather than reset it.
     NodePropertyCommand(Document* doc, int flatIndex,
                         float beforeOp, float afterOp,
                         bool beforeVis, bool afterVis,
                         BlendMode beforeBlend, BlendMode afterBlend,
-                        QString commandName)
+                        QString commandName,
+                        std::optional<LayerTreeNode::GroupBlendMode> beforeGroupBlend
+                            = std::nullopt,
+                        std::optional<LayerTreeNode::GroupBlendMode> afterGroupBlend
+                            = std::nullopt)
         : m_doc(doc)
         , m_flatIndex(flatIndex)
         , m_beforeOp(beforeOp)
@@ -1358,26 +1518,31 @@ public:
         , m_afterVis(afterVis)
         , m_beforeBlend(beforeBlend)
         , m_afterBlend(afterBlend)
+        , m_beforeGroupBlend(beforeGroupBlend)
+        , m_afterGroupBlend(afterGroupBlend)
         , m_name(std::move(commandName))
     {}
 
     void execute() override {
-        apply(m_afterOp, m_afterVis, m_afterBlend);
+        apply(m_afterOp, m_afterVis, m_afterBlend, m_afterGroupBlend);
     }
 
     void undo() override {
-        apply(m_beforeOp, m_beforeVis, m_beforeBlend);
+        apply(m_beforeOp, m_beforeVis, m_beforeBlend, m_beforeGroupBlend);
     }
 
     QString name() const override { return m_name; }
 
 private:
-    void apply(float op, bool vis, BlendMode bm) {
+    void apply(float op, bool vis, BlendMode bm,
+               std::optional<LayerTreeNode::GroupBlendMode> gbm) {
         auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
         if (node) {
             node->opacity = op;
             node->visible = vis;
             node->blendMode = bm;
+            if (gbm)
+                node->groupBlendMode = *gbm;
             // A nested adjustment (Single Layer Mode) bakes opacity/visibility
             // into its parent layer's effected image — invalidate on undo/redo.
             if (node->type == LayerTreeNode::Type::Adjustment)
@@ -1394,6 +1559,53 @@ private:
     bool m_afterVis;
     BlendMode m_beforeBlend;
     BlendMode m_afterBlend;
+    std::optional<LayerTreeNode::GroupBlendMode> m_beforeGroupBlend;
+    std::optional<LayerTreeNode::GroupBlendMode> m_afterGroupBlend;
+    QString m_name;
+};
+
+// Undoable change of a node's Fill Opacity (docs/RENDER-PIPELINE.md §4.7).
+//
+// Its own command rather than a tenth field on NodePropertyCommand: Fill is
+// never set in the same gesture as opacity/visibility/blend, and it is the one
+// composite property whose change can also invalidate the layer's styled-base
+// bake — which this has to redo on undo/redo exactly as the live edit did.
+class NodeFillOpacityCommand : public Command {
+public:
+    NodeFillOpacityCommand(Document* doc, int flatIndex,
+                           float before, float after, QString commandName)
+        : m_doc(doc)
+        , m_flatIndex(flatIndex)
+        , m_before(before)
+        , m_after(after)
+        , m_name(std::move(commandName))
+    {}
+
+    void execute() override { apply(m_after); }
+    void undo() override { apply(m_before); }
+
+    QString name() const override { return m_name; }
+
+private:
+    void apply(float fill) {
+        auto* node = m_doc ? m_doc->nodeAt(m_flatIndex) : nullptr;
+        if (!node) return;
+        node->fillOpacity = fill;
+        // Same rule as ImageController::applyNodeFill, which this has to redo
+        // exactly: a layer style puts Fill inside the styled base
+        // (LayerTreeNode::bakeFillOpacity), and an adjustment's Fill is spent
+        // in its parent layer's clipped-adjustment bake when it is nested —
+        // both are caches an undo has to invalidate, not just a stored value.
+        if (node->fillLivesInStyleBake()
+            || node->type == LayerTreeNode::Type::Adjustment)
+            node->invalidateEffects();
+        ++m_doc->compositionGeneration;
+    }
+
+    Document* m_doc;
+    int m_flatIndex;
+    float m_before;
+    float m_after;
     QString m_name;
 };
 
@@ -1463,6 +1675,33 @@ private:
     QString m_name;
 };
 
+// Clipping Mask (LayerTreeNode::clipped) across one or more nodes. Pure
+// composite state — no pixel moves and no mask is created — so execute/undo is
+// a flag flip plus the generation bump that makes the compositors re-read the
+// base layer's alpha.
+class ClippingMaskCommand : public Command {
+public:
+    struct Entry { int flatIndex; bool before; bool after; };
+
+    ClippingMaskCommand(Document* doc, std::vector<Entry> entries, QString commandName)
+        : m_doc(doc), m_entries(std::move(entries)), m_name(std::move(commandName)) {}
+
+    void execute() override { for (const auto& e : m_entries) apply(e.flatIndex, e.after); }
+    void undo() override { for (const auto& e : m_entries) apply(e.flatIndex, e.before); }
+    QString name() const override { return m_name; }
+
+private:
+    void apply(int flatIndex, bool clipped) {
+        if (auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr)
+            node->clipped = clipped;
+        if (m_doc) ++m_doc->compositionGeneration;
+    }
+
+    Document* m_doc;
+    std::vector<Entry> m_entries;
+    QString m_name;
+};
+
 class LayerEffectsCommand : public Command {
 public:
     LayerEffectsCommand(Document* doc, int flatIndex,
@@ -1511,6 +1750,11 @@ struct ResizeDocumentState {
     QImage selectionMask;
     bool selectionActive = false;
     std::vector<Guide> guides;
+    // Extra channels ride along with the rest of the document-space state:
+    // a crop, a canvas resize or an image resize moves them, the selection,
+    // the masks and the guides onto the same new frame, so they have to be
+    // restored together or undo would leave them on the old one.
+    std::vector<DocumentChannel> channels;
 };
 
 class ResizeDocumentCommand : public Command {
@@ -1597,6 +1841,13 @@ private:
         m_doc->selection.image() = state.selectionMask.copy();
         m_doc->selection.setActive(state.selectionActive);
         m_doc->guideManager.setGuides(state.guides);
+        m_doc->channels = state.channels;
+        for (auto& ch : m_doc->channels) {
+            ch.data = ch.data.copy();
+            ch.thumbDirty = true;
+        }
+        m_doc->ensureChannelBuffers();
+        m_doc->invalidateChannelView();
         ++m_doc->compositionGeneration;
     }
 

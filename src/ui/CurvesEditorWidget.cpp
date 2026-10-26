@@ -534,6 +534,55 @@ void CurvesEditorWidget::setController(ImageController* ctrl)
     }
 }
 
+void CurvesEditorWidget::setStandaloneMode(bool standalone)
+{
+    if (m_standalone == standalone)
+        return;
+
+    if (standalone)
+        setController(nullptr);
+    m_standalone = standalone;
+    m_flatIndex = -1;
+    m_inGesture = false;
+    m_previewOn = true;
+
+    // These controls express adjustment-layer or main-canvas operations. The
+    // actual curve editor remains identical in both hosts.
+    m_iconLabel->setVisible(!standalone);
+    m_maskThumb->setVisible(false);
+    m_titleLabel->setVisible(!standalone);
+    m_targetBtn->setVisible(!standalone);
+    m_eyeBlack->setVisible(!standalone);
+    m_eyeGray->setVisible(!standalone);
+    m_eyeWhite->setVisible(!standalone);
+    m_histWarnBtn->setVisible(false);
+    m_bar->setVisible(!standalone);
+    disarmPicks();
+}
+
+void CurvesEditorWidget::setCurveData(const curves::CurvesData& data)
+{
+    m_loading = true;
+    m_data = data;
+    const int presetIndex = m_presetCombo->findText(m_data.preset);
+    m_presetCombo->setCurrentIndex(presetIndex >= 0 ? presetIndex : 0);
+    if (m_channelCombo->currentIndex() < 0)
+        m_channelCombo->setCurrentIndex(0);
+    m_graph->setSelectedIndex(0);
+    updateChannelView();
+    m_loading = false;
+}
+
+void CurvesEditorWidget::setHistogramData(const HistogramData& data)
+{
+    m_histR = data.red;
+    m_histG = data.green;
+    m_histB = data.blue;
+    m_histLum = data.luminance;
+    m_hasHistogram = data.valid;
+    updateChannelView();
+}
+
 void CurvesEditorWidget::onDocumentChanged()
 {
     if (!isVisible() || m_inGesture || m_flatIndex < 0)
@@ -964,6 +1013,10 @@ void CurvesEditorWidget::updateInputOutputFields()
 
 void CurvesEditorWidget::applyLive()
 {
+    if (m_standalone) {
+        emit curveDataChanged();
+        return;
+    }
     if (!m_ctrl || m_flatIndex < 0)
         return;
     if (m_previewOn)
@@ -984,7 +1037,7 @@ void CurvesEditorWidget::beginGesture()
     m_gestureBefore = paramsFromData();
     m_inGesture = true;
     // Preview the drag on the GPU per-layer compositor (cheap) until commit.
-    if (m_ctrl)
+    if (m_ctrl && !m_standalone)
         m_ctrl->setAdjustmentLiveEdit(true);
 }
 
@@ -993,6 +1046,10 @@ void CurvesEditorWidget::commitGesture(const QString& label)
     if (!m_inGesture)
         return;
     m_inGesture = false;
+    if (m_standalone) {
+        emit curveEditCommitted();
+        return;
+    }
     // Commit while still in live-edit mode so the imageChanged it emits doesn't
     // trigger a full GPU re-upload (adjustment commits change no pixels), then
     // drop live-edit so the next frame builds the final projection off-thread.
@@ -1293,11 +1350,11 @@ void insertOrSetPoint(std::vector<QPoint>& pts, int x, int y)
 
 void CurvesEditorWidget::onAuto()
 {
-    if (m_loading || m_flatIndex < 0)
+    if (m_loading || (!m_standalone && m_flatIndex < 0))
         return;
     // Auto is an explicit action that needs the bins now: if the async backdrop
     // histogram has not landed yet, compute it synchronously as a fallback.
-    if (!m_hasHistogram)
+    if (!m_hasHistogram && !m_standalone)
         computeHistogramSync();
     if (!m_hasHistogram)
         return;
@@ -1347,7 +1404,7 @@ void CurvesEditorWidget::onPencilMode()
 
 void CurvesEditorWidget::onSmooth()
 {
-    if (m_loading || m_flatIndex < 0)
+    if (m_loading || (!m_standalone && m_flatIndex < 0))
         return;
     auto& pts = m_data.points(currentChannel());
     if (pts.size() < 3)
@@ -1436,8 +1493,13 @@ QColor CurvesEditorWidget::sampleInputColor(const QPointF& docPos)
         || docPos.x() < 0 || docPos.y() < 0
         || docPos.x() >= input.width() || docPos.y() >= input.height())
         return {};
-    const int x = std::clamp(static_cast<int>(std::lround(docPos.x())), 0, input.width() - 1);
-    const int y = std::clamp(static_cast<int>(std::lround(docPos.y())), 0, input.height() - 1);
+    // docPos is continuous and integers sit on pixel edges (the bounds check
+    // above is [0, size)), so the pixel under the cursor is floor(), not
+    // lround(): rounding took the right/bottom neighbour over three quarters of
+    // every pixel's area, so zoomed in the colour picked depended on where
+    // inside the pixel the click landed.
+    const int x = std::clamp(static_cast<int>(std::floor(docPos.x())), 0, input.width() - 1);
+    const int y = std::clamp(static_cast<int>(std::floor(docPos.y())), 0, input.height() - 1);
     const QColor c = input.pixelColor(x, y);
     if (c.alpha() == 0)
         return {}; // transparent input — nothing to sample

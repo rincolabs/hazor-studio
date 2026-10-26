@@ -39,7 +39,9 @@ enum class TextureWrap {
 enum class BlendOp {
     Normal, Multiply, Screen, Overlay, Darken, Lighten,
     ColorDodge, ColorBurn, HardLight, SoftLight, Difference,
-    Exclusion, Hue, Saturation, Color, Luminosity
+    Exclusion, Hue, Saturation, Color, Luminosity,
+    LinearBurn, LinearDodge, VividLight, LinearLight, PinLight,
+    HardMix, DarkerColor, LighterColor, Subtract, Divide, Dissolve
 };
 
 // ── Matrix helper ─────────────────────────────────────────────

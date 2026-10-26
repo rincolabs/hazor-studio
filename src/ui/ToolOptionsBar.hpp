@@ -154,6 +154,11 @@ signals:
     void textUnderlineChanged(bool underline);
     void textStrikethroughChanged(bool strikethrough);
     void textColorChanged(const QColor& color);
+    // Live text colour preview while the colour dialog is open: every
+    // intermediate colour, then one `keep` verdict when the dialog closes (OK =
+    // keep + one undo step, Cancel = restore). See CanvasView::previewTextColor.
+    void textColorPreviewChanged(const QColor& color);
+    void textColorPreviewFinished(bool keep);
     void textAlignChanged(int align);
     void textTrackingChanged(double tracking);
     void textLeadingChanged(double leading);
@@ -189,6 +194,12 @@ signals:
     void shapeStrokeColorChanged(const QColor& color);
     void shapeStrokeEnabledChanged(bool enabled);
     void shapeStrokeWidthChanged(int width);
+    // Live preview of a selected shape layer's colours while the colour dialog
+    // is open, then one `keep` verdict when it closes (OK = keep + a single undo
+    // step, Cancel = restore). See ImageController::beginShapeDataPreview.
+    void shapeFillColorPreviewChanged(const QColor& color);
+    void shapeStrokeColorPreviewChanged(const QColor& color);
+    void shapeColorPreviewFinished(bool keep);
     void shapeOpacityChanged(int opacity);
     void shapeAntiAliasChanged(bool enabled);
     void shapeCornerRadiusChanged(int radius);
@@ -444,6 +455,10 @@ private:
     QPushButton* m_underlineBtn = nullptr;
     QPushButton* m_strikethroughBtn = nullptr;
     QPushButton* m_textColorBtn = nullptr;
+    // The colour the text button shows: the selected text's colour when a text
+    // layer is active, otherwise the foreground. Seeds the colour dialog, so it
+    // opens on the colour the user sees rather than on the foreground swatch.
+    QColor m_textColor = Qt::black;
     QButtonGroup* m_alignGroup = nullptr;
 
     QPointer<QDialog> m_brushColorDlg;
@@ -451,4 +466,7 @@ private:
     QPointer<QDialog> m_textColorDlg;
     QPointer<QDialog> m_shapeFillDlg;
     QPointer<QDialog> m_shapeStrokeDlg;
+    // The gradient editor is modeless too: it hosts a colour picker for the
+    // stops, and that picker's eyedropper has to be able to click the canvas.
+    QPointer<class GradientEditorDialog> m_gradientEditorDlg;
 };

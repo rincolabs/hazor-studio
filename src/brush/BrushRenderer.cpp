@@ -1,5 +1,6 @@
 #include "BrushRenderer.hpp"
 #include "BrushDab.hpp"
+#include "BrushSampling.hpp"
 #include "AutoBrush.hpp"
 #include "PredefinedBrush.hpp"
 #include "core/Layer.hpp"
@@ -731,36 +732,6 @@ static QPainter::CompositionMode painterModeForBrushBlend(BrushBlendMode mode)
     }
 }
 
-// Fast bilinear sampler over a raw RGBA8888 buffer (byte order R,G,B,A).
-// Fully out-of-range samples read as transparent. Used by the clone and healing
-// hot loops (no per-pixel QColor/pixelColor overhead).
-static inline void sampleBilinearRgbaRaw(const uchar* bits, int bytesPerLine,
-                                         int w, int h, double x, double y,
-                                         float out[4])
-{
-    if (x < 0.0 || y < 0.0 || x > w - 1 || y > h - 1) {
-        out[0] = out[1] = out[2] = out[3] = 0.0f;
-        return;
-    }
-    const int x0 = static_cast<int>(x);
-    const int y0 = static_cast<int>(y);
-    const int x1 = std::min(x0 + 1, w - 1);
-    const int y1 = std::min(y0 + 1, h - 1);
-    const float tx = static_cast<float>(x - x0);
-    const float ty = static_cast<float>(y - y0);
-    const uchar* row0 = bits + static_cast<size_t>(y0) * bytesPerLine;
-    const uchar* row1 = bits + static_cast<size_t>(y1) * bytesPerLine;
-    const uchar* p00 = row0 + x0 * 4;
-    const uchar* p10 = row0 + x1 * 4;
-    const uchar* p01 = row1 + x0 * 4;
-    const uchar* p11 = row1 + x1 * 4;
-    for (int c = 0; c < 4; ++c) {
-        const float a = p00[c] + (p10[c] - p00[c]) * tx;
-        const float b = p01[c] + (p11[c] - p01[c]) * tx;
-        out[c] = a + (b - a) * ty;
-    }
-}
-
 static QPointF layerPixelToDocumentPixel(const Layer* layer,
                                          const QSize& documentSize,
                                          float layerX, float layerY)
@@ -1178,11 +1149,23 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
     // avoid per-dab heap churn; every element is overwritten before use.
     const size_t patchFloats = static_cast<size_t>(pcount) * 4;
     thread_local std::vector<float> srcPatch, tgtPatch, srcLow, tgtLow, blurTmp;
+    // The blur mixes neighbouring pixels, so it has to run on premultiplied
+    // alpha (4.3): a transparent texel of the snapshot carries colour 0 (the
+    // composite starts from fill(Qt::transparent)) yet still takes its share of
+    // the kernel weight, which dragged the tone base toward black near any
+    // transparency. The patches themselves stay straight, because the detail
+    // term below is a DIFFERENCE and a difference only unpremultiplies cleanly
+    // when both halves are normalised by the same alpha — so the premultiplied
+    // copies are staged separately and each low-frequency base is divided by
+    // its own blurred alpha.
+    thread_local std::vector<float> srcPre, tgtPre;
     srcPatch.resize(patchFloats);
     tgtPatch.resize(patchFloats);
     srcLow.resize(patchFloats);
     tgtLow.resize(patchFloats);
     blurTmp.resize(patchFloats);
+    srcPre.resize(patchFloats);
+    tgtPre.resize(patchFloats);
     {
         const float lx0 = static_cast<float>(left - br) + 0.5f;
         const float ly0 = static_cast<float>(top - br) + 0.5f;
@@ -1202,6 +1185,15 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
             for (int px = 0; px < pside; ++px, i += 4) {
                 sampleBilinearRgbaRaw(sbits, sbpl, sw, sh, dx, dy, &tgtPatch[i]);
                 sampleBilinearRgbaRaw(sbits, sbpl, sw, sh, dx - offx, dy - offy, &srcPatch[i]);
+                // Premultiplied copies for the blur, staged in the same pass.
+                const float sw_ = srcPatch[i + 3] * (1.0f / 255.0f);
+                const float tw_ = tgtPatch[i + 3] * (1.0f / 255.0f);
+                for (int c = 0; c < 3; ++c) {
+                    srcPre[i + c] = srcPatch[i + c] * sw_;
+                    tgtPre[i + c] = tgtPatch[i + c] * tw_;
+                }
+                srcPre[i + 3] = srcPatch[i + 3];
+                tgtPre[i + 3] = tgtPatch[i + 3];
                 dx += ddx.x();
                 dy += ddx.y();
             }
@@ -1248,8 +1240,8 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
             }
         }
     };
-    boxBlur(srcPatch, srcLow, blurTmp, br);
-    boxBlur(tgtPatch, tgtLow, blurTmp, br);
+    boxBlur(srcPre, srcLow, blurTmp, br);
+    boxBlur(tgtPre, tgtLow, blurTmp, br);
 
     QImage dab(side, side, QImage::Format_ARGB32);
     dab.fill(Qt::transparent);
@@ -1308,10 +1300,18 @@ void BrushRenderer::drawHealingDabToRasterTiles(Layer* layer,
         const float dstA = tgtPatch[i + 3];
         if (dstA <= 0.0f)
             return;
+        // Both bases are premultiplied: undo it with the blurred alpha of the
+        // patch each one came from, which turns the box average into an
+        // alpha-weighted average — blur(colour * a) / blur(a) — so transparent
+        // neighbours carry no colour into either term.
+        const float srcLowA = srcLow[i + 3];
+        const float tgtLowA = tgtLow[i + 3];
+        const float srcNorm = srcLowA > 0.0f ? 255.0f / srcLowA : 0.0f;
+        const float tgtNorm = tgtLowA > 0.0f ? 255.0f / tgtLowA : 0.0f;
         float rgb[3];
         for (int c = 0; c < 3; ++c) {
-            const float high = (srcPatch[i + c] - srcLow[i + c]) * srcA;
-            rgb[c] = std::clamp(tgtLow[i + c] + high, 0.0f, 255.0f);
+            const float high = (srcPatch[i + c] - srcLow[i + c] * srcNorm) * srcA;
+            rgb[c] = std::clamp(tgtLow[i + c] * tgtNorm + high, 0.0f, 255.0f);
         }
         const int alpha = std::clamp(
             static_cast<int>(std::round(dstA * maskAlpha)), 0, 255);
@@ -1686,18 +1686,28 @@ void BrushRenderer::drawMaskDab(Layer* layer, const BrushInputState& state,
     if (mw <= 0 || mh <= 0)
         return;
 
+    // Clip the dab to the mask rather than requiring its CENTRE to be inside it:
+    // a dab centred past the edge still covers mask pixels with the rest of its
+    // footprint, and the quad below is clipped by the viewport (which is the mask
+    // buffer), so the in-bounds part rasterises with the right geometry on its
+    // own. Only a dab whose whole footprint misses the buffer has nothing to do —
+    // skip that one, since everything below costs a full-mask texture copy.
+    // The quad spans +/-1 on both axes (y scaled by roundness <= 1) before the
+    // rotation, so its furthest corner sits sqrt(2) x the radius from the centre.
+    const float reach = params.effectiveSize * 1.41422f + 1.0f;
     const float validLeft = static_cast<float>(layer->maskOrigin.x());
     const float validTop = static_cast<float>(layer->maskOrigin.y());
     const float validRight = validLeft + static_cast<float>(mw);
     const float validBottom = validTop + static_cast<float>(mh);
-    if (state.imagePos.x() < validLeft ||
-        state.imagePos.y() < validTop ||
-        state.imagePos.x() >= validRight ||
-        state.imagePos.y() >= validBottom) {
+    if (state.imagePos.x() + reach < validLeft ||
+        state.imagePos.y() + reach < validTop ||
+        state.imagePos.x() - reach >= validRight ||
+        state.imagePos.y() - reach >= validBottom) {
         return;
     }
 
     // Translate from logical layer coords to mask pixel coords using maskOrigin.
+    // May land outside [0, mw) x [0, mh) — that is the clipped-dab case above.
     const float centerX = static_cast<float>(state.imagePos.x() - layer->maskOrigin.x());
     const float centerY = static_cast<float>(state.imagePos.y() - layer->maskOrigin.y());
 
@@ -1840,4 +1850,97 @@ void BrushRenderer::drawMaskDab(Layer* layer, const BrushInputState& state,
         glEnable(GL_BLEND);
 
     glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+}
+
+// ── Channel dab (CPU, document space) ──────────────────────────
+//
+// A channel is document-space grayscale data with no layer transform and no GL
+// texture, so this is the one dab producer with no GPU half: it rasterizes the
+// shared sprite and writes straight into the channel buffers. The composite
+// rule is the mask shader's — dst = mix(dst, target, coverage) — so the same
+// preset lays down the same values whether it is painting a layer mask or a
+// channel.
+void BrushRenderer::drawChannelDab(ChannelPaintTarget& target,
+                                   const BrushInputState& state,
+                                   const DynamicDabParams& params,
+                                   const BrushSettings& settings,
+                                   const QImage* selectMaskImage)
+{
+    if (target.buffers.empty())
+        return;
+
+    const float radius = std::max(0.5f, params.effectiveSize);
+    const int pad = 2;
+    const int left = static_cast<int>(std::floor(state.imagePos.x() - radius - pad));
+    const int top = static_cast<int>(std::floor(state.imagePos.y() - radius - pad));
+    const int side = static_cast<int>(std::ceil(radius * 2.0f + pad * 2.0f));
+    if (side <= 0)
+        return;
+
+    const float cx = static_cast<float>(state.imagePos.x() - left);
+    const float cy = static_cast<float>(state.imagePos.y() - top);
+
+    if (settings.tipSource == BrushTipSource::Image && !settings.tipImage.isNull()) {
+        const qint64 key = settings.tipImage.cacheKey();
+        if (m_rasterTipSide != side || m_rasterTipKey != key) {
+            m_rasterTipScaled = settings.tipImage.scaled(side, side,
+                Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                .convertToFormat(QImage::Format_RGBA8888);
+            m_rasterTipSide = side;
+            m_rasterTipKey = key;
+        }
+    }
+
+    // The dab already lives in document pixels, so the selection mask needs no
+    // remapping — identity, unlike the layer paths.
+    const QImage dab = BrushDab::rasterize(params, settings, params.effectiveColor,
+                                           left, top, cx, cy, side,
+                                           settings.textureConfig.enabled ? m_texStampImage : QImage(),
+                                           selectMaskImage, QTransform(),
+                                           m_rasterTipScaled, &m_dabScratch,
+                                           m_texStrokeOffsetX, m_texStrokeOffsetY);
+    if (dab.isNull())
+        return;
+
+    // Same value rule as drawMaskDab: the brush colour's luminance, flipped for
+    // the Eraser so it lifts coverage instead of adding it.
+    const bool erasing = settings.mode == BrushMode::Erase;
+    const float luminance = 0.299f * params.effectiveColor.redF()
+                          + 0.587f * params.effectiveColor.greenF()
+                          + 0.114f * params.effectiveColor.blueF();
+    const float targetValue = std::clamp(erasing ? 1.0f - luminance : luminance,
+                                         0.0f, 1.0f);
+    const int targetByte = static_cast<int>(std::lround(targetValue * 255.0f));
+
+    QRect touched;
+    for (QImage* buffer : target.buffers) {
+        if (!buffer || buffer->isNull())
+            continue;
+        if (buffer->format() != QImage::Format_Grayscale8)
+            *buffer = buffer->convertToFormat(QImage::Format_Grayscale8);
+
+        const QRect rect = QRect(left, top, side, side).intersected(buffer->rect());
+        if (rect.isEmpty())
+            continue;
+
+        for (int y = rect.top(); y <= rect.bottom(); ++y) {
+            const uchar* srcRow = dab.constScanLine(y - top);
+            uchar* dstRow = buffer->scanLine(y);
+            for (int x = rect.left(); x <= rect.right(); ++x) {
+                // Alpha is byte 3 in both layouts rasterize can return.
+                const int a = srcRow[(x - left) * 4 + 3];
+                if (a == 0)
+                    continue;
+                const int dst = dstRow[x];
+                // Rounded lerp in 8-bit: +127 keeps a long low-flow stroke from
+                // stalling one value short of the target.
+                dstRow[x] = static_cast<uchar>(
+                    dst + ((targetByte - dst) * a + (targetByte >= dst ? 127 : -127)) / 255);
+            }
+        }
+        touched = touched.isNull() ? rect : touched.united(rect);
+    }
+
+    if (!touched.isNull())
+        target.dirty = target.dirty.isNull() ? touched : target.dirty.united(touched);
 }

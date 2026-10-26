@@ -8,6 +8,7 @@
 #include <QFutureWatcher>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -18,6 +19,24 @@ class QButtonGroup;
 class ScrubbableValueInput;
 class ImageController;
 class LayerItemDelegate;
+class LayerTreeNode;
+
+// Smart Object commands offered by the layer context menu. The panel only
+// reports WHICH one was chosen — running them needs file dialogs and tab
+// management, which belong to MainWindow, and every one maps to the same action
+// the Layer ▸ Smart Objects menu uses. At file scope (not nested) so MainWindow
+// can forward-declare it rather than include this header.
+enum class LayerSmartObjectCommand {
+    Convert,
+    ViaCopy,
+    EditContents,
+    ReplaceContents,
+    RelinkToFile,
+    UpdateModified,
+    ConvertToLinked,
+    EmbedLinked,
+    Rasterize,
+};
 
 class LayerPanel : public QWidget {
     Q_OBJECT
@@ -31,17 +50,26 @@ public:
 
 signals:
     void activeLayerChanged(int index);
+    void smartObjectCommandRequested(int index, LayerSmartObjectCommand command);
     void addLayerRequested();
     void removeLayerRequested(int index);
     void grayscaleViewRequested(bool enabled);
     void layerStylesRequested(int index);
     void aiUpscaleRequested(int index);
+    // "Export Layer As..." / "Export Group As..." from the context menu.
+    void exportNodeRequested(int index);
     // Solid Color fill layer: the "New Adjustment Layer ▸ Solid Color" entry was
     // chosen (MainWindow runs the picker-first creation flow).
     void solidColorRequested();
     // The colour thumbnail of a Solid Color fill layer was double-clicked
     // (MainWindow selects it and opens the colour picker).
     void solidColorEditRequested(int index);
+    // The thumbnail of a RAW Layer was double-clicked. MainWindow selects the
+    // layer and opens its independent Hazor Develop window.
+    void rawEditRequested(int index);
+    // The thumbnail of a Smart Object was double-clicked. MainWindow opens (or
+    // reactivates) the tab that edits the document it references.
+    void smartObjectEditRequested(int index);
 
 private slots:
     void onCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* previous);
@@ -67,6 +95,11 @@ private:
     bool setCurrentVisibleRow(int row, bool extendSelection);
     bool moveCurrentVisibleRow(int delta, bool extendSelection);
     bool syncTreeSelectionToDocument();
+    // Brings the rows in line with `flat`, reusing them in place when the tree
+    // still mirrors the document and rebuilding only when the structure really
+    // changed. Fills `itemMap` either way; returns true if it rebuilt.
+    bool syncRows(const std::vector<LayerTreeNode*>& flat,
+                  QHash<LayerTreeNode*, QTreeWidgetItem*>& itemMap);
     void updateActiveTargetFromCurrent();
     bool eventFilter(QObject* obj, QEvent* event) override;
 
@@ -84,9 +117,17 @@ private:
 
     ImageController* m_controller = nullptr;
 
-    QComboBox* m_kindCombo = nullptr;
     QComboBox* m_blendCombo = nullptr;
+    // Whether m_blendCombo currently carries the group-only "Pass Through"
+    // entry. Tracked so the combo is rebuilt when the active node changes
+    // between a group and a layer, and not on every property refresh.
+    bool m_blendComboHasPassThrough = false;
     ScrubbableValueInput* m_opacitySlider = nullptr;
+    // Fill Opacity — the same control as m_opacitySlider, driving the node's
+    // own content instead of its finished result (LayerTreeNode::fillOpacity):
+    // a layer's pixels, or an adjustment's contribution to the composite.
+    // Disabled while a Group is active: a group has no Fill of its own.
+    ScrubbableValueInput* m_fillSlider = nullptr;
     QButtonGroup* m_lockGroup = nullptr;
 
     QWidget* m_topBar = nullptr;
@@ -112,6 +153,12 @@ private:
     // its last frame; one refresh() runs when the live edit ends.
     bool m_adjustmentLiveEdit = false;
     ActiveTarget m_activeTarget = ActiveTarget::None;
+    // Identity of the node that was active on the last refresh(), so the panel
+    // can tell a real active-layer change from the many redundant
+    // activeLayerChanged emissions. Only a real change reveals the layer
+    // (opens the groups hiding it) and scrolls to it. Opaque token: compared,
+    // never dereferenced — the node it named may already be deleted.
+    quintptr m_lastActiveNode = 0;
 
     QFutureWatcher<std::shared_ptr<ThumbBatch>> m_thumbWatcher;
     quint64 m_thumbToken = 0;

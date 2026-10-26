@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QPoint>
 #include <QTransform>
 #include <QVariantMap>
 #include <QRect>
@@ -47,6 +48,15 @@ struct AsyncJob {
     // (content-bounds transform outline, incremental brush tiles) instead of
     // leaving the layer flattened.
     bool retileRasterStorage = false;
+
+    // The dispatch grew the layer buffer so a spreading filter would not be
+    // cropped by the layer's own bounds (ImageController::growLayerForFilter),
+    // and the layer mask moved with the pixels. The image/transform pair in
+    // FilterCommand cannot put a mask back, so its pre-growth state travels with
+    // the job and is handed to the command on completion. Null mask => the layer
+    // did not grow, or has no mask.
+    QImage beforeMask;
+    QPoint beforeMaskOrigin;
 
     // ── Progressive tiled processing fields ──────────────────
     // Tile rects to process, sorted by viewport center priority.

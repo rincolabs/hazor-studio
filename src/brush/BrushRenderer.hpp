@@ -8,6 +8,7 @@
 #include <QHash>
 #include "BrushTypes.hpp"
 #include "BrushInputState.hpp"
+#include "ChannelPaintTarget.hpp"
 #include "DynamicsConfig.hpp"
 
 class Layer;
@@ -42,6 +43,18 @@ public:
                      const DynamicDabParams& params,
                      const BrushSettings& settings,
                      GLuint selectMaskTex, int selectMaskW, int selectMaskH);
+
+    // One dab into the armed channels' grayscale buffers. CPU-only and
+    // document-space: a channel has no layer transform and no GL texture of
+    // its own, so there is nothing to map or read back. Uses the same
+    // BrushDab::rasterize sprite as every other dab producer (one rasterizer)
+    // and the same composite rule as the mask shader —
+    // dst = mix(dst, target, coverage) — so a channel stroke and a layer-mask
+    // stroke with the same preset lay down the same values.
+    void drawChannelDab(ChannelPaintTarget& target, const BrushInputState& state,
+                        const DynamicDabParams& params,
+                        const BrushSettings& settings,
+                        const QImage* selectMaskImage);
 
     void setTextureImage(const QImage& img);
     void clearTexture();

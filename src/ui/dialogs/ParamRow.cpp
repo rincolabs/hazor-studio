@@ -10,13 +10,15 @@
 
 ParamRow::ParamRow(const QString& label, double min, double max,
                    double defaultValue, int decimals, bool logarithmic,
-                   QWidget* parent)
+                   QWidget* parent, bool centerZeroLog, double logBase)
     : QWidget(parent)
     , m_min(min)
     , m_max(max)
     , m_defaultValue(defaultValue)
     , m_decimals(decimals)
     , m_logarithmic(logarithmic)
+    , m_centerZeroLog(centerZeroLog && min < 0.0 && max > 0.0)
+    , m_logBase(logBase)
 {
     auto* layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -76,6 +78,7 @@ void ParamRow::setRange(double min, double max)
 {
     m_min = min;
     m_max = max;
+    m_centerZeroLog = m_centerZeroLog && min < 0.0 && max > 0.0;
     m_spin->setRange(min, max);
     m_spin->setSingleStep((max - min) / 100.0);
 }
@@ -115,6 +118,17 @@ void ParamRow::updateSpinFromSlider()
 double ParamRow::sliderToValue(int sliderPos) const
 {
     double t = static_cast<double>(sliderPos) / kSliderRange;
+    if (m_centerZeroLog) {
+        // Mirrors rtengine's Adjuster::setLogScale(base, 0, anchorMiddle=true):
+        // t=0.5 is always value 0; each half is independently log-curved so
+        // small swings around zero get more of the slider's resolution.
+        if (t >= 0.5) {
+            const double u = (t - 0.5) * 2.0;
+            return (std::pow(m_logBase, u) - 1.0) / (m_logBase - 1.0) * m_max;
+        }
+        const double u = (0.5 - t) * 2.0;
+        return (std::pow(m_logBase, u) - 1.0) / (m_logBase - 1.0) * m_min;
+    }
     if (m_logarithmic) {
         double logMin = std::log(m_min + 1.0);
         double logMax = std::log(m_max + 1.0);
@@ -126,7 +140,15 @@ double ParamRow::sliderToValue(int sliderPos) const
 int ParamRow::valueToSlider(double val) const
 {
     double t;
-    if (m_logarithmic) {
+    if (m_centerZeroLog) {
+        if (val >= 0.0) {
+            const double u = std::log1p(val / m_max * (m_logBase - 1.0)) / std::log(m_logBase);
+            t = 0.5 + u * 0.5;
+        } else {
+            const double u = std::log1p(val / m_min * (m_logBase - 1.0)) / std::log(m_logBase);
+            t = 0.5 - u * 0.5;
+        }
+    } else if (m_logarithmic) {
         double logMin = std::log(m_min + 1.0);
         double logMax = std::log(m_max + 1.0);
         t = (std::log(val + 1.0) - logMin) / (logMax - logMin);

@@ -3,12 +3,25 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
+#include <QDesktopServices>
+#include <QFrame>
+#include <QGuiApplication>
 #include <QLabel>
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QMenuBar>
 #include <QMouseEvent>
+#include <QUrl>
 #include <QWindow>
+
+bool TitleBar::isSupportedPlatform()
+{
+    const QString platform = QGuiApplication::platformName();
+    if (platform == QLatin1String("cocoa"))     return false;
+    if (platform == QLatin1String("wayland"))   return false;
+    if (platform == QLatin1String("offscreen")) return false;
+    return true;
+}
 
 TitleBar::TitleBar(QWidget* parent)
     : QWidget(parent)
@@ -45,14 +58,38 @@ TitleBar::TitleBar(QWidget* parent)
         return btn;
     };
 
+    // Qt's push-button label leaves only a very narrow built-in gap after the
+    // icon. Keep the translated label intact while adding one text-space of
+    // breathing room between the heart and the word.
+    m_sponsorBtn = new QPushButton(QString(QChar::Nbsp) + tr("Sponsor"), this);
+    m_sponsorBtn->setObjectName(QStringLiteral("sponsorBtn"));
+    m_sponsorBtn->setIcon(makeIcon(QStringLiteral(":/icons/sponsor-heart.png")));
+    m_sponsorBtn->setIconSize(QSize(16, 16));
+    m_sponsorBtn->setFixedSize(88, kBarHeight);
+    m_sponsorBtn->setFocusPolicy(Qt::NoFocus);
+
+    auto* windowControlsSeparator = new QFrame(this);
+    windowControlsSeparator->setObjectName(QStringLiteral("titleBarWindowSeparator"));
+    windowControlsSeparator->setFrameShape(QFrame::VLine);
+    windowControlsSeparator->setFrameShadow(QFrame::Plain);
+    windowControlsSeparator->setFixedSize(1, 16);
+
     m_minBtn   = makeBtn(":/icons/window-minimize.png", "minBtn");
     m_maxBtn   = makeBtn(":/icons/window-maximize.png", "maxBtn");
     m_closeBtn = makeBtn(":/icons/window-close.png",    "closeBtn");
 
+    m_layout->addWidget(m_sponsorBtn);
+    m_layout->addSpacing(t->spaceSM);
+    m_layout->addWidget(windowControlsSeparator, 0, Qt::AlignVCenter);
+    m_layout->addSpacing(t->spaceSM);
     m_layout->addWidget(m_minBtn);
     m_layout->addWidget(m_maxBtn);
     m_layout->addWidget(m_closeBtn);
 
+    connect(m_sponsorBtn, &QPushButton::clicked, this, []() {
+        QDesktopServices::openUrl(
+            QUrl(QStringLiteral("https://github.com/sponsors/allanesquina")));
+    });
     connect(m_minBtn, &QPushButton::clicked, this, &TitleBar::minimizeClicked);
     connect(m_maxBtn, &QPushButton::clicked, this, &TitleBar::maximizeClicked);
     connect(m_closeBtn, &QPushButton::clicked, this, &TitleBar::closeClicked);
@@ -61,6 +98,21 @@ TitleBar::TitleBar(QWidget* parent)
         auto* t = ThemeManager::instance()->current();
         setStyleSheet(t->titleBarStyleSheet());
     });
+}
+
+void TitleBar::setTitleText(const QString& text)
+{
+    if (!m_titleLabel) {
+        m_titleLabel = new QLabel(this);
+        m_titleLabel->setObjectName(QStringLiteral("titleBarTitle"));
+        // The label ignores mouse events, so pressing it falls through to the
+        // bar itself and still drags the window.
+        m_titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        // Same slot the menu bar would occupy, with the same stretch, so the
+        // window controls stay flush right.
+        m_layout->insertWidget(1, m_titleLabel, 1);
+    }
+    m_titleLabel->setText(text);
 }
 
 void TitleBar::setMenuBar(QWidget* menuBar)

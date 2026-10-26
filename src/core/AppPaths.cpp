@@ -53,31 +53,48 @@ QString aiCacheDir()
     return root;
 }
 
-QString thirdPartyDir()
+namespace {
+
+// Resolves a read-only directory shipped with the app, searching relative to
+// the executable: next to the binary, a Unix <prefix>/bin layout (../), the
+// AppImage AppDir root (usr/bin → ../../), and a macOS bundle. Returns an
+// empty string when no candidate exists, so callers decide what absence means.
+QString shippedDir(const QString& rel)
 {
-    const QString rel = QStringLiteral("3rdparty");
     const QString appDir = QCoreApplication::applicationDirPath();
-
-    // Search relative to the executable, covering: next to the binary, a Unix
-    // <prefix>/bin layout (../), the AppImage AppDir root (usr/bin → ../../),
-    // a macOS bundle, and the source tree (dev runs from the build directory).
-    QStringList candidates;
-    candidates << QDir(appDir).filePath(rel)
-               << QDir(appDir).filePath(QStringLiteral("../") + rel)
-               << QDir(appDir).filePath(QStringLiteral("../../") + rel)
-               << QDir(appDir).filePath(QStringLiteral("../Resources/") + rel); // macOS bundle
-#ifdef HAZOR_SOURCE_DIR
-    candidates << QDir(QStringLiteral(HAZOR_SOURCE_DIR)).filePath(rel);
-#endif
-
+    const QStringList candidates {
+        QDir(appDir).filePath(rel),
+        QDir(appDir).filePath(QStringLiteral("../") + rel),
+        QDir(appDir).filePath(QStringLiteral("../../") + rel),
+        QDir(appDir).filePath(QStringLiteral("../Resources/") + rel), // macOS bundle
+    };
     for (const QString& c : candidates) {
         const QFileInfo fi(c);
         if (fi.exists() && fi.isDir())
             return fi.absoluteFilePath();
     }
+    return {};
+}
+
+} // namespace
+
+QString thirdPartyDir()
+{
+    const QString rel = QStringLiteral("3rdparty");
+    const QString found = shippedDir(rel);
+    if (!found.isEmpty())
+        return found;
+
+#ifdef HAZOR_SOURCE_DIR
+    // Dev runs from the build directory.
+    const QFileInfo inSource(QDir(QStringLiteral(HAZOR_SOURCE_DIR)).filePath(rel));
+    if (inSource.exists() && inSource.isDir())
+        return inSource.absoluteFilePath();
+#endif
+
     // None present yet: return a stable path so callers have something to scan
     // and report against (the registry/backends fail gracefully when missing).
-    return QDir(appDir).absoluteFilePath(rel);
+    return QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(rel);
 }
 
 QString bundledModelsDir()
@@ -85,6 +102,24 @@ QString bundledModelsDir()
     // Models distributed with the app live under the read-only 3rdparty tree,
     // never under the user-modifiable models directory.
     return QDir(thirdPartyDir()).filePath(QStringLiteral("onnx/models"));
+}
+
+QString rawEngineResourceDir()
+{
+    return QDir(thirdPartyDir()).filePath(QStringLiteral("rawengine/rtdata"));
+}
+
+QString lensfunDatabaseDir()
+{
+    // "version_1" is lensfun's DATABASE_SUBDIR — the database *format*
+    // version, not the library version; it moves only with a format bump,
+    // which would need a different lensfun than the pinned 0.3.4 anyway.
+    return shippedDir(QStringLiteral("share/lensfun/version_1"));
+}
+
+QString rawUserDir()
+{
+    return subDir(QStringLiteral("raw"));
 }
 
 } // namespace AppPaths

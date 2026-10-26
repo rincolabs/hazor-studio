@@ -37,6 +37,20 @@ public:
                                          const QModelIndex& index,
                                          const QPoint& pos);
 
+    // Same mechanism as handleSolidColorThumbDoubleClick(), for a RAW Layer's
+    // thumbnail instead. Emits rawThumbDoubleClicked, which opens Hazor
+    // Develop through LayerPanel::rawEditRequested.
+    int handleRawThumbDoubleClick(const QStyleOptionViewItem& option,
+                                  const QModelIndex& index,
+                                  const QPoint& pos);
+
+    // Same mechanism again, for a Smart Object's thumbnail. Emits
+    // smartObjectThumbDoubleClicked, which opens the referenced document in a
+    // tab through LayerPanel::smartObjectEditRequested.
+    int handleSmartObjectThumbDoubleClick(const QStyleOptionViewItem& option,
+                                          const QModelIndex& index,
+                                          const QPoint& pos);
+
 signals:
     void visibilityToggled(int flatIndex);
     void visibilitySoloRequested(int flatIndex);   // Alt+Click eye → solo/isolate
@@ -45,6 +59,10 @@ signals:
     void layerStylesRequested(int flatIndex);
     // Double-click on a Solid Color fill layer's colour thumbnail → edit colour.
     void solidColorThumbDoubleClicked(int flatIndex);
+    // Double-click on a RAW Layer's thumbnail → (future) open Camera Raw.
+    void rawThumbDoubleClicked(int flatIndex);
+    // Double-click on a Smart Object's thumbnail → edit its contents.
+    void smartObjectThumbDoubleClicked(int flatIndex);
 
 private:
     LayerTreeNode* nodeFromIndex(const QModelIndex& index) const;

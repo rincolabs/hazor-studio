@@ -7,6 +7,7 @@
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 #include "ui/AppCheckBox.hpp"
+#include "ui/AppMessageDialog.hpp"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -22,7 +23,6 @@
 #include <QPushButton>
 #include <QTextBrowser>
 #include <QFileDialog>
-#include <QMessageBox>
 #include <QFileInfo>
 #include <QPoint>
 #include <QSet>
@@ -629,8 +629,8 @@ void BrushImportDialog::doImport()
     }
 
     if (toAdd.empty()) {
-        QMessageBox::information(this, tr("Import Brushes"),
-                                 tr("No brushes were imported."));
+        AppMessageDialog::information(this, tr("Import Brushes"),
+                                       tr("No brushes were imported."));
         return;
     }
 
@@ -649,12 +649,9 @@ void BrushImportDialog::doImport()
         summary += QLatin1Char('\n') + tr("%1 brushes could not be imported.").arg(failedCount);
 
     if (options.showCompatibilityWarnings && !report.isEmpty()) {
-        QMessageBox box(QMessageBox::Information, tr("Brushes Imported"), summary,
-                        QMessageBox::Ok, this);
-        box.setDetailedText(report);
-        box.exec();
+        AppMessageDialog::information(this, tr("Brushes Imported"), summary, report);
     } else {
-        QMessageBox::information(this, tr("Brushes Imported"), summary);
+        AppMessageDialog::information(this, tr("Brushes Imported"), summary);
     }
     accept();
 }

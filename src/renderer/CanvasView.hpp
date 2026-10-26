@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QTimer>
 #include <QRect>
+#include <QFutureWatcher>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -103,6 +104,20 @@ public:
     // the keys (Q / "\") — centralized and remappable. Each keeps its own gate.
     void toggleQuickMask();      // Q: needs an active, non-empty selection
     void toggleMaskRubylith();   // "\": needs the active layer to have a mask
+
+    // ── Grayscale strokes (channels and Quick Mask) ───────────
+    // True when the pixel tools must write grayscale coverage into a
+    // DOCUMENT-space buffer instead of into a layer: the Channels panel has
+    // extra channels armed, or Quick Mask is on. The brush entry points below
+    // dispatch on it, so every input path (mouse, pen, airbrush timer) follows
+    // without a branch of its own.
+    // Last CPU composite of this document, before any channel view.
+    // The Channels panel reads it for the RGB and R/G/B thumbnails;
+    // null until the first projection has been built.
+    QImage documentCompositeImage() const;
+
+    bool grayscaleStrokeTarget() const;
+    bool grayscaleStrokeActive() const { return m_grayscaleStrokeActive; }
 
     // Fit the document inside the viewport (used when opening an image so large
     // images aren't shown at an over-zoomed 100%). Never upscales past 100%.
@@ -229,6 +244,16 @@ public:
     void setTextStrikethrough(bool strikethrough);
     void setTextColor(const QColor& color);
     void setTextAlign(int align);
+
+    // ── Live text colour preview ──
+    // A colour dialog has to recolour the selected text while it is still open
+    // and still leave a single undo step behind. previewTextColor() snapshots
+    // the text layer on its first call and then recolours it without touching
+    // history; endTextColorPreview(true) pushes that one step, false restores
+    // the snapshot. Both are no-ops when there is no editable text layer, so a
+    // caller can bracket a colour dialog unconditionally.
+    void previewTextColor(const QColor& color);
+    void endTextColorPreview(bool keep);
     void setTextTracking(double tracking);
     void setTextLeading(double leading);
 
@@ -256,6 +281,22 @@ public:
     void setEyedropperSampleSize(SampleSize size) { m_eyedropperSampleSize = size; }
     SampleMode eyedropperSampleMode() const { return m_eyedropperSampleMode; }
     SampleSize eyedropperSampleSize() const { return m_eyedropperSampleSize; }
+
+    // Samples the document under a viewport position honouring the eyedropper's
+    // current sample mode and size. Shared by the Eyedropper tool and by the
+    // colour dialogs' eyedropper (setColorPickArmed).
+    QColor eyedropperSampleColor(QPointF screenPos);
+
+    // ── Colour-dialog eyedropper ──
+    // Armed by ColorPickerDialog: a left press/drag anywhere on the canvas
+    // samples the pixel under the cursor and reports it through colorPickSampled
+    // (continuously, so the dialog can preview) and colorPickFinished (on
+    // release). Picks fire regardless of the active tool — a colour dialog must
+    // not require the Eyedropper tool to be selected — and the press is consumed
+    // so the real tool never sees it. A tool switch or a document swap disarms
+    // and emits colorPickCancelled so the dialog un-presses its button.
+    void setColorPickArmed(bool armed);
+    bool colorPickArmed() const { return m_colorPickArmed; }
 
     // ── Curves editor image pick ──
     // Arms the Curves editor's eyedropper/target tools (0 = disarmed; 1=black,
@@ -374,6 +415,12 @@ signals:
     // The canvas disarmed the eyedropper itself (tool switch / Esc): the editor
     // should uncheck its eyedropper button.
     void hueSatPickCancelled();
+    // Colour-dialog eyedropper: the colour under the cursor while the user
+    // drags on the canvas, then once more on release (colorPickFinished).
+    // colorPickCancelled reports that the canvas disarmed itself.
+    void colorPickSampled(const QColor& color);
+    void colorPickFinished(const QColor& color);
+    void colorPickCancelled();
     void zoomChanged(float zoom);
     void mouseImageCoordChanged(QPointF imageCoord);
     void toolCallRequested(int tool, QPointF imagePos, QPointF screenPos);
@@ -390,6 +437,12 @@ signals:
     void brushSizeChanged(float size);
     void brushHardnessChanged(float hardness);
     void contextMenuRequested(QPoint globalPos);
+    // A freshly composited CPU projection became available. It is built off
+    // thread, so it lands AFTER the imageChanged() that caused it: anything
+    // deriving pixels from documentCompositeImage() (the Channels panel's
+    // composite and component thumbnails) needs this to know the buffer it
+    // drew from has been superseded.
+    void projectionUpdated();
 
 protected:
     void initializeGL() override;
@@ -434,10 +487,11 @@ private:
     // QMouseEvent from the pen's PointerInputEvent and feed it to our own mouse
     // handlers, so every tool (Hand, Move, Select, Crop, ...) reacts to the pen.
     void dispatchSynthesizedMouse(const PointerInputEvent& ev, QEvent::Type type);
-    // Single-Layer-Mode adjustment masks are baked on the CPU, so a live mask
-    // dab on the GPU FBO isn't visible until synced back. Called after each dab
-    // (requires the GL context current) to preview the effect in real time.
-    void previewAdjustmentMaskEdit(Layer* layer);
+    // Layer styles, filters and Single-Layer-Mode adjustments bake the mask into
+    // a CPU image, so a live mask dab on the GPU FBO isn't visible until synced
+    // back. Called after each dab (requires the GL context current) to preview
+    // the masked result in real time.
+    void previewBakedMaskEdit(Layer* layer);
     bool isBrushBasedTool() const;
     float clampedBrushSize(float size) const;
     float clampedBrushHardness(float hardness) const;
@@ -463,9 +517,34 @@ private:
     // as the paint action (close it with m_controller->history().endMacro()).
     // Returns false when the action must be aborted (no document, a blocking mode
     // such as crop/transform/text-edit, etc.). When a layer is already selected
-    // it returns true without creating anything — each tool's own locks /
-    // rasterization rules then decide whether the action proceeds.
+    // it creates nothing — each tool's own locks / rasterization rules then
+    // decide whether the action proceeds — except that a selected RAW Layer
+    // first runs the raster-copy gate below, which is the one case that can
+    // return false without the canvas being in a blocking mode (the user
+    // cancelled the offer).
     bool ensurePaintTargetLayer(const QString& undoName);
+
+    // THE place where "this layer's pixels cannot be painted because it is a RAW
+    // Layer" is decided, for every tool that writes straight into the active
+    // layer (Brush, Eraser, Clone Stamp, Healing, Fill Bucket, Gradient). The
+    // three funnels those tools share call it — ensurePaintTargetLayer(),
+    // beginBrushStroke() and beginCloneStampStroke() — so no individual tool
+    // carries the rule.
+    //
+    // Returns true to carry on (not a RAW layer). Returns false when the
+    // operation must be abandoned: either the user took the editable raster copy
+    // (see ImageController::rasterCopyRawLayer — it is now the selected layer,
+    // ready for the next press) or cancelled, which changes nothing at all.
+    // Nothing is painted either way: the prompt is modal and takes a click of
+    // its own, so the button the user pressed on the canvas is released onto
+    // the DIALOG and the gesture is over by the time this returns. Aborting the
+    // whole press is also what keeps the Brush — the one tool that reaches two
+    // of the three funnels — from prompting twice.
+    bool ensureRasterCopyForRawTarget();
+
+    // The "Rasterize RAW Layer?" confirmation. Returns true for "Create Raster
+    // Copy". Separate from the gate so the gate reads as policy, not as UI.
+    bool promptRasterizeRawLayer();
 
     // The Clone Stamp tool (in either Clone or Healing sub-mode) shares one set
     // of source/stroke code paths; this gates them.
@@ -473,12 +552,39 @@ private:
         return m_currentTool == Tool::CloneStamp;
     }
     QImage cloneSourceSnapshot() const;
+    // The clone/heal source composite, off the UI thread.
+    //
+    // endBrushStroke() bumps compositionGeneration, so the first pointer event
+    // after releasing a stroke found the cache stale and recomposited the whole
+    // document synchronously — a multi-megapixel CPU composite in a mouse-move
+    // handler, which is the "the mouse freezes after the dab" symptom. These
+    // dispatch it over a shallowClone() snapshot instead (same technique as
+    // ProjectionCache::makeSnapshot / AsyncProjectionBuilder) and let the
+    // overlay keep showing the previous snapshot — stale by one stroke, for the
+    // fraction of a second the composite takes — rather than blocking.
+    void requestCloneSourceSnapshot();
+    void onCloneSourceSnapshotReady();
+    // Cache matches the live document/layer/sample mode, i.e. nothing to build.
+    bool cloneSourceSnapshotIsFresh() const;
+    // The in-flight build is for the live state, i.e. worth waiting for rather
+    // than restarting.
+    bool cloneSourceBuildMatchesLiveState() const;
+    void adoptCloneSourceSnapshot();
+    // Non-blocking: returns the freshest snapshot available (possibly stale,
+    // possibly null) and schedules a rebuild when it isn't current. For the
+    // hover overlay, which can tolerate being a stroke behind.
     QImage clonePreviewSourceSnapshot();
+    // Blocking: for the two callers that cannot proceed without pixels — the
+    // stroke (a dab cannot sample what does not exist) and Alt-click priming.
+    // Waits for an in-flight build of the live state rather than starting a
+    // second one, and only composites here when there is none to wait for.
+    QImage cloneSourceSnapshotBlocking();
     QImage cloneStampPreviewImage(QPointF destinationScreen,
                                   QPointF destinationDoc,
                                   QPointF sourceDoc,
                                   const QImage& sourceImage);
     QImage brushTipPreviewImage(int side) const;
+    quint64 clonePreviewKey(const QImage& sourceImage) const;
     // Silhouette brush cursor: trace the tip silhouette ONCE into a normalized unit
     // path (cached, keyed by the tip), then only QTransform it per hover frame — the
     // same compute-once/transform-per-frame strategy as KisBrush::outline().
@@ -502,6 +608,32 @@ private:
     // ViewportCamera::clampPan. Single enforcement point: called after every
     // pan/zoom/fit/resize/overscroll change and once per frame in paintGL().
     void clampPanOffset();
+    // Same clamp, applied to an arbitrary value instead of m_doc->panOffset —
+    // lets the wheel-pan ease target stay valid without touching the live pan.
+    QPointF clampedPanOffset(const QPointF& pan) const;
+    // Eases m_doc->panOffset toward m_panAnimTarget by one frame's worth, paced
+    // by actual elapsed time. Called from paintGL() — riding the widget's own
+    // repaint cadence instead of a wall-clock timer, so the glide never asks
+    // for frames faster than they can actually be produced. Returns whether it
+    // moved panOffset (false once settled or when there is nothing to ease).
+    bool advancePanAnimation();
+    // Stops any in-flight wheel-pan ease, so a direct pan/zoom/reset never
+    // fights a leftover glide on the next frame.
+    void cancelPanAnimation();
+    // Eases m_doc->zoom toward m_zoomAnimTarget by one frame's worth, in LOG
+    // space (see the definition for why), holding the document point recorded
+    // in m_zoomAnchorCanvas still under the cursor as it goes. Shares the pan
+    // glide's shape: driven from paintGL(), paced by real elapsed time, returns
+    // whether it moved zoom.
+    bool advanceZoomAnimation();
+    // Stops any in-flight zoom ease and parks zoomTarget back on the live zoom.
+    void cancelZoomAnimation();
+    // Walks `steps` entries along the zoom ladder from the glide's DESTINATION
+    // (not the live zoom) and eases toward the result, so a fast wheel spin
+    // still lands exactly `steps` entries away instead of short of it.
+    // anchorWidgetPos is the widget-space point to pin; nullopt pivots about the
+    // canvas centre, which is what the menu/keyboard zoom has always done.
+    void stepZoomAnimated(int steps, const std::optional<QPointF>& anchorWidgetPos);
     // Viewport + on-screen canvas size in screen pixels. Returns false when the
     // widget/document is not measurable yet (so callers can no-op).
     bool viewportCanvasMetrics(double& vw, double& vh,
@@ -580,7 +712,11 @@ private:
     void doAlignLayer(int alignmentType);
     void fillBucket(QPointF screenPos);
     void eyedropperSample(QPointF screenPos, Qt::MouseButton button, Qt::KeyboardModifiers modifiers);
-    QColor eyedropperSampleColor(QPointF screenPos);
+    // Moves/fills the eyedropper's hover read-out (hex + RGBA) for `screenPos`,
+    // or hides it when the sample is invalid. Shared by the Eyedropper tool's
+    // hover and by the colour-dialog pick drag.
+    void updateEyedropperReadout(QPointF screenPos, const QColor& color);
+    void hideEyedropperReadout();
     bool isInRotateZone(const QPolygonF& cornersScreenNdc, QPointF screenPos) const;
     QPointF constrainedGradientPoint(QPointF start, QPointF current,
                                      Qt::KeyboardModifiers modifiers) const;
@@ -627,6 +763,10 @@ private:
     bool applySnapMoveFromStart(QPointF currentMouseScreen,
                                 Qt::KeyboardModifiers modifiers);
     void translateNodeByDocumentDelta(LayerTreeNode* node, QPointF deltaDoc);
+    // Realigns a moved node onto whole document pixels. A layer sitting at a
+    // fractional document offset is resampled by BOTH compositors for as long as
+    // it stays there, so one drag would otherwise leave it permanently soft.
+    void snapNodeToPixelGrid(LayerTreeNode* node);
     void applySnapForCurrentTransform(Qt::KeyboardModifiers modifiers);
     void clearSnapFeedback();
     void clearSnapBoundsCache();
@@ -717,6 +857,11 @@ private:
     QRectF m_resizeStartDocBounds;
 
     bool m_brushDrawing = false;
+    // Latched once the prompt has run for the CURRENT pointer gesture, cleared
+    // by the next press. The gate is reached twice per press for the Brush
+    // (ensurePaintTargetLayer, then beginBrushStroke) and by then the active
+    // layer is the raster copy, not a RAW layer — without this latch the second
+    // call would answer Proceed and arm a stroke whose button is long gone.
     QPointF m_brushScreenLastPos;
     QPointF m_lastBrushImagePos;
     QImage m_brushBeforeImage;
@@ -751,11 +896,24 @@ private:
     uint64_t m_clonePreviewSourceGeneration = std::numeric_limits<uint64_t>::max();
     int m_clonePreviewSourceFlatIndex = -1;
     CloneSampleMode m_clonePreviewSourceMode = CloneSampleMode::CurrentAndBelow;
+    // Identity of the build currently on the worker, so a request for the same
+    // state does not queue a second composite and the stroke path can tell a
+    // build worth waiting for from one that is already obsolete. Mirrors
+    // ProjectionCache's m_inFlightDoc/m_inFlightGen.
+    QFutureWatcher<QImage>* m_cloneSourceWatcher = nullptr;
+    uint64_t m_cloneSourceBuildGeneration = std::numeric_limits<uint64_t>::max();
+    int m_cloneSourceBuildFlatIndex = -1;
+    CloneSampleMode m_cloneSourceBuildMode = CloneSampleMode::CurrentAndBelow;
     // Per-event cost bound for the clone source preview: the rendered preview is
     // reused between refreshes (position still follows every event) and the
     // scaled tip mask is cached per tip/size.
     QElapsedTimer m_clonePreviewThrottle;
     QImage m_clonePreviewImage;
+    // Everything the preview image depends on EXCEPT the pointer position (brush
+    // footprint, falloff, tip, source image). The time throttle alone would be
+    // wrong for these: a stale image of the previous brush size is not just late,
+    // it is the wrong size. Pointer movement is what the throttle is for.
+    quint64 m_clonePreviewKey = 0;
     QImage m_cloneTipPreviewScaled;
     int m_cloneTipPreviewSide = -1;
     qint64 m_cloneTipPreviewKey = 0;
@@ -796,6 +954,28 @@ private:
     QScrollBar* m_hScrollBar = nullptr;
     QScrollBar* m_vScrollBar = nullptr;
     bool m_updatingScrollBars = false;
+
+    // Wheel-pan ease-out: each wheel tick nudges m_panAnimTarget (clamped, so
+    // the glide can never aim outside the valid pan range); while m_panAnimating
+    // is set, paintGL() eases panOffset toward it a little more each frame and
+    // clears it once they match.
+    QPointF m_panAnimTarget;
+    QElapsedTimer m_panAnimClock;
+    bool m_panAnimating = false;
+
+    // Zoom ease-out — same shape as the pan glide above. Ladder steps accumulate
+    // into m_zoomAnimTarget and paintGL() eases m_doc->zoom toward it.
+    // m_zoomAnchorCanvas is the point to hold still, in canvas-normalised
+    // coordinates: that is image space, so it stays valid while both zoom and
+    // pan move under it. m_wheelZoomAccum banks sub-notch wheel deltas, because
+    // high-resolution wheels and trackpads send far less than 120 units per
+    // event and one ladder step per event would make a single gesture fly
+    // across the whole zoom range.
+    float m_zoomAnimTarget = 1.0f;
+    QPointF m_zoomAnchorCanvas;
+    QElapsedTimer m_zoomAnimClock;
+    bool m_zoomAnimating = false;
+    double m_wheelZoomAccum = 0.0;
 
     // ── Selection state ──
     SelectType m_selectType = SelectType::Rectangular;
@@ -877,11 +1057,41 @@ private:
     bool m_quickMaskDabbed = false;
     QImage m_quickMaskBefore;
 
+    // ── Grayscale stroke state (channels / Quick Mask) ────────
+    void beginGrayscaleStroke(const BrushInputState& input, QPointF screenPos);
+    void continueGrayscaleStroke(const BrushInputState& input, QPointF screenPos);
+    void endGrayscaleStroke();
+    // Turns the dabs' accumulated rect into channel-view damage so the canvas
+    // re-derives only the painted area, then clears it for the next dab.
+    void flushGrayscaleStrokeDamage();
+
+    ChannelPaintTarget m_grayscalePaint;
+    bool m_grayscaleStrokeActive = false;
+    bool m_grayscaleStrokeIsQuickMask = false;
+    // Channel indices and their pre-stroke buffers, so the whole stroke lands
+    // as ONE history entry per channel instead of one per dab.
+    std::vector<int> m_grayscaleStrokeChannels;
+    std::vector<QImage> m_grayscaleStrokeBefore;
+
+    // Colour-component stroke: the armed R/G/B subset, plus the layer's
+    // pre-stroke pixels. The stroke paints normally and the unarmed components
+    // (and the alpha) are restored from this snapshot when it ends — see
+    // endBrushStroke.
+    bool m_componentStrokeActive = false;
+    bool m_componentStrokeMask[3] = {false, false, false};
+    QImage m_componentStrokeBefore;
+    void restoreUnarmedColorComponents(Layer* layer);
+
     bool m_hasPreview = false;
     QImage m_previewImage;
     unsigned int m_previewTexture = 0;
     processing::PreviewRenderer* m_previewRenderer = nullptr;
     LayerTreeNode* m_previewSourceNode = nullptr;
+    // Layer-pixel rect the preview covers; wider than the layer's base rect when
+    // the previewed filter reaches past the layer bounds (showPreview). Pending
+    // until the matching preview image arrives, since the render is async.
+    QRect m_previewLayerRect;
+    QRect m_previewPendingLayerRect;
 
     bool m_editingMask = false;
     bool m_grayscaleMaskView = false;
@@ -928,6 +1138,13 @@ private:
     std::shared_ptr<DistortData> m_distortDragBeforeData;
     QTransform m_distortDragBeforeTransform;
     int m_distortSessionSteps = 0; // undo entries pushed during this session
+    // DistortData::sourceImage premultiplied, for warpDistort(). Cached because
+    // a live drag re-warps every frame while the source never changes, and
+    // premultiplying a full-resolution source costs more than the warp itself
+    // (the warp is O(preview buffer), the conversion O(source)). Keyed on the
+    // source's QImage cache key, so any reassignment invalidates it.
+    QImage m_distortPremulSource;
+    qint64 m_distortPremulKey = 0;
     void distortMousePress(QMouseEvent* e);
     void distortMouseMove(QMouseEvent* e);
     void distortMouseRelease(QMouseEvent* e);
@@ -949,6 +1166,16 @@ private:
     int m_textDragStart = -1;
     TextLayerData m_textBeforeSnapshot;
     QTransform m_textBeforeTransform;
+    // ── Live text colour preview state (see previewTextColor) ──
+    // m_textColorPreviewData is the layer the session started on: if the user
+    // selects another layer while the dialog is open the session stops instead
+    // of recolouring the wrong text.
+    bool m_textColorPreview = false;
+    int m_textColorPreviewIndex = -1;
+    TextLayerData* m_textColorPreviewData = nullptr;
+    TextLayerData m_textColorPreviewBefore;
+    QTransform m_textColorPreviewTransform;
+    QColor m_textColorPreviewColor;
     QPointF m_textCreateStart;
     bool m_textCreatingBox = false;
 
@@ -960,6 +1187,10 @@ private:
     int m_curvesPickMode = 0;
     bool m_curvesTargetDragging = false;
     double m_curvesTargetStartY = 0.0;
+
+    // ── Colour-dialog eyedropper state (see setColorPickArmed) ──
+    bool m_colorPickArmed = false;
+    bool m_colorPickDragging = false;
 
     // ── Hue/Saturation editor eyedropper state ──
     // 0 = disarmed, 1 = main (recenter range, one-shot click), 2 = add range,
@@ -986,6 +1217,10 @@ private:
     QColor m_eyedropperHoverColor;
     QPointF m_eyedropperScreenPos;
     QLabel* m_eyedropperOverlay = nullptr;
+    // The colour square inside the read-out. A child of the label, so the
+    // label's own geometry and edge-flipping keep working untouched — the room
+    // for it comes from the label's extra right padding.
+    QLabel* m_eyedropperSwatch = nullptr;
     QLabel* m_transformOverlay = nullptr;
 
     // ── Crop tool state ──

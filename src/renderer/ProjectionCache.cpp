@@ -1,5 +1,6 @@
 #include "ProjectionCache.hpp"
 #include "AsyncProjectionBuilder.hpp"
+#include "ChannelView.hpp"
 #include "DocumentCompositor.hpp"
 #include "RenderContext.hpp"
 #include "core/Document.hpp"
@@ -7,6 +8,8 @@
 
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+
+#include <algorithm>
 
 ProjectionCache::ProjectionCache() = default;
 ProjectionCache::~ProjectionCache() = default;
@@ -39,12 +42,25 @@ unsigned int ProjectionCache::update(Document* doc)
         return 0;
 
     const uint64_t gen = doc->compositionGeneration;
-    const bool upToDate = m_texture != 0
-                       && m_doc == doc
-                       && m_generation == gen
-                       && m_size == doc->size;
-    if (upToDate)
+    const uint64_t chanGen = doc->channelViewGeneration;
+    const bool compositeUpToDate = m_texture != 0
+                                && m_doc == doc
+                                && m_generation == gen
+                                && m_size == doc->size;
+    if (compositeUpToDate) {
+        if (m_channelGeneration == chanGen)
+            return m_texture;
+        // Only the channel view moved. The layer composite in m_baseImage is
+        // still valid, so re-derive the display image instead of re-running
+        // the compositor — this is what makes toggling an eye, dragging an
+        // overlay opacity or painting into a channel cheap.
+        QRect dirty;
+        bool full = true;
+        doc->consumeChannelViewDirty(dirty, full);
+        applyChannelView(doc, full, dirty);
+        m_channelGeneration = chanGen;
         return m_texture;
+    }
 
     // A single full-canvas texture can't hold documents larger than the GL
     // texture limit — signal "unavailable" so the caller keeps the per-layer
@@ -59,13 +75,17 @@ unsigned int ProjectionCache::update(Document* doc)
     if (doc->flatCount() == 0) {
         QImage img(doc->size, QImage::Format_RGBA8888);
         img.fill(Qt::transparent);
-        m_image      = img;
+        m_baseImage  = img;
         m_doc        = doc;
         m_generation = gen;
         m_size       = doc->size;
         m_inFlightDoc = nullptr;
         m_inFlightGen = kInvalidGen;
-        uploadTexture();
+        QRect dirty;
+        bool full = true;
+        doc->consumeChannelViewDirty(dirty, full);
+        applyChannelView(doc, true, QRect());
+        m_channelGeneration = chanGen;
         return m_texture;
     }
 
@@ -81,11 +101,15 @@ unsigned int ProjectionCache::update(Document* doc)
         m_inFlightDoc = nullptr;
         m_inFlightGen = kInvalidGen;
         if (!resultImg.isNull() && resultDoc == doc && resultGen == gen) {
-            m_image      = resultImg.convertToFormat(QImage::Format_RGBA8888);
+            m_baseImage  = resultImg.convertToFormat(QImage::Format_RGBA8888);
             m_doc        = doc;
             m_generation = gen;
             m_size       = doc->size;
-            uploadTexture();
+            QRect dirty;
+            bool full = true;
+            doc->consumeChannelViewDirty(dirty, full);
+            applyChannelView(doc, true, QRect());
+            m_channelGeneration = chanGen;
             return m_texture;
         }
         // Stale result — fall through to dispatch a fresh build for `gen`.
@@ -108,6 +132,91 @@ unsigned int ProjectionCache::update(Document* doc)
     return 0;
 }
 
+void ProjectionCache::applyChannelView(Document* doc, bool full, const QRect& rect)
+{
+    if (m_baseImage.isNull())
+        return;
+
+    const channelview::View view = channelview::resolve(doc);
+
+    if (view.isIdentity()) {
+        // Nothing to transform: share the base buffer (COW, no copy) so the
+        // default view costs exactly what it did before channels existed.
+        const bool wasTransformed = m_image.constBits() != m_baseImage.constBits();
+        m_image = m_baseImage;
+        if (wasTransformed || m_texture == 0)
+            uploadTexture();
+        return;
+    }
+
+    QRect region = full ? QRect() : rect.intersected(m_baseImage.rect());
+    if (!full && region.isEmpty())
+        return;
+
+    if (m_image.size() != m_baseImage.size()
+        || m_image.format() != m_baseImage.format()
+        || m_image.constBits() == m_baseImage.constBits()) {
+        // First transformed frame for this composite (or a size change): take
+        // a private copy to transform into, leaving the base pristine.
+        m_image = m_baseImage.copy();
+        region = QRect();
+    } else {
+        // m_image still holds the PREVIOUS view's result, and the transform is
+        // neither idempotent nor invertible: replicating Green over an
+        // already-grey Red view shows Red again, and a component the previous
+        // view zeroed can never come back. So every pixel about to be
+        // re-derived is restored from the base first — the dab's rect on a
+        // partial update, the whole canvas on a full one (which is also how a
+        // freshly composited m_baseImage reaches the screen).
+        const QRect restore = region.isEmpty() ? m_baseImage.rect() : region;
+        for (int y = restore.top(); y <= restore.bottom(); ++y) {
+            const uchar* src = m_baseImage.constScanLine(y) + restore.left() * 4;
+            uchar* dst = m_image.scanLine(y) + restore.left() * 4;
+            std::copy(src, src + static_cast<size_t>(restore.width()) * 4, dst);
+        }
+    }
+
+    channelview::apply(m_image, view, region);
+
+    if (region.isEmpty())
+        uploadTexture();
+    else
+        uploadSubImage(region);
+}
+
+void ProjectionCache::uploadSubImage(const QRect& rect)
+{
+    auto* ctx = QOpenGLContext::currentContext();
+    auto* f   = ctx ? ctx->functions() : nullptr;
+    if (!f || m_texture == 0 || m_image.isNull() || rect.isEmpty()) {
+        uploadTexture();
+        return;
+    }
+
+    // The texture holds premultiplied samples (see uploadTexture), so the sub
+    // rect has to be converted the same way before it is pushed.
+    const QImage patch = m_image.copy(rect)
+        .convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (patch.isNull()) {
+        uploadTexture();
+        return;
+    }
+
+    GLint prevAlign = 4;
+    f->glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevAlign);
+    f->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    f->glBindTexture(GL_TEXTURE_2D, m_texture);
+    f->glTexSubImage2D(GL_TEXTURE_2D, 0, rect.x(), rect.y(),
+                       rect.width(), rect.height(),
+                       GL_RGBA, GL_UNSIGNED_BYTE, patch.constBits());
+    // The mip pyramid feeds minification (SamplingShaderLib); leaving it stale
+    // would show the pre-dab channel view as soon as the canvas is zoomed out.
+    f->glGenerateMipmap(GL_TEXTURE_2D);
+    m_mipLevels = maxMipLevel(m_image.size());
+    f->glBindTexture(GL_TEXTURE_2D, 0);
+    f->glPixelStorei(GL_UNPACK_ALIGNMENT, prevAlign);
+}
+
 void ProjectionCache::uploadTexture()
 {
     auto* ctx = QOpenGLContext::currentContext();
@@ -118,18 +227,40 @@ void ProjectionCache::uploadTexture()
     if (m_texture == 0)
         f->glGenTextures(1, &m_texture);
 
+    // Uploaded premultiplied so the mip pyramid below is correct: averaging
+    // straight-alpha texels folds the (meaningless) colour of fully
+    // transparent pixels into every level, which shows up as a dark halo
+    // around soft edges once the canvas is zoomed out. drawProjection pairs
+    // this with uSourcePremultiplied = 1.
+    const QImage premul = m_image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (premul.isNull())
+        return;
+
     f->glBindTexture(GL_TEXTURE_2D, m_texture);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    // Keep the same texture state used by the live per-layer compositor. The
-    // main shader handles straight-alpha edges explicitly, but these filters
-    // remain the fallback state for normal texture sampling.
-    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     f->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                    m_image.width(), m_image.height(),
-                    0, GL_RGBA, GL_UNSIGNED_BYTE, m_image.constBits());
+                    premul.width(), premul.height(),
+                    0, GL_RGBA, GL_UNSIGNED_BYTE, premul.constBits());
+    // The pyramid is what keeps minification an exact area filter instead of
+    // a fixed tap grid spread ever thinner as the zoom drops: the sampler
+    // picks the level whose residual footprint is in [1,2) and boxes that
+    // (renderer/SamplingShaderLib.hpp). GEGL/GIMP use the same idea
+    // (gimpprojection.c, memsize x 1.33) — the pyramid costs a third of the
+    // texture.
+    f->glGenerateMipmap(GL_TEXTURE_2D);
+    m_mipLevels = maxMipLevel(premul.size());
     f->glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+int ProjectionCache::maxMipLevel(const QSize& s)
+{
+    int level = 0;
+    for (int n = std::max(s.width(), s.height()); n > 1; n /= 2)
+        ++level;
+    return level;
 }
 
 bool ProjectionCache::exceedsMaxTextureSize(const QSize& s)
@@ -152,5 +283,6 @@ void ProjectionCache::releaseGL()
     if (f && m_texture)
         f->glDeleteTextures(1, &m_texture);
     m_texture = 0;
+    m_mipLevels = 0;
     invalidate();
 }

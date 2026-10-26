@@ -290,8 +290,11 @@ BOOST_AUTO_TEST_CASE(save_and_load_selection_channel)
     d.saveSelectionToChannel("TestChannel");
     BOOST_CHECK_EQUAL(d.channels.size(), 1);
     BOOST_CHECK_EQUAL(d.channels[0].name.toStdString(), "TestChannel");
-    BOOST_CHECK(d.channels[0].visible);
-    BOOST_CHECK(!d.channels[0].mask.isNull());
+    // A saved selection is an Alpha channel and starts hidden: creating it is
+    // not a request to look at it.
+    BOOST_CHECK(d.channels[0].isAlpha());
+    BOOST_CHECK(!d.channels[0].visible);
+    BOOST_CHECK(!d.channels[0].data.isNull());
 
     d.selection.clear();
     d.selection.setActive(false);

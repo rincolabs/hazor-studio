@@ -11,6 +11,12 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include "raw/RawDevelopParams.hpp"
+#include "raw/RawDevelopService.hpp"
+#include "raw/RawEngine.hpp"
+#include "raw/RawImageBuffer.hpp"
+#include "raw/RawSession.hpp"
+
 #include <algorithm>
 #include <cstring>
 
@@ -370,6 +376,67 @@ private:
             QStringLiteral("Loaded through OpenCV fallback. Embedded ICC profile was not preserved."));
 
         return ImageLoadResult::success(std::move(result));
+    }
+};
+
+// RAW files (CR2/CR3/NEF/ARW/...), via the native RawEngine (Fase 5). Exists
+// mainly so RawEngine::supportedExtensions() flows into
+// ImageCodecRegistry::openFileFilter() for the Open dialog, and so a stray
+// path reaching the generic codec path (drag & drop, "Insert into Canvas")
+// still decodes instead of silently falling through to QtImageCodec/
+// OpenCvImageCodec, which can misread a RAW file as a (partial/wrong) TIFF.
+// read() always flattens with RawDevelopParams::cameraDefaults() — the
+// non-destructive RAW Layer with its own PP3 is built directly in
+// MainWindow::onOpenFile(), which special-cases RAW *before* reaching the
+// registry.
+class RawImageCodec final : public ImageCodec {
+public:
+    QString name() const override { return QStringLiteral("RAW Image Codec"); }
+
+    QStringList readableFormats() const override
+    {
+        QStringList out;
+        for (const std::string& ext : RawEngine::supportedExtensions())
+            out << QString::fromStdString(ext);
+        return sortedUnique(out);
+    }
+
+    QStringList writableFormats() const override { return {}; }
+
+    bool canRead(const QString& path) const override
+    {
+        // Extension-only, regardless of RawEngine::isAvailable(): a RAW file
+        // must be claimed here and reported as unsupported-in-this-build
+        // (see read() below), never silently mis-decoded by a generic codec.
+        return RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(path).suffix()).toStdString());
+    }
+
+    bool canWrite(const QString&) const override { return false; }
+
+    ImageLoadResult read(const QString& path) override
+    {
+        if (!RawEngine::isAvailable()) {
+            return ImageLoadResult::error(
+                QStringLiteral("RAW support is not built into this copy of Hazor."));
+        }
+
+        std::string errorMessage;
+        std::unique_ptr<RawSession> session = RawEngine::openFile(path.toStdString(), &errorMessage);
+        if (!session)
+            return ImageLoadResult::error(QString::fromStdString(errorMessage));
+
+        const RawImageBuffer buffer = session->renderFull(RawDevelopParams::cameraDefaults());
+        if (buffer.isEmpty())
+            return ImageLoadResult::error(QStringLiteral("RAW develop failed."));
+
+        const QImage image = RawDevelopService::convertToRgba8888(buffer, /*dither=*/false);
+        return convertQImageToDocumentImage(image, path, QByteArrayLiteral("raw"));
+    }
+
+    bool write(const QString&, const DocumentImage&, const ImageSaveOptions&, QString*) override
+    {
+        return false;
     }
 };
 
@@ -787,6 +854,10 @@ QString ImageCodecRegistry::saveFilterForFormat(const QString& format) const
 
 void registerDefaultImageCodecs(ImageCodecRegistry& registry)
 {
+    // RawImageCodec goes first: a RAW file's extension must be claimed here,
+    // before QtImageCodec/OpenCvImageCodec get a chance to mis-decode it
+    // (e.g. a DNG's embedded TIFF structure fooling a generic TIFF reader).
+    registry.registerCodec(std::make_unique<RawImageCodec>());
     registry.registerCodec(std::make_unique<QtImageCodec>());
     registry.registerCodec(std::make_unique<OpenCvImageCodec>());
 }

@@ -45,6 +45,10 @@ bool RenderCache::isValid(const Document* doc, int viewportW, int viewportH,
     // so the final pre-overlay frame must be re-rendered (the projection below
     // re-derives its display image) instead of replaying the stale colours.
     if (m_cachedDisplayGeneration != doc->displayGeneration) return false;
+    // Same reasoning for the channel view: toggling an eye in the Channels
+    // panel or painting into a channel changes the frame without touching the
+    // composition, so a cached frame from the previous view must not replay.
+    if (m_cachedChannelGeneration != doc->channelViewGeneration) return false;
     return m_cachedGeneration == doc->compositionGeneration;
 }
 
@@ -138,4 +142,5 @@ void RenderCache::markValid(const Document* doc, int vpW, int vpH,
     m_cachedDoc = doc;
     m_cachedGeneration = doc ? doc->compositionGeneration : kInvalidGeneration;
     m_cachedDisplayGeneration = doc ? doc->displayGeneration : 0;
+    m_cachedChannelGeneration = doc ? doc->channelViewGeneration : 0;
 }

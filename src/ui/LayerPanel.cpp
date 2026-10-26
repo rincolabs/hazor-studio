@@ -7,6 +7,8 @@
 #include "core/Document.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
+#include "renderer/BlendRules.hpp"
+#include "smartobject/SmartObjectData.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
@@ -28,6 +30,7 @@
 #include <QLineEdit>
 
 #include <QSignalBlocker>
+#include <QSet>
 #include <QtConcurrent/QtConcurrent>
 #include <QMouseEvent>
 #include <QStyleOptionViewItem>
@@ -44,11 +47,70 @@
 
 namespace {
 static constexpr int kDraggingRole = Qt::UserRole + 200;
+// Identity of the node a row stands for. Stored on the row so refresh() can
+// tell "same list, fresh data" from a real structural change without having to
+// rebuild to find out.
+static constexpr int kNodeRole = Qt::UserRole + 201;
 class LayerTreeWidget : public QTreeWidget {
 public:
     explicit LayerTreeWidget(QWidget* parent = nullptr)
         : QTreeWidget(parent)
     {}
+
+    // Revealing the active layer is a deliberate gesture (LayerPanel::refresh()
+    // enables it only when the active node actually changed), not something
+    // every rebuild may do.
+    void setRevealEnabled(bool enabled) { m_revealEnabled = enabled; }
+
+    // QAbstractItemView::dropEvent is what normally clears DraggingState, the
+    // drop indicator and the auto-scroll timer — and it never runs here:
+    // LayerPanel::eventFilter handles the drop itself and consumes the event,
+    // and this widget calls startDrag() straight from mouseMoveEvent instead of
+    // going through the base implementation that resets the state afterwards.
+    // Left set, that state made the view start a drag with no button held: the
+    // DraggingState branch of QAbstractItemView::mouseMoveEvent never checks
+    // event->buttons(), so just moving the pointer over the panel after a drop
+    // grabbed whatever layer was under the cursor.
+    void endDragState()
+    {
+        setState(NoState);
+        stopAutoScroll();
+        viewport()->update();
+    }
+
+    // clear() deletes every item, so a press being tracked across a rebuild
+    // would leave a dangling pointer behind.
+    void forgetPressedItem()
+    {
+        m_pressItem = nullptr;
+        m_preserveSelectionOnPress = false;
+    }
+
+    // Two things QTreeView does on its own that the layer panel must not
+    // inherit, both funnelled through scrollTo():
+    //
+    //  • it scrolls to the current row on every currentChanged — and refresh()
+    //    re-sets the current item on every rebuild, which yanked the viewport
+    //    back to the active layer while the user was scrolling or dragging;
+    //  • to reach that row it force-expands every collapsed ancestor. That
+    //    expansion never reached node->collapsed (refresh() rebuilds with
+    //    signals blocked), so a layer inside a CLOSED group showed up while the
+    //    group still drew its "collapsed" arrow, and vanished again on the next
+    //    rebuild.
+    //
+    // Expansion is owned by node->collapsed; refresh() opens the ancestors in
+    // the model first, so by the time a real reveal gets here the path is
+    // already expanded and this only has to scroll.
+    void scrollTo(const QModelIndex& index, ScrollHint hint = EnsureVisible) override
+    {
+        if (!m_revealEnabled)
+            return;
+        for (QModelIndex parent = index.parent(); parent.isValid(); parent = parent.parent()) {
+            if (!isExpanded(parent))
+                return;
+        }
+        QTreeWidget::scrollTo(index, hint);
+    }
 
 protected:
     static bool isItemInTree(const QTreeWidgetItem* item, const QTreeWidget* tree)
@@ -132,6 +194,7 @@ protected:
         viewport()->update();
 
         QTreeWidget::startDrag(supportedActions);
+        endDragState();
 
         if (dragIndex.isValid())
             model()->setData(dragIndex, false, kDraggingRole);
@@ -142,26 +205,94 @@ private:
     QPoint m_pressPos;
     QTreeWidgetItem* m_pressItem = nullptr;
     bool m_preserveSelectionOnPress = false;
+    bool m_revealEnabled = true;
 };
-} // namespace
 
-static const char* kBlendModeNames[] = {
-    "Normal", "Multiply", "Screen", "Overlay",
-    "Darken", "Lighten", "Color Dodge", "Color Burn",
-    "Hard Light", "Soft Light", "Difference", "Exclusion",
-    "Hue", "Saturation", "Color", "Luminosity"
-};
-static constexpr int kNumBlendModes = sizeof(kBlendModeNames) / sizeof(kBlendModeNames[0]);
-
-static int blendModeToComboIndex(BlendMode mode)
+quintptr nodeToken(const LayerTreeNode* node)
 {
-    return static_cast<int>(mode);
+    return reinterpret_cast<quintptr>(node);
 }
 
-static BlendMode comboIndexToBlendMode(int idx)
+quintptr rowNodeToken(const QTreeWidgetItem* item)
 {
-    if (idx < 0 || idx >= kNumBlendModes) return BlendMode::Normal;
-    return static_cast<BlendMode>(idx);
+    return item ? item->data(0, kNodeRole).value<quintptr>() : 0;
+}
+
+void collectRowsDepthFirst(QTreeWidgetItem* item, QVector<QTreeWidgetItem*>& out)
+{
+    out.append(item);
+    for (int i = 0; i < item->childCount(); ++i)
+        collectRowsDepthFirst(item->child(i), out);
+}
+
+// Everything on a row that can change while the structure does not: a rename,
+// or a reorder elsewhere shifting this row's flat index. Qt's setters all
+// short-circuit on an equal value, so a row that did not change emits no
+// dataChanged and repaints nothing.
+void applyRowData(QTreeWidgetItem* item, LayerTreeNode* node, int flatIndex)
+{
+    item->setData(0, Qt::UserRole, flatIndex);
+    item->setData(0, Qt::UserRole + 1, static_cast<int>(node->type));
+    item->setData(0, Qt::UserRole + 2, node->collapsed ? 1 : 0);
+    item->setData(0, kNodeRole, QVariant::fromValue(nodeToken(node)));
+
+    // Groups and layers hosting Single-Layer-Mode adjustments are expandable in
+    // the tree. Use hasAdjustmentChildren() (not the visible-only variant) so a
+    // hidden nested adjustment keeps its parent row expandable instead of
+    // stranding it as an unreachable child.
+    const bool expandable = node->type == LayerTreeNode::Type::Group
+        || node->hasAdjustmentChildren();
+    item->setChildIndicatorPolicy(expandable
+        ? QTreeWidgetItem::ShowIndicator
+        : QTreeWidgetItem::DontShowIndicatorWhenChildless);
+
+    item->setText(0, node->name.isEmpty()
+        ? QString("Layer %1").arg(flatIndex + 1) : node->name);
+    item->setToolTip(0, node->name);
+}
+} // namespace
+
+// Pass Through is not a BlendMode value — it is a Group's compositing model
+// (LayerTreeNode::GroupBlendMode) — but it belongs in this combo all the same:
+// it is the alternative to blending the group's composed result, so offering
+// it anywhere else would let the user ask for both at once. It carries a
+// sentinel in the item data that cannot collide with a BlendMode (which is a
+// non-negative enum, persisted in .hzr and in the tool API).
+static constexpr int kPassThroughComboData = -1;
+
+// The combo is built from blend::pickerEntries() (renderer/BlendRules.hpp):
+// grouped order with separators, so the row index is NOT the BlendMode
+// value — the mode rides in the item data. `withPassThrough` prepends the
+// group-only entry; the combo is rebuilt only when that flag flips (see
+// updateTopBarFromActiveLayer), never per selection change.
+static void fillBlendCombo(QComboBox* combo, bool withPassThrough)
+{
+    combo->clear();
+    if (withPassThrough) {
+        combo->addItem(LayerPanel::tr("Pass Through"), kPassThroughComboData);
+        combo->insertSeparator(combo->count());
+    }
+    for (const auto& e : blend::pickerEntries()) {
+        if (!e.label) {
+            combo->insertSeparator(combo->count());
+            continue;
+        }
+        combo->addItem(LayerPanel::tr(e.label), static_cast<int>(e.mode));
+    }
+}
+
+static int blendModeToComboIndex(const QComboBox* combo, BlendMode mode)
+{
+    const int idx = combo->findData(static_cast<int>(mode));
+    return idx >= 0 ? idx : 0;
+}
+
+static BlendMode comboIndexToBlendMode(const QComboBox* combo, int idx)
+{
+    const QVariant data = combo->itemData(idx);
+    if (!data.isValid() || data.toInt() == kPassThroughComboData)
+        return BlendMode::Normal;
+    return static_cast<BlendMode>(data.toInt());
 }
 
 LayerPanel::LayerPanel(QWidget* parent)
@@ -177,7 +308,7 @@ LayerPanel::LayerPanel(QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     // layout->setContentsMargins(t->spaceSM, t->spaceSM, t->spaceSM, t->spaceSM);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(t->spaceSM);
+    layout->setSpacing(0);
 
     m_topBar = new QWidget(this);
     auto* topLay = new QVBoxLayout(m_topBar);
@@ -201,8 +332,7 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     m_blendCombo = new QComboBox(m_blendRow);
 
-    for (int i = 0; i < kNumBlendModes; ++i)
-        m_blendCombo->addItem(tr(kBlendModeNames[i]));
+    fillBlendCombo(m_blendCombo, m_blendComboHasPassThrough);
     m_blendCombo->setToolTip(tr("Blending Mode"));
     m_blendCombo->setMinimumWidth(80);
     row1->addWidget(m_blendCombo, 1);
@@ -212,7 +342,7 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     topLay->addWidget(m_blendRow);
 
-    // Row 2: kind + lock label + lock buttons
+    // Row 2: lock label + lock buttons + Fill
     m_lockRow = new QWidget(m_topBar);
     m_lockRow->setObjectName("layerLock");
 
@@ -248,12 +378,13 @@ LayerPanel::LayerPanel(QWidget* parent)
 
     row2->addStretch();
 
-    m_kindCombo = new QComboBox(m_lockRow);
-    m_kindCombo->addItems({tr("Kind"), tr("Pixel"), tr("Text"), tr("Vector"),
-                           tr("Adjustment") });
-    m_kindCombo->setToolTip(tr("Filter by layer type"));
-    m_kindCombo->setMinimumWidth(80);
-    row2->addWidget(m_kindCombo);
+    // Deliberately the same widget class, range, suffix, step and label
+    // treatment as m_opacitySlider above, so Fill reads as its sibling rather
+    // than a second kind of control — the two together are the pair users of
+    // other layered editors come here looking for. It sits where the Kind type
+    // filter used to, which is the slot that was being held for it.
+    m_fillSlider = new ScrubbableValueInput(tr("Fill"), 0, 100, 100, tr("%"), 1, m_lockRow);
+    row2->addWidget(m_fillSlider);
 
     topLay->addWidget(m_lockRow);
 
@@ -284,12 +415,13 @@ LayerPanel::LayerPanel(QWidget* parent)
     m_actionBar = new QWidget(this);
     m_actionBar->setObjectName(QStringLiteral("layerActionBar"));
     auto* bottomLayout = new QHBoxLayout(m_actionBar);
-    bottomLayout->setSpacing(t->spaceMD);
+    bottomLayout->setContentsMargins(4, 4, 4, 4);
+    bottomLayout->setSpacing(4);
     auto makeIconBtn = [&](const QString& iconPath, const QString& tooltip) {
         auto* btn = new QPushButton(this);
         btn->setIcon(makeIcon(iconPath));
-        btn->setIconSize(QSize(20, 20));
-        btn->setFixedSize(28, 28);
+        btn->setIconSize(QSize(16, 16));
+        btn->setFixedSize(24, 24);
         btn->setToolTip(tooltip);
         return btn;
     };
@@ -318,6 +450,10 @@ LayerPanel::LayerPanel(QWidget* parent)
         });
     }
     m_adjustBtn->setMenu(adjustMenu);
+    // The native menu indicator shares the button's content area with the
+    // icon. Give this one control room for both so its icon keeps the same
+    // visual spacing as the icon-only buttons beside it.
+    m_adjustBtn->setFixedWidth(32);
 
     bottomLayout->addStretch();
     bottomLayout->addWidget(m_addBtn);
@@ -348,6 +484,23 @@ LayerPanel::LayerPanel(QWidget* parent)
         m_controller->commitNodeOpacity(active, static_cast<float>(v) / 100.0f);
     });
 
+    // Same begin/preview/commit shape as opacity, so a Fill drag groups into
+    // one history step and the canvas follows every step of it.
+    connect(m_fillSlider, &ScrubbableValueInput::editingStarted, this, [this]() {
+        if (!m_controller) return;
+        m_controller->beginNodeFillOpacity(m_controller->document()->activeFlatIndex);
+    });
+    connect(m_fillSlider, &ScrubbableValueInput::valueChanged, this, [this](double v) {
+        if (!m_controller) return;
+        m_controller->previewNodeFillOpacity(m_controller->document()->activeFlatIndex,
+                                             static_cast<float>(v) / 100.0f);
+    });
+    connect(m_fillSlider, &ScrubbableValueInput::editingFinished, this, [this](double v) {
+        if (!m_controller) return;
+        m_controller->commitNodeFillOpacity(m_controller->document()->activeFlatIndex,
+                                            static_cast<float>(v) / 100.0f);
+    });
+
     connect(m_tree, &QTreeWidget::currentItemChanged,
             this, &LayerPanel::onCurrentItemChanged);
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this]() {
@@ -376,9 +529,7 @@ LayerPanel::LayerPanel(QWidget* parent)
         if (newName.isEmpty()) return;
         auto* node = m_controller->document()->nodeAt(flatIdx);
         if (!node) return;
-        node->name = newName;
-        node->nameIsAuto = false;   // user picked this name; stop auto-naming it
-        if (node->layer) node->layer->name = newName;
+        m_controller->renameNode(flatIdx, newName);
     });
 
     connect(m_tree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem* item) {
@@ -399,8 +550,6 @@ LayerPanel::LayerPanel(QWidget* parent)
     connect(m_groupBtn, &QPushButton::clicked, this, [this]() {
         if (m_controller) m_controller->newGroup();
     });
-    connect(m_kindCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int) { refresh(); });
     connect(m_removeBtn, &QPushButton::clicked, this, [this]() {
         if (m_controller) m_controller->removeSelectedNodes();
     });
@@ -440,6 +589,7 @@ LayerPanel::LayerPanel(QWidget* parent)
     connect(m_tree, &QTreeWidget::customContextMenuRequested,
             this, [this](const QPoint& pos) {
         QMenu menu(this);
+        menu.setToolTipsVisible(true);
 
         QTreeWidgetItem* item = m_tree->itemAt(pos);
         int idx = item ? item->data(0, Qt::UserRole).toInt() : -1;
@@ -487,6 +637,22 @@ LayerPanel::LayerPanel(QWidget* parent)
                 });
             }
 
+            // Clipping Mask. One entry, labelled as whichever of the two
+            // commands applies (mirrors the Layer menu): Release on a clipped
+            // layer or on the base a run is clipped to, Create otherwise.
+            if (m_controller) {
+                const bool clipped = m_controller->isClippingMask(idx);
+                const bool isBase  = m_controller->isClippingMaskBase(idx);
+                if (clipped || isBase || m_controller->canCreateClippingMask(idx)) {
+                    menu.addSeparator();
+                    menu.addAction((clipped || isBase) ? tr("Release Clipping Mask")
+                                                       : tr("Create Clipping Mask"),
+                                   [this, idx]() {
+                        if (m_controller) m_controller->toggleClippingMask({idx});
+                    });
+                }
+            }
+
             if (m_controller) {
                 auto* node = m_controller->document() ? m_controller->document()->nodeAt(idx) : nullptr;
                 const bool isPixelLayer = node && node->type == LayerTreeNode::Type::Layer
@@ -496,6 +662,58 @@ LayerPanel::LayerPanel(QWidget* parent)
                     menu.addAction(tr("AI Upscale..."), [this, idx]() {
                         emit aiUpscaleRequested(idx);
                     });
+                }
+            }
+
+            // ── Smart Objects ──────────────────────────────────────
+            // Only what applies to THIS layer: a common layer offers Convert
+            // and nothing else; Relink never shows up on embedded content.
+            // Each entry just reports the command — MainWindow runs the very
+            // same operation the Layer ▸ Smart Objects menu runs.
+            if (m_controller) {
+                auto* soNode = m_controller->document()
+                    ? m_controller->document()->nodeAt(idx) : nullptr;
+                const auto soData = (soNode && soNode->type == LayerTreeNode::Type::Layer)
+                    ? m_controller->smartObjectDataAt(idx) : nullptr;
+                const bool convertible = soNode
+                    && soNode->type != LayerTreeNode::Type::Effect
+                    && !soNode->isFullyLocked();
+                const bool pixelsLocked = soNode && soNode->isPixelEditingLocked();
+
+                auto add = [&](const QString& text, LayerSmartObjectCommand command,
+                               bool enabled = true) {
+                    auto* action = menu.addAction(text, [this, idx, command]() {
+                        emit smartObjectCommandRequested(idx, command);
+                    });
+                    action->setEnabled(enabled);
+                };
+
+                if (!soData) {
+                    if (convertible) {
+                        menu.addSeparator();
+                        add(tr("Convert to Smart Object"), LayerSmartObjectCommand::Convert);
+                    }
+                } else {
+                    const bool isLinked =
+                        soData->mode == SmartObjectStorageMode::Linked;
+                    menu.addSeparator();
+                    add(tr("Edit Contents"), LayerSmartObjectCommand::EditContents);
+                    add(tr("New Smart Object via Copy"), LayerSmartObjectCommand::ViaCopy);
+                    add(tr("Replace Contents..."), LayerSmartObjectCommand::ReplaceContents,
+                        !pixelsLocked);
+                    if (isLinked) {
+                        add(tr("Relink to File..."), LayerSmartObjectCommand::RelinkToFile,
+                            !pixelsLocked);
+                        add(tr("Update Modified Content"),
+                            LayerSmartObjectCommand::UpdateModified);
+                        add(tr("Embed Linked"), LayerSmartObjectCommand::EmbedLinked,
+                            !pixelsLocked);
+                    } else {
+                        add(tr("Convert to Linked..."),
+                            LayerSmartObjectCommand::ConvertToLinked, !pixelsLocked);
+                    }
+                    add(tr("Rasterize Layer"), LayerSmartObjectCommand::Rasterize,
+                        !pixelsLocked);
                 }
             }
 
@@ -524,6 +742,23 @@ LayerPanel::LayerPanel(QWidget* parent)
                 }
             }
 
+            // ── Export Layer/Group As... ──
+            if (node && node->type != LayerTreeNode::Type::Effect) {
+                menu.addSeparator();
+                auto* exportAction = menu.addAction(
+                    node->type == LayerTreeNode::Type::Group
+                        ? tr("Export Group As...") : tr("Export Layer As..."),
+                    [this, idx]() {
+                        emit exportNodeRequested(idx);
+                    });
+                exportAction->setEnabled(node->hasIsolatedExportContent());
+                if (!exportAction->isEnabled()) {
+                    exportAction->setToolTip(tr(
+                        "This adjustment has no content of its own — it only "
+                        "modifies the layers beneath it."));
+                }
+            }
+
             menu.addSeparator();
             menu.addAction(tr("Rename..."), [this, idx]() {
                 if (!m_controller) return;
@@ -533,12 +768,8 @@ LayerPanel::LayerPanel(QWidget* parent)
                 QString newName = QInputDialog::getText(
                     this, tr("Rename"), tr("Name:"),
                     QLineEdit::Normal, node->name, &ok);
-                if (ok && !newName.isEmpty()) {
-                    node->name = newName;
-                    node->nameIsAuto = false;   // user picked this name; stop auto-naming it
-                    if (node->layer) node->layer->name = newName;
-                    refresh();
-                }
+                if (ok)
+                    m_controller->renameNode(idx, newName);
             });
             menu.addSeparator();
             menu.addAction(tr("Delete"), [this]() {
@@ -621,6 +852,10 @@ void LayerPanel::setController(ImageController* ctrl)
             this, &LayerPanel::layerStylesRequested);
     connect(m_delegate, &LayerItemDelegate::solidColorThumbDoubleClicked,
             this, &LayerPanel::solidColorEditRequested);
+    connect(m_delegate, &LayerItemDelegate::rawThumbDoubleClicked,
+            this, &LayerPanel::rawEditRequested);
+    connect(m_delegate, &LayerItemDelegate::smartObjectThumbDoubleClicked,
+            this, &LayerPanel::smartObjectEditRequested);
 
     connect(m_delegate, &LayerItemDelegate::maskToggled,
             this, [this](int flatIndex, Qt::KeyboardModifiers mods) {
@@ -679,103 +914,187 @@ void LayerPanel::setController(ImageController* ctrl)
     refresh();
 }
 
-void LayerPanel::refresh()
+// Reuses the existing rows whenever the tree still mirrors the document, and
+// rebuilds from scratch only when the structure really changed. Returns true if
+// it rebuilt.
+//
+// refresh() runs on imageChanged, i.e. on every frame of a canvas drag, and
+// clearing the tree there threw away the scroll position, replayed the
+// expand animation of every group, cancelled an in-place rename and left the
+// view holding deleted items.
+bool LayerPanel::syncRows(const std::vector<LayerTreeNode*>& flat,
+                          QHash<LayerTreeNode*, QTreeWidgetItem*>& itemMap)
 {
-    m_updating = true;
-    m_tree->blockSignals(true);
+    const int count = static_cast<int>(flat.size());
+
+    QVector<QTreeWidgetItem*> rows;
+    rows.reserve(count);
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i)
+        collectRowsDepthFirst(m_tree->topLevelItem(i), rows);
+
+    // Rows are built in the pre-order Document::flatten() produces, so the two
+    // line up one to one. Comparing the parent as well as the node tells apart
+    // the arrangements that share a sequence — "B nested in A" vs "A then B".
+    bool reusable = rows.size() == count;
+    for (int i = 0; reusable && i < count; ++i) {
+        reusable = rowNodeToken(rows[i]) == nodeToken(flat[i])
+            && rowNodeToken(rows[i]->parent()) == nodeToken(flat[i]->parent);
+    }
+
+    if (reusable) {
+        for (int i = 0; i < count; ++i) {
+            applyRowData(rows[i], flat[i], i);
+            itemMap.insert(flat[i], rows[i]);
+        }
+        return false;
+    }
+
+    static_cast<LayerTreeWidget*>(m_tree)->forgetPressedItem();
     m_tree->clear();
 
-    if (!m_controller || !m_controller->document())
-        return;
-
-    auto* doc = m_controller->document();
-    auto flat = doc->flatten();
-
-    QHash<LayerTreeNode*, QTreeWidgetItem*> itemMap;
-
-    for (int i = 0; i < static_cast<int>(flat.size()); ++i) {
+    for (int i = 0; i < count; ++i) {
         auto* node = flat[i];
         auto* item = new QTreeWidgetItem();
         item->setFlags(item->flags() | Qt::ItemIsEditable);
-        item->setData(0, Qt::UserRole, i);
-        item->setData(0, Qt::UserRole + 1, static_cast<int>(node->type));
-        item->setData(0, Qt::UserRole + 2, node->collapsed ? 1 : 0);
-
-        // Groups and layers hosting Single-Layer-Mode adjustments are
-        // expandable in the tree.
-        if (node->type == LayerTreeNode::Type::Group
-            || node->hasVisibleAdjustmentChildren())
-            item->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
-
-        item->setText(0, node->name.isEmpty()
-            ? QString("Layer %1").arg(i + 1) : node->name);
-        item->setToolTip(0, node->name);
+        applyRowData(item, node, i);
 
         if (node->parent && itemMap.contains(node->parent))
             itemMap[node->parent]->addChild(item);
         else
             m_tree->addTopLevelItem(item);
 
-        itemMap[node] = item;
+        itemMap.insert(node, item);
+    }
+    return true;
+}
+
+void LayerPanel::refresh()
+{
+    if (!m_controller || !m_controller->document()) {
+        m_updating = true;
+        m_tree->blockSignals(true);
+        static_cast<LayerTreeWidget*>(m_tree)->forgetPressedItem();
+        m_tree->clear();
+        m_tree->blockSignals(false);
+        m_updating = false;
+        m_lastActiveNode = 0;
+        return;
     }
 
+    auto* doc = m_controller->document();
+    auto flat = doc->flatten();
+
+    m_updating = true;
+    m_tree->blockSignals(true);
+
+    // Animation belongs to the user's own gestures (the group arrow, Left and
+    // Right keys). Every setExpanded() below is state synchronisation, and
+    // animating those replayed the expand animation on each refresh — with
+    // imageChanged firing per frame, that meant continuously while dragging on
+    // the canvas.
+    const bool animated = m_tree->isAnimated();
+    m_tree->setAnimated(false);
+
+    QHash<LayerTreeNode*, QTreeWidgetItem*> itemMap;
+    const bool rebuilt = syncRows(flat, itemMap);
+
+    const int activeIdx = doc->activeFlatIndex;
+    LayerTreeNode* activeNode =
+        (activeIdx >= 0 && activeIdx < static_cast<int>(flat.size()))
+            ? flat[activeIdx] : nullptr;
+
+    // Reveal the active layer, but only when it genuinely changed. The
+    // controller re-emits activeLayerChanged on plenty of no-op paths
+    // (setSelectedIndices fires it for the same node, so does toggling another
+    // row's eye), and reacting to the signal itself would pop a group open
+    // again right after the user closed it. Identity is the node pointer — the
+    // flat index shifts on every reorder — kept as an opaque token that is
+    // compared and never dereferenced, since the node it named may be gone.
+    const auto activeToken = reinterpret_cast<quintptr>(activeNode);
+    const bool activeNodeChanged = activeToken != m_lastActiveNode;
+    m_lastActiveNode = activeToken;
+
+    // Opening the ancestors is written into the MODEL, not just into the view:
+    // the group's arrow then matches what the list shows, and the group stays
+    // open afterwards. Closing it by hand sticks — only the next active-layer
+    // change reveals again.
+    if (activeNodeChanged && activeNode) {
+        for (auto* ancestor = activeNode->parent; ancestor; ancestor = ancestor->parent)
+            ancestor->collapsed = false;
+    }
+
+    // node->collapsed is the only source of truth for expansion. Assert both
+    // states (not just "expand the open ones") so a row that the view opened
+    // behind the panel's back is closed again instead of lingering.
     for (auto it = itemMap.begin(); it != itemMap.end(); ++it) {
         const bool expandable = it.key()->type == LayerTreeNode::Type::Group
-            || it.key()->hasVisibleAdjustmentChildren();
-        if (expandable && !it.key()->collapsed)
-            it.value()->setExpanded(true);
+            || it.key()->hasAdjustmentChildren();
+        it.value()->setExpanded(expandable && !it.key()->collapsed);
     }
 
-    int activeIdx = doc->activeFlatIndex;
-    if (activeIdx >= 0 && activeIdx < static_cast<int>(flat.size())) {
-        auto* activeItem = itemMap.value(flat[activeIdx]);
-        if (activeItem)
-            m_tree->setCurrentItem(activeItem);
+    QTreeWidgetItem* activeItem = activeNode ? itemMap.value(activeNode) : nullptr;
+    if (activeItem) {
+        // setCurrentItem() scrolls to the row through scrollTo(); the gate
+        // keeps a plain rebuild from dragging the viewport along with it.
+        // NoUpdate because the selection is synced from the document right
+        // below — the default command clears and re-selects, which on a
+        // multi-selection undid itself on every refresh.
+        auto* tree = static_cast<LayerTreeWidget*>(m_tree);
+        tree->setRevealEnabled(activeNodeChanged);
+        m_tree->setCurrentItem(activeItem, 0, QItemSelectionModel::NoUpdate);
+        tree->setRevealEnabled(true);
     }
 
-    // Sync multi-selection from Document to tree
-    m_tree->clearSelection();
+    // Sync multi-selection from Document to tree, but only when it differs:
+    // clearSelection() plus re-selecting repaints every row, and on a reused
+    // tree the selection is usually already right.
+    QSet<QTreeWidgetItem*> wanted;
     for (int selIdx : doc->selectedFlatIndices) {
         if (selIdx >= 0 && selIdx < static_cast<int>(flat.size())) {
-            auto* selItem = itemMap.value(flat[selIdx]);
-            if (selItem)
-                selItem->setSelected(true);
+            if (auto* selItem = itemMap.value(flat[selIdx]))
+                wanted.insert(selItem);
         }
     }
+    // The active row stays selected even when the document's selection set is
+    // empty — the ClearAndSelect that setCurrentItem() used to perform
+    // guaranteed that much.
+    if (wanted.isEmpty() && activeItem)
+        wanted.insert(activeItem);
 
+    const auto selected = m_tree->selectedItems();
+    bool selectionMatches = selected.size() == wanted.size();
+    for (auto* item : selected) {
+        if (!wanted.contains(item)) {
+            selectionMatches = false;
+            break;
+        }
+    }
+    if (!selectionMatches) {
+        m_tree->clearSelection();
+        for (auto* item : wanted)
+            item->setSelected(true);
+    }
+
+    m_tree->setAnimated(animated);
     m_tree->blockSignals(false);
     m_updating = false;
 
-    int kindIdx = m_kindCombo->currentIndex();
-    if (kindIdx > 0) {
-        auto matchesFilter = [&](LayerTreeNode* n) -> bool {
-            if (!n) return false;
-            switch (kindIdx) {
-            case 1: return n->type == LayerTreeNode::Type::Layer && n->layer && !n->layer->isTextLayer() && !n->layer->isShapeLayer();
-            case 2: return n->layer && n->layer->isTextLayer();
-            case 3: return n->layer && n->layer->isShapeLayer();
-            case 4: return n->type == LayerTreeNode::Type::Adjustment;
-            default: return false;
-            }
-        };
-
-        std::function<bool(QTreeWidgetItem*)> hasMatchingDescendant = [&](QTreeWidgetItem* item) -> bool {
-            for (int i = 0; i < item->childCount(); ++i) {
-                auto* child = item->child(i);
-                if (matchesFilter(doc->nodeAt(child->data(0, Qt::UserRole).toInt()))) return true;
-                if (hasMatchingDescendant(child)) return true;
-            }
-            return false;
-        };
-
+    if (!rebuilt) {
+        // Reused rows could still carry a hidden flag from an earlier state (a
+        // collapsed branch, a solo); a fresh tree starts out visible.
         QTreeWidgetItemIterator it(m_tree);
         while (*it) {
-            int srcIdx = (*it)->data(0, Qt::UserRole).toInt();
-            bool show = matchesFilter(doc->nodeAt(srcIdx)) || hasMatchingDescendant(*it);
-            (*it)->setHidden(!show);
+            if ((*it)->isHidden())
+                (*it)->setHidden(false);
             ++it;
         }
     }
+
+    // The delegate reads visibility, locks, opacity and thumbnails straight off
+    // the node, so a reused tree has to be told to repaint — none of that goes
+    // through the item model.
+    if (!rebuilt)
+        m_tree->viewport()->update();
 
     updateTopBarFromActiveLayer();
     updateActiveTargetFromCurrent();
@@ -924,7 +1243,16 @@ void LayerPanel::onBlendModeChanged(int index)
     auto* doc = m_controller->document();
     int active = doc->activeFlatIndex;
     if (active < 0 || active >= doc->flatCount()) return;
-    m_controller->setNodeBlendMode(active, comboIndexToBlendMode(index));
+    // One control, two properties: Pass Through switches the group's
+    // compositing model, everything else sets a blend mode (and, on a group,
+    // switches the model back). Both controller entry points record one
+    // history step, so the user sees a single undoable "Set Blend Mode".
+    if (m_blendCombo->itemData(index).toInt() == kPassThroughComboData) {
+        m_controller->setNodeGroupBlendMode(
+            active, LayerTreeNode::GroupBlendMode::PassThrough);
+        return;
+    }
+    m_controller->setNodeBlendMode(active, comboIndexToBlendMode(m_blendCombo, index));
 }
 
 void LayerPanel::onOpacityChanged(int value)
@@ -1170,6 +1498,44 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
             return true;
         }
     }
+    if (obj == m_tree->viewport() && event->type() == QEvent::MouseButtonPress) {
+        auto* mouseEvent = static_cast<QMouseEvent*>(event);
+        // Alt+click on the line BETWEEN two rows creates or releases the
+        // clipping mask of the upper one — the gesture this kind of editor
+        // established. The band covers both sides of the line so it does not
+        // need pixel-hunting, and it is only a few pixels tall: every other hit
+        // area in the row (eye, thumbnail, lock, fx) is vertically centred and
+        // well clear of it, so an Alt+click on those still reaches the delegate
+        // (solo visibility) untouched.
+        static constexpr int kClipBoundaryBand = 4;
+        if (m_controller && mouseEvent->button() == Qt::LeftButton
+            && (mouseEvent->modifiers() & Qt::AltModifier)) {
+            const QPoint pos = mouseEvent->pos();
+            QTreeWidgetItem* upper = nullptr;
+            if (auto* item = m_tree->itemAt(pos)) {
+                const QRect rect = m_tree->visualItemRect(item);
+                if (pos.y() >= rect.bottom() - kClipBoundaryBand) {
+                    upper = item;                        // the line below this row
+                } else if (pos.y() <= rect.top() + kClipBoundaryBand) {
+                    // The line above it, but only when the row there is a
+                    // SIBLING: across a container boundary (a group's last child
+                    // above a root-level layer) "the layer below" is in another
+                    // container, so the gesture has no unambiguous meaning.
+                    auto* above = m_tree->itemAbove(item);
+                    if (above && above->parent() == item->parent())
+                        upper = above;
+                }
+            }
+            if (upper) {
+                // layerChanged/imageChanged from the controller refresh the panel
+                // and the canvas, so there is nothing to do here but consume the
+                // click (it would otherwise also re-select a row).
+                m_controller->toggleClippingMask(
+                    {upper->data(0, Qt::UserRole).toInt()});
+                return true;
+            }
+        }
+    }
     if (obj == m_tree->viewport() && event->type() == QEvent::MouseButtonDblClick) {
         auto* mouseEvent = static_cast<QMouseEvent*>(event);
         const QModelIndex index = m_tree->indexAt(mouseEvent->pos());
@@ -1191,18 +1557,39 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
         if (delegate->handleSolidColorThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
             return true;
 
+        // Double-click on a RAW Layer's thumbnail (emits rawThumbDoubleClicked →
+        // rawEditRequested). Consumed here for the same reason as the Solid
+        // Color case above: this filter runs before the view/delegate's own
+        // in-place-rename double-click handling.
+        if (delegate->handleRawThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
+            return true;
+
+        // Double-click on a Smart Object's thumbnail opens its contents
+        // (emits smartObjectThumbDoubleClicked → smartObjectEditRequested).
+        // Same reason this is handled here as the two cases above.
+        if (delegate->handleSmartObjectThumbDoubleClick(option, index, mouseEvent->pos()) >= 0)
+            return true;
+
         if (!delegate->labelRect(option, index).contains(mouseEvent->pos()))
             return true;
     }
     if (obj == m_tree->viewport() && event->type() == QEvent::Drop) {
-        if (!m_controller || !m_controller->document()) return false;
+        // Consuming the drop keeps QAbstractItemView::dropEvent from running,
+        // and with it the state reset it performs — see endDragState(). Do it
+        // first so every exit below is covered. The event is consumed on all of
+        // them too: the native InternalMove would reshuffle rows behind the
+        // document's back, and the next refresh() would silently undo it.
+        auto* tree = static_cast<LayerTreeWidget*>(m_tree);
+        tree->endDragState();
+
+        if (!m_controller || !m_controller->document()) return true;
 
         auto* srcItem = m_tree->currentItem();
-        if (!srcItem) return false;
+        if (!srcItem) return true;
 
         int srcIdx = srcItem->data(0, Qt::UserRole).toInt();
         auto* doc = m_controller->document();
-        if (!doc) return false;
+        if (!doc) return true;
 
         auto* dropEvent = static_cast<QDropEvent*>(event);
         auto* targetItem = m_tree->itemAt(dropEvent->position().toPoint());
@@ -1359,30 +1746,69 @@ bool LayerPanel::eventFilter(QObject* obj, QEvent* event)
 
 void LayerPanel::updateTopBarFromActiveLayer()
 {
+    // Fill belongs to the node types that have content of their own to fade —
+    // a Layer and an Adjustment (LayerTreeNode::hasFillOpacity) — so "no layer"
+    // and "a group" both leave the control showing the neutral 100% and
+    // unavailable, rather than a value nothing would read. setEnabled (not
+    // setReadOnly) so the theme's disabled state shows it is unavailable
+    // instead of silently ignoring the drag.
+    auto showFill = [this](bool available, float value) {
+        m_fillSlider->blockSignals(true);
+        m_fillSlider->setValue(available
+            ? static_cast<int>(std::lround(value * 100.0f)) : 100);
+        m_fillSlider->blockSignals(false);
+        m_fillSlider->setEnabled(available);
+    };
+
     if (!m_controller) {
         m_opacitySlider->setValue(100);
+        showFill(false, 1.0f);
         return;
     }
 
     auto* doc = m_controller->document();
     int active = doc->activeFlatIndex;
     if (active < 0 || active >= doc->flatCount()) {
+        // Nothing active: drop back to the layer form of the combo so index 0
+        // is Normal rather than the group-only Pass Through entry.
+        if (m_blendComboHasPassThrough) {
+            m_blendComboHasPassThrough = false;
+            m_blendCombo->blockSignals(true);
+            fillBlendCombo(m_blendCombo, false);
+            m_blendCombo->blockSignals(false);
+        }
         m_blendCombo->setCurrentIndex(0);
         m_opacitySlider->setValue(100);
+        showFill(false, 1.0f);
         return;
     }
 
     auto* node = doc->nodeAt(active);
     if (!node) return;
 
+    // Pass Through is a Group-only choice, so the entry appears only while a
+    // group is active. Rebuilding is gated on the flag actually flipping: this
+    // function runs on every selection/property refresh, and clearing a combo
+    // the user may have open is not something to do for nothing.
+    const bool wantPassThrough = node->type == LayerTreeNode::Type::Group;
     m_blendCombo->blockSignals(true);
-    m_blendCombo->setCurrentIndex(blendModeToComboIndex(node->blendMode));
+    if (wantPassThrough != m_blendComboHasPassThrough) {
+        m_blendComboHasPassThrough = wantPassThrough;
+        fillBlendCombo(m_blendCombo, wantPassThrough);
+    }
+    m_blendCombo->setCurrentIndex(
+        node->groupBlendMode == LayerTreeNode::GroupBlendMode::PassThrough
+            && wantPassThrough
+            ? m_blendCombo->findData(kPassThroughComboData)
+            : blendModeToComboIndex(m_blendCombo, node->blendMode));
     m_blendCombo->blockSignals(false);
 
     int opacityPct = static_cast<int>(node->opacity * 100.0f);
     m_opacitySlider->blockSignals(true);
     m_opacitySlider->setValue(opacityPct);
     m_opacitySlider->blockSignals(false);
+
+    showFill(node->hasFillOpacity(), node->fillOpacity);
 
     // Lock buttons reflect the folded lock state of the selection. A partial
     // lock reads as checked whenever Lock All is set (it implies all three), and

@@ -1,6 +1,7 @@
 #include "ExportImageDialog.hpp"
 #include "io/ImageIO.hpp"
 #include "core/Document.hpp"
+#include "core/LayerTreeNode.hpp"
 #include "color/ColorProfileRepository.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
@@ -25,7 +26,7 @@
 #include <QtConcurrentRun>
 #include <QFutureWatcher>
 #include <QInputDialog>
-#include <QMessageBox>
+#include "ui/AppMessageDialog.hpp"
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -71,14 +72,24 @@ ExportPreset ExportPreset::fromVariant(const QVariantMap& v)
 // ── Dialog ───────────────────────────────────────────────────
 
 ExportImageDialog::ExportImageDialog(Document* doc, QWidget* parent)
+    : ExportImageDialog(doc, nullptr, parent)
+{
+}
+
+ExportImageDialog::ExportImageDialog(Document* doc, const LayerTreeNode* exportNode, QWidget* parent)
     : QDialog(parent)
     , m_doc(doc)
+    , m_exportNode(exportNode)
 {
-    setWindowTitle(tr("Export As"));
+    setWindowTitle(exportNode
+        ? (exportNode->type == LayerTreeNode::Type::Group ? tr("Export Group As") : tr("Export Layer As"))
+        : tr("Export As"));
     setMinimumSize(720, 520);
 
-    m_fullImage = ::compositeImage(m_doc);
-    if (m_fullImage.isNull())
+    m_opts.layerBoundsMode = true;
+    m_fullImage = computeSourceImage();
+    const bool startedEmpty = m_fullImage.isNull();
+    if (startedEmpty)
         m_fullImage = QImage(1, 1, QImage::Format_RGBA8888);
 
     auto* t = ThemeManager::instance()->current();
@@ -94,6 +105,8 @@ ExportImageDialog::ExportImageDialog(Document* doc, QWidget* parent)
             this, &ExportImageDialog::onPreviewComputed);
 
     buildUi();
+    if (m_emptyContentWarningLabel)
+        m_emptyContentWarningLabel->setVisible(startedEmpty);
     loadPresets();
     populatePresetCombo();
     updatePreview();
@@ -102,6 +115,13 @@ ExportImageDialog::ExportImageDialog(Document* doc, QWidget* parent)
 ExportImageDialog::Options ExportImageDialog::options() const
 {
     return m_opts;
+}
+
+QImage ExportImageDialog::computeSourceImage() const
+{
+    if (m_exportNode)
+        return ::compositeNodeImage(m_doc, m_exportNode, m_opts.layerBoundsMode);
+    return ::compositeImage(m_doc);
 }
 
 // ── Layout ───────────────────────────────────────────────────
@@ -192,6 +212,28 @@ void ExportImageDialog::buildUi()
 
     optionsColumn->addWidget(settingsGroup);
 
+    // ── Dimensions group (Export Layer/Group As... only) ──
+    if (m_exportNode) {
+        auto* dimensionsGroup = new QGroupBox(tr("Dimensions"));
+        auto* dimensionsLayout = new QVBoxLayout(dimensionsGroup);
+        m_dimensionModeCombo = new QComboBox;
+        m_dimensionModeCombo->addItem(tr("Layer Bounds"), true);
+        m_dimensionModeCombo->addItem(tr("Preserve Canvas Size"), false);
+        connect(m_dimensionModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &ExportImageDialog::onDimensionModeChanged);
+        dimensionsLayout->addWidget(m_dimensionModeCombo);
+
+        m_emptyContentWarningLabel = new QLabel(tr(
+            "This layer has no content inside the canvas, so Layer Bounds has "
+            "nothing to crop to. Try Preserve Canvas Size instead."));
+        m_emptyContentWarningLabel->setWordWrap(true);
+        m_emptyContentWarningLabel->setStyleSheet(QStringLiteral("color:#e0a030;"));
+        m_emptyContentWarningLabel->hide();
+        dimensionsLayout->addWidget(m_emptyContentWarningLabel);
+
+        optionsColumn->addWidget(dimensionsGroup);
+    }
+
     // ── Image Size group ──
     auto* sizeGroup = new QGroupBox(tr("Image Size"));
     auto* sizeLayout = new QVBoxLayout(sizeGroup);
@@ -211,7 +253,7 @@ void ExportImageDialog::buildUi()
     sizeRow->addWidget(new QLabel(tr("px")));
 
     m_constrainCheck = new QPushButton;
-    m_constrainCheck->setIcon(makeIcon(QStringLiteral(":/icons/constrain-proportions.png")));
+    m_constrainCheck->setIcon(makeIcon(QStringLiteral(":/icons/constrain-proportions.svg")));
     m_constrainCheck->setIconSize(QSize(20, 20));
     m_constrainCheck->setFixedSize(28, 24);
     m_constrainCheck->setCheckable(true);
@@ -536,6 +578,28 @@ void ExportImageDialog::onResampleChanged(int index)
         m_previewTimer->start();
 }
 
+void ExportImageDialog::onDimensionModeChanged(int index)
+{
+    if (!m_dimensionModeCombo) return;
+    m_opts.layerBoundsMode = m_dimensionModeCombo->itemData(index).toBool();
+    m_fullImage = computeSourceImage();
+    const bool isEmpty = m_fullImage.isNull();
+    if (isEmpty)
+        m_fullImage = QImage(1, 1, QImage::Format_RGBA8888);
+    if (m_emptyContentWarningLabel)
+        m_emptyContentWarningLabel->setVisible(isEmpty);
+    // Resize (when enabled) targets an explicit size chosen independently of
+    // the dimension mode; only refresh the spinboxes' base size while it is
+    // off, so they show the natural size of whichever mode is now selected.
+    if (!m_resizeCheck->isChecked()) {
+        m_updating = true;
+        m_widthSpin->setValue(m_fullImage.width());
+        m_heightSpin->setValue(m_fullImage.height());
+        m_updating = false;
+    }
+    updatePreview();
+}
+
 void ExportImageDialog::onColorModeChanged(int index)
 {
     if (!m_colorModeCombo) return;
@@ -850,10 +914,9 @@ void ExportImageDialog::onDeletePreset()
     if (idx <= 0) return;
 
     const auto& preset = m_presets[idx - 1];
-    auto ret = QMessageBox::question(this, tr("Delete Preset"),
-        tr("Delete preset \"%1\"?").arg(preset.name),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (ret != QMessageBox::Yes) return;
+    if (!AppMessageDialog::confirm(this, tr("Delete Preset"),
+            tr("Delete preset \"%1\"?").arg(preset.name)))
+        return;
 
     m_presets.removeAt(idx - 1);
     savePresets();

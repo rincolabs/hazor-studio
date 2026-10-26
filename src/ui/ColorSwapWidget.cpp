@@ -206,7 +206,7 @@ void ColorSwapWidget::openPickerFor(Area area)
         m_colorEngine->addSwatchColor(color);
     });
 
-    dlg->open();
+    dlg->showModeless();
 }
 
 void ColorSwapWidget::mousePressEvent(QMouseEvent* e)

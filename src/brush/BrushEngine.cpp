@@ -71,6 +71,15 @@ void BrushEngine::beginStroke(const BrushInputState& state)
 void BrushEngine::beginStroke(const BrushInputState& state, bool targetMask)
 {
     m_targetMask = targetMask;
+    m_channelTarget = nullptr;
+    beginStroke(state);
+}
+
+void BrushEngine::beginChannelStroke(const BrushInputState& state,
+                                     ChannelPaintTarget* target)
+{
+    m_targetMask = false;
+    m_channelTarget = target;
     beginStroke(state);
 }
 
@@ -80,6 +89,7 @@ void BrushEngine::endStroke()
     m_state.smoothCount = 0;
     m_splineHistory.clear();
     m_targetMask = false;
+    m_channelTarget = nullptr;
 }
 
 void BrushEngine::drawDynamicDab(QPointF imagePos,
@@ -103,7 +113,10 @@ void BrushEngine::drawDynamicDab(QPointF imagePos,
     DynamicDabParams params = DynamicsEvaluator::evaluate(settings, s, seed);
     s.imagePos += params.scatterOffset;
 
-    if (m_targetMask)
+    if (m_channelTarget)
+        renderer.drawChannelDab(*m_channelTarget, s, params, settings,
+                                selectMaskImage);
+    else if (m_targetMask)
         renderer.drawMaskDab(layer, s, params, settings,
                              selectMaskTex, selectMaskW, selectMaskH);
     else if (cloneContext)

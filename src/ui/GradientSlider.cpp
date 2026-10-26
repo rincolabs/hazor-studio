@@ -1,8 +1,10 @@
 #include "GradientSlider.hpp"
+#include "ColorTrack.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
 #include <QHBoxLayout>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QSlider>
 #include <QSpinBox>
@@ -13,7 +15,16 @@ static constexpr int kTrackH    = 8;
 static constexpr int kSpinWidth = 56;
 
 // ── GradientSlider::Track ────────────────────────────────────────────────────
-
+// The interactive piece. Value/range/keyboard handling stay QSlider's (every
+// consumer's limits, step and precision keep working unchanged); mouse
+// handling is replaced outright, because QSlider's own groove click is a page
+// step, not a jump to the clicked position — clicking anywhere on the bar must
+// move the handle there immediately and keep tracking the drag. The handle's
+// own drag already matched this once pressed; valueForPosition() below is the
+// same pixel↔value mapping Qt uses internally for that drag, just invoked from
+// mousePress too, so a press on the handle reproduces its current value (no
+// jump) and extremes stay pixel-accurate. Rendering of the colour composition
+// is delegated to ColorTrack, which knows nothing about sliders or values.
 class GradientSlider::Track : public QSlider {
 public:
     using Stop = GradientSlider::Stop;
@@ -25,7 +36,7 @@ public:
             "QSlider::sub-page:horizontal { background: transparent; }"));
     }
 
-    void setStops(const QList<Stop>& stops) { m_stops = stops; update(); }
+    void setStops(const QList<Stop>& stops) { m_colorTrack.setStops(stops); update(); }
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -34,29 +45,72 @@ protected:
         initStyleOption(&opt);
 
         QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
 
         const QRect groove = style()->subControlRect(
             QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
 
-        QRect track(groove.left(), groove.center().y() - kTrackH / 2,
-                    groove.width(), kTrackH);
-
-        QLinearGradient grad(track.left(), 0, track.right(), 0);
-        for (const Stop& s : m_stops)
-            grad.setColorAt(s.pos, s.color);
+        const QRectF track(groove.left(), groove.center().y() - kTrackH / 2,
+                            groove.width(), kTrackH);
 
         const QColor border = ThemeManager::instance()->current()->colorBorder;
-        p.setPen(QPen(border, 1));
-        p.setBrush(m_stops.isEmpty() ? Qt::NoBrush : QBrush(grad));
-        p.drawRoundedRect(QRectF(track).adjusted(0.5, 0.5, -0.5, -0.5), 3, 3);
+        m_colorTrack.paint(p, track, border);
 
         opt.subControls = QStyle::SC_SliderHandle;
         style()->drawComplexControl(QStyle::CC_Slider, &opt, &p, this);
     }
 
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        if (e->button() != Qt::LeftButton) {
+            QSlider::mousePressEvent(e);
+            return;
+        }
+        setFocus(Qt::MouseFocusReason);
+        setSliderDown(true);
+        setValue(valueForPosition(e->pos().x()));
+        e->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* e) override
+    {
+        if (!isSliderDown()) {
+            QSlider::mouseMoveEvent(e);
+            return;
+        }
+        setValue(valueForPosition(e->pos().x()));
+        e->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* e) override
+    {
+        if (e->button() != Qt::LeftButton || !isSliderDown()) {
+            QSlider::mouseReleaseEvent(e);
+            return;
+        }
+        setSliderDown(false);
+        e->accept();
+    }
+
 private:
-    QList<Stop> m_stops;
+    // Mirrors QSliderPrivate::pixelPosToRangeValue (horizontal case): the span
+    // excludes the handle's own width, and QStyle::sliderValueFromPosition maps
+    // the click/drag x within it to a value — the same mapping the handle's
+    // drag already used, so this works for any range, including negative or
+    // asymmetric ones (Hue -180..180, Color Balance -100..100, ...).
+    int valueForPosition(int x) const
+    {
+        QStyleOptionSlider opt;
+        initStyleOption(&opt);
+        const QRect groove = style()->subControlRect(
+            QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
+        const QRect handle = style()->subControlRect(
+            QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+        const int span = groove.width() - handle.width();
+        return QStyle::sliderValueFromPosition(
+            minimum(), maximum(), x - groove.left(), span, opt.upsideDown);
+    }
+
+    ColorTrack m_colorTrack;
 };
 
 // ── GradientSlider ───────────────────────────────────────────────────────────

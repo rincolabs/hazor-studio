@@ -1,4 +1,5 @@
 #include "ImageController.hpp"
+#include "core/CrashHandler.hpp"
 #include "core/AdjustmentTypes.hpp"
 #include "core/Layer.hpp"
 #include "core/LayerTreeNode.hpp"
@@ -26,8 +27,14 @@
 #include "ai/models/AiModelRegistry.hpp"
 #include "ai/upscale/RealEsrganProcessBackend.hpp"
 #include "ai/upscale/UpscaleService.hpp"
+#include "raw/RawDevelopService.hpp"
+#include "raw/RawDevelopParams.hpp"
+#include "raw/RawEngine.hpp"
+#include "raw/RawSession.hpp"
+#include "raw/RawLayerData.hpp"
 
 #include <QImage>
+#include <QMargins>
 #include <QPainter>
 #include <QClipboard>
 #include <QGuiApplication>
@@ -40,6 +47,7 @@
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QFutureWatcher>
+#include <QTimer>
 #include <QtConcurrent>
 #include <GL/gl.h>
 #include <QDebug>
@@ -79,7 +87,11 @@ static void convertDocumentContentToProfile(Document* doc,
 ImageController::ImageController(QObject* parent)
     : QObject(parent)
     , m_upscaleService(std::make_unique<UpscaleService>())
+    , m_rawDevelopService(std::make_unique<RawDevelopService>())
 {
+    connect(m_rawDevelopService.get(), &RawDevelopService::developFinished,
+            this, &ImageController::onRawLayerDevelopFinished);
+
     m_history.setChangeCallback([this]() {
         emit historyChanged();
     });
@@ -288,7 +300,9 @@ ImageController::ImageController(QObject* parent)
 
 ImageController::~ImageController()
 {
+    CrashHandler::breadcrumb("~ImageController: enter");
     flushGpuChanges();
+    CrashHandler::breadcrumb("~ImageController: done");
 }
 
 void ImageController::setDocument(Document* doc)
@@ -306,6 +320,19 @@ void ImageController::cancelLongOperation(uint64_t jobId)
 {
     if (jobId != 0 && jobId == m_genJobId && m_genProvider) {
         m_genProvider->cancel();        // onGenerativeFailed(Canceled) follows
+        return;
+    }
+
+    // Layer-style bake: there is nothing to cancel in the worker (the result
+    // lands and is uploaded whenever it is ready, see StyleBakePool), so this
+    // only stops the waiting — the dialog closes and the canvas keeps showing
+    // the interim preview until the bake arrives. Reported as finished, not
+    // canceled, because the edit itself is still on its way; "Operation
+    // canceled" would claim the opposite.
+    if (jobId != 0 && jobId == m_styleBakeJobId) {
+        m_styleBakeJobId = 0;
+        m_styleEditPending = false;
+        emit progressOperationFinished(jobId);
         return;
     }
 
@@ -638,7 +665,13 @@ static void stampResetTransformRecursive(LayerTreeNode* node)
         stampResetTransformRecursive(child.get());
 }
 
-static cv::InterpolationFlags toCvInterpolation(ResizeInterpolation interpolation)
+// `shrinking` is true only when BOTH axes lose pixels. That is what makes
+// "Bicubic Automatic" automatic: of the four kernels only the area filter
+// integrates the pixels that are about to be thrown away, so a cubic
+// downscale aliases. Mixed axes count as growing, because OpenCV's area path
+// only implements the shrinking case (it degenerates to nearest otherwise).
+static cv::InterpolationFlags toCvInterpolation(ResizeInterpolation interpolation,
+                                                bool shrinking)
 {
     switch (interpolation) {
     case ResizeInterpolation::Nearest:
@@ -646,12 +679,19 @@ static cv::InterpolationFlags toCvInterpolation(ResizeInterpolation interpolatio
     case ResizeInterpolation::Bilinear:
         return cv::INTER_LINEAR;
     case ResizeInterpolation::Bicubic:
-    case ResizeInterpolation::BicubicAutomatic:
         return cv::INTER_CUBIC;
+    case ResizeInterpolation::BicubicAutomatic:
+        return shrinking ? cv::INTER_AREA : cv::INTER_CUBIC;
     case ResizeInterpolation::Lanczos:
         return cv::INTER_LANCZOS4;
     }
     return cv::INTER_CUBIC;
+}
+
+static bool isShrink(const QImage& source, const QSize& targetSize)
+{
+    return targetSize.width() <= source.width()
+        && targetSize.height() <= source.height();
 }
 
 static QImage resampleRgbaImage(const QImage& source,
@@ -663,11 +703,12 @@ static QImage resampleRgbaImage(const QImage& source,
     if (source.size() == targetSize)
         return source.copy();
 
+    // Premultiplied: this bakes into the layer and into the export, so a dark
+    // fringe picked up here is permanent (ImageEngine.hpp states the rule).
     cv::Mat src = ImageEngine::toCvMat(source);
-    cv::Mat dst;
-    cv::resize(src, dst,
-               cv::Size(targetSize.width(), targetSize.height()),
-               0.0, 0.0, toCvInterpolation(interpolation));
+    cv::Mat dst = ImageEngine::resizePremultiplied(
+        src, cv::Size(targetSize.width(), targetSize.height()),
+        toCvInterpolation(interpolation, isShrink(source, targetSize)));
     if (dst.empty())
         return source.copy();
     return ImageEngine::toQImage(dst).convertToFormat(QImage::Format_RGBA8888);
@@ -686,10 +727,12 @@ static QImage resampleMaskImage(const QImage& source,
     cv::Mat src(gray.height(), gray.width(), CV_8UC1,
                 const_cast<uchar*>(gray.constBits()),
                 static_cast<size_t>(gray.bytesPerLine()));
+    // Single channel: no alpha to premultiply by, so this stays a plain
+    // cv::resize (see the mask note in ImageEngine.hpp).
     cv::Mat dst;
     cv::resize(src, dst,
                cv::Size(targetSize.width(), targetSize.height()),
-               0.0, 0.0, toCvInterpolation(interpolation));
+               0.0, 0.0, toCvInterpolation(interpolation, isShrink(source, targetSize)));
     if (dst.empty())
         return source.copy();
 
@@ -891,6 +934,9 @@ static ResizeDocumentState captureResizeState(const Document* doc)
     snapshot.selectionMask = doc->selection.image().copy();
     snapshot.selectionActive = doc->selection.active();
     snapshot.guides = doc->guideManager.guides();
+    snapshot.channels = doc->channels;
+    for (auto& ch : snapshot.channels)
+        ch.data = ch.data.copy();
     return snapshot;
 }
 
@@ -919,6 +965,9 @@ static ResizeDocumentState captureResizeStateShared(const Document* doc)
     snapshot.selectionMask = doc->selection.image().copy();
     snapshot.selectionActive = doc->selection.active();
     snapshot.guides = doc->guideManager.guides();
+    // Channel buffers are shared, not copied: the async op works on its own
+    // localDoc and anything that later writes these detaches by COW.
+    snapshot.channels = doc->channels;
     return snapshot;
 }
 
@@ -936,6 +985,8 @@ static Document documentFromResizeState(const ResizeDocumentState& state)
     doc.selection.image() = state.selectionMask.copy();
     doc.selection.setActive(state.selectionActive);
     doc.guideManager.setGuides(state.guides);
+    doc.channels = state.channels;
+    doc.ensureChannelBuffers();
     return doc;
 }
 
@@ -1145,8 +1196,19 @@ void ImageController::newLayer()
 
     auto* newNode = m_doc->nodeAt(m_doc->activeFlatIndex);
     if (newNode && newNode->layer) {
-        if (size.width() * size.height() >= 256 * 256)
-            newNode->layer->enableTiling(m_doc->tileSize());
+        // Sparse raster storage, not the dense TileManager grid. An empty layer
+        // then owns no tile at all, so it draws nothing and holds no texture
+        // until something is actually painted on it. The grid is dense — every
+        // tile of the canvas is "visible" to the culler whatever it contains —
+        // and the live compositor redraws the whole stack into a canvas-sized
+        // FBO on every brush dab, so each blank layer used to add a full-canvas
+        // quad plus a document-sized RGBA8 texture to every frame of every
+        // stroke: paint performance fell off with the layer count even when the
+        // layers were empty. This is also the representation the first stroke
+        // converts the layer to anyway (CanvasView::beginBrushStroke →
+        // Layer::enableRasterStorage, a no-op once enabled), so the layer no
+        // longer changes shape underneath the user mid-gesture.
+        newNode->layer->enableRasterStorage(m_doc->tileSize());
         m_history.push(std::make_unique<AddLayerCommand>(
             m_doc, flatIndex, newNode->clone(), tr("Add Layer")));
     }
@@ -1155,6 +1217,58 @@ void ImageController::newLayer()
     emit activeLayerChanged(m_doc->activeFlatIndex);
     emit imageChanged();
     if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::initializeBackgroundLayer(const QColor& fill)
+{
+    if (!m_doc || m_doc->flatCount() != 0) return;
+
+    QSize size = m_doc->size;
+    if (!size.isValid() || size.isEmpty())
+        size = QSize(1024, 768);
+
+    auto treeNode = std::make_unique<LayerTreeNode>();
+    treeNode->type = LayerTreeNode::Type::Layer;
+    treeNode->name = tr("Background");
+    // Locked from the moment the document exists, like the Background of a
+    // scanned/flattened image: the user unlocks it (or adds a layer above)
+    // before painting. LockAll is the master bit the layer row's padlock
+    // toggles, so the row shows the lock closed with no further setup.
+    treeNode->lockFlags = LockAll;
+    treeNode->layer = std::make_shared<Layer>();
+    treeNode->layer->name = treeNode->name;
+    treeNode->layer->cpuImage = QImage(size, QImage::Format_RGBA8888);
+    treeNode->layer->cpuImage.fill(fill.isValid() ? fill : QColor(Qt::transparent));
+    treeNode->layer->owner = treeNode.get();
+    treeNode->layer->resetTransform = treeNode->transform;
+    treeNode->layer->hasResetTransform = true;
+    treeNode->layer->textureOutdated = true;
+    treeNode->layer->pendingGpuUpload = true;
+
+    m_doc->size = size;
+    m_doc->selection.resize(size.width(), size.height());
+    m_doc->roots.push_back(std::move(treeNode));
+    // A new document opens with nothing selected. Pre-selecting the Background
+    // would hand the user an edit target that is locked anyway, and the first
+    // click in the Layers panel is what picks a real target.
+    m_doc->deselectAll();
+
+    auto* node = m_doc->nodeAt(0);
+    if (node && node->layer) {
+        // Only a transparent Background gets sparse raster storage, for the
+        // reason newLayer() documents: an empty layer then owns no tile and
+        // costs nothing per frame. A filled one would tile the entire canvas
+        // up front and keep a second full-size copy of pixels cpuImage already
+        // holds, so it stays a plain cpuImage until the first stroke converts
+        // it (CanvasView::beginBrushStroke -> Layer::enableRasterStorage).
+        if (!fill.isValid() || fill.alpha() == 0)
+            node->layer->enableRasterStorage(m_doc->tileSize());
+        markLayerDirty(node->layer.get());
+    }
+
+    emit layerChanged(0);
+    emit activeLayerChanged(-1);
+    emit imageChanged();
 }
 
 void ImageController::newGroup()
@@ -1766,9 +1880,24 @@ void ImageController::removeNode(int flatIndex)
             aj->cancelForLayer(node->layer.get());
     }
 
+    // RawDevelopService's cache is keyed by this node's address: the node
+    // (not just its clone) is about to be destroyed below, so drop the
+    // cache/pending-reveal entries now rather than leaving them keyed to a
+    // dangling pointer a future heap allocation could reuse (see
+    // RawDevelopService::release()'s doc comment).
+    if (node->layer && node->layer->rawData) {
+        m_rawDevelopService->release(node);
+        m_pendingRawDevelops.erase(node);
+    }
+
     auto clone = node->clone();
 
-    (void)m_doc->takeNodeAt(flatIndex);
+    // clone() builds a fresh Layer (every GL name defaulted to 0, raster tiles
+    // rebuilt from an image), so the detached node is the sole owner of the
+    // live textures. Retire it instead of dropping it on the floor: there is no
+    // current GL context here, and the renderer frees the names on the next
+    // sync.
+    m_doc->retiredNodes.push_back(m_doc->takeNodeAt(flatIndex));
 
     if (m_doc->flatCount() == 0) {
         m_doc->activeFlatIndex = -1;
@@ -1820,6 +1949,14 @@ void ImageController::duplicateNode(int flatIndex)
             dup->layer->textData = std::make_shared<TextLayerData>(*srcNode->layer->textData);
         if (srcNode->layer->shapeData)
             dup->layer->shapeData = std::make_shared<ShapeData>(*srcNode->layer->shapeData);
+        // A duplicated Smart Object is a second INSTANCE of the same content —
+        // the payload is shared, not copied, so both layers keep pointing at
+        // one document, which is what Duplicate Layer means for a Smart
+        // Object. Without this the copy silently degraded into a plain
+        // raster layer holding
+        // the rendered pixels. "New Smart Object via Copy" is the command for
+        // the other intent, an independent copy of the document.
+        dup->layer->smartObjectData = srcNode->layer->smartObjectData;
         if (!srcNode->layer->maskImage.isNull()) {
             dup->layer->maskImage = srcNode->layer->maskImage.copy();
             if (!srcNode->layer->maskRawImage.isNull())
@@ -1867,6 +2004,30 @@ void ImageController::setActiveNode(int flatIndex)
     }
     m_doc->selectNode(flatIndex, false);
     emit activeLayerChanged(flatIndex);
+}
+
+void ImageController::renameNode(int flatIndex, const QString& name)
+{
+    if (!m_doc)
+        return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    const QString trimmedName = name.trimmed();
+    if (!node || trimmedName.isEmpty()
+        || (node->name == trimmedName && !node->nameIsAuto)) {
+        return;
+    }
+
+    const QString beforeName = node->name;
+    const bool beforeNameIsAuto = node->nameIsAuto;
+    node->name = trimmedName;
+    node->nameIsAuto = false;
+    if (node->layer)
+        node->layer->name = trimmedName;
+
+    m_history.push(std::make_unique<RenameNodeCommand>(
+        m_doc, flatIndex, beforeName, trimmedName,
+        beforeNameIsAuto, false, tr("Rename Layer")));
+    emit layerChanged(flatIndex);
 }
 
 void ImageController::setMultiSelectNode(int flatIndex, bool addToSelection)
@@ -2109,9 +2270,19 @@ void ImageController::removeSelectedNodes()
             if (auto* aj = AsyncJobSystem::instance())
                 aj->cancelForLayer(node->layer.get());
         }
+        // See removeNode()'s comment: the node (not just its clone) is about
+        // to be destroyed, so drop its RawDevelopService entry now.
+        if (node->layer && node->layer->rawData) {
+            m_rawDevelopService->release(node);
+            m_pendingRawDevelops.erase(node);
+        }
 
         auto clone = node->clone();
-        (void)m_doc->takeNodeAt(idx);
+        // Retire rather than destroy, for the reason spelled out in
+        // removeNode(): clone() built a fresh Layer, so the detached node is
+        // the sole owner of the live GL names and there is no current context
+        // here to free them in.
+        m_doc->retiredNodes.push_back(m_doc->takeNodeAt(idx));
 
         composite->add(std::make_unique<RemoveLayerCommand>(
             m_doc, idx, std::move(clone), QString()));
@@ -2206,6 +2377,91 @@ void ImageController::commitNodeOpacity(int flatIndex, float opacity)
     if (m_doc) ++m_doc->compositionGeneration;
 }
 
+// ── Fill Opacity (docs/RENDER-PIPELINE.md §4.7) ─────────────────────────────
+//
+// Mirrors the four opacity entry points above, with two differences that both
+// come from Fill being a *content* property rather than a layer-result one:
+//
+//  - a Group has no Fill, here or in the editors this one follows, so these
+//    refuse one (LayerTreeNode::hasFillOpacity) instead of silently storing a
+//    value no compositor would read. A Layer and an Adjustment both have one;
+//  - a node whose Fill lives in a bake has to invalidate that bake when it
+//    changes — see applyNodeFill. An ordinary layer's does not, which is what
+//    keeps a Fill drag as cheap as an opacity drag instead of re-blurring a
+//    layer that has no blur.
+namespace {
+void applyNodeFill(LayerTreeNode* node, float fill)
+{
+    node->fillOpacity = fill;
+    // Two kinds of node hold their Fill inside a cached bake rather than
+    // applying it at composite time, and both have to re-run it here:
+    //  - a layer with an enabled layer style keeps Fill in its styled base
+    //    (LayerTreeNode::bakeFillOpacity);
+    //  - a Single-Layer-Mode adjustment's Fill is spent where its parent layer
+    //    bakes its clipped adjustments (computeEffectedImage), which
+    //    invalidateEffects() reaches through its parent hop — the same reason
+    //    setNodeVisibility invalidates on any Adjustment node.
+    if (node->fillLivesInStyleBake()
+        || node->type == LayerTreeNode::Type::Adjustment)
+        node->invalidateEffects();
+}
+} // namespace
+
+void ImageController::setNodeFillOpacity(int flatIndex, float fillOpacity)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || !node->hasFillOpacity()) return;
+    const float before = node->fillOpacity;
+    const float after = std::clamp(fillOpacity, 0.0f, 1.0f);
+    if (before == after) return;
+    applyNodeFill(node, after);
+    m_history.push(std::make_unique<NodeFillOpacityCommand>(
+        m_doc, flatIndex, before, after, tr("Set Fill Opacity")));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::beginNodeFillOpacity(int flatIndex)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || !node->hasFillOpacity()) return;
+    m_fillOpacityLayerIdx = flatIndex;
+    m_fillOpacityBefore   = node->fillOpacity;
+}
+
+void ImageController::previewNodeFillOpacity(int flatIndex, float fillOpacity)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || !node->hasFillOpacity()) return;
+    applyNodeFill(node, std::clamp(fillOpacity, 0.0f, 1.0f));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::commitNodeFillOpacity(int flatIndex, float fillOpacity)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || !node->hasFillOpacity()) return;
+
+    const float before = (m_fillOpacityLayerIdx == flatIndex && m_fillOpacityBefore >= 0.0f)
+                         ? m_fillOpacityBefore : node->fillOpacity;
+    const float after  = std::clamp(fillOpacity, 0.0f, 1.0f);
+
+    applyNodeFill(node, after);
+    m_fillOpacityBefore   = -1.0f;
+    m_fillOpacityLayerIdx = -1;
+
+    if (before == after) return;
+
+    m_history.push(std::make_unique<NodeFillOpacityCommand>(
+        m_doc, flatIndex, before, after, tr("Set Fill Opacity")));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
 void ImageController::setNodeVisibility(int flatIndex, bool visible)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
@@ -2289,17 +2545,181 @@ void ImageController::setNodeBlendMode(int flatIndex, BlendMode mode)
 {
     auto* node = nodeAtOrWarn(m_doc, flatIndex);
     if (!node) return;
-    BlendMode before = node->blendMode;
-    if (before == mode) return;
+    const BlendMode before = node->blendMode;
+    // Choosing a real blend mode for a group also takes it out of Pass
+    // Through: the two are one choice in the UI, and a group that blends a
+    // composed result is by definition no longer passing its children
+    // through (see LayerTreeNode::GroupBlendMode).
+    const auto beforeGroup = node->groupBlendMode;
+    const bool leavesPassThrough =
+        node->type == LayerTreeNode::Type::Group
+        && beforeGroup != LayerTreeNode::GroupBlendMode::Isolated;
+    if (before == mode && !leavesPassThrough) return;
     node->blendMode = mode;
+    if (leavesPassThrough)
+        node->groupBlendMode = LayerTreeNode::GroupBlendMode::Isolated;
     m_history.push(std::make_unique<NodePropertyCommand>(
         m_doc, flatIndex, node->opacity, node->opacity,
         node->visible, node->visible,
         before, mode,
-        tr("Set Blend Mode")));
+        tr("Set Blend Mode"),
+        leavesPassThrough ? std::optional(beforeGroup) : std::nullopt,
+        leavesPassThrough ? std::optional(node->groupBlendMode) : std::nullopt));
     emit layerChanged(flatIndex);
     emit imageChanged();
     if (m_doc) ++m_doc->compositionGeneration;
+}
+
+void ImageController::setNodeGroupBlendMode(int flatIndex,
+                                            LayerTreeNode::GroupBlendMode mode)
+{
+    auto* node = nodeAtOrWarn(m_doc, flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Group) return;
+    const auto before = node->groupBlendMode;
+    const BlendMode beforeBlend = node->blendMode;
+    // Pass Through leaves the group's blend slot unused, so it is reset here
+    // rather than left to resurface if the group is switched back — the single
+    // blend-mode control the user sees can only show one of the two.
+    const BlendMode afterBlend =
+        mode == LayerTreeNode::GroupBlendMode::PassThrough
+            ? BlendMode::Normal : beforeBlend;
+    if (before == mode && beforeBlend == afterBlend) return;
+    node->groupBlendMode = mode;
+    node->blendMode = afterBlend;
+    m_history.push(std::make_unique<NodePropertyCommand>(
+        m_doc, flatIndex, node->opacity, node->opacity,
+        node->visible, node->visible,
+        beforeBlend, afterBlend,
+        tr("Set Blend Mode"),
+        before, mode));
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+    if (m_doc) ++m_doc->compositionGeneration;
+}
+
+// ── Clipping masks ──────────────────────────────────────────────────────────
+//
+// The whole feature is a flag on a sibling (LayerTreeNode::clipped); the
+// compositors resolve the base from the sibling order, so nothing here has to
+// track or store a relationship. These helpers only locate the node among its
+// siblings, which is where "the layer below" is defined — the flat index is not
+// that, because it walks into groups and Single-Layer-Mode children.
+namespace {
+
+const std::vector<std::unique_ptr<LayerTreeNode>>* siblingsOf(const Document* doc,
+                                                              const LayerTreeNode* node)
+{
+    if (!doc || !node) return nullptr;
+    return node->parent ? &node->parent->children : &doc->roots;
+}
+
+// Index of `node` in its own sibling vector, or -1.
+int siblingIndexOf(const std::vector<std::unique_ptr<LayerTreeNode>>& siblings,
+                   const LayerTreeNode* node)
+{
+    for (size_t i = 0; i < siblings.size(); ++i) {
+        if (siblings[i].get() == node)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+} // namespace
+
+bool ImageController::isClippingMask(int flatIndex) const
+{
+    const auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    return node && node->isClippedLayer();
+}
+
+bool ImageController::isClippingMaskBase(int flatIndex) const
+{
+    const auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    const auto* siblings = siblingsOf(m_doc, node);
+    if (!siblings) return false;
+    const int idx = siblingIndexOf(*siblings, node);
+    return idx >= 0 && LayerTreeNode::isClipBase(*siblings, static_cast<size_t>(idx));
+}
+
+bool ImageController::canCreateClippingMask(int flatIndex) const
+{
+    const auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
+        return false;
+    if (node->clipped) return false;
+    const auto* siblings = siblingsOf(m_doc, node);
+    if (!siblings) return false;
+    const int idx = siblingIndexOf(*siblings, node);
+    return idx >= 0
+        && LayerTreeNode::resolveClipBase(*siblings, static_cast<size_t>(idx)) != nullptr;
+}
+
+void ImageController::toggleClippingMask(const std::vector<int>& flatIndices)
+{
+    if (!m_doc || flatIndices.empty()) return;
+
+    // Candidates, in flat order, restricted to the node type the flag means
+    // anything for. An adjustment in the selection is ignored here: it clips by
+    // becoming its host's child instead (MainWindow::toggleActiveClipping routes
+    // those to moveAdjustmentToLayer).
+    std::vector<LayerTreeNode*> candidates;
+    for (int idx : flatIndices) {
+        auto* node = m_doc->nodeAt(idx);
+        if (node && node->type == LayerTreeNode::Type::Layer && node->layer)
+            candidates.push_back(node);
+    }
+    if (candidates.empty()) return;
+
+    std::vector<ClippingMaskCommand::Entry> entries;
+    auto add = [&](LayerTreeNode* node, bool on) {
+        if (!node || node->clipped == on) return;
+        const int flat = flatIndexOfNode(m_doc, node);
+        if (flat < 0) return;
+        entries.push_back({flat, node->clipped, on});
+    };
+
+    const bool anyClipped = std::any_of(candidates.begin(), candidates.end(),
+                                        [](const LayerTreeNode* n) { return n->clipped; });
+    if (anyClipped) {
+        // Release: a selection that already contains clipped layers is read as
+        // "undo this", which is how a single toggle command is expected to act.
+        for (auto* node : candidates)
+            add(node, false);
+    } else {
+        for (auto* node : candidates) {
+            const auto* siblings = siblingsOf(m_doc, node);
+            if (!siblings) continue;
+            const int idx = siblingIndexOf(*siblings, node);
+            if (idx < 0) continue;
+            // Release Clipping Mask on the BASE releases everything clipped to
+            // it — selecting the base is the usual way to undo a whole run.
+            if (LayerTreeNode::isClipBase(*siblings, static_cast<size_t>(idx))) {
+                for (int j = idx - 1; j >= 0; --j) {
+                    if (!(*siblings)[j] || !(*siblings)[j]->isClippedLayer())
+                        break;
+                    add((*siblings)[j].get(), false);
+                }
+                continue;
+            }
+            if (LayerTreeNode::resolveClipBase(*siblings, static_cast<size_t>(idx)))
+                add(node, true);
+        }
+    }
+    if (entries.empty()) return;
+
+    const bool creating  = entries.front().after;
+    const int changedFlat = entries.front().flatIndex;
+    for (const auto& e : entries) {
+        if (auto* node = m_doc->nodeAt(e.flatIndex))
+            node->clipped = e.after;
+    }
+    ++m_doc->compositionGeneration;
+    m_history.push(std::make_unique<ClippingMaskCommand>(
+        m_doc, std::move(entries),
+        creating ? tr("Create Clipping Mask") : tr("Release Clipping Mask")));
+
+    emit layerChanged(changedFlat);
+    emit imageChanged();
 }
 
 static QString lockBitName(int flagBit, bool on)
@@ -2352,6 +2772,64 @@ void ImageController::setNodeLockFlags(int flatIndex, int newFlags)
     emit layerChanged(flatIndex);
 }
 
+void ImageController::setStyleBakeBusy(bool busy)
+{
+    if (m_styleBakeBusy == busy)
+        return;
+    m_styleBakeBusy = busy;
+
+    if (busy) {
+        ++m_styleBakeIdleToken;   // cancel a pending close
+        updateStyleBakeProgress();
+        return;
+    }
+
+    // Debounce the idle edge. A gesture dispatches one bake after another with
+    // a short gap in between (the result lands, the next snapshot goes out), and
+    // closing the progress op in every gap would flicker the dialog — worse, it
+    // would restart its 220 ms show delay each time and so never appear on the
+    // one bake that really is slow.
+    const uint64_t token = ++m_styleBakeIdleToken;
+    QTimer::singleShot(150, this, [this, token]() {
+        if (token != m_styleBakeIdleToken || m_styleBakeBusy)
+            return;
+        updateStyleBakeProgress();
+    });
+}
+
+void ImageController::updateStyleBakeProgress()
+{
+    // Only a bake the user is actually waiting on earns the dialog:
+    //  - m_styleEditPending: a Layer Styles edit, not the per-dab bakes a brush
+    //    stroke on a styled layer dispatches (a modal dialog per stroke would
+    //    make painting on a styled layer impossible);
+    //  - !m_liveCompositeEdit: not mid-drag — the dialog is application-modal
+    //    and would steal the slider's mouse grab, and the drag already shows
+    //    each bake as it lands.
+    const bool want = m_styleEditPending && m_styleBakeBusy && !m_liveCompositeEdit;
+
+    if (want && m_styleBakeJobId == 0) {
+        m_styleBakeJobId = m_nextDocumentOperationId++;
+        // Cancelable: the bake itself cannot be stopped (it will land and be
+        // uploaded like any other), but the user must always be able to stop
+        // WAITING for it — see cancelLongOperation.
+        emit progressOperationStarted(m_styleBakeJobId,
+                                      tr("Applying layer style…"), true);
+        emit progressOperationProgressChanged(m_styleBakeJobId, -1);
+    } else if (!want && m_styleBakeJobId != 0) {
+        const uint64_t jobId = m_styleBakeJobId;
+        m_styleBakeJobId = 0;
+        emit progressOperationFinished(jobId);
+    }
+
+    // The edit is settled once its bake is done and the gesture is over; bakes
+    // after that (painting, mask edits) must not resurrect the dialog. Keeping
+    // it armed DURING the gesture is deliberate: the gaps between a drag's
+    // bakes would otherwise clear it before the release.
+    if (!m_styleBakeBusy && !m_liveCompositeEdit)
+        m_styleEditPending = false;
+}
+
 void ImageController::previewLayerEffects(int flatIndex, const std::vector<LayerEffect>& effects)
 {
     auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
@@ -2359,9 +2837,20 @@ void ImageController::previewLayerEffects(int flatIndex, const std::vector<Layer
     node->effects = effects;
     node->invalidateEffects();
     node->thumbnailDirty = true;
-    node->layer->textureOutdated = true;
+    // From here until the bake lands, the user is waiting on this edit — that
+    // is what qualifies a style bake for the loading dialog (setStyleBakeBusy).
+    m_styleEditPending = true;
+    updateStyleBakeProgress();
+    // Deliberately NOT textureOutdated: a style change touches no layer pixel,
+    // and that flag makes syncLayersToGpu markAllGpuDirty() the whole raster —
+    // a full re-upload of every tile of the layer on every slider frame, which
+    // alone stalled the UI on a large image. The style result reaches the GPU
+    // through effectedTexture/styledBaseTexture (see StyleBakePool).
     if (m_doc) ++m_doc->compositionGeneration;
-    emit layerChanged(flatIndex);
+    // Live preview: imageChanged only, like updateAdjustmentParamsLive. Emitting
+    // layerChanged here forced an unconditional LayerPanel::refresh() (tree
+    // rebuild + a full-res thumbnail re-bake of the styled layer) per frame; the
+    // panel is refreshed once when the gesture commits.
     emit imageChanged();
 }
 
@@ -2381,6 +2870,8 @@ void ImageController::commitLayerEffects(
     node->invalidateEffects();
     node->thumbnailDirty = true;
     node->layer->textureOutdated = true;
+    m_styleEditPending = true;   // see previewLayerEffects
+    updateStyleBakeProgress();
     m_history.push(std::make_unique<LayerEffectsCommand>(
         m_doc, flatIndex, beforeEffects, afterEffects, tr("Layer Styles")));
     if (m_doc) ++m_doc->compositionGeneration;
@@ -3330,7 +3821,7 @@ uint64_t ImageController::upscale(const UpscaleOptions& options)
         sourceLayerIndex = m_doc->activeFlatIndex;
         auto* node = m_doc->nodeAt(sourceLayerIndex);
         auto* layer = node && node->type == LayerTreeNode::Type::Layer ? node->layer.get() : nullptr;
-        if (!node || !layer || layer->isTextLayer() || layer->isShapeLayer()) {
+        if (!node || !layer || !layer->hasDirectlyEditablePixels()) {
             emit operationBlocked(tr("Rasterize or select a pixel layer to use AI Upscale."));
             return 0;
         }
@@ -3425,7 +3916,7 @@ bool ImageController::convertDocumentToProfile(const ColorProfile& destinationPr
 bool ImageController::checkDestructiveOp(Layer* layer)
 {
     if (!layer) return false;
-    if (layer->isTextLayer() || layer->isShapeLayer()) {
+    if (!layer->hasDirectlyEditablePixels()) {
         emit operationBlocked(tr("This operation requires a rasterized layer."));
         return false;
     }
@@ -3840,6 +4331,17 @@ static bool applyResizeImageState(Document* doc, const ImageResizeOptions& optio
             doc->selection.image(), targetSize, options.interpolation);
         doc->selection.resize(targetSize.width(), targetSize.height());
 
+        // Channels resample with the canvas, through the same coverage-safe
+        // mask path the selection and the layer masks use: a channel carries
+        // partial coverage, and a nearest-neighbour resize would turn its soft
+        // edges into staircases.
+        for (auto& channel : doc->channels) {
+            channel.data = resampleMaskImage(channel.data, targetSize,
+                                             options.interpolation);
+            channel.thumbDirty = true;
+        }
+        doc->invalidateChannelView();
+
         auto guides = doc->guideManager.guides();
         for (auto& guide : guides) {
             if (guide.orientation == GuideOrientation::Vertical) {
@@ -3893,6 +4395,155 @@ bool ImageController::resizeImageAsync(const ImageResizeOptions& options)
         [options](Document& doc) { return applyResizeImageState(&doc, options); });
 }
 
+// Extracts the slice of a document-space mask that survives a canvas re-frame,
+// re-based to origin (0, 0) on the new canvas. `srcRect` is the old-document
+// rectangle that becomes the new canvas, so its size IS the new canvas size: a
+// crop passes its crop rect, a canvas resize passes the negated anchor offset.
+// Pixels the old mask never covered read 255 — the same "no mask here means
+// apply fully" rule the compositors and the adjust shader use outside maskImage.
+static QImage reframeDocSpaceMask(const QImage& maskIn, const QPoint& origin,
+                                  const QRect& srcRect)
+{
+    const QImage mask = maskIn.format() == QImage::Format_Grayscale8
+        ? maskIn
+        : maskIn.convertToFormat(QImage::Format_Grayscale8);
+
+    QImage out(srcRect.size(), QImage::Format_Grayscale8);
+    out.fill(255);
+    for (int y = 0; y < srcRect.height(); ++y) {
+        const int my = srcRect.y() + y - origin.y();
+        if (my < 0 || my >= mask.height())
+            continue;
+        const uchar* in = mask.constScanLine(my);
+        uchar* dst = out.scanLine(y);
+        for (int x = 0; x < srcRect.width(); ++x) {
+            const int mx = srcRect.x() + x - origin.x();
+            if (mx >= 0 && mx < mask.width())
+                dst[x] = in[mx];
+        }
+    }
+    return out;
+}
+
+// Same re-frame for a channel buffer, with one difference that matters: the
+// value outside the old buffer is the CHANNEL's neutral one — 0 for an Alpha
+// (nothing selected there) and 255 for a Spot (no ink there) — not a mask's
+// 255. Padding a spot with 0 would print solid ink across every pixel the
+// canvas just gained.
+static QImage reframeChannelBuffer(const DocumentChannel& channel,
+                                   const QRect& srcRect)
+{
+    const QImage src = channel.data.format() == QImage::Format_Grayscale8
+        ? channel.data
+        : channel.data.convertToFormat(QImage::Format_Grayscale8);
+
+    QImage out(srcRect.size(), QImage::Format_Grayscale8);
+    out.fill(channel.neutralValue());
+    if (src.isNull())
+        return out;
+    for (int y = 0; y < srcRect.height(); ++y) {
+        const int sy = srcRect.y() + y;
+        if (sy < 0 || sy >= src.height())
+            continue;
+        const uchar* in = src.constScanLine(sy);
+        uchar* dst = out.scanLine(y);
+        for (int x = 0; x < srcRect.width(); ++x) {
+            const int sx = srcRect.x() + x;
+            if (sx >= 0 && sx < src.width())
+                dst[x] = in[sx];
+        }
+    }
+    return out;
+}
+
+// Moves every piece of document-space state onto a new canvas frame. Shared by
+// crop and canvas resize: both leave the layer pixels alone and only re-frame
+// the canvas around them. `docRemap` maps old document NDC to new document NDC;
+// `srcRect` expresses the same move in old-document pixels (see
+// reframeDocSpaceMask).
+//
+// Root transforms are POST-multiplied. A node's own transform already maps its
+// pixels into the OLD canvas, and QTransform is row-vector — the leftmost factor
+// applies first, which is why LayerTreeNode::accumulatedTransform walks
+// leaf-to-root as `xf * n->transform` — so the re-frame has to be the last
+// factor. Pre-multiplying it instead displaced and rescaled every layer that
+// carried a transform of its own (anything moved, scaled or rotated, or pasted
+// across documents) while untransformed layers still looked right, because for
+// those the two orders happen to coincide. Note the contrast with the
+// layer-local corrections in expandLayer/ensureWritableRect, which remap the
+// layer's own grown image and therefore DO pre-multiply.
+//
+// Stack (Normal-Mode) adjustments are skipped on purpose: both compositors
+// sample their mask in document space and ignore the node transform entirely
+// (DocumentCompositor::applyAdjustmentNode, LayerCompositor's canvas quad), so
+// for them the re-frame belongs on the mask — and parking it on the transform
+// only desyncs mask painting, which does read accumulatedTransform(). Clipped
+// (Single Layer Mode) adjustments hold their mask in the parent layer's pixel
+// space, which a canvas re-frame never touches.
+//
+// Extra channels ARE re-framed here, by reframeChannelBuffer below: they are
+// document-space data, so a crop slices them and a grow pads them with the
+// kind's neutral value. Anything that reads a channel can therefore assume it
+// is canvas-aligned, which is what lets loadChannelToSelection copy it
+// straight across instead of stretching a stale buffer onto the new canvas.
+static void reframeDocumentSpaceState(Document* doc, const QTransform& docRemap,
+                                      const QRect& srcRect)
+{
+    for (auto& root : doc->roots) {
+        auto* node = root.get();
+        if (!node || node->type == LayerTreeNode::Type::Adjustment)
+            continue;
+        node->transform = node->transform * docRemap;
+        // Keep "Reset transform" aiming at the layer's home position in the NEW
+        // frame instead of snapping it back into the old one.
+        if (node->layer && node->layer->hasResetTransform)
+            node->layer->resetTransform = node->layer->resetTransform * docRemap;
+    }
+
+    for (auto* node : doc->flatten()) {
+        if (!node || node->type != LayerTreeNode::Type::Adjustment || !node->layer)
+            continue;
+        if (node->parent && node->parent->type == LayerTreeNode::Type::Layer)
+            continue;  // clipped — mask lives in the parent layer's pixel space
+        auto* layer = node->layer.get();
+        if (!layer->maskImage.isNull()) {
+            layer->maskImage = reframeDocSpaceMask(layer->maskImage,
+                                                   layer->maskOrigin, srcRect);
+            if (!layer->maskRawImage.isNull()) {
+                // The unfeathered source shares maskImage's geometry and origin.
+                layer->maskRawImage = reframeDocSpaceMask(layer->maskRawImage,
+                                                          layer->maskOrigin, srcRect);
+            }
+            layer->maskOrigin = QPoint(0, 0);
+            layer->maskThumbDirty = true;
+            layer->maskTextureOutdated = true;
+        }
+        // The transparent placeholder is what defines the document coordinate
+        // space the mask tools work in (see addAdjustmentLayer), so it has to
+        // follow the canvas.
+        layer->cpuImage = QImage(srcRect.size(), QImage::Format_RGBA8888);
+        layer->cpuImage.fill(Qt::transparent);
+    }
+
+    for (auto& channel : doc->channels) {
+        channel.data = reframeChannelBuffer(channel, srcRect);
+        channel.thumbDirty = true;
+    }
+    doc->invalidateChannelView();
+
+    auto guides = doc->guideManager.guides();
+    for (auto& guide : guides) {
+        if (guide.orientation == GuideOrientation::Vertical) {
+            guide.position = std::clamp<qreal>(guide.position - srcRect.x(),
+                                               0.0, std::max(0, srcRect.width()));
+        } else {
+            guide.position = std::clamp<qreal>(guide.position - srcRect.y(),
+                                               0.0, std::max(0, srcRect.height()));
+        }
+    }
+    doc->guideManager.setGuides(std::move(guides));
+}
+
 static bool applyResizeCanvasState(Document* doc, const CanvasResizeOptions& options)
 {
     if (!doc || !options.targetSize.isValid() || options.targetSize.isEmpty())
@@ -3906,26 +4557,14 @@ static bool applyResizeCanvasState(Document* doc, const CanvasResizeOptions& opt
     const QTransform adjust = oldDocToNewDocNoScale(oldSize, newSize,
                                                      offset.x(), offset.y());
 
-    for (auto& root : doc->roots) {
-        if (root)
-            root->transform = adjust * root->transform;
-    }
+    // srcRect: the old-document rectangle that becomes the new canvas. The
+    // anchor offset places the old canvas inside the new one, so old-document
+    // (-offset) is what lands on new-document (0, 0).
+    reframeDocumentSpaceState(doc, adjust, QRect(-offset, newSize));
 
     doc->size = newSize;
     doc->selection.image() = translateMaskToCanvas(doc->selection.image(), newSize, offset);
     doc->selection.resize(newSize.width(), newSize.height());
-
-    auto guides = doc->guideManager.guides();
-    for (auto& guide : guides) {
-        if (guide.orientation == GuideOrientation::Vertical) {
-            guide.position = std::clamp<qreal>(
-                guide.position + offset.x(), 0.0, std::max(0, newSize.width()));
-        } else {
-            guide.position = std::clamp<qreal>(
-                guide.position + offset.y(), 0.0, std::max(0, newSize.height()));
-        }
-    }
-    doc->guideManager.setGuides(std::move(guides));
 
     if (options.fillExtension
         && options.extensionColor.alpha() > 0
@@ -4021,14 +4660,6 @@ static bool applyCropDocumentState(Document* doc, const QRect& cropRect)
     const double docW = static_cast<double>(doc->size.width());
     const double docH = static_cast<double>(doc->size.height());
 
-    std::vector<int> rootFlatIndices;
-    auto flat = doc->flatten();
-    for (int fi = 0; fi < static_cast<int>(flat.size()); ++fi) {
-        auto* node = flat[fi];
-        if (node && !node->parent)
-            rootFlatIndices.push_back(fi);
-    }
-
     const double sx = docW / static_cast<double>(cropW);
     const double sy = docH / static_cast<double>(cropH);
     const double tx = (docW - 2.0 * cropX - cropW) / static_cast<double>(cropW);
@@ -4038,11 +4669,7 @@ static bool applyCropDocumentState(Document* doc, const QRect& cropRect)
         0.0, sy, 0.0,
         tx, ty, 1.0);
 
-    for (int flatIndex : rootFlatIndices) {
-        auto* node = doc->nodeAt(flatIndex);
-        if (node)
-            node->transform = oldDocToNewDoc * node->transform;
-    }
+    reframeDocumentSpaceState(doc, oldDocToNewDoc, crop);
 
     doc->size = QSize(cropW, cropH);
     doc->selection.resize(cropW, cropH);
@@ -4312,7 +4939,7 @@ static bool applyMergeLayersState(Document* doc, int srcFlat, int dstFlat)
 
     QImage merged = DocumentCompositor::compositeSubset(
         doc, {srcNode, dstNode}, /*applyAdjustments=*/false, ctx,
-        /*ancestorGroupsPassThrough=*/true);
+        /*ancestorGroupsDirect=*/true);
     requireMergeComposite(merged, doc);
 
     // dst keeps the merged pixels; its own clipped adjustments are already baked
@@ -4584,7 +5211,9 @@ void ImageController::rasterizeNode(int flatIndex)
     if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer)
         return;
     auto* layer = node->layer.get();
-    if (!layer->textData && !layer->shapeData) return;
+    if (!layer->textData && !layer->shapeData && !layer->rawData
+        && !layer->smartObjectData)
+        return;
     if (node->isPixelEditingLocked()) {
         emit operationBlocked(tr("This layer is locked and cannot be rasterized."));
         return;
@@ -4594,6 +5223,48 @@ void ImageController::rasterizeNode(int flatIndex)
     QTransform beforeXf = node->transform;
     auto beforeText = layer->textData;
     auto beforeShape = layer->shapeData;
+
+    // Smart Object: drop the reference, keep the cached render as plain pixels.
+    // No re-render — the cpuImage already IS the referenced document's
+    // composite, and the referenced document itself is untouched (it stays in
+    // the container, available to other instances and to Undo).
+    if (layer->smartObjectData) {
+        auto beforeSmart = layer->smartObjectData;
+        layer->smartObjectData.reset();
+        markLayerDirty(layer);
+        m_history.push(std::make_unique<RasterizeCommand>(
+            m_doc, flatIndex,
+            std::move(beforeImg), beforeXf,
+            std::move(beforeText), std::move(beforeShape), layer->rawData,
+            std::move(beforeSmart),
+            layer->cpuImage.copy(), node->transform,
+            tr("Rasterize Layer")));
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        if (m_doc) ++m_doc->compositionGeneration;
+        return;
+    }
+
+    // RAW Layer: discard the develop payload, keep the already-rendered
+    // pixels as-is (Fase 4.7) — no re-render, just drop the re-edit path.
+    auto beforeRaw = layer->rawData;
+    if (layer->rawData) {
+        layer->rawData.reset();
+        m_rawDevelopService->release(node);
+        m_pendingRawDevelops.erase(node);
+        markLayerDirty(layer);
+        m_history.push(std::make_unique<RasterizeCommand>(
+            m_doc, flatIndex,
+            std::move(beforeImg), beforeXf,
+            std::move(beforeText), std::move(beforeShape), std::move(beforeRaw),
+            nullptr,
+            layer->cpuImage.copy(), node->transform,
+            tr("Rasterize Layer")));
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+        if (m_doc) ++m_doc->compositionGeneration;
+        return;
+    }
 
     if (layer->shapeData) {
         QTransform accum = node->accumulatedTransform();
@@ -4629,13 +5300,334 @@ void ImageController::rasterizeNode(int flatIndex)
     m_history.push(std::make_unique<RasterizeCommand>(
         m_doc, flatIndex,
         std::move(beforeImg), beforeXf,
-        std::move(beforeText), std::move(beforeShape),
+        std::move(beforeText), std::move(beforeShape), nullptr, nullptr,
         layer->cpuImage.copy(), node->transform,
         tr("Rasterize Layer")));
 
     emit layerChanged(flatIndex);
     emit imageChanged();
     if (m_doc) ++m_doc->compositionGeneration;
+}
+
+// Creates the editable pixel copy a paint tool needs when the user aims it at a
+// RAW Layer (the "Rasterize RAW Layer?" offer in CanvasView::
+// ensureRasterCopyForRawTarget). A RAW layer's cpuImage already *is* the
+// full-resolution Hazor Develop result — RawDevelopService renders the real
+// reveal into it, the canvas never holds a reduced-quality preview — so the
+// copy is that image, not a re-render and not a screen grab.
+//
+// The copy is a one-way snapshot by design: a later re-reveal of the RAW layer
+// does not touch its pixels. Everything that made the RAW layer *look* the way
+// it did travels with the copy (transform, mask, opacity, blend mode, layer
+// styles, clipped Single-Layer-Mode adjustments) so hiding the original leaves
+// the composite unchanged.
+//
+// Both steps land as ONE history entry, pushed in the order [hide RAW, insert
+// copy] so the flat indices each command stores stay valid in both directions:
+// on redo the RAW is still at `flatIndex` when it is hidden and only then does
+// the insert push it down; on undo the copy is removed first, which puts the
+// RAW back at `flatIndex` before its visibility is restored.
+int ImageController::rasterCopyRawLayer(int flatIndex)
+{
+    if (!m_doc) return -1;
+    auto* srcNode = m_doc->nodeAt(flatIndex);
+    if (!srcNode || srcNode->type != LayerTreeNode::Type::Layer
+        || !srcNode->layer || !srcNode->layer->rawData)
+        return -1;
+    if (srcNode->isPixelEditingLocked()) {
+        emit operationBlocked(tr("This layer is locked and cannot be rasterized."));
+        return -1;
+    }
+    // A re-reveal in flight overwrites cpuImage the moment it lands, so the copy
+    // would silently hold the *previous* develop. Make the user wait rather than
+    // hand them pixels that don't match what Hazor Develop just applied.
+    if (m_rawDevelopService->isBusy(srcNode)) {
+        emit operationBlocked(tr("Wait for the RAW development to finish."));
+        return -1;
+    }
+
+    Layer* src = srcNode->layer.get();
+    QImage pixels = flushLayerToCpuImage(src);
+    if (pixels.isNull()) return -1;
+    if (pixels.format() != QImage::Format_RGBA8888)
+        pixels = pixels.convertToFormat(QImage::Format_RGBA8888);
+
+    auto copyNode = std::make_unique<LayerTreeNode>();
+    copyNode->type = LayerTreeNode::Type::Layer;
+    copyNode->name = tr("%1 (Raster)").arg(srcNode->name);
+    copyNode->opacity = srcNode->opacity;
+    copyNode->visible = true;
+    copyNode->blendMode = srcNode->blendMode;
+    copyNode->groupBlendMode = srcNode->groupBlendMode;
+    // Deliberately NOT inherited: the copy exists to be painted on, and a
+    // Lock Transparent / Lock Position carried over from the RAW original would
+    // block the very stroke that asked for it.
+    copyNode->lockFlags = LockNone;
+    copyNode->clipped = srcNode->clipped;
+    copyNode->transform = srcNode->transform;
+    copyNode->effects = srcNode->effects;
+    copyNode->invalidateEffects();
+
+    copyNode->layer = std::make_shared<Layer>();
+    Layer* dst = copyNode->layer.get();
+    dst->name = copyNode->name;
+    dst->cpuImage = std::move(pixels);
+    dst->textureOutdated = true;
+    dst->owner = copyNode.get();
+    dst->resetTransform = copyNode->transform;
+    dst->hasResetTransform = true;
+    if (!src->maskImage.isNull()) {
+        dst->maskImage = src->maskImage.copy();
+        if (!src->maskRawImage.isNull())
+            dst->maskRawImage = src->maskRawImage.copy();
+        dst->maskOrigin = src->maskOrigin;
+        dst->maskThumbDirty = true;
+    }
+    dst->maskVisible = src->maskVisible;
+    dst->maskDensity = src->maskDensity;
+    dst->maskFeather = src->maskFeather;
+
+    for (const auto& child : srcNode->children) {
+        if (!child) continue;
+        auto childClone = child->clone();
+        childClone->parent = copyNode.get();
+        copyNode->children.push_back(std::move(childClone));
+    }
+
+    // Mutate first, record after (CommandHistory's contract: pushed commands are
+    // never re-executed). That order also lets the insert fail cleanly without
+    // leaving a half-written history entry behind.
+    const bool rawWasVisible = srcNode->visible;
+    srcNode->visible = false;
+
+    auto redoClone = copyNode->clone();
+    const int newFlat = m_doc->insertNodeAt(flatIndex, std::move(copyNode));
+    if (newFlat < 0) {
+        srcNode->visible = rawWasVisible;
+        return -1;
+    }
+    m_doc->activeFlatIndex = newFlat;
+    m_doc->selectedFlatIndices = {newFlat};
+
+    m_history.beginMacro(tr("Rasterize RAW Layer"));
+    m_history.push(std::make_unique<NodePropertyCommand>(
+        m_doc, flatIndex,
+        srcNode->opacity, srcNode->opacity,
+        rawWasVisible, false,
+        srcNode->blendMode, srcNode->blendMode,
+        tr("Hide RAW Layer")));
+    m_history.push(std::make_unique<DuplicateLayerCommand>(
+        m_doc, newFlat, std::move(redoClone), tr("Raster Copy")));
+    m_history.endMacro();
+
+    ++m_doc->compositionGeneration;
+    emit layerChanged(newFlat);
+    emit activeLayerChanged(newFlat);
+    emit imageChanged();
+    return newFlat;
+}
+
+// Resamples a layer mask from one layer-pixel space into another, given the
+// affine `m` reframeTransform() derived between a RAW Layer's old and new
+// develop geometry (Fase 4.4). Returns the remapped mask; *outOrigin
+// receives its new maskOrigin. Mirrors warpMaskDocToLayer/warpMaskLayerToDoc
+// above (cv::warpAffine with the inverse map), but between two layer-pixel
+// spaces directly — no document-space round trip, and no NDC scaling since
+// `m` already operates in plain pixel coordinates.
+static QImage warpMaskByReframeTransform(const QImage& maskIn, const QPoint& maskOrigin,
+                                         const QTransform& m, QPoint* outOrigin)
+{
+    if (maskIn.isNull()) {
+        *outOrigin = QPoint(0, 0);
+        return maskIn;
+    }
+
+    const QRectF oldRect(maskOrigin, maskIn.size());
+    const QRect newRect = m.mapRect(oldRect).toAlignedRect();
+    const int mw = std::max(1, newRect.width());
+    const int mh = std::max(1, newRect.height());
+    *outOrigin = newRect.topLeft();
+
+    // old-mask-local -> old-layer (translate) -> new-layer (m) -> new-mask-local (translate).
+    const QTransform maskSpace =
+        QTransform(1, 0, 0, 1, maskOrigin.x(), maskOrigin.y())
+        * m
+        * QTransform(1, 0, 0, 1, -newRect.x(), -newRect.y());
+    bool invertible = false;
+    const QTransform inv = maskSpace.inverted(&invertible);
+    if (!invertible) {
+        *outOrigin = maskOrigin;
+        return maskIn;
+    }
+
+    cv::Mat xf = (cv::Mat_<double>(2, 3) <<
+        inv.m11(), inv.m21(), inv.m31(),
+        inv.m12(), inv.m22(), inv.m32());
+
+    QImage src = maskIn.convertToFormat(QImage::Format_Grayscale8);
+    cv::Mat srcMat(src.height(), src.width(), CV_8UC1, src.bits(),
+                  static_cast<size_t>(src.bytesPerLine()));
+    QImage out(mw, mh, QImage::Format_Grayscale8);
+    out.fill(255);
+    cv::Mat outMat(mh, mw, CV_8UC1, out.bits(),
+                  static_cast<size_t>(out.bytesPerLine()));
+    cv::warpAffine(srcMat, outMat, xf, cv::Size(mw, mh),
+                  cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                  cv::BORDER_CONSTANT, cv::Scalar(255));
+    return out;
+}
+
+void ImageController::adoptRawSession(int flatIndex, std::unique_ptr<RawSession> session,
+                                      const QString& tempPath)
+{
+    if (!m_doc || !session) return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer || !node->layer->rawData)
+        return;
+    m_rawDevelopService->adoptSession(node, std::move(session), tempPath);
+}
+
+bool ImageController::rerevealRawLayer(int flatIndex, const RawDevelopParams& params)
+{
+    if (!m_doc) return false;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || node->type != LayerTreeNode::Type::Layer || !node->layer || !node->layer->rawData)
+        return false;
+    // The RAW develop profile is this layer's non-destructive "content",
+    // same gate as a text/shape edit (see LayerTreeNode::canEditContent()).
+    if (!node->canEditContent()) {
+        emit operationBlocked(tr("This layer is locked and cannot be re-revealed."));
+        return false;
+    }
+    if (m_rawDevelopService->isBusy(node))
+        return false;
+
+    Layer* layer = node->layer.get();
+
+    PendingRawDevelop pending;
+    pending.beforeImage = layer->cpuImage.copy();
+    pending.beforeTransform = node->transform;
+    pending.beforeMask = layer->maskImage;
+    pending.beforeMaskOrigin = layer->maskOrigin;
+    pending.beforeData = layer->rawData;
+    pending.pp3 = QString::fromStdString(params.toPP3String());
+    pending.flatIndex = flatIndex;
+
+    const std::shared_ptr<const RawSource> source = layer->rawData->source;
+    const RawStorageMode mode = layer->rawData->mode;
+    m_pendingRawDevelops[node] = std::move(pending);
+
+    if (!m_rawDevelopService->requestDevelop(node, source, mode, params)) {
+        m_pendingRawDevelops.erase(node);
+        return false;
+    }
+    return true;
+}
+
+void ImageController::onRawLayerDevelopFinished(LayerTreeNode* node, RawDevelopResult result)
+{
+    auto it = m_pendingRawDevelops.find(node);
+    if (it == m_pendingRawDevelops.end())
+        return;
+    PendingRawDevelop pending = std::move(it->second);
+    m_pendingRawDevelops.erase(it);
+
+    if (!result.ok) {
+        emit rawLayerDevelopFinished(node, pending.flatIndex, false, result.errorMessage);
+        return;
+    }
+    if (!m_doc) {
+        emit rawLayerDevelopFinished(node, pending.flatIndex, false, tr("The document is no longer open."));
+        return;
+    }
+
+    // The node may have moved (reorder) or been deleted while the render
+    // ran — re-resolve by identity rather than trusting pending.flatIndex.
+    const auto flat = m_doc->flatten();
+    const auto flatIt = std::find(flat.begin(), flat.end(), node);
+    if (flatIt == flat.end() || node->type != LayerTreeNode::Type::Layer
+        || !node->layer || !node->layer->rawData) {
+        emit rawLayerDevelopFinished(node, pending.flatIndex, false,
+            tr("The layer is no longer available."));
+        return;
+    }
+    const int flatIndex = static_cast<int>(flatIt - flat.begin());
+    Layer* layer = node->layer.get();
+
+    auto afterData = std::make_shared<RawLayerData>(*layer->rawData);
+    afterData->state.pp3 = pending.pp3;
+    afterData->state.developedSize = result.developedSize;
+    afterData->state.geometry = result.geometry;
+    afterData->state.revision = pending.beforeData->state.revision + 1;
+
+    RawDevelopCommand::State after;
+    after.image = result.image;
+    after.transform = pending.beforeTransform;
+    after.maskImage = pending.beforeMask;
+    after.maskOrigin = pending.beforeMaskOrigin;
+    after.data = afterData;
+
+    // Fase 4.4: if the framing changed (coarse rotation/flip/crop/resize),
+    // compensate the node transform (and remap the mask) so the composited
+    // result does not move. When it's not derivable (fine rotation,
+    // perspective), keep the previous framing and warn instead of guessing.
+    const auto m = reframeTransform(pending.beforeData->state.geometry, result.geometry);
+    QString warning;
+    if (m.has_value()) {
+        // QTransform's `*` applies its left operand first (A*B ⇒ B.map(A.map(p))):
+        // we need new-pixel-space mapped back to old-pixel-space (m->inverted(),
+        // applied first) and then through the old canvas placement, so the same
+        // scene point lands on the same canvas position it did before.
+        after.transform = m->inverted() * pending.beforeTransform;
+        if (!pending.beforeMask.isNull()) {
+            after.maskImage = warpMaskByReframeTransform(
+                pending.beforeMask, pending.beforeMaskOrigin, *m, &after.maskOrigin);
+        }
+    } else if (pending.beforeData->state.geometry.fullWidth > 0) {
+        // No derivable M, but there WAS a previous reveal to compare
+        // against — conservatively warn rather than assume the framing
+        // happens to still match (see reframeTransform()'s doc comment).
+        warning = tr("This re-reveal changed the RAW frame in a way Hazor can't "
+                     "compensate for automatically (fine rotation or perspective "
+                     "correction). The layer keeps its previous position; use "
+                     "Rasterize if you want to keep the new framing.");
+    }
+
+    RawDevelopCommand::State before;
+    before.image = pending.beforeImage;
+    before.transform = pending.beforeTransform;
+    before.maskImage = pending.beforeMask;
+    before.maskOrigin = pending.beforeMaskOrigin;
+    before.data = pending.beforeData;
+
+    // Commands only record before/after for Undo/Redo (see CommandHistory::
+    // push()) — apply `after` to the live layer/node ourselves first, same
+    // as every other call site that pushes a Command here.
+    if (layer->rasterStorage.isEnabled())
+        layer->rasterStorage.clear();
+    layer->cpuImage = after.image;
+    layer->tiledSystem = false;
+    layer->tileManager.clear();
+    layer->dirtyRegion.clear();
+    layer->textureOutdated = true;
+    layer->pendingGpuUpload = true;
+    node->transform = after.transform;
+    layer->maskImage = after.maskImage;
+    layer->maskOrigin = after.maskOrigin;
+    layer->maskTextureOutdated = true;
+    layer->maskThumbDirty = true;
+    layer->rawData = afterData;
+    node->invalidateEffects();
+    ++m_doc->compositionGeneration;
+
+    m_history.push(std::make_unique<RawDevelopCommand>(
+        m_doc, flatIndex, std::move(before), std::move(after), tr("Re-reveal RAW Layer")));
+
+    markLayerDirty(layer);
+    emit layerChanged(flatIndex);
+    emit imageChanged();
+
+    emit rawLayerDevelopFinished(node, flatIndex, true, warning);
 }
 
 void ImageController::mergeVisibleLayers()
@@ -4839,10 +5831,42 @@ bool ImageController::isLayerMaskEnabled(int flatIndex) const
     return node && node->layer && node->layer->maskVisible && !node->layer->maskImage.isNull();
 }
 
+void ImageController::claimEditTarget(EditTarget target)
+{
+    if (target != EditTarget::LayerMask && m_editingMask) {
+        // Assigned here instead of through setEditingMask(), which is the
+        // caller claiming LayerMask — going back through it would recurse.
+        m_editingMask = false;
+        // Every panel that shows the mask as the target listens to this (the
+        // Layers panel's mask highlight, the canvas' own flag, the histogram
+        // source), so the UI follows from the one assignment.
+        emit maskEditingChanged(false);
+    }
+
+    if (target != EditTarget::Channel && m_doc
+        && !m_doc->channelState.compositeIsEditTarget()) {
+        // Back to the composite, which is the target the layer and mask tools
+        // write through. Only the arming moves: selectComposite() re-arms the
+        // three colour components and no channel's eye is touched, so a
+        // visible alpha overlay stays visible — an edit target and a
+        // visibility are different properties.
+        m_doc->channelState.selectComposite();
+        m_doc->invalidateChannelView();
+        emit channelsChanged();
+        emit imageChanged();
+    }
+}
+
 void ImageController::setEditingMask(bool editing)
 {
     if (m_editingMask == editing) return;
+    // Flag first, then the claim: the channels it disarms notify through
+    // channelsChanged/imageChanged, and those listeners should already see the
+    // mask as the target. maskEditingChanged stays last so the canvas and the
+    // Layers panel get the final, settled state.
     m_editingMask = editing;
+    if (editing)
+        claimEditTarget(EditTarget::LayerMask);
     emit maskEditingChanged(editing);
 }
 
@@ -5127,9 +6151,12 @@ bool ImageController::extractSelectedDocRegion(Layer* layer, cv::Mat& outCropped
     // Bake the layer mask in layer space, BEFORE warping, so the copy matches
     // the composited (masked) appearance rather than the raw pixels.
     applyLayerMaskToCvImage(layer, layerMat);
-    cv::Mat canvas(dh, dw, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-    cv::warpAffine(layerMat, canvas, xform, canvas.size(),
-                   cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+    // Premultiplied cubic: the copied pixels go to the clipboard and may be
+    // pasted back, so a dark fringe or a bilinear smear here is permanent.
+    cv::Mat canvas = ImageEngine::warpAffinePremultiplied(
+        layerMat, xform, cv::Size(dw, dh), cv::INTER_CUBIC,
+        cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+    if (canvas.empty()) return false;
 
     cv::Mat selMask(dh, dw, CV_8UC1,
                     const_cast<uchar*>(m_doc->selection.constBits()),
@@ -5181,6 +6208,156 @@ void ImageController::applyLayerMaskToCvImage(Layer* layer,
             row[x * 4 + 3] = static_cast<uchar>(row[x * 4 + 3] * f);
         }
     }
+}
+
+// ── Growing a layer so a filter is not cropped by its own bounds ─────────────
+
+// Hard ceiling on the growth a single filter may ask for, per side, in layer
+// pixels. The reach is already bounded by the filter parameters; this only keeps
+// a pathological combination (a huge layer shrunk to a few canvas pixels) from
+// turning one blur into a multi-gigabyte buffer.
+static constexpr int kMaxFilterGrowthPx = 4096;
+
+// The document's canvas rect expressed in this layer's pixel grid. Same
+// layer-pixel → document-pixel affine the selection warps use
+// (Document::selectionMaskForLayer), inverted, so a rotated or scaled layer
+// still reports the region of its own buffer the canvas can show.
+static QRect documentRectInLayerPixels(const Document* doc, const Layer* layer,
+                                       const QSize& imageSize)
+{
+    if (!doc || !layer) return {};
+    const double dw = doc->size.width();
+    const double dh = doc->size.height();
+    const int lw = imageSize.width();
+    const int lh = imageSize.height();
+    if (dw <= 0.0 || dh <= 0.0 || lw <= 0 || lh <= 0) return {};
+
+    const QTransform tf = layer->owner ? layer->owner->accumulatedTransform()
+                                       : QTransform();
+    const double a00 = dw * tf.m11() / lw;
+    const double a01 = -dw * tf.m21() / lh;
+    const double a02 = dw * 0.5 * (1.0 - tf.m11() + tf.m21() + tf.m31());
+    const double a10 = -dh * tf.m12() / lw;
+    const double a11 = dh * tf.m22() / lh;
+    const double a12 = dh * 0.5 * (1.0 + tf.m12() - tf.m22() - tf.m32());
+
+    // QTransform maps (x,y) → (m11·x + m21·y + m31, m12·x + m22·y + m32).
+    const QTransform layerToDoc(a00, a10, 0.0,
+                                a01, a11, 0.0,
+                                a02, a12, 1.0);
+    bool invertible = false;
+    const QTransform docToLayer = layerToDoc.inverted(&invertible);
+    if (!invertible) return {};
+
+    const QRectF mapped = docToLayer.mapRect(QRectF(0.0, 0.0, dw, dh));
+    if (!std::isfinite(mapped.left()) || !std::isfinite(mapped.top())
+        || !std::isfinite(mapped.width()) || !std::isfinite(mapped.height()))
+        return {};
+    // A near-degenerate transform (a big layer shrunk to a couple of canvas
+    // pixels) maps the canvas far outside int range, where toAlignedRect() is
+    // not defined. The result is only ever intersected with a rect a few
+    // thousand pixels wide, so clamping generously costs nothing; a layer that
+    // falls entirely outside the clamp reports nothing and simply does not grow.
+    constexpr double kCoordLimit = 1e7;
+    const QRectF clamped = mapped.intersected(
+        QRectF(-kCoordLimit, -kCoordLimit, 2.0 * kCoordLimit, 2.0 * kCoordLimit));
+    return clamped.isEmpty() ? QRect() : clamped.toAlignedRect();
+}
+
+QRect ImageController::filterTargetRect(const Layer* layer,
+                                        const QSize& imageSize,
+                                        const QRect& contentBounds,
+                                        const std::string& toolName,
+                                        const QVariantMap& params) const
+{
+    const QRect current(QPoint(0, 0), imageSize);
+    if (!layer || !m_doc || imageSize.isEmpty())
+        return current;
+
+    QMargins reach = processing::FilterProcessor::outwardReach(
+        toolName, params, imageSize, contentBounds);
+    if (reach.isNull())
+        return current;
+
+    reach = QMargins(std::min(reach.left(),   kMaxFilterGrowthPx),
+                     std::min(reach.top(),    kMaxFilterGrowthPx),
+                     std::min(reach.right(),  kMaxFilterGrowthPx),
+                     std::min(reach.bottom(), kMaxFilterGrowthPx));
+
+    // Grow only as far as the effect could ever be seen in this document. That
+    // keeps the common "blur the whole photo" case byte-identical (a layer that
+    // already covers the canvas has nowhere to grow, so it keeps the
+    // BORDER_REPLICATE edges it has today) while a pasted, placed or
+    // scaled-down layer — where the crop is visible as a straight line across
+    // the canvas — gets the room its streaks need.
+    const QRect allowed = current.united(
+        documentRectInLayerPixels(m_doc, layer, imageSize));
+    return current.marginsAdded(reach).intersected(allowed);
+}
+
+bool ImageController::growLayerForFilter(Layer* layer, const QRect& targetRect,
+                                         QPoint* outOffset)
+{
+    if (outOffset) *outOffset = QPoint(0, 0);
+    if (!layer || layer->cpuImage.isNull() || targetRect.isEmpty())
+        return false;
+
+    const QRect current(0, 0, layer->cpuImage.width(), layer->cpuImage.height());
+    if (current.contains(targetRect))
+        return false;
+
+    // ensureWritableRect anchors the union of both rects at (0,0), so content
+    // shifts by however far the target reaches into negative coordinates.
+    const QPoint offset(std::max(0, -targetRect.left()),
+                        std::max(0, -targetRect.top()));
+
+    QTransform adjust;
+    if (!layer->ensureWritableRect(targetRect, &adjust))
+        return false;
+
+    const int newW = layer->cpuImage.width();
+    const int newH = layer->cpuImage.height();
+
+    if (layer->tiledSystem) {
+        layer->tileManager.resize(newW, newH);
+        layer->tileManager.markAllDirty();
+        layer->pendingGpuUpload = true;
+    }
+    if (layer->owner && !adjust.isIdentity())
+        layer->owner->transform = adjust * layer->owner->transform;
+
+    // The mask is addressed in layer pixels, so it has to follow the pixels it
+    // masks; the revealed border is fully visible (255), as in every other layer
+    // growth path (CanvasView::expandLayerToRect).
+    // The CPU maskImage is authoritative here, so there is no GPU readback: this
+    // runs from a tool dispatch, and any mask stroke was already synced GPU→CPU
+    // when it ended (see CanvasView::growMaskToTiledLayer).
+    if (!layer->maskImage.isNull()) {
+        QImage grownMask(newW, newH, QImage::Format_Grayscale8);
+        grownMask.fill(255);
+        {
+            QPainter mp(&grownMask);
+            mp.drawImage(layer->maskOrigin + offset, layer->maskImage);
+        }
+        layer->maskImage = grownMask;
+        layer->maskOrigin = QPoint(0, 0);
+        layer->maskThumbDirty = true;
+        syncLayerMaskToGpu(layer);
+    }
+
+    layer->invalidateContentBounds();
+    layer->textureOutdated = true;
+    // The layer's footprint changed, not just its pixels: anything keyed to the
+    // old geometry (the display projection, a baked layer-style texture, the
+    // thumbnail) has to be rebuilt, including for the frames drawn while an
+    // async filter is still running on the grown buffer.
+    if (layer->owner) {
+        layer->owner->invalidateEffects();
+        layer->owner->thumbnailDirty = true;
+    }
+    if (m_doc) ++m_doc->compositionGeneration;
+    if (outOffset) *outOffset = offset;
+    return true;
 }
 
 void ImageController::applyFilterWithSelection(Layer* layer,
@@ -5371,11 +6548,17 @@ void ImageController::onAsyncJobCompleted(uint64_t jobId)
     emit imageChanged();
 
     QTransform afterT = node->transform;
-    m_history.push(std::make_unique<FilterCommand>(
+    auto command = std::make_unique<FilterCommand>(
         m_doc, job->targetFlatIndex,
         std::move(job->beforeImage), job->beforeTransform,
         layer->cpuImage.copy(), afterT,
-        QString::fromStdString(job->toolName)));
+        QString::fromStdString(job->toolName));
+    // The dispatch grew the layer for a filter that reaches past its bounds, so
+    // the mask was shifted/grown with the pixels and has to be restorable too.
+    if (!job->beforeMask.isNull())
+        command->setMaskSnapshots(std::move(job->beforeMask), job->beforeMaskOrigin,
+                                  layer->maskImage, layer->maskOrigin);
+    m_history.push(std::move(command));
 
     emit toolExecuted(QString::fromStdString(job->toolName), true);
     emit progressOperationProgressChanged(jobId, 100);
@@ -5432,7 +6615,7 @@ bool ImageController::hasClipboard() const
 // system clipboard still corresponds to the internal rich data. When another
 // app later takes the clipboard, the marker disappears and paste() ignores the
 // stale internal cache — copying inside the app never permanently shadows the
-// system clipboard (GIMP/Photoshop behaviour).
+// system clipboard (the behaviour every other image editor has).
 static void publishClipboardToSystem(const QImage& raster, const QString& token)
 {
     auto* sys = QGuiApplication::clipboard();
@@ -5445,7 +6628,8 @@ static void publishClipboardToSystem(const QImage& raster, const QString& token)
     sys->setMimeData(mime); // clipboard takes ownership of mime
 }
 
-bool ImageController::importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc)
+bool ImageController::importExternalImages(const QStringList& paths, const QPointF& dropCanvasNdc,
+                                            QList<int>* outRawLayerFlatIndices)
 {
     if (!m_doc || paths.isEmpty()) return false;
 
@@ -5478,23 +6662,55 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
     int importedCount = 0;
     for (int i = 0; i < paths.size(); ++i) {
         const QString path = paths[i];
+        const bool isRaw = RawEngine::isSupportedExtension(
+            normalizeImageExtension(QFileInfo(path).suffix()).toStdString());
 
-        ImageLoadResult loaded = imageCodecRegistry().readImage(path);
-        if (!loaded.ok)
-            continue;
-        if (loaded.image.width > 20000 || loaded.image.height > 20000)
-            continue;
+        QImage img;
+        std::shared_ptr<RawLayerData> rawData;
 
-        OpenColorPolicyContext colorContext =
-            ColorManagementService::instance().defaultOpenContext(path);
-        colorContext.workingSpace = m_doc->colorProfile().isValid()
-            ? m_doc->colorProfile()
-            : ColorProfile::sRgb();
-        colorContext.mismatchPolicy = ProfileMismatchPolicy::ConvertToWorkingSpace;
-        const ColorManagedOpenResult colorManaged =
-            ColorManagementService::instance().prepareImageForOpen(loaded.image, colorContext);
+        if (isRaw) {
+            // Same non-destructive RAW Layer the dedicated RAW open path
+            // builds (MainWindow::openRawFileAsNewTab), not the generic
+            // flatten-on-import codec path below.
+            if (!RawEngine::isAvailable()) continue;
+            std::string errorMessage;
+            std::unique_ptr<RawSession> session = RawEngine::openFile(path.toStdString(), &errorMessage);
+            if (!session) continue;
 
-        QImage img = convertDocumentImageToQImage(colorManaged.image).convertToFormat(QImage::Format_RGBA8888);
+            RawDevelopParams params = RawDevelopParams::cameraDefaults();
+            const RawImageBuffer buffer = session->renderFull(params);
+            if (buffer.isEmpty()) continue;
+
+            img = RawDevelopService::convertToRgba8888(buffer, /*dither=*/false);
+            if (img.isNull()) continue;
+
+            auto source = std::make_shared<RawSource>();
+            source->path = path;
+            source->meta = session->metadata();
+            rawData = std::make_shared<RawLayerData>();
+            rawData->source = std::move(source);
+            rawData->state.pp3 = QString::fromStdString(params.toPP3String());
+            rawData->state.developedSize = QSize(buffer.width, buffer.height);
+            rawData->state.geometry = buffer.geometry;
+            rawData->mode = RawStorageMode::Linked;
+        } else {
+            ImageLoadResult loaded = imageCodecRegistry().readImage(path);
+            if (!loaded.ok)
+                continue;
+            if (loaded.image.width > 20000 || loaded.image.height > 20000)
+                continue;
+
+            OpenColorPolicyContext colorContext =
+                ColorManagementService::instance().defaultOpenContext(path);
+            colorContext.workingSpace = m_doc->colorProfile().isValid()
+                ? m_doc->colorProfile()
+                : ColorProfile::sRgb();
+            colorContext.mismatchPolicy = ProfileMismatchPolicy::ConvertToWorkingSpace;
+            const ColorManagedOpenResult colorManaged =
+                ColorManagementService::instance().prepareImageForOpen(loaded.image, colorContext);
+
+            img = convertDocumentImageToQImage(colorManaged.image).convertToFormat(QImage::Format_RGBA8888);
+        }
         if (img.isNull()) continue;
 
         auto node = std::make_unique<LayerTreeNode>();
@@ -5504,6 +6720,7 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
         node->layer->name = node->name;
         node->layer->cpuImage = img;
         node->layer->owner = node.get();
+        node->layer->rawData = std::move(rawData);
         node->visible = true;
         node->opacity = 1.0f;
         node->blendMode = BlendMode::Normal;
@@ -5519,6 +6736,9 @@ bool ImageController::importExternalImages(const QStringList& paths, const QPoin
             cx, cy, 1.0);
         node->layer->resetTransform = node->transform;
         node->layer->hasResetTransform = true;
+
+        if (node->layer->rawData && outRawLayerFlatIndices)
+            outRawLayerFlatIndices->push_back(insertAt);
 
         auto snapshot = node->clone(true);
         comp->add(std::make_unique<AddLayerCommand>(m_doc, insertAt, std::move(snapshot), tr("Import Image")));
@@ -5561,10 +6781,22 @@ bool ImageController::importImage(const QImage& img, const QString& name)
     const int docH = std::max(1, m_doc->size.height());
     const float halfW = static_cast<float>(converted.width()) / static_cast<float>(docW);
     const float halfH = static_cast<float>(converted.height()) / static_cast<float>(docH);
+
+    // Centre the layer on a WHOLE-pixel grid. A pure scale transform puts the
+    // image at ((docW - imgW)/2, (docH - imgH)/2) canvas pixels, which is a HALF
+    // pixel whenever that difference is odd — and a half-pixel offset forces both
+    // compositors to resample the whole layer bilinearly, baking the softness into
+    // the projection and into the export (not just the preview). The nudge is that
+    // missing half pixel expressed in the transform's NDC units: one canvas pixel
+    // is 2/docW in x, and pixel Y runs opposite to NDC Y, hence the minus.
+    const double offX = (docW - converted.width()) * 0.5;
+    const double offY = (docH - converted.height()) * 0.5;
+    const double nudgeX = std::round(offX) - offX;   // 0 or ±0.5 px
+    const double nudgeY = std::round(offY) - offY;
     node->transform.setMatrix(
         halfW, 0.0, 0.0,
         0.0, halfH, 0.0,
-        0.0, 0.0, 1.0);
+        2.0 * nudgeX / docW, -2.0 * nudgeY / docH, 1.0);
     node->layer->resetTransform = node->transform;
     node->layer->hasResetTransform = true;
 
@@ -6060,6 +7292,11 @@ bool ImageController::applyAiRemoveResult(const AiRemoveApplyRequest& request)
 void ImageController::copy()
 {
     if (!m_doc) return;
+    // A channel armed in the Channels panel is the edit target, so it is also
+    // what Copy reads — reaching for the active layer's pixels here would copy
+    // something the user is not looking at.
+    if (copyArmedChannel())
+        return;
     auto& clip = ClipboardManager::instance();
 
     if (m_doc->selection.active() && !m_doc->selection.isEmpty()) {
@@ -6169,9 +7406,12 @@ void ImageController::copy()
                 cv::Mat layerMat = ImageEngine::toCvMat(srcLayerImage);
                 // Honour each layer's mask so the composited copy matches display.
                 applyLayerMaskToCvImage(l, layerMat);
-                cv::Mat canvas(dh, dw, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-                cv::warpAffine(layerMat, canvas, xform, canvas.size(),
-                               cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                // Premultiplied cubic, as in extractSelectedDocRegion: these
+                // layers are about to be composited into clipboard pixels.
+                cv::Mat canvas = ImageEngine::warpAffinePremultiplied(
+                    layerMat, xform, cv::Size(dw, dh), cv::INTER_CUBIC,
+                    cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+                if (canvas.empty()) continue;
                 mats.push_back(std::move(canvas));
                 ops.push_back(n->opacity);
                 vis.push_back(true);
@@ -6233,9 +7473,36 @@ void ImageController::copy()
     emit clipboardChanged();
 }
 
+// QMimeData::imageData() does not guarantee a lossless format is preferred: on
+// some platforms/sources (e.g. a browser publishing a JPEG fallback alongside
+// a PNG), Qt's own format negotiation can hand back the lossy one even though
+// a pixel-exact format is also on the clipboard. Decode known-lossless raw
+// formats directly, in priority order, before falling back to Qt's negotiation.
+static QImage decodeClipboardImage(const QMimeData* mime)
+{
+    if (!mime) return {};
+    static const char* kLosslessFormats[] = {
+        "image/png", "image/bmp", "image/x-bmp", "image/tiff", "image/x-portable-pixmap"
+    };
+    for (const char* fmt : kLosslessFormats) {
+        if (!mime->hasFormat(QString::fromLatin1(fmt))) continue;
+        const QByteArray raw = mime->data(QString::fromLatin1(fmt));
+        QImage img;
+        if (!raw.isEmpty() && img.loadFromData(raw) && !img.isNull())
+            return img;
+    }
+    if (mime->hasImage()) {
+        QImage img = qvariant_cast<QImage>(mime->imageData());
+        if (!img.isNull()) return img;
+    }
+    return {};
+}
+
 void ImageController::paste()
 {
     if (!m_doc) return;
+    if (pasteIntoArmedChannels())
+        return;
     auto& clip = ClipboardManager::instance();
 
     // ── Resolve the paste source: system clipboard first ────────────────────
@@ -6256,12 +7523,10 @@ void ImageController::paste()
         && mime && mime->hasFormat(kInternalClipboardMime)
         && QString::fromUtf8(mime->data(kInternalClipboardMime)) == clip.token();
     if (!internalCurrent) {
-        if (mime && mime->hasImage()) {
-            const QImage img = qvariant_cast<QImage>(mime->imageData());
-            if (!img.isNull()) {
-                importImage(img, tr("Pasted Layer"));
-                return;
-            }
+        const QImage img = decodeClipboardImage(mime);
+        if (!img.isNull()) {
+            importImage(img, tr("Pasted Layer"));
+            return;
         }
         const bool systemEmpty = !mime || mime->formats().isEmpty();
         if (!systemEmpty)
@@ -6556,19 +7821,20 @@ void ImageController::createShapeLayer(const ShapeData& data)
     emit imageChanged();
 }
 
-void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
+bool ImageController::applyShapeDataInPlace(int flatIndex, const ShapeData& newData,
+                                            ShapeEdit& out)
 {
-    if (!m_doc) return;
+    if (!m_doc) return false;
     auto* node = m_doc->nodeAt(flatIndex);
-    if (!node || !node->layer || !node->layer->shapeData) return;
+    if (!node || !node->layer || !node->layer->shapeData) return false;
     if (!node->canEditContent()) {
         emit operationBlocked(tr("The content of this shape layer is locked."));
-        return;
+        return false;
     }
 
     ShapeData shape = normalizedShapeData(newData);
     if (!shapeHasGeometry(shape))
-        return;
+        return false;
 
     ShapeData before = *node->layer->shapeData;
     QImage beforeImage = node->layer->cpuImage.copy();
@@ -6580,7 +7846,7 @@ void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
         *node->layer->shapeData = before;
         node->layer->cpuImage = beforeImage;
         node->transform = beforeXf;
-        return;
+        return false;
     }
 
     QImage rendered = node->layer->cpuImage.copy();
@@ -6595,15 +7861,97 @@ void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
     node->invalidateEffects();
     node->thumbnailDirty = true;
 
+    out.before = std::move(before);
+    out.applied = std::move(shape);
+    out.beforeImage = std::move(beforeImage);
+    out.rendered = std::move(rendered);
+    out.beforeTransform = beforeXf;
+    out.afterTransform = afterXf;
+    return true;
+}
+
+void ImageController::modifyShapeLayer(int flatIndex, const ShapeData& newData)
+{
+    ShapeEdit edit;
+    if (!applyShapeDataInPlace(flatIndex, newData, edit))
+        return;
+
     m_history.push(std::make_unique<ModifyShapeCommand>(
         m_doc, flatIndex,
-        std::move(before), shape,
-        std::move(beforeImage), rendered.copy(),
-        beforeXf, afterXf,
+        std::move(edit.before), std::move(edit.applied),
+        std::move(edit.beforeImage), std::move(edit.rendered),
+        edit.beforeTransform, edit.afterTransform,
         "edit_shape"));
 
     emit layerChanged(flatIndex);
     emit imageChanged();
+}
+
+// ── Live shape-data preview ─────────────────────────────────────────────────
+
+void ImageController::beginShapeDataPreview(int flatIndex)
+{
+    if (!m_doc) return;
+    auto* node = m_doc->nodeAt(flatIndex);
+    if (!node || !node->layer || !node->layer->shapeData) return;
+    // The fill and the stroke dialog can be open at once: the second one joins
+    // the session the first opened instead of re-snapshotting over its state.
+    if (m_shapePreviewActive && m_shapePreviewIndex == flatIndex) return;
+    if (m_shapePreviewActive) endShapeDataPreview(true);
+
+    m_shapePreviewActive = true;
+    m_shapePreviewIndex = flatIndex;
+    m_shapePreviewBefore = *node->layer->shapeData;
+    m_shapePreviewBeforeImage = node->layer->cpuImage.copy();
+    m_shapePreviewBeforeTransform = node->transform;
+}
+
+void ImageController::previewShapeData(const ShapeData& data)
+{
+    if (!m_shapePreviewActive) return;
+    ShapeEdit edit;
+    if (!applyShapeDataInPlace(m_shapePreviewIndex, data, edit))
+        return;
+    emit layerChanged(m_shapePreviewIndex);
+    emit imageChanged();
+}
+
+void ImageController::endShapeDataPreview(bool keep)
+{
+    if (!m_shapePreviewActive) return;
+    const int flatIndex = m_shapePreviewIndex;
+    m_shapePreviewActive = false;
+    m_shapePreviewIndex = -1;
+
+    auto* node = m_doc ? m_doc->nodeAt(flatIndex) : nullptr;
+    if (node && node->layer && node->layer->shapeData) {
+        if (keep) {
+            m_history.push(std::make_unique<ModifyShapeCommand>(
+                m_doc, flatIndex,
+                m_shapePreviewBefore, *node->layer->shapeData,
+                m_shapePreviewBeforeImage, node->layer->cpuImage.copy(),
+                m_shapePreviewBeforeTransform, node->transform,
+                "edit_shape"));
+        } else {
+            // Raster and transform are both derived from the shape data, so all
+            // three have to go back — the same restore ModifyShapeCommand::undo
+            // performs, minus the history entry.
+            node->layer->shapeData = std::make_shared<ShapeData>(m_shapePreviewBefore);
+            node->layer->cpuImage = m_shapePreviewBeforeImage;
+            node->transform = m_shapePreviewBeforeTransform;
+            node->layer->textureOutdated = true;
+            node->layer->shapeCache.dirty = true;
+            node->invalidateEffects();
+            node->thumbnailDirty = true;
+            ++m_doc->compositionGeneration;
+        }
+        emit layerChanged(flatIndex);
+        emit imageChanged();
+    }
+
+    m_shapePreviewBefore = ShapeData();
+    m_shapePreviewBeforeImage = QImage();
+    m_shapePreviewBeforeTransform = QTransform();
 }
 
 void ImageController::bakeShapeTransform(int flatIndex, const QTransform& beforeTransform)

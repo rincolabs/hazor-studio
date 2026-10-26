@@ -3,24 +3,14 @@
 #include "MainWindow.hpp"
 
 #include <QVBoxLayout>
-#include <QGuiApplication>
 #include <QEvent>
 #include <QWindowStateChangeEvent>
 #include <QCloseEvent>
 
-static bool supportsCustomTitleBar()
-{
-    QString pf = QGuiApplication::platformName();
-    if (pf == "cocoa")    return false;
-    if (pf == "wayland")  return false;
-    if (pf == "offscreen") return false;
-    return true;
-}
-
 MainHost::MainHost(QWidget* parent)
     : QWidget(parent)
 {
-    m_useNativeTitleBar = !supportsCustomTitleBar();
+    m_useNativeTitleBar = !TitleBar::isSupportedPlatform();
 
     setWindowTitle(tr("Image Editor"));
 

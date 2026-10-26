@@ -17,12 +17,13 @@
 #include <QPushButton>
 #include "colorpicker/ColorPickerDialog.hpp"
 
-NewDocumentDialog::NewDocumentDialog(QWidget* parent)
+NewDocumentDialog::NewDocumentDialog(QWidget* parent, Mode mode)
     : QDialog(parent)
 {
     setUpdatesEnabled(false);
 
-    setWindowTitle(tr("New | Edit"));
+    const QString modeTitle = mode == Mode::Edit ? tr("Edit") : tr("New");
+    setWindowTitle(modeTitle);
     setMinimumWidth(600);
     setMinimumHeight(480);
 
@@ -32,7 +33,8 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
     mainLayout->setContentsMargins(t->spaceXL, t->spaceLG, t->spaceXL, t->spaceLG);
 
     // ── Title ──
-    auto* title = new QLabel(tr("<h2>New | Edit</h2>"), this);
+    auto* title = new QLabel(
+        QStringLiteral("<h2>%1</h2>").arg(modeTitle.toHtmlEscaped()), this);
     title->setTextFormat(Qt::RichText);
     mainLayout->addWidget(title);
 
@@ -80,7 +82,16 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent)
 
 void NewDocumentDialog::setupPresets()
 {
-    m_presets = {
+    m_presets = sizePresets();
+
+    m_sizePresetCombo->addItem(tr("Custom"));
+    for (const auto& p : m_presets)
+        m_sizePresetCombo->addItem(p.label);
+}
+
+const std::vector<DocumentSizePreset>& NewDocumentDialog::sizePresets()
+{
+    static const std::vector<DocumentSizePreset> presets = {
         {"Landscape, 8 x 10 in",   10.0,   8.0,  "in"},
         {"Landscape, 16 x 20 in",  20.0,  16.0,  "in"},
         {"Portrait, 10 x 8 in",     8.0,  10.0,  "in"},
@@ -93,10 +104,7 @@ void NewDocumentDialog::setupPresets()
         {"3840 x 2160 px",       3840.0, 2160.0, "px"},
         {"1024 x 768 px",        1024.0,  768.0, "px"},
     };
-
-    m_sizePresetCombo->addItem(tr("Custom"));
-    for (const auto& p : m_presets)
-        m_sizePresetCombo->addItem(p.label);
+    return presets;
 }
 
 QWidget* NewDocumentDialog::createFormSection()
@@ -397,8 +405,8 @@ void NewDocumentDialog::onSizePresetChanged(int index)
     m_widthUnitCombo->blockSignals(true);
     m_heightUnitCombo->blockSignals(true);
 
-    m_widthSpin->setValue(p.w);
-    m_heightSpin->setValue(p.h);
+    m_widthSpin->setValue(p.width);
+    m_heightSpin->setValue(p.height);
 
     int unitIdx = m_widthUnitCombo->findText(p.unit, Qt::MatchContains);
     if (unitIdx >= 0) {
@@ -467,7 +475,7 @@ void NewDocumentDialog::pickBackgroundColor()
             QStringLiteral("background-color: %1; border: 1px solid %2; border-radius: %3px;").arg(m_bgColor.name()).arg(t->colorBorder.name()).arg(t->radiusSM));
     });
     dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->open();
+    dlg->showModeless();
 }
 
 void NewDocumentDialog::updateImageSizeDisplay()

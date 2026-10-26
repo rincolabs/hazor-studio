@@ -15,6 +15,7 @@
 #include <cmath>
 #include <functional>
 #include <set>
+#include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────
 // CPU compositor — single source of truth for the flattened document image.
@@ -25,15 +26,16 @@
 // non-Normal group blend modes, and the same transform chain.
 //
 // Blend-mode semantics come from renderer/BlendRules.hpp (shared with the
-// GPU path). The four non-separable HSL modes (Hue/Saturation/Color/
-// Luminosity) have no QPainter::CompositionMode and are composited manually
-// per pixel below, using the same HSL helpers as the blend shader.
+// GPU path). Modes with no QPainter::CompositionMode — the non-separable HSL
+// modes, the light/arithmetic modes and Dissolve — are composited
+// manually per pixel below (compositeManual), using the same blendmath
+// helpers the blend shader mirrors.
 // ─────────────────────────────────────────────────────────────────────────
 
 namespace {
 
-// Non-separable (HSL) blend math comes from renderer/BlendMath.hpp — the
-// shared CPU/GPU specification (GLSL mirror: renderer/BlendShaderLib.hpp).
+// Blend math comes from renderer/BlendMath.hpp — the shared CPU/GPU
+// specification (GLSL mirror: renderer/BlendShaderLib.hpp).
 using blendmath::Vec3;
 
 inline uchar toByte(float v)
@@ -41,112 +43,292 @@ inline uchar toByte(float v)
     return static_cast<uchar>(std::clamp(static_cast<int>(std::lround(v * 255.0f)), 0, 255));
 }
 
-struct PremulSample {
-    float r = 0.0f;
-    float g = 0.0f;
-    float b = 0.0f;
-    float a = 0.0f;
+// ── Resampling (CPU half of the sampling specification) ──────────────────
+//
+// GLSL mirror: sm_boxWeights / sm_cubicWeights / sm_sampleSeparable in
+// renderer/SamplingShaderLib.hpp. Two kernels over premultiplied samples,
+// picked per axis by the footprint — an exact box where the axis minifies, a
+// cubic where it magnifies or only rotates — so a layer that the GPU live
+// preview transforms and the CPU bakes into the document land on the same
+// pixels (docs/RENDER-PIPELINE.md §4.2).
+
+// One output sample's worth of box weights for a `width`-texel box centred at
+// `p`, in texel-centre coordinates (texel i covers [i-0.5, i+0.5]): the weight
+// of texel i is its overlap with [p-width/2, p+width/2] over `width`. Same
+// algebra as sm_boxWeights in SamplingShaderLib.hpp, but evaluated per sample
+// rather than tabulated per axis index — under a rotation the two axes are not
+// separable, so there is no row/column to tabulate against.
+struct BoxTaps {
+    int first = 0;
+    int n     = 1;
 };
 
-PremulSample samplePremultipliedAt(const QImage& rgba, double x, double y)
+BoxTaps boxWeights(double p, double width, double inv, float* w, int maxTaps)
 {
-    const int w = rgba.width();
-    const int h = rgba.height();
-    if (w <= 0 || h <= 0)
-        return {};
-
-    const int ix0 = static_cast<int>(std::floor(x));
-    const int iy0 = static_cast<int>(std::floor(y));
-    const int ix1 = ix0 + 1;
-    const int iy1 = iy0 + 1;
-    const int x0 = std::clamp(ix0, 0, w - 1);
-    const int y0 = std::clamp(iy0, 0, h - 1);
-    const int x1 = std::clamp(ix1, 0, w - 1);
-    const int y1 = std::clamp(iy1, 0, h - 1);
-    const float tx = static_cast<float>(x - ix0);
-    const float ty = static_cast<float>(y - iy0);
-
-    auto texel = [&](int px, int py) {
-        const uchar* p = rgba.constScanLine(py) + px * 4;
-        const float a = p[3] / 255.0f;
-        return PremulSample{
-            (p[0] / 255.0f) * a,
-            (p[1] / 255.0f) * a,
-            (p[2] / 255.0f) * a,
-            a
-        };
-    };
-    auto mix = [](const PremulSample& a, const PremulSample& b, float t) {
-        return PremulSample{
-            a.r + (b.r - a.r) * t,
-            a.g + (b.g - a.g) * t,
-            a.b + (b.b - a.b) * t,
-            a.a + (b.a - a.a) * t
-        };
-    };
-
-    return mix(mix(texel(x0, y0), texel(x1, y0), tx),
-               mix(texel(x0, y1), texel(x1, y1), tx),
-               ty);
+    BoxTaps t;
+    const double lo = p - width * 0.5;
+    const double hi = p + width * 0.5;
+    t.first = static_cast<int>(std::floor(lo + 0.5));
+    // The caller sizes the buffer at ceil(width)+2, which is one slot more
+    // than this can ask for; the clamp is there so a float edge case cannot
+    // turn into an overrun.
+    t.n = std::clamp(static_cast<int>(std::floor(hi + 0.5)) - t.first + 1,
+                     1, maxTaps);
+    for (int i = 0; i < t.n; ++i) {
+        const double c = t.first + i;
+        w[i] = static_cast<float>(
+            std::max(std::min(hi, c + 0.5) - std::max(lo, c - 0.5), 0.0) * inv);
+    }
+    return t;
 }
 
-QImage resampleLikeGpu(const QImage& source, int outW, int outH)
+// Keys cubic, in OpenCV's formulation: A = -0.75 is exactly cv::INTER_CUBIC,
+// which every destructive path already bakes (ImageEngine::
+// warpAffinePremultiplied / resizePremultiplied, docs/RENDER-PIPELINE.md §4.3).
+// Sharing the coefficient means a non-destructive layer scale and the same
+// scale applied for real land on the same pixels instead of differing by a
+// kernel. Four taps at floor(p)-1 .. floor(p)+2, by distance x+1, x, 1-x, 2-x;
+// the last weight is 1 minus the other three (OpenCV does the same), so the
+// weights are a partition of unity by construction — measured at 5e-8 after the
+// store to float, four orders below the 8-bit quantisation step.
+// GLSL mirror: sm_cubicWeights in SamplingShaderLib.hpp.
+constexpr double kCubicA    = -0.75;
+constexpr int    kCubicTaps = 4;
+
+BoxTaps cubicWeights(double p, float* w)
 {
-    if (source.isNull() || outW <= 0 || outH <= 0)
+    BoxTaps t;
+    const double c = std::floor(p);
+    t.first = static_cast<int>(c) - 1;
+    t.n     = kCubicTaps;
+    const double x  = p - c;
+    const double x1 = x + 1.0;
+    const double x2 = 1.0 - x;
+    const double w0 = ((kCubicA * x1 - 5.0 * kCubicA) * x1 + 8.0 * kCubicA) * x1
+                      - 4.0 * kCubicA;
+    const double w1 = ((kCubicA + 2.0) * x - (kCubicA + 3.0)) * x * x + 1.0;
+    const double w2 = ((kCubicA + 2.0) * x2 - (kCubicA + 3.0)) * x2 * x2 + 1.0;
+    w[0] = static_cast<float>(w0);
+    w[1] = static_cast<float>(w1);
+    w[2] = static_cast<float>(w2);
+    w[3] = static_cast<float>(1.0 - w0 - w1 - w2);
+    return t;
+}
+
+// Which kernel an axis gets, decided once from its footprint (source texels per
+// destination pixel) and then applied to every sample — the mirror of the bvec2
+// in sm_sampleSurface.
+//
+// The box is only right where it prefilters: at footprint 1 it *is* plain
+// bilinear, which is softer than a magnified or rotated layer has to be. The
+// 0.1% slack is what keeps the two backends on the same kernel for the common
+// rotated-at-scale-1 layer, which lands exactly on footprint 1 — the shader
+// measures it from screen-space derivatives and this path from the transform,
+// and those agree only to within rounding.
+// GLSL mirror: SM_CUBIC_MAX_FOOTPRINT.
+constexpr double kCubicMaxFootprint = 1.001;
+
+struct AxisKernel {
+    bool   cubic   = true;
+    double width   = 1.0;   // box width in texels; unused when cubic
+    double inv     = 1.0;
+    int    maxTaps = kCubicTaps;
+};
+
+AxisKernel axisKernel(double footprint)
+{
+    AxisKernel k;
+    k.cubic = footprint <= kCubicMaxFootprint;
+    k.width = std::max(footprint, 1.0);
+    k.inv   = 1.0 / k.width;
+    // One slot more than boxWeights() can ask for (see there); never below the
+    // cubic's four.
+    k.maxTaps = std::max(static_cast<int>(std::ceil(k.width)) + 2, kCubicTaps);
+    return k;
+}
+
+BoxTaps axisTaps(const AxisKernel& k, double p, float* w)
+{
+    return k.cubic ? cubicWeights(p, w)
+                   : boxWeights(p, k.width, k.inv, w, k.maxTaps);
+}
+
+// Single-pass affine resample of `source` into a canvas-sized premultiplied
+// image: for every document pixel, inverse-map its centre into source texels
+// and evaluate the kernel there.
+//
+// This exists to remove a *second* resample. The minifying path used to box
+// the source down to a rounded integer size and then let QPainter place that
+// result, which resampled it again: `lround` leaves a residual scale, the
+// destination offset is generally fractional, and QPainter's bilinear tent
+// therefore ran over pixels that were already correctly filtered — at a
+// half-pixel offset that is a plain two-texel average, i.e. blur with no
+// filtering purpose. Evaluating the kernel once at the exact inverse-mapped
+// position skips it.
+//
+// `footprintX`/`footprintY` are source texels per destination pixel along each
+// axis (1/scale), which is what picks the kernel per axis — see axisKernel().
+//
+// Mirror of sm_sampleSeparable (SamplingShaderLib.hpp) with one deliberate
+// difference, documented in docs/RENDER-PIPELINE.md §4.4: the tap count is not
+// capped. The shader's SM_MAX_TAPS budget is a GPU constraint; this is the path
+// that writes the export, so a 20× downscale stays exact instead of degrading
+// to a narrower centred box.
+//
+// Coverage is decided on the destination pixel centre falling inside the
+// source rect, matching the GPU rasterising the layer quad; taps that fall
+// outside clamp to the edge texel, which re-homes their weight rather than
+// dropping it so the weights still sum to 1 at the border.
+QImage resampleAffine(const QImage& source, const QTransform& imgToCanvas,
+                      const QSize& docSize, double footprintX, double footprintY)
+{
+    bool invertible = false;
+    const QTransform inv = imgToCanvas.inverted(&invertible);
+    // isAffine(): the row walk below steps the inverse-mapped position
+    // linearly, which only holds without a projective part. A projective
+    // transform falls back to the QPainter path.
+    if (!invertible || !inv.isAffine() || source.isNull() || docSize.isEmpty())
         return QImage();
 
     const QImage rgba = source.convertToFormat(QImage::Format_RGBA8888);
-    QImage out(outW, outH, QImage::Format_RGBA8888);
-    const double footprintX = static_cast<double>(rgba.width()) / outW;
-    const double footprintY = static_cast<double>(rgba.height()) / outH;
+    const int inW = rgba.width();
+    const int inH = rgba.height();
+    if (inW <= 0 || inH <= 0)
+        return QImage();
+    // Indexed by hand rather than through constScanLine(): that is an
+    // out-of-line Qt call, and at one call per tap row per sample it cost more
+    // than the filtering itself.
+    const uchar*     srcBase = rgba.constBits();
+    const qsizetype  srcBpl  = rgba.bytesPerLine();
 
-    for (int y = 0; y < outH; ++y) {
-        uchar* row = out.scanLine(y);
-        const double centerY = (static_cast<double>(y) + 0.5) * footprintY - 0.5;
-        const double stepY = footprintY / 4.0;
-        const double firstY = centerY - footprintY * 0.5 + stepY * 0.5;
-        for (int x = 0; x < outW; ++x) {
-            const double centerX = (static_cast<double>(x) + 0.5) * footprintX - 0.5;
-            const double stepX = footprintX / 4.0;
-            const double firstX = centerX - footprintX * 0.5 + stepX * 0.5;
+    QImage out(docSize, QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
 
-            PremulSample sum;
-            for (int sy = 0; sy < 4; ++sy) {
-                for (int sx = 0; sx < 4; ++sx) {
-                    const PremulSample s = samplePremultipliedAt(
-                        rgba, firstX + sx * stepX, firstY + sy * stepY);
-                    sum.r += s.r;
-                    sum.g += s.g;
-                    sum.b += s.b;
-                    sum.a += s.a;
-                }
-            }
-            sum.r *= 1.0f / 16.0f;
-            sum.g *= 1.0f / 16.0f;
-            sum.b *= 1.0f / 16.0f;
-            sum.a *= 1.0f / 16.0f;
+    // Only the layer's own footprint is touched; the rest stays transparent.
+    const QRect dest = imgToCanvas.mapRect(QRectF(0, 0, inW, inH))
+                           .toAlignedRect()
+                           .intersected(QRect(QPoint(0, 0), docSize));
+    if (dest.isEmpty())
+        return out;
 
-            uchar* p = row + x * 4;
-            if (sum.a > 0.0f) {
-                p[0] = toByte(sum.r / sum.a);
-                p[1] = toByte(sum.g / sum.a);
-                p[2] = toByte(sum.b / sum.a);
+    // Affine ⇒ constant Jacobian, so the kernel and the tap budget are the
+    // same for every sample and can be decided once.
+    const AxisKernel kx = axisKernel(footprintX);
+    const AxisKernel ky = axisKernel(footprintY);
+    const int maxX = kx.maxTaps;
+    const int maxY = ky.maxTaps;
+    std::vector<float> wx(maxX), wy(maxY);
+
+    // Without rotation or shear the two axes separate again: the x taps are the
+    // same on every row and the y taps are constant along a row. Tabulating
+    // them matters — recomputing weights per sample costs ~20% of the inner
+    // loop, which would make this slower than the two-pass path it replaces for
+    // the very common near-1.0 scales. The table is filled by the same
+    // axisTaps(), so each kernel still has exactly one definition.
+    const bool separable = inv.m12() == 0.0 && inv.m21() == 0.0;
+    const int  destW     = dest.width();
+    std::vector<int>   colN;
+    std::vector<int>   colOff;   // edge-clamped byte offset of each x tap
+    std::vector<float> colW;
+    std::vector<int>   rowOff(maxX);
+    if (separable) {
+        colN.resize(destW);
+        colW.assign(static_cast<size_t>(destW) * maxX, 0.0f);
+        colOff.assign(static_cast<size_t>(destW) * maxX, 0);
+        for (int c = 0; c < destW; ++c) {
+            const double px = inv.m11() * (dest.left() + c + 0.5) + inv.m31();
+            const BoxTaps t = axisTaps(kx, px - 0.5,
+                                       colW.data() + static_cast<size_t>(c) * maxX);
+            colN[c] = t.n;
+            for (int i = 0; i < t.n; ++i)
+                colOff[static_cast<size_t>(c) * maxX + i] =
+                    std::clamp(t.first + i, 0, inW - 1) * 4;
+        }
+    }
+
+    for (int y = dest.top(); y <= dest.bottom(); ++y) {
+        QRgb* row = reinterpret_cast<QRgb*>(out.scanLine(y));
+        // Walk the row incrementally rather than calling inv.map() per pixel.
+        const double y0 = y + 0.5;
+        double sx = inv.m11() * (dest.left() + 0.5) + inv.m21() * y0 + inv.m31();
+        double sy = inv.m12() * (dest.left() + 0.5) + inv.m22() * y0 + inv.m32();
+        BoxTaps tyRow;
+        if (separable)
+            tyRow = axisTaps(ky, sy - 0.5, wy.data());
+        for (int x = dest.left(); x <= dest.right(); ++x,
+             sx += inv.m11(), sy += inv.m12()) {
+            if (sx < 0.0 || sx > inW || sy < 0.0 || sy > inH)
+                continue;                       // outside the layer quad
+
+            int          nx;
+            BoxTaps      ty = tyRow;            // already correct when separable
+            const float* wxp;
+            const int*   offp;
+            if (separable) {
+                const int c = x - dest.left();
+                nx   = colN[c];
+                wxp  = colW.data() + static_cast<size_t>(c) * maxX;
+                offp = colOff.data() + static_cast<size_t>(c) * maxX;
             } else {
-                p[0] = p[1] = p[2] = 0;
+                const BoxTaps tx = axisTaps(kx, sx - 0.5, wx.data());
+                ty  = axisTaps(ky, sy - 0.5, wy.data());
+                nx  = tx.n;
+                wxp = wx.data();
+                for (int i = 0; i < nx; ++i)
+                    rowOff[i] = std::clamp(tx.first + i, 0, inW - 1) * 4;
+                offp = rowOff.data();
             }
-            p[3] = toByte(sum.a);
+
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+            for (int j = 0; j < ty.n; ++j) {
+                const uchar* line = srcBase
+                    + std::clamp(ty.first + j, 0, inH - 1) * srcBpl;
+                float rr = 0.0f, gg = 0.0f, bb = 0.0f, aa = 0.0f;
+                for (int i = 0; i < nx; ++i) {
+                    const uchar* s  = line + offp[i];
+                    const float  av = s[3] * (1.0f / 255.0f);
+                    const float  wi = wxp[i] * (1.0f / 255.0f);
+                    rr += wi * s[0] * av;
+                    gg += wi * s[1] * av;
+                    bb += wi * s[2] * av;
+                    aa += wxp[i] * av;
+                }
+                r += wy[j] * rr;
+                g += wy[j] * gg;
+                b += wy[j] * bb;
+                a += wy[j] * aa;
+            }
+
+            // ARGB32_Premultiplied: keep the premultiplied values, which is
+            // also one fewer round trip than the QPainter path (that one had
+            // to unpremultiply the boxed intermediate and premultiply again).
+            // The clamping here is load-bearing for the cubic, not just LSB
+            // insurance as it was for the box: its negative lobes can push a
+            // channel below 0 or above alpha, and a premultiplied pixel that
+            // violates colour ≤ alpha makes Qt's compositing produce a speck
+            // (toByte() clamps the low end, min() the high one — the mirror of
+            // sm_clampPremultiplied).
+            const uchar av8 = toByte(a);
+            row[x] = qRgba(std::min(toByte(r), av8), std::min(toByte(g), av8),
+                           std::min(toByte(b), av8), av8);
         }
     }
     return out;
 }
 
-// Composite `src` over `dst` using a non-separable HSL blend mode.
-// Both images are canvas-sized Format_ARGB32_Premultiplied. `opacity` is the
-// node opacity folded into the source alpha. Uses the standard W3C
-// non-separable compositing formula, consistent with QPainter's handling of
-// the separable modes.
-void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float opacity)
+// Composite `src` over `dst` for every blend mode QPainter has no
+// CompositionMode for (the HSL modes, the light/arithmetic modes,
+// Dissolve) — plus any mode whose Fill Opacity belongs inside the formula,
+// which the raster engine cannot express. Both images are canvas-sized
+// Format_ARGB32_Premultiplied; `opacity` is the node opacity folded into the
+// source alpha and `fillOpacity` the layer's Fill (1 = unchanged). Same W3C
+// compositing formula the blend shader runs, so the live GPU frame and this
+// result agree pixel for pixel.
+void compositeManual(QImage& dst, const QImage& src, BlendMode mode, float opacity,
+                     float fillOpacity)
 {
+    const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+    const bool fillInBlend = fill < 0.999f && blendmath::fillEntersBlend(mode);
     const int w = std::min(dst.width(), src.width());
     const int h = std::min(dst.height(), src.height());
     for (int y = 0; y < h; ++y) {
@@ -154,8 +336,15 @@ void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float
         const QRgb* s = reinterpret_cast<const QRgb*>(src.constScanLine(y));
         for (int x = 0; x < w; ++x) {
             const QRgb sp = s[x];
+            const QRgb dp = d[x];
+            const float ab = qAlpha(dp) / 255.0f;            // dst alpha
             const float sA0 = qAlpha(sp) / 255.0f;          // src coverage
-            const float sa  = sA0 * opacity;                 // effective src alpha
+            // Dissolve turns coverage into a per-pixel 0/1 dither keyed on the
+            // document pixel; every other mode keeps its alpha. x,y are
+            // document pixels (both images are canvas-aligned), which is what
+            // the shader reconstructs from gl_FragCoord.
+            const float sa = blendmath::coverage(
+                mode, sA0 * opacity * blendmath::fillBlendCoverage(mode, fill), x, y);
             if (sa <= 0.0f) continue;
 
             // Unpremultiply src colour (stage is premultiplied).
@@ -165,43 +354,47 @@ void compositeNonSeparable(QImage& dst, const QImage& src, BlendMode mode, float
                       qBlue(sp) / 255.0f / sA0};
             }
 
-            const QRgb dp = d[x];
-            const float ab = qAlpha(dp) / 255.0f;            // dst alpha
             Vec3 cb{0, 0, 0};
             if (ab > 0.0f) {
                 cb = {qRed(dp) / 255.0f / ab, qGreen(dp) / 255.0f / ab,
                       qBlue(dp) / 255.0f / ab};
             }
 
-            const Vec3 B = blendmath::blendHsl(mode, cb, cs);
-            // W3C: blended source colour Cs' = (1-ab)*Cs + ab*B
-            const Vec3 cp{(1.0f - ab) * cs[0] + ab * B[0],
-                          (1.0f - ab) * cs[1] + ab * B[1],
-                          (1.0f - ab) * cs[2] + ab * B[2]};
-
-            // Source-over with premultiplied output. dst channels are already
-            // premultiplied (dpr = qRed(dp)/255).
-            const float ao   = sa + ab * (1.0f - sa);
-            const float outR = sa * cp[0] + (1.0f - sa) * (qRed(dp)   / 255.0f);
-            const float outG = sa * cp[1] + (1.0f - sa) * (qGreen(dp) / 255.0f);
-            const float outB = sa * cp[2] + (1.0f - sa) * (qBlue(dp)  / 255.0f);
+            const Vec3 B = blendmath::blendFilled(mode, cb, cs, fill);
+            float ao   = 0.0f;
+            float outR = 0.0f;
+            float outG = 0.0f;
+            float outB = 0.0f;
+            if (!fillInBlend) {
+                // W3C: blended source colour Cs' = (1-ab)*Cs + ab*B, then
+                // source-over with premultiplied output. dst channels are
+                // already premultiplied (dpr = qRed(dp)/255).
+                const Vec3 cp{(1.0f - ab) * cs[0] + ab * B[0],
+                              (1.0f - ab) * cs[1] + ab * B[1],
+                              (1.0f - ab) * cs[2] + ab * B[2]};
+                ao   = sa + ab * (1.0f - sa);
+                outR = sa * cp[0] + (1.0f - sa) * (qRed(dp)   / 255.0f);
+                outG = sa * cp[1] + (1.0f - sa) * (qGreen(dp) / 255.0f);
+                outB = sa * cp[2] + (1.0f - sa) * (qBlue(dp)  / 255.0f);
+            } else {
+                // Same composite, regrouped by the backdrop alpha so Fill can
+                // fade the source's bare (no-backdrop) term while the blend
+                // term keeps full coverage — see blendmath::fillBareCoverage
+                // for the derivation and for why the two are not one factor.
+                // The branch exists only because the two forms differ by float
+                // regrouping, and the default path must stay bit-identical to
+                // what it produced before Fill existed.
+                const float saBare = sa * blendmath::fillBareCoverage(mode, fill);
+                ao   = (1.0f - ab) * saBare + ab;
+                outR = (1.0f - ab) * saBare * cs[0] + ab * sa * B[0]
+                     + (1.0f - sa) * (qRed(dp)   / 255.0f);
+                outG = (1.0f - ab) * saBare * cs[1] + ab * sa * B[1]
+                     + (1.0f - sa) * (qGreen(dp) / 255.0f);
+                outB = (1.0f - ab) * saBare * cs[2] + ab * sa * B[2]
+                     + (1.0f - sa) * (qBlue(dp)  / 255.0f);
+            }
             d[x] = qRgba(toByte(outR), toByte(outG), toByte(outB), toByte(ao));
         }
-    }
-}
-
-// Composite a fully-rendered canvas-sized `stage` onto `target` with the
-// given blend mode and opacity. Separable/native modes go through QPainter;
-// HSL modes are composited manually.
-void compositeStage(QImage& target, const QImage& stage, BlendMode mode, float opacity)
-{
-    if (blend::painterHasNativeMode(mode)) {
-        QPainter p(&target);
-        p.setOpacity(opacity);
-        p.setCompositionMode(blend::painterMode(mode));
-        p.drawImage(0, 0, stage);
-    } else {
-        compositeNonSeparable(target, stage, mode, opacity);
     }
 }
 
@@ -231,15 +424,34 @@ QTransform buildImgToCanvas(const LayerTreeNode* node, const Layer* layer,
     return imgToNdc * node->accumulatedTransform() * ndcToPixel;
 }
 
-// Renders a single Layer node into `target` (canvas-sized, premultiplied).
-void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* doc,
-                   const QTransform& ndcToPixel)
+// Builds a single Layer node's canvas-sized, premultiplied stage: its source
+// pixels placed through the img→canvas transform with its mask applied, but
+// WITHOUT its opacity and blend mode — those belong to compositeStage, which
+// merges the stage into the target. Null when the node has nothing to draw.
+//
+// Split out of drawLayerNode because a clipping base needs exactly this image's
+// alpha (docs/RENDER-PIPELINE.md §4.6) and nothing else: not the accumulated
+// backdrop, and not the base's blend mode, which has no effect on the alpha it
+// contributes.
+//
+// rawPixelNode: when this node IS rawPixelNode, render its stored pixels
+// straight — skipping its own layer effects and Single-Layer-Mode (clipped)
+// adjustment children, bypassing the baked effected image entirely. Used by
+// clone/heal sampling: that node is also the stroke's paint destination, and
+// those effects/adjustments re-apply live from the raw pixels at render time
+// regardless, so baking them into the sample too would double them (and the
+// double-up compounds every time the cloned pixels are themselves sampled
+// again). Other included layers keep rendering through their own effected
+// image as usual — they aren't being painted into, so no double-up risk.
+QImage buildLayerStage(const LayerTreeNode* node, const Document* doc,
+                       const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode)
 {
     auto* layer = node->layer.get();
+    const bool bypassEffects = rawPixelNode && node == rawPixelNode;
     // Layers with effects OR Single-Layer-Mode adjustments render through the
     // baked effected image (mask included) — same source the GPU live path
     // draws via effectedTexture, so the two stay pixel-identical.
-    const bool effectedPipeline = node->usesEffectedPipeline();
+    const bool effectedPipeline = !bypassEffects && node->usesEffectedPipeline();
     const bool useShapeBase = layer->isShapeLayer() && !effectedPipeline;
     const bool isShapeSprite = !useShapeBase && layer->shapeSpriteRenderable();
 
@@ -247,53 +459,66 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
                                          : layer->rasterBaseSize();
     const int baseW = baseSize.width();
     const int baseH = baseSize.height();
-    if (baseW <= 0 || baseH <= 0) return;
+    if (baseW <= 0 || baseH <= 0) return QImage();
 
     const QImage source = useShapeBase ? layer->renderImage()
-                                       : node->computeEffectedImage();
+                                       : bypassEffects ? node->baseRenderImage()
+                                                       : node->computeEffectedImage();
     const QRectF sourceBounds = useShapeBase ? layer->renderImageBounds()
-                                             : node->effectedImageBounds();
+                                             : bypassEffects ? node->baseRenderImageBounds()
+                                                             : node->effectedImageBounds();
     const int lw = source.width();
     const int lh = source.height();
-    if (lw <= 0 || lh <= 0) return;
-
-    QImage stage(doc->size, QImage::Format_ARGB32_Premultiplied);
-    stage.fill(Qt::transparent);
-    QPainter layerPainter(&stage);
-    layerPainter.setRenderHint(QPainter::SmoothPixmapTransform);
-    layerPainter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    if (lw <= 0 || lh <= 0) return QImage();
 
     const QTransform imgToCanvas = buildImgToCanvas(node, layer, sourceBounds,
                                                     baseW, baseH, ndcToPixel, isShapeSprite);
-    layerPainter.setOpacity(1.0);
-    layerPainter.setTransform(imgToCanvas);
 
-    // Match the GPU preview reference: keep small downscales bilinear, and only
-    // switch to premultiplied/alpha-weighted area sampling once the source
-    // footprint exceeds the shader's 1.25 texel threshold.
+    // Anything that actually resamples goes through the premultiplied sampler,
+    // mirroring the shader (renderer/SamplingShaderLib.hpp): the exact area box
+    // where an axis minifies, the cubic where it magnifies, rotates, or is only
+    // offset by a fraction of a pixel. It runs as a *single* pass straight into
+    // the stage — prefilter and placement at once, so a fractional destination
+    // offset no longer costs a second (bilinear) resample on top of a correctly
+    // filtered image. See resampleAffine.
+    //
+    // QPainter keeps the two cases it is better at: a whole-pixel copy, which
+    // is not a resample at all (the common untransformed layer, where walking
+    // the sampler for a 1-tap kernel would only cost time), and a projective
+    // transform, which resampleAffine declines because its row walk steps the
+    // inverse-mapped position linearly.
     const double effScaleX = std::hypot(imgToCanvas.m11(), imgToCanvas.m12());
     const double effScaleY = std::hypot(imgToCanvas.m21(), imgToCanvas.m22());
-    bool resampled = false;
-    if (effScaleX < 0.8 || effScaleY < 0.8) {
-        const int sw = std::clamp(
-            static_cast<int>(std::lround(lw * std::min(effScaleX, 1.0))), 1, lw);
-        const int sh = std::clamp(
-            static_cast<int>(std::lround(lh * std::min(effScaleY, 1.0))), 1, lh);
-        if (sw < lw || sh < lh) {
-            const QImage small = resampleLikeGpu(source, sw, sh);
-            if (!small.isNull()) {
-                const QTransform smallToCanvas =
-                    QTransform::fromScale(static_cast<double>(lw) / sw,
-                                          static_cast<double>(lh) / sh) * imgToCanvas;
-                layerPainter.setTransform(smallToCanvas);
-                layerPainter.drawImage(QRectF(0, 0, sw, sh), small, QRectF(0, 0, sw, sh));
-                layerPainter.setTransform(imgToCanvas);
-                resampled = true;
-            }
-        }
+    const bool degenerate = effScaleX <= 1e-9 || effScaleY <= 1e-9;
+    // Tolerances, not exact comparisons: the transform is composed from
+    // imgToNdc · accumulated · ndcToPixel, so an untransformed layer's unit
+    // scale and integral offset only survive that round trip to within rounding.
+    const bool wholePixelCopy =
+        !degenerate
+        && std::abs(effScaleX - 1.0) < 1e-9 && std::abs(effScaleY - 1.0) < 1e-9
+        && std::abs(imgToCanvas.m12()) < 1e-9 && std::abs(imgToCanvas.m21()) < 1e-9
+        && std::abs(imgToCanvas.dx() - std::round(imgToCanvas.dx())) < 1e-6
+        && std::abs(imgToCanvas.dy() - std::round(imgToCanvas.dy())) < 1e-6;
+    QImage stage;
+    if (!degenerate && !wholePixelCopy) {
+        stage = resampleAffine(source, imgToCanvas, doc->size,
+                               1.0 / effScaleX, 1.0 / effScaleY);
     }
-    if (!resampled)
-        layerPainter.drawImage(QRectF(0, 0, lw, lh), source, QRectF(0, 0, lw, lh));
+    if (stage.isNull()) {
+        stage = QImage(doc->size, QImage::Format_ARGB32_Premultiplied);
+        stage.fill(Qt::transparent);
+        QPainter p(&stage);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        p.setTransform(imgToCanvas);
+        p.drawImage(QRectF(0, 0, lw, lh), source, QRectF(0, 0, lw, lh));
+    }
+
+    QPainter layerPainter(&stage);
+    layerPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+    layerPainter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    layerPainter.setOpacity(1.0);
+    layerPainter.setTransform(imgToCanvas);
 
     // Apply layer mask when the effected pipeline hasn't already baked it.
     if (!effectedPipeline && layer->maskVisible
@@ -342,8 +567,86 @@ void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* do
     }
 
     layerPainter.end();
+    return stage;
+}
 
-    compositeStage(target, stage, node->blendMode, node->opacity);
+// The Fill factor the compositor has to apply to a layer node's stage.
+//
+// LayerTreeNode::compositeFillOpacity() already reads 1 for a layer whose Fill
+// is baked into its styled base; this adds the one case the node cannot know
+// about. When the node IS `rawPixelNode` its stage was built from the stored
+// pixels with its own effects bypassed (buildLayerStage), for the same reason
+// Fill must be bypassed here: clone/heal sampling feeds those pixels back into
+// the layer, where Fill applies again at render time, so baking it into the
+// sample would double it — and compound on every further sample.
+float compositeFill(const LayerTreeNode* node, const LayerTreeNode* rawPixelNode)
+{
+    if (rawPixelNode && node == rawPixelNode) return 1.0f;
+    return node->compositeFillOpacity();
+}
+
+// Renders a single Layer node into `target` (canvas-sized, premultiplied) with
+// its own blend mode, opacity and Fill. See buildLayerStage for `rawPixelNode`.
+void drawLayerNode(QImage& target, const LayerTreeNode* node, const Document* doc,
+                   const QTransform& ndcToPixel, const LayerTreeNode* rawPixelNode = nullptr)
+{
+    const QImage stage = buildLayerStage(node, doc, ndcToPixel, rawPixelNode);
+    if (stage.isNull()) return;
+    DocumentCompositor::compositeStage(target, stage, node->blendMode, node->opacity,
+                                       compositeFill(node, rawPixelNode));
+}
+
+// The per-pixel alpha a clipping base contributes, in canvas coordinates: the
+// alpha of the base's own stage, scaled by the base node's opacity. One byte
+// per document pixel — a quarter of what keeping the whole stage would cost,
+// and the colour is never needed.
+//
+// Folding the base's opacity in here is what this kind of editor does (fading
+// the base fades everything clipped to it) and it is applied exactly once: the
+// stage carries no opacity of its own, and the clipped layer's opacity is a
+// separate factor applied by its own compositeStage.
+QImage clipAlphaFromStage(const QImage& stage, float opacity)
+{
+    if (stage.isNull()) return QImage();
+    const int o = std::clamp(static_cast<int>(std::lround(opacity * 255.0f)), 0, 255);
+    QImage out(stage.size(), QImage::Format_Grayscale8);
+    for (int y = 0; y < stage.height(); ++y) {
+        const QRgb* src = reinterpret_cast<const QRgb*>(stage.constScanLine(y));
+        uchar*      dst = out.scanLine(y);
+        for (int x = 0; x < stage.width(); ++x)
+            dst[x] = static_cast<uchar>((qAlpha(src[x]) * o + 127) / 255);
+    }
+    return out;
+}
+
+// alphaClipped = alphaSource × alphaBase, applied to a clipped layer's
+// premultiplied stage so the product goes into the *normal* blend — no second
+// mask is created, and the backdrop already in the target is never read.
+//
+// Every channel is scaled, not just alpha: the stage is premultiplied, so
+// scaling colour by the same factor is what keeps it premultiplied. Rounding is
+// monotonic, so colour ≤ alpha survives it and Qt's compositing cannot produce
+// the out-of-range speck resampleAffine clamps for.
+void applyClipAlpha(QImage& stage, const QImage& clipAlpha)
+{
+    // Both buffers are canvas-sized by construction — buildLayerStage always
+    // renders into doc->size — which is what makes the pairing below a straight
+    // index match with no sampling in between.
+    if (stage.size() != clipAlpha.size()) return;
+    for (int y = 0; y < stage.height(); ++y) {
+        QRgb*        row = reinterpret_cast<QRgb*>(stage.scanLine(y));
+        const uchar* a   = clipAlpha.constScanLine(y);
+        for (int x = 0; x < stage.width(); ++x) {
+            const int ca = a[x];
+            if (ca == 255) continue;
+            if (ca == 0) { row[x] = 0; continue; }
+            const QRgb p = row[x];
+            row[x] = qRgba((qRed(p)   * ca + 127) / 255,
+                           (qGreen(p) * ca + 127) / 255,
+                           (qBlue(p)  * ca + 127) / 255,
+                           (qAlpha(p) * ca + 127) / 255);
+        }
+    }
 }
 
 // Scales every (premultiplied) channel of `stage` by the adjustment factor
@@ -397,6 +700,16 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
         density = l->maskDensity;
     }
 
+    // Fill fades how much of the adjustment's contribution reaches the
+    // composite, leaving the adjustment's own parameters alone — a Curves at
+    // Fill 50% is half as much of the same curve, not a flatter curve
+    // (docs/RENDER-PIPELINE.md §4.7). It is a second factor beside `opacity`,
+    // applied *after* the mask like everywhere else, and it reaches each of the
+    // three branches below at the point that branch spends the node's coverage,
+    // so compositeStage still owns the eight modes that take Fill inside the
+    // blend function rather than on the coverage.
+    const float fill = node->compositeFillOpacity();
+
     // Solid Color is a fill, not a backdrop transform: it generates a single
     // colour on demand (no permanent full-document bitmap) and composites it
     // source-over the stack with the node's blend mode/opacity/mask — covering
@@ -410,22 +723,32 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
         stage.fill(qPremultiply(qRgba(c.red(), c.green(), c.blue(), c.alpha())));
         // The mask reveals/hides the fill per pixel (mix(1, mask, density)).
         modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-        compositeStage(target, stage, node->blendMode, node->opacity);
+        DocumentCompositor::compositeStage(target, stage, node->blendMode,
+                                           node->opacity, fill);
         return;
     }
 
     if (node->blendMode == BlendMode::Normal) {
-        adjustments::apply(target, *node->adjustment, node->opacity,
+        // A Normal-mode pass is a mix toward the adjusted backdrop, where Fill
+        // and Opacity are the same factor on the adjustment's contribution — so
+        // the two fold into one mix strength, the same fold setMainUniforms
+        // does for a Normal layer draw (§4.7).
+        adjustments::apply(target, *node->adjustment, node->opacity * fill,
                            mask, maskTopLeft, density);
         return;
     }
 
     // Non-Normal blend: blend the fully-adjusted backdrop over the original
     // with the node's blend mode; the mask modulates the source coverage.
+    // Fill goes to compositeStage rather than onto the stage's alpha, because
+    // for the eight modes of blendmath::fillEntersBlend it belongs inside the
+    // blend function — fading this stage's coverage instead would interpolate
+    // the already-clamped result.
     QImage stage = target.copy();
     adjustments::apply(stage, *node->adjustment, 1.0f);
     modulateAlphaByAdjustmentMask(stage, mask, maskTopLeft, density);
-    compositeStage(target, stage, node->blendMode, node->opacity);
+    DocumentCompositor::compositeStage(target, stage, node->blendMode,
+                                       node->opacity, fill);
 }
 
 // Group-mask extension point. Masks currently live on Layer, not on
@@ -435,9 +758,64 @@ void applyAdjustmentNode(QImage& target, const LayerTreeNode* node)
 // here (destination-in against the canvas-aligned mask alpha) so the order
 // stays: compose children -> group mask -> group effects -> opacity/blend.
 // Never apply the mask to individual children.
+//
+// This is the *isolated* group's mask step, and it is the only one: a Pass
+// Through group must not come through here, because its stage holds the
+// backdrop too. Destination-in would punch the backdrop away wherever the
+// group mask is black instead of merely leaving it unchanged there. The mask
+// multiplies into that path's interpolation factor instead — see
+// compositePassThroughStage.
 void applyGroupMask(QImage& /*groupStage*/, const LayerTreeNode* /*group*/)
 {
     // intentionally empty until LayerTreeNode gains group masks
+}
+
+// Merges a Pass Through group's result back into the backdrop it was composed
+// against. `stage` started as a copy of `target` and had the group's children
+// composited into it, so the two already agree everywhere the group painted
+// nothing; what is left is to let the group's own opacity decide how much of
+// the difference survives.
+//
+// That makes this an interpolation, not a composite: a pass-through group has
+// no isolated result that could be drawn *over* the backdrop, and source-over
+// at `opacity` would re-apply the backdrop already present inside `stage` —
+// coming out too opaque wherever the backdrop is semi-transparent (a 0.5-alpha
+// backdrop under an empty 50% group would read 0.75 instead of staying 0.5).
+// A straight lerp of premultiplied colour *and* alpha is the composite the
+// model asks for: it reduces to "group absent" at opacity 0 and to `stage` at
+// opacity 1, and it is what the live GPU path reproduces in fixed-function
+// blending (GPUViewport::popGroupFbo's pass-through branch).
+//
+// When group masks arrive, multiply the per-pixel mask into `t` here. Never
+// route a pass-through stage through applyGroupMask().
+void compositePassThroughStage(QImage& target, const QImage& stage, float opacity)
+{
+    const float t = std::clamp(opacity, 0.0f, 1.0f);
+    if (t <= 0.0f) return;            // group has no effect at all
+    if (t >= 1.0f) { target = stage; return; }
+
+    const int w = std::min(target.width(), stage.width());
+    const int h = std::min(target.height(), stage.height());
+    for (int y = 0; y < h; ++y) {
+        QRgb*       d = reinterpret_cast<QRgb*>(target.scanLine(y));
+        const QRgb* s = reinterpret_cast<const QRgb*>(stage.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            if (d[x] == s[x]) continue;   // the group left this pixel alone
+            const QRgb dp = d[x];
+            const QRgb sp = s[x];
+            const float a = (qAlpha(sp) - qAlpha(dp)) / 255.0f * t + qAlpha(dp) / 255.0f;
+            const float r = (qRed(sp)   - qRed(dp))   / 255.0f * t + qRed(dp)   / 255.0f;
+            const float g = (qGreen(sp) - qGreen(dp)) / 255.0f * t + qGreen(dp) / 255.0f;
+            const float b = (qBlue(sp)  - qBlue(dp))  / 255.0f * t + qBlue(dp)  / 255.0f;
+            // Both endpoints satisfy colour <= alpha, so their convex
+            // combination does too — but only before 8-bit rounding, which can
+            // push a channel one step past alpha and make Qt's compositing
+            // produce a speck (same clamp as resampleAffine).
+            const uchar a8 = toByte(a);
+            d[x] = qRgba(std::min(toByte(r), a8), std::min(toByte(g), a8),
+                         std::min(toByte(b), a8), a8);
+        }
+    }
 }
 
 // Applies a group's layer effects to the already-composed (canvas-space) group
@@ -477,16 +855,47 @@ void applyGroupEffects(QImage& groupStage, const LayerTreeNode* group,
 }
 
 // Recursively composites a list of sibling nodes (top-to-bottom order in the
-// vector) bottom→top into `target`. Mirrors LayerCompositor::renderNodes:
-// Normal-blend groups composite their children directly into `target`;
-// non-Normal groups are isolated into an intermediate image then composited
-// with the group's opacity and blend mode.
+// vector) bottom→top into `target`. Mirrors LayerCompositor::renderNodes,
+// including its three ways of merging a Group (LayerTreeNode decides which,
+// so the two compositors cannot drift):
+//   - direct        children go straight into `target` — an opacity-1,
+//                   Normal-blend, effect/mask-free group, and every Pass
+//                   Through group at full opacity
+//   - pass-through  children go into a copy of `target`, which is then
+//                   interpolated back by the group's opacity
+//   - isolated      children go into a transparent buffer, which then takes
+//                   the group's mask/effects/opacity/blend as a unit
 void renderNodesFiltered(QImage& target,
                          const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough);
+                         bool forceDirectGroups,
+                         const LayerTreeNode* rawPixelNode = nullptr);
+
+// A Group's own composite: its children against TRANSPARENCY, then the group
+// mask and the group effects — i.e. the isolated model's stage, before the
+// group's opacity and blend mode are applied to it.
+//
+// This is the alpha a clipping run reads from a group base (§4.6), and it is
+// the group's *own* content by definition: a Pass Through group's children see
+// the backdrop when the group is composited for real, but what a clip asks for
+// is the group's silhouette, so the capture isolates them. Same choice layer
+// effects make for a pass-through group (isPassThroughGroup()).
+QImage buildGroupStage(const LayerTreeNode* group, const Document* doc,
+                       const QTransform& ndcToPixel,
+                       const std::function<bool(const LayerTreeNode*)>& includeLayer,
+                       bool applyAdjustments, bool forceDirectGroups,
+                       const LayerTreeNode* rawPixelNode)
+{
+    QImage stage(doc->size, QImage::Format_ARGB32_Premultiplied);
+    stage.fill(Qt::transparent);
+    renderNodesFiltered(stage, group->children, doc, ndcToPixel, includeLayer,
+                        applyAdjustments, forceDirectGroups, rawPixelNode);
+    applyGroupMask(stage, group);                 // no-op until group masks exist
+    applyGroupEffects(stage, group, doc->size);
+    return stage;
+}
 
 void renderNodes(QImage& target,
                  const std::vector<std::unique_ptr<LayerTreeNode>>& nodes,
@@ -494,11 +903,27 @@ void renderNodes(QImage& target,
 {
     renderNodesFiltered(target, nodes, doc, ndcToPixel,
         [](const LayerTreeNode*) { return true; }, true,
-        /*groupsPassThrough=*/false);
+        /*forceDirectGroups=*/false);
 }
 
-bool subtreeHasIncludedLayer(const LayerTreeNode* node,
-                             const std::function<bool(const LayerTreeNode*)>& includeLayer)
+// True when a subtree can still change the composite under the current filter,
+// i.e. whether the group is worth descending into at all.
+//
+// An included Layer somewhere inside is the usual reason. The other one is a
+// Pass Through group holding a Normal-Mode adjustment: that adjustment acts on
+// the *backdrop* rather than on the group's own content, so it has an effect
+// even when the group contains no layer at all — an adjustment-only pass-
+// through group over the stack below it is a normal way to work, and pruning
+// it would silently drop the adjustment. An Isolated group in the same shape
+// has nothing to adjust — its buffer stays transparent — which is why the
+// extra reason is gated on pass-through, and on applyAdjustments so clone
+// sampling still consumes no adjustment. (The one Isolated case this prunes
+// and arguably should not is a layer-less group holding only a Solid Color
+// adjustment, which is a fill rather than a modifier. That predates Pass
+// Through and is left as it was.)
+bool subtreeAffectsComposite(const LayerTreeNode* node,
+                             const std::function<bool(const LayerTreeNode*)>& includeLayer,
+                             bool applyAdjustments)
 {
     if (!node || !node->visible)
         return false;
@@ -506,8 +931,11 @@ bool subtreeHasIncludedLayer(const LayerTreeNode* node,
         return node->layer && includeLayer(node);
     if (node->type != LayerTreeNode::Type::Group)
         return false;
+    const bool passThrough = applyAdjustments && node->isPassThroughGroup();
     for (const auto& child : node->children) {
-        if (subtreeHasIncludedLayer(child.get(), includeLayer))
+        if (passThrough && child && child->visible && child->isAdjustmentLayer())
+            return true;
+        if (subtreeAffectsComposite(child.get(), includeLayer, applyAdjustments))
             return true;
     }
     return false;
@@ -518,8 +946,17 @@ void renderNodesFiltered(QImage& target,
                          const Document* doc, const QTransform& ndcToPixel,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough)
+                         bool forceDirectGroups,
+                         const LayerTreeNode* rawPixelNode)
 {
+    // Clipping-mask state for THIS sibling level (§4.6). A run of clipped
+    // layers shares one base, so the base's alpha is extracted once — while the
+    // base itself is being drawn, since the bottom→top walk reaches it first —
+    // and then reused by every layer in the run. Recursion gives each level its
+    // own copy, so a nested group cannot invalidate an outer run's alpha.
+    const LayerTreeNode* clipAlphaOwner = nullptr;
+    QImage clipAlpha;
+
     for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
         auto* node = nodes[i].get();
         if (!node->visible) continue;
@@ -535,34 +972,63 @@ void renderNodesFiltered(QImage& target,
         }
 
         if (node->type == LayerTreeNode::Type::Group) {
-            if (!subtreeHasIncludedLayer(node, includeLayer))
+            if (!subtreeAffectsComposite(node, includeLayer, applyAdjustments))
                 continue;
-            if (groupsPassThrough || !node->needsIsolatedComposite()) {
-                // Fast path: an opacity-1, Normal-blend, effect-free, mask-free
-                // group composites identically whether its children are merged
-                // straight into the parent or isolated first, so skip the extra
-                // buffer. (A future PassThrough group would also take this path
-                // by design — see LayerTreeNode::needsIsolatedComposite.)
+            // §4.6: a group can be the base of a clipping run. The alpha the run
+            // reads is the group's own content, which only an ISOLATED composite
+            // holds — so the isolated model below hands its stage over, and the
+            // other two models pay one extra pass for the alpha alone.
+            const bool clipBaseGroup =
+                LayerTreeNode::isClipBase(nodes, static_cast<size_t>(i));
+            QImage ownStage;
+            if (!forceDirectGroups && node->passThroughNeedsStage()) {
+                // Pass Through, with an opacity (or mask) of its own to apply
+                // to the group as a whole. The children still have to blend
+                // against the real backdrop, so the stage is a *copy* of it
+                // rather than a transparent buffer, and the group's opacity
+                // then decides how much of the difference survives.
+                QImage stage = target.copy();
+                renderNodesFiltered(stage, node->children, doc, ndcToPixel,
+                                    includeLayer, applyAdjustments,
+                                    forceDirectGroups, rawPixelNode);
+                compositePassThroughStage(target, stage, node->opacity);
+            } else if (forceDirectGroups || !node->needsIsolatedComposite()) {
+                // Direct path: an opacity-1, Normal-blend, effect-free,
+                // mask-free group composites identically whether its children
+                // are merged straight into the parent or isolated first, so
+                // skip the extra buffer.
                 //
-                // groupsPassThrough forces this path for merge subsets whose
+                // A Pass Through group at full opacity lands here too, and for
+                // it the "identically" is the point rather than a shortcut:
+                // merging the children into the parent target is what lets an
+                // inner blend mode read the layers below the group and an
+                // inner Normal-Mode adjustment reach them.
+                //
+                // forceDirectGroups forces this path for merge subsets whose
                 // result stays inside the group: its opacity/blend/effects
                 // remain live on the tree, so baking them here would apply
                 // them twice (see DocumentCompositor::compositeSubset).
                 renderNodesFiltered(target, node->children, doc, ndcToPixel,
                                     includeLayer, applyAdjustments,
-                                    groupsPassThrough);
+                                    forceDirectGroups, rawPixelNode);
             } else {
                 // Isolated group model — the group's mask/effects/opacity/blend
                 // apply once to the composed children, in this order:
                 //   compose children -> group mask -> group effects -> opacity/blend
-                QImage groupStage(doc->size, QImage::Format_ARGB32_Premultiplied);
-                groupStage.fill(Qt::transparent);
-                renderNodesFiltered(groupStage, node->children, doc, ndcToPixel,
-                                    includeLayer, applyAdjustments,
-                                    groupsPassThrough);
-                applyGroupMask(groupStage, node);                 // no-op until group masks exist
-                applyGroupEffects(groupStage, node, doc->size);
-                compositeStage(target, groupStage, node->blendMode, node->opacity);
+                ownStage = buildGroupStage(node, doc, ndcToPixel, includeLayer,
+                                           applyAdjustments, forceDirectGroups,
+                                           rawPixelNode);
+                DocumentCompositor::compositeStage(target, ownStage,
+                                                  node->mergeBlendMode(),
+                                                  node->opacity);
+            }
+            if (clipBaseGroup) {
+                if (ownStage.isNull())
+                    ownStage = buildGroupStage(node, doc, ndcToPixel, includeLayer,
+                                               applyAdjustments, forceDirectGroups,
+                                               rawPixelNode);
+                clipAlphaOwner = node;
+                clipAlpha = clipAlphaFromStage(ownStage, node->opacity);
             }
             continue;
         }
@@ -572,14 +1038,99 @@ void renderNodesFiltered(QImage& target,
         if (!includeLayer(node))
             continue;
 
-        drawLayerNode(target, node, doc, ndcToPixel);
+        // ── Clipping mask (docs/RENDER-PIPELINE.md §4.6) ──
+        // A clipped layer contributes only where its base is opaque:
+        //   alphaClipped = alphaSource × alphaBase
+        // read per pixel off the base's OWN alpha — never off the alpha
+        // accumulated in `target`, which already holds every layer below.
+        const LayerTreeNode* clipTo = nullptr;
+        if (node->isClippedLayer()) {
+            const LayerTreeNode* base =
+                LayerTreeNode::resolveClipBase(nodes, static_cast<size_t>(i));
+            // The clip needs the base to take part in THIS walk. A filtered
+            // composite that leaves it out — clone sampling of a single layer,
+            // a merge subset that excludes it — has no base alpha to read and
+            // draws the layer unclipped rather than inventing one. Export
+            // Layer As... never gets here at all (compositeIsolatedNode calls
+            // drawLayerNode directly).
+            if (base && includeLayer(base)) {
+                // A hidden base hides its whole run: its alpha is zero
+                // everywhere.
+                if (!base->visible)
+                    continue;
+                // Normally already cached from drawing the base a few
+                // iterations ago; rebuilt only when the base was reached
+                // through a path that did not draw it.
+                if (base != clipAlphaOwner) {
+                    clipAlphaOwner = base;
+                    const QImage baseStage =
+                        base->type == LayerTreeNode::Type::Group
+                            ? buildGroupStage(base, doc, ndcToPixel, includeLayer,
+                                              applyAdjustments, forceDirectGroups,
+                                              rawPixelNode)
+                            : buildLayerStage(base, doc, ndcToPixel, rawPixelNode);
+                    clipAlpha = clipAlphaFromStage(baseStage, base->opacity);
+                }
+                // A base with nothing to draw (an empty layer) lets nothing
+                // through, so the whole run is skipped.
+                if (clipAlpha.isNull())
+                    continue;
+                clipTo = base;
+            }
+        }
+
+        QImage stage = buildLayerStage(node, doc, ndcToPixel, rawPixelNode);
+        if (stage.isNull())
+            continue;
+        if (clipTo) {
+            applyClipAlpha(stage, clipAlpha);
+        } else if (LayerTreeNode::isClipBase(nodes, static_cast<size_t>(i))) {
+            // This node is a base: keep its alpha for the run above it, which
+            // the bottom→top walk has not reached yet. Extracting it here is
+            // what spares the run a second full stage build; it costs one
+            // byte-per-pixel pass, far less than the stage it reads.
+            clipAlphaOwner = node;
+            clipAlpha = clipAlphaFromStage(stage, node->opacity);
+        }
+        DocumentCompositor::compositeStage(target, stage, node->blendMode,
+                                           node->opacity,
+                                           compositeFill(node, rawPixelNode));
     }
+}
+
+// Bounding box of the non-transparent pixels of an RGBA8888 image, in its own
+// pixel coordinates. Empty when the whole image is transparent.
+QRect nonTransparentBounds(const QImage& img)
+{
+    const int w = img.width();
+    const int h = img.height();
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+    for (int y = 0; y < h; ++y) {
+        const uchar* row = img.constScanLine(y);
+        int first = -1, last = -1;
+        for (int x = 0; x < w; ++x) {
+            if (row[x * 4 + 3] == 0)
+                continue;
+            if (first < 0) first = x;
+            last = x;
+        }
+        if (first < 0)
+            continue;
+        if (minY > y) minY = y;
+        maxY = y;
+        minX = std::min(minX, first);
+        maxX = std::max(maxX, last);
+    }
+    if (maxX < minX)
+        return QRect();
+    return QRect(QPoint(minX, minY), QPoint(maxX, maxY));
 }
 
 QImage compositeFiltered(const Document* doc,
                          const std::function<bool(const LayerTreeNode*)>& includeLayer,
                          bool applyAdjustments,
-                         bool groupsPassThrough = false)
+                         bool forceDirectGroups = false,
+                         const LayerTreeNode* rawPixelNode = nullptr)
 {
     if (!doc || doc->flatCount() == 0 || doc->size.isEmpty())
         return QImage();
@@ -595,12 +1146,47 @@ QImage compositeFiltered(const Document* doc,
     ndcToPixel.scale(cw * 0.5, -ch * 0.5);
 
     renderNodesFiltered(result, doc->roots, doc, ndcToPixel, includeLayer,
-                        applyAdjustments, groupsPassThrough);
+                        applyAdjustments, forceDirectGroups, rawPixelNode);
 
-    return result.convertToFormat(QImage::Format_RGBA8888);
+    // convertTo(), not convertToFormat(): `result` is this function's own buffer
+    // with no other reference, so Qt unpremultiplies it in place instead of
+    // allocating a second canvas-sized image and copying into it. On a 24 MP
+    // document that is ~96 MB of allocation plus a full pass saved on every CPU
+    // composite — export, flatten, merge, clone sampling and the idle projection
+    // all land here. Pixels are identical either way.
+    //
+    // Checked, not assumed: convertTo() signals failure by leaving the image
+    // alone (it returns void on Qt 6.8), and every consumer of this function
+    // indexes the result as 4-byte RGBA (§3.2) — a silent premultiplied-ARGB
+    // return would be read as garbage rather than as an error.
+    result.convertTo(QImage::Format_RGBA8888);
+    if (result.format() != QImage::Format_RGBA8888)
+        return result.convertToFormat(QImage::Format_RGBA8888);
+    return result;
 }
 
 } // namespace
+
+void DocumentCompositor::compositeStage(QImage& target, const QImage& stage,
+                                        BlendMode mode, float opacity,
+                                        float fillOpacity)
+{
+    const float fill = std::clamp(fillOpacity, 0.0f, 1.0f);
+    // QPainter only knows each mode at full strength, so a Fill that belongs
+    // *inside* the formula has to be composited by hand even for a mode the
+    // raster engine supports natively (Color Dodge/Burn, Difference). Where
+    // Fill is plain coverage it folds into the painter opacity instead, which
+    // is the same single factor on the source alpha.
+    const bool fillInBlend = fill < 0.999f && blendmath::fillEntersBlend(mode);
+    if (!fillInBlend && blend::painterHasNativeMode(mode)) {
+        QPainter p(&target);
+        p.setOpacity(opacity * fill);
+        p.setCompositionMode(blend::painterMode(mode));
+        p.drawImage(0, 0, stage);
+    } else {
+        compositeManual(target, stage, mode, opacity, fill);
+    }
+}
 
 QImage DocumentCompositor::composite(const Document* doc, const RenderContext& /*ctx*/)
 {
@@ -608,7 +1194,8 @@ QImage DocumentCompositor::composite(const Document* doc, const RenderContext& /
 }
 
 QImage DocumentCompositor::compositeOnlyFlatIndex(const Document* doc, int flatIndex,
-                                                  const RenderContext& /*ctx*/)
+                                                  const RenderContext& /*ctx*/,
+                                                  const LayerTreeNode* rawPixelNode)
 {
     if (!doc)
         return QImage();
@@ -618,15 +1205,19 @@ QImage DocumentCompositor::compositeOnlyFlatIndex(const Document* doc, int flatI
 
     // Clone/heal sampling: exclude Normal-Mode adjustments so painting the
     // sampled pixels back into a layer doesn't bake (and double-apply) them.
-    // Single-Layer-Mode adjustments are part of the layer's own render and
-    // stay included via computeEffectedImage.
+    // rawPixelNode (when given, typically == active, the paint destination)
+    // additionally renders raw — see drawLayerNode — so its own Single-Layer-
+    // Mode adjustments aren't baked into the sample either. Any OTHER included
+    // layer's Single-Layer-Mode adjustments still render normally: that layer
+    // isn't being painted into, so no double-apply risk.
     return compositeFiltered(doc, [active](const LayerTreeNode* node) {
         return node == active;
-    }, false);
+    }, false, false, rawPixelNode);
 }
 
 QImage DocumentCompositor::compositeFromFlatIndex(const Document* doc, int flatIndex,
-                                                  const RenderContext& /*ctx*/)
+                                                  const RenderContext& /*ctx*/,
+                                                  const LayerTreeNode* rawPixelNode)
 {
     if (!doc)
         return QImage();
@@ -639,10 +1230,11 @@ QImage DocumentCompositor::compositeFromFlatIndex(const Document* doc, int flatI
     }
 
     // See compositeOnlyFlatIndex: stack adjustments are excluded from clone
-    // sampling sources.
+    // sampling sources, and rawPixelNode's own Single-Layer-Mode adjustments
+    // (if any) are excluded too.
     return compositeFiltered(doc, [included](const LayerTreeNode* node) {
         return included.count(node) > 0;
-    }, false);
+    }, false, false, rawPixelNode);
 }
 
 QImage DocumentCompositor::compositeSubset(
@@ -650,11 +1242,81 @@ QImage DocumentCompositor::compositeSubset(
     const std::set<const LayerTreeNode*>& includeLayers,
     bool applyAdjustments,
     const RenderContext& /*ctx*/,
-    bool ancestorGroupsPassThrough)
+    bool ancestorGroupsDirect)
 {
     if (!doc)
         return QImage();
     return compositeFiltered(doc, [&includeLayers](const LayerTreeNode* node) {
         return includeLayers.count(node) > 0;
-    }, applyAdjustments, ancestorGroupsPassThrough);
+    }, applyAdjustments, ancestorGroupsDirect);
+}
+
+QImage DocumentCompositor::compositeIsolatedNode(const Document* doc, const LayerTreeNode* node,
+                                                 bool trimToLayerBounds)
+{
+    if (!doc || !node || doc->size.isEmpty())
+        return QImage();
+
+    // Every node without content of its own (a non-Solid-Color adjustment,
+    // an Effect entry, ...) only modifies whatever is already composited
+    // beneath it — exactly the "backdrop dependency" the feature must block.
+    if (!node->hasIsolatedExportContent())
+        return QImage();
+
+    const bool isGroup = node->type == LayerTreeNode::Type::Group;
+    const bool isLayer = node->type == LayerTreeNode::Type::Layer;
+
+    const double cw = doc->size.width();
+    const double ch = doc->size.height();
+    QTransform ndcToPixel;
+    ndcToPixel.translate(cw * 0.5, ch * 0.5);
+    ndcToPixel.scale(cw * 0.5, -ch * 0.5);
+
+    // Always canvas-sized and canvas-aligned, like every other CPU composite
+    // — a Normal-Mode adjustment nested inside an exported group, or a
+    // layer's own mask, is positioned in absolute document-pixel space
+    // (maskOrigin etc.), so rendering into anything but the real canvas grid
+    // would misalign them. Layer Bounds crops the result afterward instead
+    // of resizing the render target, which also means content entirely
+    // outside the canvas has nothing to crop to and is reported as empty.
+    //
+    // Node visibility is intentionally bypassed here (exporting a hidden
+    // layer/group must still render it); descendants keep their own
+    // visibility via renderNodesFiltered's normal check.
+    QImage result(doc->size, QImage::Format_ARGB32_Premultiplied);
+    result.fill(Qt::transparent);
+
+    if (isLayer) {
+        drawLayerNode(result, node, doc, ndcToPixel);
+    } else if (isGroup) {
+        QImage childStage(doc->size, QImage::Format_ARGB32_Premultiplied);
+        childStage.fill(Qt::transparent);
+        renderNodesFiltered(childStage, node->children, doc, ndcToPixel,
+                            [](const LayerTreeNode*) { return true; },
+                            /*applyAdjustments=*/true, /*forceDirectGroups=*/false);
+        applyGroupMask(childStage, node);                 // no-op until group masks exist
+        applyGroupEffects(childStage, node, childStage.size());
+        // The group's own blend mode/opacity, composited against a
+        // transparent backdrop (no layers below it in an isolated export) —
+        // same W3C fade semantics as any other isolated composite here. A Pass
+        // Through group needs no separate path: with nothing behind it to pass
+        // through to, interpolating a transparent backdrop towards the children
+        // by `opacity` is exactly compositing them at that opacity, and
+        // mergeBlendMode() keeps the unused blend slot out of it.
+        DocumentCompositor::compositeStage(result, childStage,
+                                          node->mergeBlendMode(),
+                                          node->opacity);
+    } else {
+        applyAdjustmentNode(result, node);
+    }
+
+    QImage rgba = result.convertToFormat(QImage::Format_RGBA8888);
+    if (trimToLayerBounds) {
+        const QRect trimmed = nonTransparentBounds(rgba);
+        if (trimmed.isEmpty())
+            return QImage(); // nothing visible of this node's own content
+        if (trimmed != QRect(QPoint(0, 0), rgba.size()))
+            rgba = rgba.copy(trimmed);
+    }
+    return rgba;
 }

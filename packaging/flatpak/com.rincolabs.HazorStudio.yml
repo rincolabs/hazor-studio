@@ -1,0 +1,354 @@
+app-id: com.rincolabs.HazorStudio
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: Hazor
+
+# flatpak-builder 1.2.x runs appstream-compose, which the KDE 6.8 SDK no longer
+# ships (it provides "appstreamcli compose" instead). The metainfo file is
+# installed into share/metainfo by CMake either way; only the pre-composed
+# appstream catalogue is missing, which matters for store publishing, not for
+# installing or running the bundle. Drop this once flatpak-builder >= 1.4 is
+# the baseline.
+appstream-compose: false
+
+finish-args:
+  - --device=dri
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --filesystem=home
+
+# The RawEngine development headers and static archives are build-time only:
+# everything that survives into the bundle is either linked into Hazor already
+# or is runtime data (exiv2's shared library, lensfun's camera/lens database).
+cleanup:
+  - /app/rawengine/*/include
+  - /app/rawengine/*/lib/*.a
+  - /app/rawengine/*/lib/pkgconfig
+  - /app/rawengine/*/lib/cmake
+  - /app/rawengine/*/share/man
+  - /app/rawengine/*/bin
+  - /app/include/onnxruntime
+  - /include
+  - /share/man
+  - /share/pkgconfig
+  - '*.la'
+
+modules:
+  # ── RawEngine dependencies ────────────────────────────────────────────────
+  # The nine libraries src/rawengine/ needs, each pinned to the version
+  # docs/BUILD.md records for the host tree, built from source *inside* the
+  # sandbox: the host copies under 3rdparty/rawengine/ were compiled against
+  # this machine's ABI and the KDE runtime is a different one. They install
+  # into /app/rawengine/<lib>, the layout CMakeLists.txt's
+  # _rawengine_add_imported_lib() and the exiv2 find_package() expect from
+  # RAWENGINE_DEPS_DIR, so no CMake change is needed to consume them.
+  #
+  # glib-2.0 (lensfun's only external dependency) deliberately comes from the
+  # KDE runtime instead: Qt 6 links it too, so a second private copy in the
+  # same process would be the defect rather than an isolation win. This is the
+  # same platform-ABI exemption scripts/build.sh applies to native builds.
+
+  - name: rawengine-zlib
+    buildsystem: simple
+    build-commands:
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/zlib
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DZLIB_BUILD_SHARED=OFF -DZLIB_BUILD_EXAMPLES=OFF
+      - cmake --build _build
+      - cmake --install _build
+    sources:
+      # Same pinned commit scripts/build/versions.sh uses for the app's own
+      # zlib; RawEngine still gets its own prefix because the two are allowed
+      # to drift independently.
+      - type: git
+        url: https://github.com/madler/zlib.git
+        commit: da607da739fa6047df13e66a2af6b8bec7c2a498
+
+  - name: rawengine-libjpeg-turbo
+    buildsystem: simple
+    build-commands:
+      # WITH_SIMD=OFF matches the host tree: the SDK has no nasm either.
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/libjpeg-turbo
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DENABLE_SHARED=OFF -DWITH_SIMD=OFF -DWITH_TURBOJPEG=OFF -DWITH_JPEG8=ON
+      - cmake --build _build
+      - cmake --install _build
+    sources:
+      - type: archive
+        url: https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.0.tar.gz
+        sha256: 980dd81f425082aa6d7c9e47fef27554ce7a9ffc8e2f6e863b97d263c5c50858
+
+  - name: rawengine-libpng
+    buildsystem: simple
+    build-commands:
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/libpng
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_PREFIX_PATH=/app/rawengine/zlib
+        -DZLIB_ROOT=/app/rawengine/zlib
+        -DZLIB_INCLUDE_DIR=/app/rawengine/zlib/include
+        -DZLIB_LIBRARY=/app/rawengine/zlib/lib/libz.a
+        -DPNG_SHARED=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF
+      - cmake --build _build
+      - cmake --install _build
+    sources:
+      - type: archive
+        url: https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.59.tar.gz
+        sha256: 2540302a1844ad2b2b501977abecfa850f265f97b78f065a712ab4074a89f5b5
+
+  - name: rawengine-libtiff
+    buildsystem: simple
+    build-commands:
+      # jbig/lzma/zstd/webp/libdeflate off, as in the host tree: rtengine reads
+      # TIFF with JPEG and DEFLATE only, and every extra codec would be another
+      # library to pin.
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/libtiff
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_PREFIX_PATH="/app/rawengine/zlib;/app/rawengine/libjpeg-turbo"
+        -DZLIB_ROOT=/app/rawengine/zlib
+        -DZLIB_INCLUDE_DIR=/app/rawengine/zlib/include
+        -DZLIB_LIBRARY=/app/rawengine/zlib/lib/libz.a
+        -DJPEG_INCLUDE_DIR=/app/rawengine/libjpeg-turbo/include
+        -DJPEG_LIBRARY=/app/rawengine/libjpeg-turbo/lib/libjpeg.a
+        -DBUILD_SHARED_LIBS=OFF -Dtiff-tools=OFF -Dtiff-tests=OFF
+        -Dtiff-docs=OFF -Dtiff-contrib=OFF
+        -Djbig=OFF -Dlzma=OFF -Dzstd=OFF -Dwebp=OFF -Dlibdeflate=OFF
+      - cmake --build _build
+      - cmake --install _build
+    sources:
+      - type: archive
+        url: https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz
+        sha256: 672bd7d10aee4606171afb864f3570b83340f6a33e2c186dc0512f7145ffdf6a
+
+  - name: rawengine-expat
+    buildsystem: simple
+    build-commands:
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/expat
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DEXPAT_SHARED_LIBS=OFF -DEXPAT_BUILD_TESTS=OFF
+        -DEXPAT_BUILD_EXAMPLES=OFF -DEXPAT_BUILD_TOOLS=OFF -DEXPAT_BUILD_DOCS=OFF
+      - cmake --build _build
+      - cmake --install _build
+    sources:
+      - type: archive
+        url: https://github.com/libexpat/libexpat/releases/download/R_2_9_0/expat-2.9.0.tar.gz
+        sha256: 16afbb9cefead2aa278105cf27d9f597bde7fbf3dbb85015857ca7ca6a4e89ba
+
+  - name: rawengine-lcms2
+    buildsystem: autotools
+    builddir: true
+    config-opts:
+      - --prefix=/app/rawengine/lcms2
+      - --libdir=/app/rawengine/lcms2/lib
+      - --disable-shared
+      - --enable-static
+      - --with-pic
+    sources:
+      - type: archive
+        url: https://github.com/mm2/Little-CMS/releases/download/lcms2.16/lcms2-2.16.tar.gz
+        sha256: d873d34ad8b9b4cea010631f1a6228d2087475e4dc5e763eb81acc23d9d45a51
+
+  - name: rawengine-fftw3f
+    buildsystem: autotools
+    builddir: true
+    config-opts:
+      - --prefix=/app/rawengine/fftw3f
+      - --libdir=/app/rawengine/fftw3f/lib
+      - --enable-float
+      - --enable-threads
+      - --disable-shared
+      - --enable-static
+      - --with-pic
+    sources:
+      - type: archive
+        url: https://www.fftw.org/fftw-3.3.10.tar.gz
+        sha256: 56c932549852cddcfafdab3820b0200c7742675be92179e59e6215b340e26467
+
+  - name: rawengine-exiv2
+    buildsystem: simple
+    build-commands:
+      # Shared, like the prebuilt release the host tree uses: a static exiv2
+      # would make its exiv2Config.cmake pull zlib/expat in as link
+      # dependencies, and those would resolve to the runtime's copies rather
+      # than the vendored ones above — two zlibs in one binary.
+      #
+      # brotli and inih default ON in 0.28 and would each be another pinned
+      # dependency; they only affect BMFF/ini-file support, which rtengine's
+      # metadata reader does not use.
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/exiv2
+        -DBUILD_SHARED_LIBS=ON
+        -DCMAKE_INSTALL_RPATH=/app/lib
+        -DEXIV2_ENABLE_BROTLI=OFF -DEXIV2_ENABLE_INIH=OFF
+        -DEXIV2_ENABLE_XMP=ON -DEXIV2_ENABLE_PNG=ON
+        -DEXIV2_BUILD_SAMPLES=OFF -DEXIV2_BUILD_EXIV2_COMMAND=OFF
+        -DEXIV2_BUILD_UNIT_TESTS=OFF
+        -DZLIB_ROOT=/app/rawengine/zlib
+        -DZLIB_INCLUDE_DIR=/app/rawengine/zlib/include
+        -DZLIB_LIBRARY=/app/rawengine/zlib/lib/libz.a
+        -DEXPAT_INCLUDE_DIR=/app/rawengine/expat/include
+        -DEXPAT_LIBRARY=/app/rawengine/expat/lib/libexpat.a
+      - cmake --build _build
+      - cmake --install _build
+      # Hazor's INSTALL_RPATH is $ORIGIN/../lib, so the one shared RawEngine
+      # dependency has to be reachable there.
+      - cp -a /app/rawengine/exiv2/lib/libexiv2.so* /app/lib/
+    sources:
+      - type: archive
+        url: https://github.com/Exiv2/exiv2/archive/refs/tags/v0.28.9.tar.gz
+        sha256: 700b76b97695b2fab4ef8c79619c68ae57d09e0c130724791cafbd39e0eb4aef
+
+  - name: rawengine-lensfun
+    buildsystem: simple
+    build-commands:
+      # lensfun 0.3.4 predates CMake 3.5; 3.31 still accepts it under an
+      # explicit policy floor, 4.x will not.
+      - cmake -S . -B _build -GNinja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_PREFIX=/app/rawengine/lensfun
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DBUILD_DOC=OFF
+        -DINSTALL_PYTHON_MODULE=OFF -DBUILD_LENSTOOL=OFF
+      - cmake --build _build
+      - cmake --install _build
+      # rtengine leaves rtengine::Settings::lensfunDbDirectory empty, so
+      # LFDatabase::init() falls back to lensfun's own search path. Inside the
+      # sandbox that means XDG_DATA_DIRS, which covers /app/share — but not
+      # the private prefix the library was installed into.
+      - mkdir -p /app/share
+      - cp -a /app/rawengine/lensfun/share/lensfun /app/share/
+    sources:
+      - type: archive
+        url: https://github.com/lensfun/lensfun/archive/refs/tags/v0.3.4.tar.gz
+        sha256: dafb39c08ef24a0e2abd00d05d7341b1bf1f0c38bfcd5a4c69cf5f0ecb6db112
+
+  - name: opencv
+    buildsystem: cmake-ninja
+    # flatpak-builder configures in the source directory by default, which
+    # OpenCV rejects ("FATAL: In-source builds are not allowed").
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      # OpenCV's own GNUInstallDirs detection resolves to lib64 inside this
+      # SDK. Flatpak puts /app/lib on the loader path, not /app/lib64, so the
+      # libraries would build, install, and then not be found at runtime.
+      - -DCMAKE_INSTALL_LIBDIR=lib
+      - -DOPENCV_LIB_INSTALL_PATH=lib
+      - -DOPENCV_CONFIG_INSTALL_PATH=lib/cmake/opencv4
+      - -DBUILD_LIST=core,imgproc,imgcodecs
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_JPEG=ON
+      - -DBUILD_PNG=ON
+      - -DBUILD_TIFF=ON
+      - -DBUILD_WEBP=ON
+      - -DBUILD_TESTS=OFF
+      - -DBUILD_PERF_TESTS=OFF
+      - -DBUILD_EXAMPLES=OFF
+      - -DBUILD_opencv_apps=OFF
+      - -DBUILD_JAVA=OFF
+      - -DBUILD_opencv_python2=OFF
+      - -DBUILD_opencv_python3=OFF
+      - -DWITH_OPENEXR=OFF
+      - -DWITH_JASPER=OFF
+      - -DWITH_OPENJPEG=OFF
+      - -DWITH_FFMPEG=OFF
+      - -DWITH_GSTREAMER=OFF
+      - -DWITH_GTK=OFF
+      - -DWITH_QT=OFF
+    sources:
+      - type: git
+        url: https://github.com/opencv/opencv.git
+        commit: 4223495e6cd67011f86b8ecd9be1fa105018f3b1
+
+  # ── ONNX Runtime ──────────────────────────────────────────────────────────
+  # The same prebuilt Linux GPU package the AppImage ships, staged out of the
+  # prepared host tree by scripts/build/package.sh (it is a manylinux build, so
+  # it is ABI-compatible with the KDE runtime). CPU, CUDA and TensorRT are
+  # runtime execution providers selected in Settings — never separate builds
+  # (AGENTS.md invariant 10) — so all three provider libraries ship.
+  #
+  # They go to /app/lib rather than under /app/3rdparty: CMakeLists.txt's
+  # INSTALL_RPATH for a packaged build is "$ORIGIN/../lib" plus
+  # "$ORIGIN/../../3rdparty/...", and only the first of those resolves inside
+  # /app from /app/bin/Hazor.
+  - name: onnxruntime
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib /app/include/onnxruntime
+      - cp -a lib/libonnxruntime.so* lib/libonnxruntime_providers_*.so /app/lib/
+      - cp -a include/. /app/include/onnxruntime/
+      - install -Dm644 LICENSE /app/share/licenses/hazor-studio/ONNXRUNTIME-LICENSE
+    sources:
+      - type: dir
+        path: ../../build/flatpak-assets/onnxruntime
+
+  # ── Runtime assets ────────────────────────────────────────────────────────
+  # Bundled ONNX models, the Real-ESRGAN ncnn process and its weights, and
+  # RawEngine's rtdata (camera matrices, DCP/ICC profiles, processing
+  # profiles). All platform-neutral data, staged by package.sh through the same
+  # copy_runtime_assets() the AppImage uses, so the two packages cannot drift.
+  #
+  # /app/3rdparty is where AppPaths::thirdPartyDir() finds them: it probes
+  # <appdir>/../3rdparty, and the binary lands in /app/bin.
+  - name: hazor-runtime-assets
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/3rdparty
+      - cp -a 3rdparty/. /app/3rdparty/
+      - mkdir -p /app/share/licenses/hazor-studio
+      - cp -a licenses/. /app/share/licenses/hazor-studio/
+    sources:
+      - type: dir
+        path: ../../build/flatpak-assets/runtime
+
+  - name: hazor-studio
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_TESTS=OFF
+      # src/psd's own test option defaults ON and its tests require Boost,
+      # which the KDE runtime does not ship.
+      - -DPSD_BUILD_TESTS=OFF
+      - -DHAZOR_DEVELOPMENT_PATHS=OFF
+      - -DOpenCV_DIR=/app/lib/cmake/opencv4
+      # The full feature set: AI inference and the native RAW engine are both
+      # part of the product, so a Flatpak that dropped either would not be
+      # Hazor Studio. Lens Corrections (lensfun) included.
+      - -DENABLE_ONNXRUNTIME=ON
+      - -DONNXRUNTIME_ROOT=/app
+      - -DONNXRUNTIME_INCLUDE_DIR=/app/include/onnxruntime
+      - -DONNXRUNTIME_LIBRARY=/app/lib/libonnxruntime.so
+      - -DENABLE_RAWENGINE=ON
+      - -DRAWENGINE_WITH_LENSFUN=ON
+      - -DRAWENGINE_DEPS_DIR=/app/rawengine
+    sources:
+      - type: dir
+        path: ../..
+        # The sandbox build needs the source tree only: OpenCV, the RawEngine
+        # libraries and ONNX Runtime come from the modules above, and Qt and
+        # zlib from the KDE SDK. Without these exclusions flatpak-builder
+        # copies 3rdparty/ and every build output into the build directory on
+        # each run.
+        skip:
+          - .git
+          - .flatpak-builder
+          - 3rdparty
+          - build
+          - dist
+          - artifacts
+          - tmp

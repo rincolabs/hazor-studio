@@ -1,4 +1,5 @@
 #include "ai/compat/AiCudaCompatibilityChecker.hpp"
+#include "ai/compat/AiCudaLibraryProbe.hpp"
 
 #include <QProcess>
 #include <QRegularExpression>
@@ -87,12 +88,23 @@ AiCudaInfo detect()
 #if defined(Q_OS_MACOS)
     return info; // CUDA never applicable on macOS.
 #elif defined(Q_OS_LINUX)
+    // The loader probe is the authority on whether the provider can resolve its
+    // dependencies; ldconfig only widens the picture (it also sees libraries
+    // outside the probed sonames) and supplies the installed majors.
+    const AiCudaLibraryProbe::Result& probe = AiCudaLibraryProbe::probe();
+    info.missingLibraries = probe.missing;
+
     const QString ldconfig = runCommand(QStringLiteral("ldconfig"), { QStringLiteral("-p") });
-    info.cudaRuntimeDetected = ldconfigHas(ldconfig, QStringLiteral("libcudart"));
-    info.cublasDetected      = ldconfigHas(ldconfig, QStringLiteral("libcublas"));
-    info.cudnnDetected       = ldconfigHas(ldconfig, QStringLiteral("libcudnn"));
+    info.cudaRuntimeDetected = probe.cudaRuntimeFound || ldconfigHas(ldconfig, QStringLiteral("libcudart"));
+    info.cublasDetected      = probe.cublasFound || ldconfigHas(ldconfig, QStringLiteral("libcublas"));
+    info.cudnnDetected       = probe.cudnnFound || ldconfigHas(ldconfig, QStringLiteral("libcudnn"));
     info.cudaRuntimeMajor    = sonameMajor(ldconfig, QStringLiteral("libcudart"));
     info.cudnnMajor          = sonameMajor(ldconfig, QStringLiteral("libcudnn"));
+    // A successful probe wins over the soname scan: ldconfig misses libraries
+    // reachable only through LD_LIBRARY_PATH (pip nvidia wheels, for one), and
+    // when both are present the probed major is the one the provider loads.
+    if (probe.cudaRuntimeFound) info.cudaRuntimeMajor = probe.cudaMajor;
+    if (probe.cudnnFound)       info.cudnnMajor = probe.cudnnMajor;
     const bool libcuda       = ldconfigHas(ldconfig, QStringLiteral("libcuda"));
 
     // nvidia-smi: GPU name, driver version, CUDA driver API version.
@@ -116,7 +128,7 @@ AiCudaInfo detect()
     }
     return info;
 #elif defined(Q_OS_WIN)
-    // Best-effort on Windows: rely on a configured CUDA toolkit + driver query.
+    // nvidia-smi answers for the GPU and the driver.
     const QString smiQuery = runCommand(QStringLiteral("nvidia-smi"),
         { QStringLiteral("--query-gpu=name,driver_version"),
           QStringLiteral("--format=csv,noheader") });
@@ -127,8 +139,20 @@ AiCudaInfo detect()
         if (cols.size() >= 1) info.gpuName = cols.at(0).trimmed();
         if (cols.size() >= 2) info.driverVersion = cols.at(1).trimmed();
     }
-    const QByteArray cudaPath = qgetenv("CUDA_PATH");
-    info.cudaRuntimeDetected = !cudaPath.isEmpty();
+
+    // The libraries themselves go through the loader probe. CUDA_PATH only
+    // proves a toolkit was installed at some point and says nothing about
+    // cuBLAS/cuDNN being reachable from this process, which is what decides
+    // whether the CUDA provider can load at all.
+    const AiCudaLibraryProbe::Result& probe = AiCudaLibraryProbe::probe();
+    info.cudaRuntimeDetected = probe.cudaRuntimeFound;
+    info.cublasDetected      = probe.cublasFound;
+    info.cudnnDetected       = probe.cudnnFound;
+    info.missingLibraries    = probe.missing;
+    // Windows DLLs carry their major in the file name, so a successful load of
+    // cudart64_12.dll / cudnn64_9.dll is itself the version evidence.
+    if (probe.cudaRuntimeFound) info.cudaRuntimeMajor = probe.cudaMajor;
+    if (probe.cudnnFound)       info.cudnnMajor = probe.cudnnMajor;
     return info;
 #else
     return info;

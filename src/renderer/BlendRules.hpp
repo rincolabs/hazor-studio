@@ -2,6 +2,7 @@
 
 #include "core/Layer.hpp" // BlendMode
 #include <QPainter>
+#include <array>
 
 // ─────────────────────────────────────────────────────────────────────────
 // Single source of truth for blend-mode semantics, shared by the CPU
@@ -47,6 +48,19 @@ inline int shaderId(BlendMode m)
     case BlendMode::Screen:     return 12;
     case BlendMode::Darken:     return 13;
     case BlendMode::Lighten:    return 14;
+    case BlendMode::LinearBurn:   return 15;
+    case BlendMode::LinearDodge:  return 16;
+    case BlendMode::VividLight:   return 17;
+    case BlendMode::LinearLight:  return 18;
+    case BlendMode::PinLight:     return 19;
+    case BlendMode::HardMix:      return 20;
+    case BlendMode::DarkerColor:  return 21;
+    case BlendMode::LighterColor: return 22;
+    case BlendMode::Subtract:     return 23;
+    case BlendMode::Divide:       return 24;
+    // Dissolve carries no colour formula: bm_coverage() reads the id and
+    // quantizes the source coverage instead (bm_blend returns the source).
+    case BlendMode::Dissolve:     return 25;
     }
     return -1;
 }
@@ -55,9 +69,10 @@ inline int shaderId(BlendMode m)
 // must go through the blend shader. Everything except Normal.
 inline bool needsShaderBlend(BlendMode m) { return m != BlendMode::Normal; }
 
-// Whether QPainter exposes this mode natively as a CompositionMode. The four
-// non-separable HSL modes (Hue/Saturation/Color/Luminosity) have no QPainter
-// equivalent and must be composited manually, per pixel, by the CPU path.
+// Whether QPainter exposes this mode natively as a CompositionMode. The
+// non-separable HSL modes, the light/arithmetic modes and Dissolve
+// have no QPainter equivalent and must be composited manually, per pixel, by
+// the CPU path (DocumentCompositor::compositeStage).
 inline bool painterHasNativeMode(BlendMode m)
 {
     switch (m) {
@@ -65,6 +80,17 @@ inline bool painterHasNativeMode(BlendMode m)
     case BlendMode::Saturation:
     case BlendMode::Color:
     case BlendMode::Luminosity:
+    case BlendMode::LinearBurn:
+    case BlendMode::LinearDodge:
+    case BlendMode::VividLight:
+    case BlendMode::LinearLight:
+    case BlendMode::PinLight:
+    case BlendMode::HardMix:
+    case BlendMode::DarkerColor:
+    case BlendMode::LighterColor:
+    case BlendMode::Subtract:
+    case BlendMode::Divide:
+    case BlendMode::Dissolve:
         return false;
     default:
         return true;
@@ -89,13 +115,62 @@ inline QPainter::CompositionMode painterMode(BlendMode m)
     case BlendMode::SoftLight:  return QPainter::CompositionMode_SoftLight;
     case BlendMode::Difference: return QPainter::CompositionMode_Difference;
     case BlendMode::Exclusion:  return QPainter::CompositionMode_Exclusion;
-    case BlendMode::Hue:
-    case BlendMode::Saturation:
-    case BlendMode::Color:
-    case BlendMode::Luminosity:
-        return QPainter::CompositionMode_SourceOver; // composited manually
+    default:
+        // Composited manually — see painterHasNativeMode().
+        return QPainter::CompositionMode_SourceOver;
     }
-    return QPainter::CompositionMode_SourceOver;
+}
+
+// ── Picker order ────────────────────────────────────────────────────────
+// Display order and labels for every blend-mode combo, shared so the layer
+// panel and the tool options cannot drift apart. BlendMode values are
+// appended as modes are added (they are persisted), so the enum order is not
+// a usable display order; this table groups the modes by what they do —
+// darkening, lightening, contrast, inversion, component — with a null label
+// marking a separator between groups. The order matches what users of other
+// layered editors expect to find in this menu.
+struct PickerEntry {
+    BlendMode mode;
+    const char* label; // nullptr → group separator
+};
+
+inline const std::array<PickerEntry, 32>& pickerEntries()
+{
+    static const std::array<PickerEntry, 32> kEntries{{
+        {BlendMode::Normal,       "Normal"},
+        {BlendMode::Dissolve,     "Dissolve"},
+        {BlendMode::Normal,       nullptr},
+        {BlendMode::Darken,       "Darken"},
+        {BlendMode::Multiply,     "Multiply"},
+        {BlendMode::ColorBurn,    "Color Burn"},
+        {BlendMode::LinearBurn,   "Linear Burn"},
+        {BlendMode::DarkerColor,  "Darker Color"},
+        {BlendMode::Normal,       nullptr},
+        {BlendMode::Lighten,      "Lighten"},
+        {BlendMode::Screen,       "Screen"},
+        {BlendMode::ColorDodge,   "Color Dodge"},
+        {BlendMode::LinearDodge,  "Linear Dodge (Add)"},
+        {BlendMode::LighterColor, "Lighter Color"},
+        {BlendMode::Normal,       nullptr},
+        {BlendMode::Overlay,      "Overlay"},
+        {BlendMode::SoftLight,    "Soft Light"},
+        {BlendMode::HardLight,    "Hard Light"},
+        {BlendMode::VividLight,   "Vivid Light"},
+        {BlendMode::LinearLight,  "Linear Light"},
+        {BlendMode::PinLight,     "Pin Light"},
+        {BlendMode::HardMix,      "Hard Mix"},
+        {BlendMode::Normal,       nullptr},
+        {BlendMode::Difference,   "Difference"},
+        {BlendMode::Exclusion,    "Exclusion"},
+        {BlendMode::Subtract,     "Subtract"},
+        {BlendMode::Divide,       "Divide"},
+        {BlendMode::Normal,       nullptr},
+        {BlendMode::Hue,          "Hue"},
+        {BlendMode::Saturation,   "Saturation"},
+        {BlendMode::Color,        "Color"},
+        {BlendMode::Luminosity,   "Luminosity"},
+    }};
+    return kEntries;
 }
 
 } // namespace blend

@@ -38,6 +38,10 @@ public:
                                QWidget* parent = nullptr);
 
     int selectedPage() const;
+    // Switches to `page` on an already-open dialog. Needed because Settings is
+    // modeless now: a second "Snap Settings..." while it is open should land on
+    // that page instead of just raising whatever was showing.
+    void setCurrentPage(int page);
     void reject() override;
 
 private slots:

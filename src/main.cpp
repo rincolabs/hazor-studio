@@ -10,14 +10,18 @@
 #include <QImageReader>
 #include <QFileOpenEvent>
 #include <QEvent>
+#include <QFont>
+#include <QFontDatabase>
 #include <memory>
 #include "ui/MainWindow.hpp"
 #include "ui/SplashScreen.hpp"
 #include "mcp/McpServer.hpp"
 #include "async/AsyncJobSystem.hpp"
+#include "core/AppPaths.hpp"
 #include "core/CrashHandler.hpp"
 #include "core/Version.hpp"
 #include "brush/import/BrushImportManager.hpp"
+#include "raw/RawEngine.hpp"
 
 class NoDialogButtonIconsStyle : public QProxyStyle {
 public:
@@ -45,6 +49,23 @@ public:
     }
 };
 
+// Embeds Inter (Regular/Medium/SemiBold/Bold) from Qt resources so the UI
+// typography doesn't depend on the font being installed on the host OS.
+// Theme::fontFamily names this same family; see src/theme/Theme.hpp.
+static void registerInterFonts()
+{
+    static const char* kWeights[] = {
+        ":/fonts/Inter-Regular.ttf",
+        ":/fonts/Inter-Medium.ttf",
+        ":/fonts/Inter-SemiBold.ttf",
+        ":/fonts/Inter-Bold.ttf",
+    };
+    for (const char* path : kWeights) {
+        if (QFontDatabase::addApplicationFont(QString::fromLatin1(path)) == -1)
+            qWarning() << "Failed to load embedded font" << path;
+    }
+}
+
 static bool isSupportedBrushImportFile(const QString& filePath)
 {
     static BrushImportManager manager;
@@ -58,7 +79,10 @@ static bool isSupportedBrushImportFile(const QString& filePath)
 
 static bool isHazorProjectFile(const QString& filePath)
 {
-    return filePath.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive)
+    // .hzs is the old extension, kept readable for backward compatibility;
+    // .hazor is the only one anything now writes.
+    return (filePath.endsWith(QStringLiteral(".hazor"), Qt::CaseInsensitive)
+            || filePath.endsWith(QStringLiteral(".hzs"), Qt::CaseInsensitive))
         && QFileInfo(filePath).isFile();
 }
 
@@ -115,6 +139,10 @@ int main(int argc, char* argv[])
 {
     CrashHandler::install();
     QApplication app(argc, argv);
+
+    registerInterFonts();
+    QApplication::setFont(QFont(QStringLiteral("Inter")));
+
     // Force the Fusion base style on every platform so the app looks identical
     // regardless of the host desktop (Windows native, KDE Breeze, GTK, …). Fusion
     // is compiled into QtWidgets, so it is always available. The proxy only
@@ -144,7 +172,7 @@ int main(int argc, char* argv[])
     QApplication::setApplicationVersion(QStringLiteral(HAZOR_VERSION_STRING));
 
     // File paths handed to us by the OS (extension association / "Open With").
-    // *.hzs projects open as new tabs; supported brush files open the import
+    // *.hazor projects open as new tabs; supported brush files open the import
     // dialog. On macOS these instead arrive via QFileOpenEvent, handled below.
     QStringList initialBrushImportFiles;
     QStringList initialProjectFiles;
@@ -163,6 +191,14 @@ int main(int argc, char* argv[])
     QImageReader::setAllocationLimit(0); // remove Qt's default 128 MB decoded-image cap
     AsyncJobSystem::create();
 
+    // Process-wide RawEngine startup (Fase 5): safe to call even when
+    // HAVE_RAWENGINE isn't compiled in (isAvailable() just stays false) or
+    // when the resource directory doesn't exist yet. Must run once, before
+    // any RAW file is opened (registerDefaultImageCodecs()/onOpenFile()).
+    RawEngine::initialize(AppPaths::rawEngineResourceDir().toStdString(),
+                          AppPaths::rawUserDir().toStdString(),
+                          AppPaths::lensfunDatabaseDir().toStdString());
+
     QSurfaceFormat fmt;
     fmt.setSwapInterval(1);
     fmt.setSamples(0);
@@ -177,28 +213,25 @@ int main(int argc, char* argv[])
     QObject::connect(&splash, &SplashScreen::firstPainted, &app, [&]() {
         splash.setProgress(15, "Initializing application...");
 
-        splash.setProgress(35, "Creating main window...");
+        splash.setProgress(35, "Preparing your workspace...");
         window = std::make_unique<MainWindow>();
 
         fileOpenFilter->setWindow(window.get());
         QObject::connect(&splash, &SplashScreen::finished, window.get(),
                          [&window, initialBrushImportFiles, initialProjectFiles, fileOpenFilter]() {
-            window->showMaximized();
+            window->showWithRestoredWorkspace();
 
-            // Merge any *.hzs paths that arrived via QFileOpenEvent (macOS) before
+            // Merge any *.hazor paths that arrived via QFileOpenEvent (macOS) before
             // the window existed with those parsed from argv (Windows/Linux).
             QStringList projectFiles = initialProjectFiles;
             projectFiles += fileOpenFilter->takePending();
 
             QTimer::singleShot(0, window.get(), [&window, projectFiles]() {
-                int opened = 0;
                 if (!projectFiles.isEmpty())
-                    opened = window->openProjectFiles(projectFiles);
-                // Only fall back to a blank document when nothing was opened from
-                // a file association; otherwise the requested project would sit
-                // behind a spurious "Untitled" tab.
-                if (opened == 0)
-                    window->createDefaultDocument();
+                    window->openProjectFiles(projectFiles);
+                // MainWindow starts on its permanent Home tab. A directly
+                // supplied project selects its document tab; no blank document
+                // is manufactured when startup has no file association.
             });
 
             if (!initialBrushImportFiles.isEmpty()) {
@@ -234,6 +267,11 @@ int main(int argc, char* argv[])
 
     int ret = app.exec();
     window.reset();
+    // After window.reset(): RawDevelopService's cached RawSessions (and the
+    // rtengine InitialImage/StagedImageProcessor behind them) are owned by
+    // the documents' ImageControllers, and rtengine::cleanup() tears down the
+    // caches those sessions read from.
+    RawEngine::shutdown();
     AsyncJobSystem::destroy();
     return ret;
 }

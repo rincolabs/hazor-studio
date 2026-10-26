@@ -3,4 +3,7 @@
 #define HAZOR_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
 #define HAZOR_VERSION_MINOR @PROJECT_VERSION_MINOR@
 #define HAZOR_VERSION_PATCH @PROJECT_VERSION_PATCH@
-#define HAZOR_VERSION_STRING "@PROJECT_VERSION@"
+// Pre-release label, "" for a final release. Set in CMakeLists.txt.
+#define HAZOR_VERSION_SUFFIX "@HAZOR_VERSION_SUFFIX@"
+// The displayed version, suffix included: "0.0.2" or "0.0.2-beta".
+#define HAZOR_VERSION_STRING "@HAZOR_VERSION_FULL@"

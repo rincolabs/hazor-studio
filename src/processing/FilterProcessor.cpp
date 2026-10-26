@@ -5,6 +5,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <cmath>
 #include <cstring>
 #include <QDebug>
 
@@ -91,6 +92,130 @@ int FilterProcessor::kernelRadius(const std::string& toolName,
         return length / 2 + 1;
     }
     return 0;
+}
+
+// ── Outward reach (how far a filter pushes content past the image rect) ──
+
+QMargins FilterProcessor::outwardReach(const std::string& toolName,
+                                        const QVariantMap& params,
+                                        const QSize& imageSize,
+                                        const QRect& contentBounds)
+{
+    if (imageSize.isEmpty())
+        return {};
+
+    const QRect imageRect(QPoint(0, 0), imageSize);
+    const QRect content = contentBounds.isEmpty()
+        ? imageRect
+        : contentBounds.intersected(imageRect);
+    if (content.isEmpty())
+        return {};
+
+    // QRect::right()/bottom() are inclusive; the warps below are continuous, so
+    // work with the half-open box the content pixels actually cover.
+    const QRectF box(content.x(), content.y(), content.width(), content.height());
+
+    const double centerX = params.value("center_x", 0.5).toDouble() * imageSize.width();
+    const double centerY = params.value("center_y", 0.5).toDouble() * imageSize.height();
+    const double amount = params.value("amount", 0.25).toDouble();
+
+    QRectF reached;
+
+    if (toolName == "zoom_blur") {
+        if (amount <= 0.0) return {};
+        // Mirrors ImageEngine::zoomBlur: the last sample scales by 1 + amount·0.3
+        // about the centre, so that is the furthest any pixel travels.
+        const double s = 1.0 + amount * 0.3;
+        reached = QRectF(centerX + (box.left() - centerX) * s,
+                         centerY + (box.top()  - centerY) * s,
+                         box.width() * s, box.height() * s);
+    }
+    else if (toolName == "radial_blur") {
+        if (amount <= 0.0) return {};
+        // Mirrors ImageEngine::radialBlur: the sweep spans ±15°·amount about the
+        // centre, so both extremes of the rotation have to fit.
+        const double maxAngle = 15.0 * amount * M_PI / 180.0;
+        const double c = std::cos(maxAngle);
+        const double s = std::sin(maxAngle);
+        const double xs[2] = { box.left(), box.right() };
+        const double ys[2] = { box.top(),  box.bottom() };
+        double minX = 0.0, minY = 0.0, maxX = 0.0, maxY = 0.0;
+        bool first = true;
+        for (const double x : xs) {
+            for (const double y : ys) {
+                const double dx = x - centerX;
+                const double dy = y - centerY;
+                for (int sign = -1; sign <= 1; sign += 2) {
+                    const double rx = centerX + dx * c - dy * s * sign;
+                    const double ry = centerY + dx * s * sign + dy * c;
+                    minX = first ? rx : std::min(minX, rx);
+                    maxX = first ? rx : std::max(maxX, rx);
+                    minY = first ? ry : std::min(minY, ry);
+                    maxY = first ? ry : std::max(maxY, ry);
+                    first = false;
+                }
+            }
+        }
+        reached = QRectF(minX, minY, maxX - minX, maxY - minY);
+    }
+    else if (toolName == "motion_blur") {
+        const int length = params.value("length", 15).toInt();
+        if (length <= 1) return {};
+        // The kernel is a line of `length` pixels through its centre, rotated by
+        // `angle`: content smears half its length each way along that direction.
+        const double angle = params.value("angle", 0.0).toDouble() * M_PI / 180.0;
+        const double half = length / 2.0;
+        const double dx = std::abs(half * std::cos(angle)) + 1.0;  // +1: bilinear
+        const double dy = std::abs(half * std::sin(angle)) + 1.0;  // kernel spill
+        reached = box.adjusted(-dx, -dy, dx, dy);
+    }
+    else if (toolName == "gaussian_blur" || toolName == "box_blur"
+             || toolName == "median_blur" || toolName == "bilateral_blur") {
+        // These run in premultiplied space and filter the alpha channel with the
+        // colour, so content softens past its own silhouette by the kernel
+        // radius. sharpen and noise_reduce are deliberately not here: they are
+        // BGR-only (ImageEngine's processBgrOnly) and leave alpha untouched, so
+        // nothing of them can land outside the pixels they started from. Nor is
+        // edge_detect, whose Canny output replaces alpha with an opaque
+        // rectangle — growing it would only make that rectangle bigger.
+        const int r = kernelRadius(toolName, params);
+        if (r <= 0) return {};
+        reached = box.adjusted(-r, -r, r, r);
+    }
+    else {
+        return {};   // point filter, or nothing that moves pixels outward
+    }
+
+    const auto margin = [](double v) {
+        return v <= 0.0 ? 0 : static_cast<int>(std::ceil(v));
+    };
+    return QMargins(margin(-reached.left()),
+                    margin(-reached.top()),
+                    margin(reached.right()  - imageSize.width()),
+                    margin(reached.bottom() - imageSize.height()));
+}
+
+QVariantMap FilterProcessor::paramsForGrownImage(const std::string& toolName,
+                                                  const QVariantMap& params,
+                                                  const QSize& oldSize,
+                                                  const QMargins& margins)
+{
+    QVariantMap out = params;
+    if (margins.isNull() || oldSize.isEmpty())
+        return out;
+    if (toolName != "zoom_blur" && toolName != "radial_blur")
+        return out;   // no image-relative parameters to re-normalize
+
+    const double newW = oldSize.width()  + margins.left() + margins.right();
+    const double newH = oldSize.height() + margins.top()  + margins.bottom();
+    if (newW <= 0.0 || newH <= 0.0)
+        return out;
+
+    out["center_x"] = (params.value("center_x", 0.5).toDouble() * oldSize.width()
+                       + margins.left()) / newW;
+    out["center_y"] = (params.value("center_y", 0.5).toDouble() * oldSize.height()
+                       + margins.top()) / newH;
+    return out;
 }
 
 // ── Separable Gaussian blur (two 1D passes, preserves alpha) ──
