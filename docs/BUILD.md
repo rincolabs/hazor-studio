@@ -11,7 +11,7 @@ builds share pinned component versions through
 |------------|---------|-------|
 | C++ compiler | C++20 | GCC 11+ / Clang 14+ / MSVC 2022 |
 | CMake | ≥ 3.16 | `AUTOMOC` / `AUTORCC` enabled |
-| Qt 6 | 6.8.x recommended | Components: `Widgets`, `OpenGLWidgets`, `Network`, `Concurrent` |
+| Qt 6 | 6.8.x recommended | Components: `Widgets`, `OpenGLWidgets`, `Network`, `Concurrent`, `WebEngineWidgets`, `WebChannel` |
 | OpenCV 4 | — | Components: `core`, `imgproc`, `imgcodecs` |
 | zlib | — | Brush import (`.kpp` / `.bundle`) |
 | OpenGL | 3.3 Core | Runtime GPU viewport |
@@ -23,6 +23,13 @@ The target-aware scripts additionally require `ninja`, `git`, `curl`,
 packaging requires `patchelf`; Flatpak packaging requires `flatpak` and
 `flatpak-builder`. Windows x64 requires MinGW-w64 GCC 13, while macOS targets
 require the user-supplied OSXCross/SDK setup described below.
+
+The current AI Agent WebEngine proof of concept directly requires the official
+`qtwebengine` and `qtwebchannel` modules from the same Qt distribution. For the
+Linux developer build, install those modules into the prepared Qt 6.8.3 prefix;
+CMake intentionally fails if either package is missing. The test does not add a
+feature flag or a second panel implementation. Packaging/deployment of
+`QtWebEngineProcess` and Chromium resources is not part of this UI experiment.
 
 > The editor **builds and runs without ONNX Runtime**. The AI inference layer
 > (SAM object selection, matting / background removal) simply reports itself as

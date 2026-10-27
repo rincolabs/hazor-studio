@@ -307,5 +307,8 @@
         <file>brushes/presets/edge-refine-soft.json</file>
         <file>swatches/default-presets.json</file>
         <file>models/ai-models-manifest.json</file>
+        <file>agent-web/index.html</file>
+        <file>agent-web/styles.css</file>
+        <file>agent-web/app.js</file>
     </qresource>
 </RCC>

@@ -59,6 +59,7 @@ if(USE_RHI)
 else()
     find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Network Concurrent)
 endif()
+find_package(Qt6 REQUIRED COMPONENTS WebEngineWidgets WebChannel)
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
@@ -87,6 +88,8 @@ endfunction()
 
 if(HAZOR_STRICT_DEPENDENCIES)
     _hazor_require_dependency_path("Qt 6 package" "${Qt6_DIR}")
+    _hazor_require_dependency_path("Qt WebEngine Widgets package" "${Qt6WebEngineWidgets_DIR}")
+    _hazor_require_dependency_path("Qt WebChannel package" "${Qt6WebChannel_DIR}")
     _hazor_require_dependency_path("OpenCV package" "${OpenCV_DIR}")
     _hazor_require_dependency_path("zlib headers" "${ZLIB_INCLUDE_DIRS}")
     if(ZLIB_LIBRARY)
@@ -1005,6 +1008,17 @@ target_link_libraries(Hazor PRIVATE
     Qt6::Concurrent
     ${OpenCV_LIBS}
     ZLIB::ZLIB
+)
+
+target_sources(Hazor PRIVATE
+    src/agent/AgentWebBridge.cpp
+    src/agent/AgentWebBridge.hpp
+    src/ui/WebViewHost.cpp
+    src/ui/WebViewHost.hpp
+)
+target_link_libraries(Hazor PRIVATE
+    Qt6::WebEngineWidgets
+    Qt6::WebChannel
 )
 
 if(UNIX AND NOT APPLE)

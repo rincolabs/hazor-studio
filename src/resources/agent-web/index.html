@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self' qrc:; img-src 'self' qrc: data:; style-src 'self' qrc: 'unsafe-inline'; script-src 'self' qrc:">
+    <title>Hazor AI Agent</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main class="agent-shell">
+        <header class="agent-header">
+            <div class="identity">
+                <span class="agent-mark" aria-hidden="true">H</span>
+                <div class="identity-copy">
+                    <strong>AI Agent</strong>
+                    <span id="status" role="status">Ready</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <label class="sr-only" for="agent-select">Agent preset</label>
+                <select id="agent-select" aria-label="Agent preset"></select>
+                <button id="settings-button" class="icon-button" type="button"
+                        aria-label="Configure AI Agent" title="Configure AI Agent">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M19.1 13a7.7 7.7 0 0 0 .05-1 7.7 7.7 0 0 0-.05-1l2.1-1.65-2-3.46-2.5 1a7.5 7.5 0 0 0-1.72-1L14.6 3h-4l-.4 2.89a7.5 7.5 0 0 0-1.72 1l-2.5-1-2 3.46L6.1 11a7.7 7.7 0 0 0-.05 1 7.7 7.7 0 0 0 .05 1l-2.12 1.65 2 3.46 2.5-1a7.5 7.5 0 0 0 1.72 1l.4 2.89h4l.4-2.89a7.5 7.5 0 0 0 1.72-1l2.5 1 2-3.46L19.1 13Zm-7.05 2.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/>
+                    </svg>
+                </button>
+            </div>
+            <div id="model-info" class="model-info">Model</div>
+        </header>
+
+        <section id="messages" class="messages" aria-live="polite" aria-label="Conversation">
+            <div id="empty-state" class="empty-state">
+                <span class="empty-icon" aria-hidden="true">✦</span>
+                <strong>How can I help with your image?</strong>
+                <p>Ask the agent to inspect or edit the current document using Hazor tools.</p>
+            </div>
+        </section>
+
+        <footer class="composer-wrap">
+            <div class="composer">
+                <label class="sr-only" for="prompt">Message the AI Agent</label>
+                <textarea id="prompt" rows="1" placeholder="Ask AI to edit the image…"
+                          aria-label="Message the AI Agent"></textarea>
+                <button id="send-button" class="send-button" type="button" aria-label="Send message" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="m4 12 15-7-4.7 14-3-5.2L4 12Zm7.8.2 1.9 3.3 2.2-6.5-7 3.2h2.9Z"/>
+                    </svg>
+                </button>
+            </div>
+            <span class="composer-hint">Enter to send · Shift+Enter for a new line</span>
+        </footer>
+    </main>
+
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
