@@ -507,10 +507,11 @@ compiled into the binary — see
 [Embedded web interfaces](#embedded-web-interfaces-embedded-ui-optional-developer-toolchain)
 below.
 
-It is still development-only, **not** a shipped feature:
-`ENABLE_STABLE_DIFFUSION` defaults to `OFF`, and with `OFF` none of its source
-files are compiled and no link edge exists, so AppImage, Flatpak, Windows and
-macOS builds are unaffected.
+It is still development-only, **not** a shipped feature. The host Linux
+developer build enables `ENABLE_STABLE_DIFFUSION` by default; packaging and
+cross-target builds force it off, so AppImage, Flatpak, Windows and macOS builds
+are unaffected. Set `HAZOR_ENABLE_STABLE_DIFFUSION=OFF` to leave it out of a
+host developer build explicitly.
 
 The dependency is not vendored in git. Clone the pinned revision — and its
 `ggml` submodule — into `3rdparty/stable-diffusion.cpp/`:
@@ -527,16 +528,17 @@ git -C 3rdparty/stable-diffusion.cpp submodule update --init --recursive
 | `stable-diffusion.cpp` | `687915518efd69548965d24818f0d3bbbb903718` |
 | `ggml` (submodule) | `a5915eb0e47adef21c3f25b889a008925ea838c2` |
 
-Then build the host developer target with the panel enabled:
+Then build the host developer target; the panel and its CUDA backend are the
+defaults:
 
 ```bash
-HAZOR_ENABLE_STABLE_DIFFUSION=ON ./scripts/build.sh
+./scripts/build.sh
 ```
 
-The environment variable is honoured only for `--target linux-x86_64` **and**
-only when no `--package` format is requested; [`build.sh`](../scripts/build.sh)
-logs that it ignored the flag otherwise. The Flatpak manifest adds a second,
-independent barrier: it never passes the option, and its `skip:` list excludes
+`HAZOR_ENABLE_STABLE_DIFFUSION` is honoured only for `--target linux-x86_64`
+**and** only when no `--package` format is requested;
+[`build.sh`](../scripts/build.sh) forces the module off otherwise. The Flatpak
+manifest adds a second, independent barrier: its `skip:` list excludes
 `3rdparty/`, so the checkout is not even copied into the sandbox.
 
 CMake builds the dependency as a static
@@ -553,15 +555,16 @@ answers with the generic x86-64 baseline.
 run time.
 
 ```bash
-HAZOR_ENABLE_STABLE_DIFFUSION=ON HAZOR_SD_BACKEND=VULKAN ./scripts/build.sh
-HAZOR_ENABLE_STABLE_DIFFUSION=ON HAZOR_SD_BACKEND=CUDA   ./scripts/build.sh
+HAZOR_SD_BACKEND=CPU    ./scripts/build.sh
+HAZOR_SD_BACKEND=VULKAN ./scripts/build.sh
+HAZOR_SD_BACKEND=CUDA   ./scripts/build.sh
 ```
 
 | Value | Needs | Notes |
 |-------|-------|-------|
-| `CPU` (default) | nothing beyond Hazor's own toolchain | Always available; the only backend ggml is guaranteed to have |
+| `CPU` | nothing beyond Hazor's own toolchain | Always available; the only backend ggml is guaranteed to have |
 | `VULKAN` | Vulkan headers with `VK_HEADER_VERSION` ≥ 272, `glslc`, SPIRV-Headers | Vendor-neutral; the preferred GPU backend |
-| `CUDA` | a CUDA toolkit (`nvcc`) | Searched on `PATH`, `$CUDACXX`, `$CUDA_PATH`, `$CUDA_HOME` and `/usr/local/cuda` |
+| `CUDA` (default) | a CUDA toolkit (`nvcc`) | Searched on `PATH`, `$CUDACXX`, `$CUDA_PATH`, `$CUDA_HOME` and `/usr/local/cuda` |
 
 **Every failure degrades to CPU with a warning rather than failing the
 configure.** An unknown value, a missing Vulkan SDK, a Vulkan SDK that is too
@@ -612,7 +615,6 @@ that file. They are applied on top of it and are not persisted:
 | `HAZOR_SD_LORA_DIR` | Registers a directory of LoRAs |
 
 ```bash
-HAZOR_ENABLE_STABLE_DIFFUSION=ON \
 HAZOR_SD_MODEL=/models/v1-5-pruned-emaonly.safetensors \
   ./scripts/build.sh
 ```
@@ -796,9 +798,9 @@ cmake --build build -j"$(nproc)" --target Hazor
 | `ENABLE_ONNXRUNTIME` | `ON` | Build with ONNX Runtime AI inference support |
 | `ENABLE_RAWENGINE` | `ON` | Build the native RAW engine (`rawengine` target) and link it into `Hazor` via [`src/raw/`](../src/raw/) (see [`docs/RAW-ENGINE.md`](RAW-ENGINE.md)) |
 | `RAWENGINE_WITH_LENSFUN` | `ON` | Build RawEngine with lensfun lens-correction support |
-| `ENABLE_STABLE_DIFFUSION` | `OFF` | Experimental local Stable Diffusion module and panel (Linux dev builds only — see above) |
+| `ENABLE_STABLE_DIFFUSION` | `ON` | Experimental local Stable Diffusion module and panel (Linux dev builds only; packaging and cross-target builds force it off — see above) |
 | `SD_CPP_SOURCE_DIR` | `3rdparty/stable-diffusion.cpp` | Where `ENABLE_STABLE_DIFFUSION` looks for the pinned checkout |
-| `HAZOR_SD_BACKEND` | `CPU` | ggml backend compiled into the Stable Diffusion module: `CPU`, `VULKAN` or `CUDA`; falls back to `CPU` with a warning when the toolchain is absent |
+| `HAZOR_SD_BACKEND` | `CUDA` | ggml backend compiled into the Stable Diffusion module: `CPU`, `VULKAN` or `CUDA`; falls back to `CPU` with a warning when the toolchain is absent |
 | `HAZOR_SD_VULKAN_MIN_HEADER_VERSION` | `272` | Minimum `VK_HEADER_VERSION` accepted by `HAZOR_SD_BACKEND=VULKAN` |
 | `ENABLE_EMBEDDED_UI` | `ON` | Compile the Vue interfaces in [`embedded-ui/`](../embedded-ui/) into the binary (needs npm, or a prebuilt `dist`); only used when `ENABLE_STABLE_DIFFUSION` is on |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |

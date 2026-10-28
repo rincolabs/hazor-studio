@@ -316,27 +316,25 @@ endif()
 add_subdirectory(src/psd)
 
 # ── stable-diffusion.cpp (experimental, local developer builds only) ─────────
-# OFF by default and never switched on by a packaging run: this is the bare
-# viability test for a local txt2img landing in a pixel layer (src/ai/sd/ +
-# src/ui/StableDiffusionPanel), not a shipped feature. With OFF, no source file
-# and no link edge is added — every other platform builds exactly as before.
+# ON by default for local developer builds and never switched on by a packaging
+# run: this is the bare viability test for a local txt2img landing in a pixel
+# layer (src/ai/sd/ + src/ui/StableDiffusionPanel), not a shipped feature. With
+# OFF, no source file and no link edge is added.
 #
 # The dependency is not vendored in git: clone the pinned revision into
-# SD_CPP_SOURCE_DIR first (see docs/BUILD.md), then build with
-#   HAZOR_ENABLE_STABLE_DIFFUSION=ON ./scripts/build.sh
+# SD_CPP_SOURCE_DIR first (see docs/BUILD.md), then run ./scripts/build.sh.
 option(ENABLE_STABLE_DIFFUSION
-    "Build the experimental local Stable Diffusion module (stable-diffusion.cpp)" OFF)
+    "Build the experimental local Stable Diffusion module (stable-diffusion.cpp)" ON)
 set(SD_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stable-diffusion.cpp" CACHE PATH
     "Checkout of leejet/stable-diffusion.cpp consumed by ENABLE_STABLE_DIFFUSION")
 
-# Which ggml backend gets compiled into the module. CPU is the default because
-# it needs no toolchain beyond the one that builds Hazor and is the only backend
-# ggml always has; VULKAN and CUDA are opt-in for a developer who has the
-# dependencies. The selection is a BUILD property only — which device the
+# Which ggml backend gets compiled into the module. CUDA is the developer
+# default; CMake falls back to the CPU backend when nvcc is unavailable. The
+# selection is a BUILD property only — which device the
 # inference really runs on is resolved at run time (src/ai/sd/SdBackend.cpp),
 # and a GPU build falls back to the CPU device when the machine has no usable
 # GPU, so one binary stays portable across machines.
-set(HAZOR_SD_BACKEND "CPU" CACHE STRING
+set(HAZOR_SD_BACKEND "CUDA" CACHE STRING
     "ggml backend compiled into the Stable Diffusion module: CPU, VULKAN or CUDA")
 set_property(CACHE HAZOR_SD_BACKEND PROPERTY STRINGS CPU VULKAN CUDA)
 # Floor for the Vulkan headers, as VK_HEADER_VERSION — the patch component of

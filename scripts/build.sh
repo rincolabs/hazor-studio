@@ -203,15 +203,16 @@ if [[ "$DO_BUILD" == "1" ]]; then
     if [[ "${HAZOR_ENABLE_RAWENGINE:-AUTO}" != "OFF" && -d "$RAWENGINE_DEPS_DIR/exiv2" ]]; then
         local_rawengine=ON
     fi
-    # Experimental local Stable Diffusion panel: a developer-only probe, so it is
-    # opt-in through the environment and restricted to the host Linux target.
+    # Experimental local Stable Diffusion panel: enabled by default for the host
+    # Linux developer build and restricted to that target. Set
+    # HAZOR_ENABLE_STABLE_DIFFUSION=OFF to leave it out explicitly.
     # The flag is also refused for any packaging run, because the panel embeds an
     # absolute model path and must not reach a distributable: the environment
     # variable would otherwise be enough to put it inside an AppImage, and
     # verify_no_local_paths() only looks for the source tree's own path, not an
     # arbitrary one baked into a string constant.
     local_stable_diffusion=OFF
-    if [[ "${HAZOR_ENABLE_STABLE_DIFFUSION:-OFF}" == "ON" ]]; then
+    if [[ "${HAZOR_ENABLE_STABLE_DIFFUSION:-ON}" == "ON" ]]; then
         if [[ "$TARGET" != "linux-x86_64" ]]; then
             log "HAZOR_ENABLE_STABLE_DIFFUSION is ignored for $TARGET (host Linux only)"
         elif [[ "$PACKAGE_FORMAT" != "none" ]]; then
@@ -220,11 +221,9 @@ if [[ "$DO_BUILD" == "1" ]]; then
             local_stable_diffusion=ON
         fi
     fi
-    # Which ggml backend the module compiles against. CPU needs nothing extra;
-    # VULKAN and CUDA need a toolchain this script does not try to install, and
-    # CMake falls back to CPU with a warning when it is absent, so a wrong value
-    # here costs a slow generation rather than a failed build.
-    local_sd_backend="${HAZOR_SD_BACKEND:-CPU}"
+    # Which ggml backend the module compiles against. CUDA is the developer
+    # default; CMake falls back to CPU with a warning when nvcc is absent.
+    local_sd_backend="${HAZOR_SD_BACKEND:-CUDA}"
     local_sd_backend="${local_sd_backend^^}"
     if [[ "$local_stable_diffusion" != "ON" && -n "${HAZOR_SD_BACKEND:-}" ]]; then
         log "HAZOR_SD_BACKEND is ignored without HAZOR_ENABLE_STABLE_DIFFUSION=ON"
