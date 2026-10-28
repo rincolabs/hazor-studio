@@ -218,6 +218,20 @@ function installPointerCorrections(
   canvasInstance: LGraphCanvas,
   element: HTMLCanvasElement,
 ): void {
+  const processContextMenu = canvasInstance.processContextMenu
+  canvasInstance.processContextMenu = function (node, event): void {
+    const mouseEvent = event as MouseEvent
+    // LiteGraph 0.7.18 routes `pointer_is_double` through the same branch as a
+    // right click (`e.which == 3 || this.pointer_is_double`). When that state
+    // remains set after a missed mouse-up, an ordinary left click opens the
+    // node menu. The menu itself has one unambiguous contract: it opens only
+    // for the secondary mouse button.
+    if (mouseEvent.button !== 2 && mouseEvent.which !== 3) {
+      return
+    }
+    processContextMenu.call(this, node, event)
+  }
+
   const toBackingStore = (event: MouseEvent): [number, number] => {
     const rect = element.getBoundingClientRect()
     const ratio = rect.width > 0 ? element.width / rect.width : 1
