@@ -1372,6 +1372,8 @@ if(STABLE_DIFFUSION_FOUND)
         # Workflow
         src/ai/sd/SdWorkflow.hpp
         src/ai/sd/SdWorkflow.cpp
+        src/ai/sd/SdNodeCatalog.hpp
+        src/ai/sd/SdNodeCatalog.cpp
         src/ai/sd/SdWorkflowValidator.hpp
         src/ai/sd/SdWorkflowValidator.cpp
         src/ai/sd/SdWorkflowExecutor.hpp
@@ -1384,6 +1386,130 @@ if(STABLE_DIFFUSION_FOUND)
         src/ui/StableDiffusionPanel.cpp
     )
     target_link_libraries(Hazor PRIVATE stable-diffusion)
+endif()
+
+# ── embedded-ui: the Vue interfaces hosted in Qt WebEngine ────
+# One Vite project (embedded-ui/) holds the web interfaces Hazor embeds, and its
+# build output is compiled into the binary as a Qt resource. That is what lets
+# the editor load with no HTTP server, no Vite dev server and no network access,
+# and it keeps node_modules out of anything distributed.
+#
+# Node.js is a developer requirement only: the resource is baked into the
+# binary, so the end user needs neither Node nor npm. A prebuilt embedded-ui/dist
+# is used as-is when npm is absent, which is what makes a source tarball with the
+# dist included buildable without a JavaScript toolchain.
+#
+# Currently consumed only by the Neural Flow panel, so it follows the Stable
+# Diffusion module: there is nothing to host without it.
+option(ENABLE_EMBEDDED_UI
+    "Compile the Vue interfaces under embedded-ui/ into the binary" ON)
+
+set(EMBEDDED_UI_FOUND OFF)
+if(ENABLE_EMBEDDED_UI AND STABLE_DIFFUSION_FOUND)
+    set(EMBEDDED_UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/embedded-ui")
+    set(EMBEDDED_UI_DIST "${EMBEDDED_UI_DIR}/dist")
+    set(EMBEDDED_UI_WORK "${CMAKE_CURRENT_BINARY_DIR}/embedded-ui")
+    set(EMBEDDED_UI_QRC "${EMBEDDED_UI_WORK}/embedded-ui.qrc")
+    set(EMBEDDED_UI_RCC "${EMBEDDED_UI_WORK}/qrc_embedded_ui.cpp")
+    file(MAKE_DIRECTORY "${EMBEDDED_UI_WORK}")
+
+    find_program(NPM_EXECUTABLE NAMES npm npm.cmd
+        DOC "npm, used to build the embedded web interfaces under embedded-ui/")
+
+    if(NPM_EXECUTABLE)
+        # CONFIGURE_DEPENDS so a file added under embedded-ui/src is noticed
+        # without a manual re-configure: these are the inputs of a generator,
+        # not a hand-maintained source list.
+        file(GLOB_RECURSE EMBEDDED_UI_SOURCES CONFIGURE_DEPENDS
+            "${EMBEDDED_UI_DIR}/src/*")
+        list(APPEND EMBEDDED_UI_SOURCES
+            "${EMBEDDED_UI_DIR}/package.json"
+            "${EMBEDDED_UI_DIR}/tsconfig.json"
+            "${EMBEDDED_UI_DIR}/vite.config.ts")
+
+        # `npm ci` is its own step with its own stamp, keyed on the lockfile:
+        # installing on every C++ build would add seconds to each one and would
+        # make the build depend on the network.
+        add_custom_command(
+            OUTPUT "${EMBEDDED_UI_WORK}/npm-ci.stamp"
+            COMMAND "${NPM_EXECUTABLE}" ci --no-audit --no-fund
+            COMMAND "${CMAKE_COMMAND}" -E touch "${EMBEDDED_UI_WORK}/npm-ci.stamp"
+            WORKING_DIRECTORY "${EMBEDDED_UI_DIR}"
+            DEPENDS "${EMBEDDED_UI_DIR}/package-lock.json"
+                    "${EMBEDDED_UI_DIR}/package.json"
+            COMMENT "embedded-ui: installing frontend dependencies (npm ci)"
+            VERBATIM)
+
+        add_custom_command(
+            OUTPUT "${EMBEDDED_UI_WORK}/npm-build.stamp"
+            COMMAND "${NPM_EXECUTABLE}" run build
+            COMMAND "${CMAKE_COMMAND}" -E touch "${EMBEDDED_UI_WORK}/npm-build.stamp"
+            WORKING_DIRECTORY "${EMBEDDED_UI_DIR}"
+            DEPENDS "${EMBEDDED_UI_WORK}/npm-ci.stamp" ${EMBEDDED_UI_SOURCES}
+            COMMENT "embedded-ui: building the web interfaces (vite build)"
+            VERBATIM)
+
+        set(EMBEDDED_UI_QRC_DEPENDS "${EMBEDDED_UI_WORK}/npm-build.stamp")
+    elseif(EXISTS "${EMBEDDED_UI_DIST}/neural-flow/index.html")
+        message(STATUS
+            "embedded-ui: npm was not found; using the prebuilt build in "
+            "'${EMBEDDED_UI_DIST}'. Changes under embedded-ui/src will not be picked up.")
+        set(EMBEDDED_UI_QRC_DEPENDS "")
+    else()
+        # A warning rather than an error, for the same reason the Stable
+        # Diffusion backends degrade instead of failing: a missing developer
+        # tool must not be able to stop Hazor from building. The Neural Flow
+        # panel is simply not compiled, and the button that opens it is not
+        # added to the Stable Diffusion panel.
+        message(WARNING
+            "ENABLE_EMBEDDED_UI is ON but npm was not found and no prebuilt build exists at "
+            "'${EMBEDDED_UI_DIST}'. Building without the Neural Flow editor — install "
+            "Node.js, or run `npm ci && npm run build` in embedded-ui/ on a machine that has it.")
+    endif()
+
+    if(DEFINED EMBEDDED_UI_QRC_DEPENDS)
+        add_custom_command(
+            OUTPUT "${EMBEDDED_UI_QRC}"
+            COMMAND "${CMAKE_COMMAND}"
+                    -DDIST_DIR=${EMBEDDED_UI_DIST}
+                    -DQRC_FILE=${EMBEDDED_UI_QRC}
+                    -DRESOURCE_PREFIX=/embedded-ui
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedUiQrc.cmake"
+            DEPENDS ${EMBEDDED_UI_QRC_DEPENDS}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedUiQrc.cmake"
+            COMMENT "embedded-ui: listing the build output for rcc"
+            VERBATIM)
+
+        # rcc is invoked explicitly rather than through AUTORCC: the .qrc does
+        # not exist until the frontend has been built, and AUTORCC resolves its
+        # inputs too early to wait for that.
+        add_custom_command(
+            OUTPUT "${EMBEDDED_UI_RCC}"
+            COMMAND "$<TARGET_FILE:Qt6::rcc>" --name embedded_ui
+                    --output "${EMBEDDED_UI_RCC}" "${EMBEDDED_UI_QRC}"
+            DEPENDS "${EMBEDDED_UI_QRC}"
+            COMMENT "embedded-ui: compiling the interfaces into a Qt resource"
+            VERBATIM)
+        # Nothing in rcc's output declares a QObject, and the generated file is
+        # megabytes of byte arrays; keep the autogen passes off it.
+        set_source_files_properties("${EMBEDDED_UI_RCC}" PROPERTIES
+            SKIP_AUTOGEN ON GENERATED ON)
+
+        set(EMBEDDED_UI_FOUND ON)
+    endif()
+endif()
+
+if(EMBEDDED_UI_FOUND)
+    target_compile_definitions(Hazor PRIVATE HAVE_NEURAL_FLOW=1)
+    target_sources(Hazor PRIVATE
+        "${EMBEDDED_UI_RCC}"
+        # Qt WebChannel surface + the dock that hosts the page. The existing
+        # WebViewHost does the embedding; nothing new is added for that.
+        src/ui/NeuralFlowBridge.hpp
+        src/ui/NeuralFlowBridge.cpp
+        src/ui/NeuralFlowPanel.hpp
+        src/ui/NeuralFlowPanel.cpp
+    )
 endif()
 
 # Theme sources — object library for reuse by tests
@@ -1403,6 +1529,8 @@ set(THEME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/theme/ThemeBuilder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/theme/ScrollBarStyle.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/theme/ScrollBarStyle.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/theme/WebThemeVariables.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/theme/WebThemeVariables.cpp
 )
 add_library(theme_lib STATIC ${THEME_SOURCES})
 target_include_directories(theme_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

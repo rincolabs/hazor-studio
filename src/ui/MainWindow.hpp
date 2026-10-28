@@ -67,6 +67,7 @@ class BrushImportManager;
 class ColorEngine;
 class GenerativeFillDialog;
 class StableDiffusionPanel;
+class NeuralFlowPanel;
 class AiObjectSelectionController;
 struct AiCompatibilityMessage;
 struct DocumentSettings;
@@ -420,6 +421,8 @@ private:
     void updateToolBarLayout();
     void syncGenerativeFillPanelController();
     void syncStableDiffusionPanelController();
+    // Opens the Neural Flow node editor, or raises it when it is already open.
+    void onOpenNeuralFlow();
     void applyViewportStatusBarTheme();
     void showViewportStatusMessage(const QString& message, int timeoutMs,
                                    const QString& iconPath = QString());
@@ -638,6 +641,11 @@ private:
     // every packaged build and each use site is a plain null check.
     QDockWidget* m_stableDiffusionDock = nullptr;
     StableDiffusionPanel* m_stableDiffusionPanel = nullptr;
+    // Neural Flow node editor: built only when the Stable Diffusion module and
+    // the compiled embedded interfaces are both present (HAVE_NEURAL_FLOW), so
+    // the same plain null check covers a build without either.
+    QDockWidget* m_neuralFlowDock = nullptr;
+    NeuralFlowPanel* m_neuralFlowPanel = nullptr;
 
     // Right-side panel docks (each individually dockable) + the on-demand
     // floating Brush Settings dock. Held as members so resetDockLayout() can

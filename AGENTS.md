@@ -110,8 +110,8 @@ src/
 ├── io/            ImageIO (open/export), ImageCodec, ProjectFileService (.hzr)
 ├── ai/            ONNX inference: SAM selection, matting, inpaint, upscale
 │   └── sd/        Local Stable Diffusion (stable-diffusion.cpp): model registry,
-│                  runtime, generation service, job controller, workflow executor.
-│                  Optional, ENABLE_STABLE_DIFFUSION
+│                  runtime, generation service, job controller, workflow executor,
+│                  node catalog. Optional, ENABLE_STABLE_DIFFUSION
 ├── agent/         Chat agent: AgentController, LLMClient, AgentPanel
 ├── tools/         ToolCatalog + ToolExecutor — the tool surface shared by the
 │                  chat agent and the MCP server
@@ -120,6 +120,11 @@ src/
 ├── theme/         Semantic theme system (Theme, ThemeManager, builders)
 ├── cache/ async/ memory/   RenderCache, AsyncJobSystem, memory helpers
 └── resources/     Qt resources, generated shape SVGs
+
+embedded-ui/       Vue 3 + TypeScript interfaces hosted in Qt WebEngine, built by
+                   Vite and compiled into the binary as a Qt resource. One
+                   project, one entry point per panel (Neural Flow, the node
+                   editor). Optional, ENABLE_EMBEDDED_UI
 
 docs/              BUILD.md, MCP.md, RENDER-PIPELINE.md
 scripts/           build.sh, run.sh, tests.sh, run-tests.sh
@@ -180,6 +185,9 @@ under `src/renderer/`.
 
 8. **No hardcoded colours in UI or canvas code.** Everything comes from the
    active [`Theme`](src/theme/Theme.hpp) via `ThemeManager::instance()->current()`.
+   The embedded web interfaces get the same values through
+   [`WebThemeVariables.cpp`](src/theme/WebThemeVariables.cpp), which is the one
+   translation of a `Theme` into web values — not one per panel.
 
 9. **One source of version truth:** `project(... VERSION ...)` in
    [`CMakeLists.txt`](CMakeLists.txt) → generated `Version.hpp`. Never hardcode
@@ -189,6 +197,15 @@ under `src/renderer/`.
     must run with `ENABLE_ONNXRUNTIME=OFF`; the AI layer reports itself
     unavailable at runtime. CPU/CUDA/TensorRT are *runtime* execution
     providers, never separate builds.
+
+11. **The Stable Diffusion node contract has one owner.**
+    [`SdNodeCatalog.cpp`](src/ai/sd/SdNodeCatalog.cpp) holds every node
+    property's kind, default and range; [`SdWorkflowValidator`](src/ai/sd/SdWorkflowValidator.cpp)
+    checks against it, [`SdWorkflowExecutor`](src/ai/sd/SdWorkflowExecutor.cpp)
+    takes its fallbacks from it, and the Neural Flow frontend builds its widgets
+    out of the JSON it serialises to. Restating a default or a bound in any of
+    those three is how a spinner ends up offering a value the validator rejects.
+    The frontend keeps no catalog of its own and implements no validation.
 
 ---
 
@@ -281,3 +298,6 @@ Update docs in the same change as the code:
 | Colour management | [`src/color/`](src/color/) |
 | Menus, panels, dialogs, shortcuts | [`MainWindow.cpp`](src/ui/MainWindow.cpp), [`MainWindow_Menus.cpp`](src/ui/MainWindow_Menus.cpp), [`src/ui/`](src/ui/) |
 | Agent / automation surface | [`ToolCatalog.cpp`](src/tools/ToolCatalog.cpp), [`ToolExecutor.cpp`](src/tools/ToolExecutor.cpp), [`AgentController.cpp`](src/agent/AgentController.cpp), [`McpServer.cpp`](src/mcp/McpServer.cpp) |
+| Local image generation, workflows, node contract | [`src/ai/sd/`](src/ai/sd/) — [`SdNodeCatalog.cpp`](src/ai/sd/SdNodeCatalog.cpp), [`SdWorkflowValidator.cpp`](src/ai/sd/SdWorkflowValidator.cpp), [`SdWorkflowExecutor.cpp`](src/ai/sd/SdWorkflowExecutor.cpp) |
+| Neural Flow node editor | [`embedded-ui/src/neural-flow/`](embedded-ui/src/neural-flow/), [`NeuralFlowBridge.cpp`](src/ui/NeuralFlowBridge.cpp), [`NeuralFlowPanel.cpp`](src/ui/NeuralFlowPanel.cpp) |
+| Embedded web interfaces (build, hosting) | [`embedded-ui/README.md`](embedded-ui/README.md), [`WebViewHost.cpp`](src/ui/WebViewHost.cpp), [`cmake/GenerateEmbeddedUiQrc.cmake`](cmake/GenerateEmbeddedUiQrc.cmake) |

@@ -6,12 +6,50 @@
 #include <QWebEnginePage>
 #include <QWebEngineView>
 
+#include <functional>
+#include <utility>
+
+namespace {
+
+// The only way to see a page's console output: javaScriptConsoleMessage() is a
+// virtual on the page, not a signal, so forwarding it needs a subclass.
+class ConsoleForwardingPage : public QWebEnginePage {
+public:
+    using Forwarder = std::function<void(int, const QString&, int, const QString&)>;
+
+    ConsoleForwardingPage(Forwarder forward, QObject* parent)
+        : QWebEnginePage(parent), m_forward(std::move(forward))
+    {}
+
+protected:
+    void javaScriptConsoleMessage(JavaScriptConsoleMessageLevel level, const QString& message,
+                                  int lineNumber, const QString& sourceId) override
+    {
+        if (m_forward)
+            m_forward(static_cast<int>(level), message, lineNumber, sourceId);
+    }
+
+private:
+    Forwarder m_forward;
+};
+
+} // namespace
+
 WebViewHost::WebViewHost(QWidget* parent)
     : QWidget(parent), m_view(new QWebEngineView(this))
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(m_view);
+
+    // Installed before anything is loaded, and parented to the view so it
+    // shares its lifetime. setPage() disposes of the one the view made for
+    // itself, which has not been used for anything yet.
+    m_view->setPage(new ConsoleForwardingPage(
+        [this](int level, const QString& message, int lineNumber, const QString& sourceId) {
+            emit consoleMessage(level, message, lineNumber, sourceId);
+        },
+        m_view));
 
     connect(m_view->page(), &QWebEnginePage::loadingChanged, this,
             [this](const QWebEngineLoadingInfo& info) {

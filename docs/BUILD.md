@@ -16,6 +16,7 @@ builds share pinned component versions through
 | zlib | — | Brush import (`.kpp` / `.bundle`) |
 | OpenGL | 3.3 Core | Runtime GPU viewport |
 | ONNX Runtime | 1.26.x | **Optional** — enables AI selection / background removal |
+| Node.js + npm | Node ≥ 20.19 | **Optional, developers only** — builds the embedded web interfaces in [`embedded-ui/`](../embedded-ui/); the output is compiled into the binary, so the end user needs neither |
 | zlib, libjpeg-turbo, libpng, libtiff, expat, lcms2, fftw3f (+threads), exiv2, lensfun | — | **Optional** — [`src/rawengine/`](../src/rawengine/) (native RAW engine); all 9 are vendored under `3rdparty/rawengine/`, independent of Hazor's own system `zlib`/OpenCV above, so RawEngine's dependency versions never drift with the host system |
 
 The target-aware scripts additionally require `ninja`, `git`, `curl`,
@@ -500,6 +501,12 @@ which runs a fixed `txt2img` workflow through
 [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
 and inserts the result as an ordinary pixel layer.
 
+The same workflow executor also backs **Neural Flow**, the node editor opened
+from that panel's *Neural Flow* button. Its interface is a Vue application
+compiled into the binary — see
+[Embedded web interfaces](#embedded-web-interfaces-embedded-ui-optional-developer-toolchain)
+below.
+
 It is still development-only, **not** a shipped feature:
 `ENABLE_STABLE_DIFFUSION` defaults to `OFF`, and with `OFF` none of its source
 files are compiled and no link edge exists, so AppImage, Flatpak, Windows and
@@ -613,6 +620,53 @@ HAZOR_SD_MODEL=/models/v1-5-pruned-emaonly.safetensors \
 No absolute model path is committed in the source — it would be valid on
 exactly one machine. With nothing registered, the panel reports that no model
 is available and names the registry file.
+
+### Embedded web interfaces (`embedded-ui/`) — *optional, developer toolchain*
+
+The Vue 3 + TypeScript interfaces Hazor embeds through Qt WebEngine live in
+[`embedded-ui/`](../embedded-ui/) — currently the **Neural Flow** node editor,
+opened from the Stable Diffusion panel. One Vite project with one entry point
+per panel, not one Node project per panel.
+
+The build output is compiled into the Hazor binary as a Qt resource, which is
+what lets the editor load with no HTTP server, no Vite dev server and no
+network access, and keeps `node_modules` out of everything distributed.
+
+Build it on its own:
+
+```bash
+cd embedded-ui
+npm ci
+npm run build          # vue-tsc --noEmit && vite build
+```
+
+CMake does the same thing as part of the Hazor build, in four steps:
+
+1. `npm ci`, keyed on `package-lock.json` through a stamp file — **not** on
+   every C++ build. This step needs network access the first time a build
+   directory is configured.
+2. `npm run build`, keyed on everything under `embedded-ui/src` plus
+   `package.json`, `tsconfig.json` and `vite.config.ts`.
+3. [`cmake/GenerateEmbeddedUiQrc.cmake`](../cmake/GenerateEmbeddedUiQrc.cmake)
+   lists `embedded-ui/dist` into a generated `.qrc`. Generated rather than
+   committed because Vite's asset names carry a content hash.
+4. `rcc` compiles that into the binary under the `/embedded-ui` prefix, so the
+   panel loads `qrc:/embedded-ui/neural-flow/index.html`.
+
+`rcc` is invoked explicitly instead of through `AUTORCC`, because the `.qrc`
+does not exist until the frontend has been built and `AUTORCC` resolves its
+inputs too early to wait for that.
+
+`ENABLE_EMBEDDED_UI` defaults to `ON` but only does anything when
+`ENABLE_STABLE_DIFFUSION` is also on, since the node editor is currently its
+only consumer. With npm absent, an existing `embedded-ui/dist` is used as-is —
+which is what makes a source tree with the build output included compilable
+without a JavaScript toolchain. With neither, CMake warns and builds Hazor
+without the Neural Flow panel; the button that opens it is then not added to
+the Stable Diffusion panel.
+
+`embedded-ui/node_modules` and `embedded-ui/dist` are build artefacts and are
+not tracked in git.
 
 ### Bundled ONNX models (optional, cross-platform)
 
@@ -746,6 +800,7 @@ cmake --build build -j"$(nproc)" --target Hazor
 | `SD_CPP_SOURCE_DIR` | `3rdparty/stable-diffusion.cpp` | Where `ENABLE_STABLE_DIFFUSION` looks for the pinned checkout |
 | `HAZOR_SD_BACKEND` | `CPU` | ggml backend compiled into the Stable Diffusion module: `CPU`, `VULKAN` or `CUDA`; falls back to `CPU` with a warning when the toolchain is absent |
 | `HAZOR_SD_VULKAN_MIN_HEADER_VERSION` | `272` | Minimum `VK_HEADER_VERSION` accepted by `HAZOR_SD_BACKEND=VULKAN` |
+| `ENABLE_EMBEDDED_UI` | `ON` | Compile the Vue interfaces in [`embedded-ui/`](../embedded-ui/) into the binary (needs npm, or a prebuilt `dist`); only used when `ENABLE_STABLE_DIFFUSION` is on |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |
 | `HAZOR_STRICT_DEPENDENCIES` | `OFF` | Reject app dependencies outside `HAZOR_DEPENDENCY_ROOT` |
 | `HAZOR_DEVELOPMENT_PATHS` | `ON` | Embed source-tree fallback paths for local development only |

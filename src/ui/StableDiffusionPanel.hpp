@@ -26,6 +26,10 @@ struct SdWorkflowRunResult;
 // button now goes through the workflow controller rather than calling the
 // engine directly, which is what keeps that path exercised: parse, validate,
 // resolve, generate, insert.
+//
+// The one thing here that is not a test harness is the Neural Flow button: it
+// is how the node editor is opened, so it is present whenever that panel was
+// built (HAVE_NEURAL_FLOW).
 class StableDiffusionPanel : public QWidget {
     Q_OBJECT
 public:
@@ -35,6 +39,12 @@ public:
     // (Re)binds the panel to the active document's controller; nullptr means no
     // document is open. Same lifecycle as the other right-side panels.
     void setController(ImageController* ctrl);
+
+signals:
+    // The user asked for the node editor. MainWindow owns the dock, so the
+    // panel only reports the intent — opening it from here would mean this
+    // widget knowing about the docking system.
+    void neuralFlowRequested();
 
 private:
     void buildUi();
@@ -50,4 +60,6 @@ private:
     QLabel* m_title = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_generateBtn = nullptr;
+    // Only built when the embedded interfaces are compiled in; null otherwise.
+    QPushButton* m_neuralFlowBtn = nullptr;
 };

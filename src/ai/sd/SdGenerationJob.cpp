@@ -2,6 +2,7 @@
 
 #include "ai/sd/SdGenerationService.hpp"
 
+#include <QAtomicInt>
 #include <QCoreApplication>
 #include <QDebug>
 #include <QMetaObject>
@@ -14,6 +15,14 @@ QString tr_(const char* text)
 {
     return QCoreApplication::translate("StableDiffusion", text);
 }
+
+// The one generation slot there is, held by whichever job is running.
+//
+// Per process rather than per job: SdRuntime owns a single sd_ctx, so two jobs
+// running at once would both be inside generate_image() on the same context.
+// Atomic because the claim is made on the GUI thread while a worker thread may
+// be releasing it.
+QAtomicInt s_generationSlot { 0 };
 
 } // namespace
 
@@ -39,9 +48,20 @@ void SdGenerationJob::shutdown()
     SdGenerationService::instance().requestCancel();
     m_pool.waitForDone();
     m_running = false;
+    // The queued completion below may never be delivered now, so the slot has
+    // to be returned here instead.
+    releaseSlot();
     // Safe now: the worker is gone, so no generation can be holding the
     // context the service is about to free.
     SdGenerationService::instance().shutdown();
+}
+
+void SdGenerationJob::releaseSlot()
+{
+    if (!m_holdsSlot)
+        return;
+    m_holdsSlot = false;
+    s_generationSlot.storeRelease(0);
 }
 
 void SdGenerationJob::setState(SdGenerationState state, const QString& detail)
@@ -67,6 +87,14 @@ bool SdGenerationJob::start(const SdGenerationRequest& request, QString* refusal
         return false;
     }
 
+    // Claimed after validation, which has no side effects, and before a thread
+    // exists: whoever wins this is the only run in the process.
+    if (!s_generationSlot.testAndSetAcquire(0, 1)) {
+        if (refusal)
+            *refusal = tr_("A generation is already running.");
+        return false;
+    }
+    m_holdsSlot = true;
     m_running = true;
     setState(SdGenerationState::Loading, request.load.files.modelId);
 
@@ -94,6 +122,7 @@ bool SdGenerationJob::start(const SdGenerationRequest& request, QString* refusal
         // as a registered metatype.
         QMetaObject::invokeMethod(this, [this, result]() {
             m_running = false;
+            releaseSlot();
             setState(result.state, result.error);
             emit finished(result);
         }, Qt::QueuedConnection);

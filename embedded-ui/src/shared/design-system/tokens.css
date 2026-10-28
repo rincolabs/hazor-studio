@@ -1,0 +1,48 @@
+/*
+ * Design tokens for Hazor's embedded interfaces.
+ *
+ * The colours are placeholders. Every one of them is overwritten at runtime
+ * from the active Hazor theme, which arrives over the Qt WebChannel as a flat
+ * map (src/theme/WebThemeVariables.cpp) and is written onto this same custom
+ * property set. What is here is what the page looks like for the few
+ * milliseconds before the bridge answers, and what it looks like under
+ * `npm run dev` outside Hazor.
+ *
+ * The non-colour tokens are not themed and so are the real values.
+ *
+ * This is deliberately not a design system. It is the smallest set of names
+ * that keeps two panels from inventing their own spacing scale.
+ */
+:root {
+  /* ── Themed: replaced from Hazor's Theme ──────────────────────────────── */
+  --hz-background: #1b1b1b;
+  --hz-surface: #252525;
+  --hz-surface-dark: #1e1e1e;
+  --hz-surface-hover: #2f2f2f;
+  --hz-surface-selected: #343434;
+  --hz-text: #d8d8d8;
+  --hz-text-bright: #f2f2f2;
+  --hz-text-secondary: #9a9a9a;
+  --hz-text-disabled: #6a6a6a;
+  --hz-border: #3a3a3a;
+  --hz-border-focus: #5a8dd6;
+  --hz-accent: #4f8cc9;
+  --hz-accent-hover: #5e9bd8;
+  --hz-danger: #d05a5a;
+  --hz-success: #5aa469;
+  --hz-warning: #c79a3c;
+  --hz-font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  --hz-font-family-mono: "JetBrains Mono", "Consolas", monospace;
+  --hz-font-size: 13px;
+  --hz-radius: 4px;
+
+  /* ── Fixed ────────────────────────────────────────────────────────────── */
+  --hz-font-size-sm: 11px;
+  --hz-font-size-lg: 15px;
+  --hz-space-1: 4px;
+  --hz-space-2: 8px;
+  --hz-space-3: 12px;
+  --hz-space-4: 16px;
+  --hz-radius-sm: 3px;
+  --hz-control-height: 24px;
+}

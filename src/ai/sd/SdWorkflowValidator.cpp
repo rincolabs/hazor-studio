@@ -2,6 +2,7 @@
 
 #include "ai/sd/SdGenerationService.hpp"
 #include "ai/sd/SdModelManager.hpp"
+#include "ai/sd/SdNodeCatalog.hpp"
 
 #include <QCoreApplication>
 #include <QHash>
@@ -32,6 +33,15 @@ void addError(QVector<SdWorkflowError>& errors, SdWorkflowErrorCode code,
 
 // ── Property checking ───────────────────────────────────────────────────────
 //
+// Kinds, ranges and defaults come from SdNodeCatalog rather than from literals
+// here: the executor takes its fallbacks from the same table and the Neural
+// Flow frontend builds its widgets out of it, so a bound restated in this file
+// is a bound that will eventually disagree with the spinner offering it.
+//
+// What stays here is everything a spec cannot express — the library's own
+// sampler and scheduler parsers, and whether a model id resolves to files that
+// exist on this machine.
+//
 // The executor reads these same keys without re-checking them, so everything it
 // relies on has to be rejected here: that invariant is what keeps the executor
 // free of error paths for values it cannot do anything about.
@@ -60,62 +70,51 @@ bool checkBool(const QJsonObject& props, const QString& key, const QString& node
     return false;
 }
 
-bool checkInt(const QJsonObject& props, const QString& key, int minimum, int maximum,
-              const QString& nodeId, QVector<SdWorkflowError>& errors)
+// Int and Number share this: the only difference is whether the bound is
+// reported as an integer and whether the multiple-of constraint applies.
+bool checkNumber(const QJsonObject& props, const SdPropertySpec& spec, const QString& nodeId,
+                 QVector<SdWorkflowError>& errors)
 {
-    if (!props.contains(key))
+    if (!props.contains(spec.key))
         return true;
-    const QJsonValue value = props.value(key);
+    const QJsonValue value = props.value(spec.key);
     if (!value.isDouble()) {
         addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                 tr_("\"%1\" must be a number.").arg(key), nodeId);
+                 tr_("\"%1\" must be a number.").arg(spec.key), nodeId);
         return false;
     }
-    const int number = value.toInt();
-    if (number < minimum || number > maximum) {
-        addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                 tr_("\"%1\" must be between %2 and %3 (got %4).")
-                     .arg(key).arg(minimum).arg(maximum).arg(number), nodeId);
-        return false;
-    }
-    return true;
-}
 
-bool checkDouble(const QJsonObject& props, const QString& key, double minimum, double maximum,
-                 const QString& nodeId, QVector<SdWorkflowError>& errors)
-{
-    if (!props.contains(key))
+    if (spec.kind == SdPropertyKind::Int) {
+        const int number = value.toInt();
+        if (number < spec.minimum || number > spec.maximum) {
+            addError(errors, SdWorkflowErrorCode::InvalidProperty,
+                     tr_("\"%1\" must be between %2 and %3 (got %4).")
+                         .arg(spec.key)
+                         .arg(static_cast<int>(spec.minimum))
+                         .arg(static_cast<int>(spec.maximum))
+                         .arg(number),
+                     nodeId);
+            return false;
+        }
+        // A latent dimension has to be a positive multiple of 8: the VAE
+        // downsamples by that factor, and anything else is silently rounded
+        // somewhere inside the pipeline rather than rejected.
+        if (spec.multipleOf > 0 && number % spec.multipleOf != 0) {
+            addError(errors, SdWorkflowErrorCode::InvalidProperty,
+                     tr_("\"%1\" must be a multiple of %2 (got %3).")
+                         .arg(spec.key).arg(spec.multipleOf).arg(number),
+                     nodeId);
+            return false;
+        }
         return true;
-    const QJsonValue value = props.value(key);
-    if (!value.isDouble()) {
-        addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                 tr_("\"%1\" must be a number.").arg(key), nodeId);
-        return false;
     }
+
     const double number = value.toDouble();
-    if (number < minimum || number > maximum) {
+    if (number < spec.minimum || number > spec.maximum) {
         addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                 tr_("\"%1\" must be between %2 and %3.").arg(key).arg(minimum).arg(maximum),
+                 tr_("\"%1\" must be between %2 and %3.")
+                     .arg(spec.key).arg(spec.minimum).arg(spec.maximum),
                  nodeId);
-        return false;
-    }
-    return true;
-}
-
-// A latent dimension has to be a positive multiple of 8: the VAE downsamples by
-// that factor, and anything else is silently rounded somewhere inside the
-// pipeline rather than rejected.
-bool checkDimension(const QJsonObject& props, const QString& key, const QString& nodeId,
-                    QVector<SdWorkflowError>& errors)
-{
-    if (!checkInt(props, key, 8, 8192, nodeId, errors))
-        return false;
-    if (!props.contains(key))
-        return true;
-    const int value = props.value(key).toInt();
-    if (value % 8 != 0) {
-        addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                 tr_("\"%1\" must be a multiple of 8 (got %2).").arg(key).arg(value), nodeId);
         return false;
     }
     return true;
@@ -124,10 +123,9 @@ bool checkDimension(const QJsonObject& props, const QString& key, const QString&
 // Seeds are strings: a 64-bit seed does not survive JSON's double, and the
 // library writes its own the same way. A number is accepted too, for documents
 // written by hand.
-bool checkSeed(const QJsonObject& props, const QString& nodeId,
+bool checkSeed(const QJsonObject& props, const QString& key, const QString& nodeId,
                QVector<SdWorkflowError>& errors)
 {
-    const QString key = QStringLiteral("seed");
     if (!props.contains(key))
         return true;
     const QJsonValue value = props.value(key);
@@ -140,27 +138,95 @@ bool checkSeed(const QJsonObject& props, const QString& nodeId,
             return true;
     }
     addError(errors, SdWorkflowErrorCode::InvalidProperty,
-             tr_("\"seed\" must be an integer, optionally written as a string."), nodeId);
+             tr_("\"%1\" must be an integer, optionally written as a string.").arg(key),
+             nodeId);
     return false;
+}
+
+bool checkEnum(const QJsonObject& props, const SdPropertySpec& spec, const QString& nodeId,
+               QVector<SdWorkflowError>& errors)
+{
+    if (!checkString(props, spec.key, nodeId, errors))
+        return false;
+    // Membership is only checkable here when the spec says its option list is
+    // the whole truth. Where a parser in the module decides instead, the
+    // per-type block below asks it and reports its own message.
+    if (!spec.strictOptions || !props.contains(spec.key))
+        return true;
+    const QString value = props.value(spec.key).toString().trimmed().toLower();
+    if (value.isEmpty() && spec.allowsEmpty)
+        return true;
+    if (spec.options.contains(value, Qt::CaseInsensitive))
+        return true;
+    addError(errors, SdWorkflowErrorCode::InvalidProperty,
+             tr_("Unknown %1 \"%2\" (use %3).")
+                 .arg(spec.label.toLower(), props.value(spec.key).toString(),
+                      spec.options.join(QStringLiteral(" or "))),
+             nodeId);
+    return false;
+}
+
+bool checkModelRefList(const QJsonObject& props, const SdPropertySpec& spec,
+                       const QString& nodeId, QVector<SdWorkflowError>& errors)
+{
+    const QJsonValue value = props.value(spec.key);
+    if (value.isUndefined() || value.isNull())
+        return true;
+    if (!value.isArray()) {
+        addError(errors, SdWorkflowErrorCode::InvalidProperty,
+                 tr_("\"%1\" must be an array of model ids.").arg(spec.key), nodeId);
+        return false;
+    }
+    for (const QJsonValue& entry : value.toArray()) {
+        if (!entry.isString()) {
+            addError(errors, SdWorkflowErrorCode::InvalidProperty,
+                     tr_("\"%1\" must contain only model ids.").arg(spec.key), nodeId);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool checkProperty(const QJsonObject& props, const SdPropertySpec& spec, const QString& nodeId,
+                   QVector<SdWorkflowError>& errors)
+{
+    switch (spec.kind) {
+    case SdPropertyKind::String:
+    case SdPropertyKind::Text:
+    // A model id is a string here; whether it names anything is the registry's
+    // answer to give, below.
+    case SdPropertyKind::ModelRef:
+        return checkString(props, spec.key, nodeId, errors);
+    case SdPropertyKind::Bool:
+        return checkBool(props, spec.key, nodeId, errors);
+    case SdPropertyKind::Int:
+    case SdPropertyKind::Number:
+        return checkNumber(props, spec, nodeId, errors);
+    case SdPropertyKind::Seed:
+        return checkSeed(props, spec.key, nodeId, errors);
+    case SdPropertyKind::Enum:
+        return checkEnum(props, spec, nodeId, errors);
+    case SdPropertyKind::ModelRefList:
+        return checkModelRefList(props, spec, nodeId, errors);
+    }
+    return true;
 }
 
 bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models,
                         QVector<SdWorkflowError>& errors)
 {
     const QJsonObject& p = node.properties;
+
+    // Kinds and ranges first, for every property the type declares. Nothing
+    // below may run against a value whose type is already wrong.
     bool ok = true;
+    for (const SdPropertySpec& spec : nodeProperties(node.type))
+        ok &= checkProperty(p, spec, node.id, errors);
+    if (!ok)
+        return false;
 
     switch (node.type) {
     case SdNodeType::Checkpoint: {
-        ok &= checkString(p, QStringLiteral("modelId"), node.id, errors);
-        ok &= checkString(p, QStringLiteral("vaeId"), node.id, errors);
-        ok &= checkString(p, QStringLiteral("weightType"), node.id, errors);
-        ok &= checkString(p, QStringLiteral("device"), node.id, errors);
-        ok &= checkInt(p, QStringLiteral("threads"), 0, 1024, node.id, errors);
-        ok &= checkBool(p, QStringLiteral("allowCpuFallback"), node.id, errors);
-        if (!ok)
-            return false;
-
         SdWeightType weightType = SdWeightType::Auto;
         const QString weightName = p.value(QStringLiteral("weightType")).toString();
         if (!weightTypeFromName(weightName, weightType)) {
@@ -180,22 +246,9 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         SdModelSelection selection;
         selection.modelId = p.value(QStringLiteral("modelId")).toString();
         selection.vaeId = p.value(QStringLiteral("vaeId")).toString();
-        const QJsonValue encoders = p.value(QStringLiteral("textEncoderIds"));
-        if (!encoders.isUndefined() && !encoders.isNull()) {
-            if (!encoders.isArray()) {
-                addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                         tr_("\"textEncoderIds\" must be an array of model ids."), node.id);
-                return false;
-            }
-            for (const QJsonValue& v : encoders.toArray()) {
-                if (!v.isString()) {
-                    addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                             tr_("\"textEncoderIds\" must contain only model ids."), node.id);
-                    return false;
-                }
-                selection.textEncoderIds << v.toString();
-            }
-        }
+        // Already known to be an array of strings, or absent.
+        for (const QJsonValue& entry : p.value(QStringLiteral("textEncoderIds")).toArray())
+            selection.textEncoderIds << entry.toString();
 
         // The whole point of validating before executing: a missing checkpoint
         // or a missing component is reported now, with the registry's own
@@ -209,10 +262,6 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         return ok;
     }
     case SdNodeType::Lora: {
-        ok &= checkString(p, QStringLiteral("modelId"), node.id, errors);
-        ok &= checkDouble(p, QStringLiteral("weight"), -10.0, 10.0, node.id, errors);
-        if (!ok)
-            return false;
         const QString modelId = p.value(QStringLiteral("modelId")).toString().trimmed();
         if (modelId.isEmpty()) {
             addError(errors, SdWorkflowErrorCode::InvalidProperty,
@@ -227,21 +276,9 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         }
         return true;
     }
-    case SdNodeType::Prompt:
-    case SdNodeType::NegativePrompt:
-        return checkString(p, QStringLiteral("text"), node.id, errors);
     case SdNodeType::Sampling: {
-        ok &= checkDimension(p, QStringLiteral("width"), node.id, errors);
-        ok &= checkDimension(p, QStringLiteral("height"), node.id, errors);
-        ok &= checkInt(p, QStringLiteral("steps"), 1, 1000, node.id, errors);
-        ok &= checkInt(p, QStringLiteral("clipSkip"), -1, 12, node.id, errors);
-        ok &= checkDouble(p, QStringLiteral("cfgScale"), 0.0, 100.0, node.id, errors);
-        ok &= checkDouble(p, QStringLiteral("denoisingStrength"), 0.0, 1.0, node.id, errors);
-        ok &= checkSeed(p, node.id, errors);
-        ok &= checkString(p, QStringLiteral("sampler"), node.id, errors);
-        ok &= checkString(p, QStringLiteral("scheduler"), node.id, errors);
-        if (!ok)
-            return false;
+        // The library's own vocabulary, asked of the library: str_to_*() is the
+        // only authority on what it will accept.
         const QString sampler = p.value(QStringLiteral("sampler")).toString();
         if (!SdGenerationService::isKnownSampler(sampler)) {
             addError(errors, SdWorkflowErrorCode::InvalidProperty,
@@ -256,35 +293,15 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         }
         return ok;
     }
-    case SdNodeType::InputImage: {
-        if (!checkString(p, QStringLiteral("source"), node.id, errors))
-            return false;
-        const QString source = p.value(QStringLiteral("source")).toString().trimmed().toLower();
-        if (!source.isEmpty() && source != QLatin1String("composite")
-            && source != QLatin1String("current_layer")) {
-            addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                     tr_("Unknown image source \"%1\" (use composite or current_layer).")
-                         .arg(source), node.id);
-            return false;
-        }
-        return true;
-    }
-    case SdNodeType::InputMask: {
-        if (!checkString(p, QStringLiteral("source"), node.id, errors))
-            return false;
-        const QString source = p.value(QStringLiteral("source")).toString().trimmed().toLower();
-        if (!source.isEmpty() && source != QLatin1String("selection")) {
-            addError(errors, SdWorkflowErrorCode::InvalidProperty,
-                     tr_("Unknown mask source \"%1\" (only selection is supported).")
-                         .arg(source), node.id);
-            return false;
-        }
-        return true;
-    }
+    // Nothing a spec could not already answer: their enums are strict and the
+    // generic pass checked them.
+    case SdNodeType::Prompt:
+    case SdNodeType::NegativePrompt:
+    case SdNodeType::InputImage:
+    case SdNodeType::InputMask:
     case SdNodeType::Generate:
-        return checkInt(p, QStringLiteral("batchCount"), 1, 16, node.id, errors);
     case SdNodeType::ImageOutput:
-        return checkString(p, QStringLiteral("layerName"), node.id, errors);
+        break;
     }
     return ok;
 }

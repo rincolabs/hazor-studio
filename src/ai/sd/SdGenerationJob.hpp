@@ -8,11 +8,14 @@
 
 // Keeps inference off the GUI thread and reports what it is doing.
 //
-// One generation at a time, on purpose: a second concurrent run would need a
-// second inference context, and the point of SdRuntime is that there is exactly
-// one. A request arriving while one is in flight is refused with a reason
-// rather than queued — a queue would let a user stack up ten multi-minute runs
-// with one impatient click.
+// One generation at a time per PROCESS, on purpose: a second concurrent run
+// would need a second inference context, and the point of SdRuntime is that
+// there is exactly one. The limit is enforced across instances rather than per
+// instance because more than one of these exists — the experimental Stable
+// Diffusion panel and the Neural Flow editor each own an executor, and both are
+// reachable at the same time. A request arriving while one is in flight is
+// refused with a reason rather than queued; a queue would let a user stack up
+// ten multi-minute runs with one impatient click.
 //
 // This is deliberately not a scheduler. No priorities, no queue, no multi-GPU
 // distribution: start, report, cancel, finish.
@@ -49,11 +52,17 @@ signals:
 
 private:
     void setState(SdGenerationState state, const QString& detail = QString());
+    // Gives the process-wide generation slot back, if this job is holding it.
+    void releaseSlot();
 
     // One worker thread, and shutdown() waits on it, so the worker's `this`
     // capture can never outlive this object.
     QThreadPool m_pool;
     bool m_running = false;
+    // This job is the one holding the process-wide slot. Separate from
+    // m_running so a teardown that outruns the queued completion still returns
+    // the slot exactly once.
+    bool m_holdsSlot = false;
     SdGenerationState m_state = SdGenerationState::Idle;
 };
 

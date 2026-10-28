@@ -2,6 +2,7 @@
 
 #include "ai/sd/SdCanvasBridge.hpp"
 #include "ai/sd/SdModelManager.hpp"
+#include "ai/sd/SdNodeCatalog.hpp"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -16,8 +17,6 @@ QString tr_(const char* text)
 {
     return QCoreApplication::translate("StableDiffusion", text);
 }
-
-const char* kDefaultLayerName = "AI Generated";
 
 void addError(QVector<SdWorkflowError>& errors, SdWorkflowErrorCode code,
               const QString& message, const QString& nodeId = {}, const QString& portId = {})
@@ -79,6 +78,35 @@ QStringList sourcesFor(const SdWorkflowDefinition& definition, const QString& no
     return out;
 }
 
+// Every fallback below comes from SdNodeCatalog rather than from a literal:
+// the frontend shows the catalog's default in the widget it builds for a
+// property, so a value invented here would be a value the user never saw.
+// Validation has already rejected anything of the wrong type.
+int intProperty(const QJsonObject& props, SdNodeType type, const char* key)
+{
+    const QString name = QString::fromUtf8(key);
+    return props.value(name).toInt(propertyDefault(type, name).toInt());
+}
+
+float floatProperty(const QJsonObject& props, SdNodeType type, const char* key)
+{
+    const QString name = QString::fromUtf8(key);
+    return static_cast<float>(
+        props.value(name).toDouble(propertyDefault(type, name).toDouble()));
+}
+
+QString stringProperty(const QJsonObject& props, SdNodeType type, const char* key)
+{
+    const QString name = QString::fromUtf8(key);
+    return props.value(name).toString(propertyDefault(type, name).toString());
+}
+
+bool boolProperty(const QJsonObject& props, SdNodeType type, const char* key)
+{
+    const QString name = QString::fromUtf8(key);
+    return props.value(name).toBool(propertyDefault(type, name).toBool());
+}
+
 qint64 readSeed(const QJsonObject& props)
 {
     const QJsonValue value = props.value(QStringLiteral("seed"));
@@ -86,9 +114,11 @@ qint64 readSeed(const QJsonObject& props)
         return value.toString().toLongLong();
     if (value.isDouble())
         return static_cast<qint64>(value.toDouble());
-    // -1 asks the library for a random seed, and the one it used comes back in
-    // the result, so an unseeded run is still reproducible afterwards.
-    return -1;
+    // The catalog's default is -1, which asks the library for a random seed;
+    // the one it used comes back in the result, so an unseeded run is still
+    // reproducible afterwards.
+    return propertyDefault(SdNodeType::Sampling, QStringLiteral("seed"))
+        .toString().toLongLong();
 }
 
 } // namespace
@@ -165,11 +195,11 @@ bool SdWorkflowExecutor::run(const QByteArray& workflowJson, QVector<SdWorkflowE
     }
 
     const SdWorkflowNode* output = definition.node(plan.outputNodeId);
-    m_layerName = output
-        ? output->properties.value(QStringLiteral("layerName")).toString()
-        : QString();
+    m_layerName = output ? stringProperty(output->properties, output->type, "layerName")
+                         : QString();
     if (m_layerName.isEmpty())
-        m_layerName = QString::fromUtf8(kDefaultLayerName);
+        m_layerName = propertyDefault(SdNodeType::ImageOutput,
+                                      QStringLiteral("layerName")).toString();
 
     QString refusal;
     if (!m_job.start(request, &refusal)) {
@@ -229,9 +259,8 @@ bool SdWorkflowExecutor::buildRequest(const SdWorkflowDefinition& definition,
                                value.load.weightType);
             devicePreferenceFromName(p.value(QStringLiteral("device")).toString(),
                                      value.load.device);
-            value.load.threads = p.value(QStringLiteral("threads")).toInt(0);
-            value.load.allowCpuFallback =
-                p.value(QStringLiteral("allowCpuFallback")).toBool(true);
+            value.load.threads = intProperty(p, node->type, "threads");
+            value.load.allowCpuFallback = boolProperty(p, node->type, "allowCpuFallback");
             break;
         }
         case SdNodeType::Prompt:
@@ -239,22 +268,19 @@ bool SdWorkflowExecutor::buildRequest(const SdWorkflowDefinition& definition,
             value.text = p.value(QStringLiteral("text")).toString();
             break;
         case SdNodeType::Sampling:
-            value.width = p.value(QStringLiteral("width")).toInt(512);
-            value.height = p.value(QStringLiteral("height")).toInt(512);
-            value.sampling.steps = p.value(QStringLiteral("steps")).toInt(20);
+            value.width = intProperty(p, node->type, "width");
+            value.height = intProperty(p, node->type, "height");
+            value.sampling.steps = intProperty(p, node->type, "steps");
             value.sampling.seed = readSeed(p);
-            value.sampling.cfgScale =
-                static_cast<float>(p.value(QStringLiteral("cfgScale")).toDouble(7.0));
-            value.sampling.sampler = p.value(QStringLiteral("sampler")).toString();
-            value.sampling.scheduler = p.value(QStringLiteral("scheduler")).toString();
-            value.sampling.clipSkip = p.value(QStringLiteral("clipSkip")).toInt(-1);
-            value.denoisingStrength = static_cast<float>(
-                p.value(QStringLiteral("denoisingStrength")).toDouble(0.75));
+            value.sampling.cfgScale = floatProperty(p, node->type, "cfgScale");
+            value.sampling.sampler = stringProperty(p, node->type, "sampler");
+            value.sampling.scheduler = stringProperty(p, node->type, "scheduler");
+            value.sampling.clipSkip = intProperty(p, node->type, "clipSkip");
+            value.denoisingStrength = floatProperty(p, node->type, "denoisingStrength");
             break;
         case SdNodeType::Lora: {
             const QString modelId = p.value(QStringLiteral("modelId")).toString();
-            const float weight =
-                static_cast<float>(p.value(QStringLiteral("weight")).toDouble(1.0));
+            const float weight = floatProperty(p, node->type, "weight");
             QString error;
             if (!models.resolveLora(modelId, weight, value.lora, &error)) {
                 addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, nodeId);
@@ -264,7 +290,7 @@ bool SdWorkflowExecutor::buildRequest(const SdWorkflowDefinition& definition,
         }
         case SdNodeType::InputImage: {
             const QString source =
-                p.value(QStringLiteral("source")).toString().trimmed().toLower();
+                stringProperty(p, node->type, "source").trimmed().toLower();
             QString error;
             if (!m_bridge->captureImage(source == QLatin1String("current_layer")
                                             ? SdImageSource::CurrentLayer
@@ -328,7 +354,7 @@ bool SdWorkflowExecutor::buildRequest(const SdWorkflowDefinition& definition,
     request.height = sampling->height;
     request.sampling = sampling->sampling;
     request.denoisingStrength = sampling->denoisingStrength;
-    request.batchCount = generate->properties.value(QStringLiteral("batchCount")).toInt(1);
+    request.batchCount = intProperty(generate->properties, generate->type, "batchCount");
     request.label = plan.generateNodeId;
 
     for (const QString& loraNode : sourcesFor(definition, plan.generateNodeId, "lora")) {

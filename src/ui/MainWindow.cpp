@@ -68,6 +68,9 @@
 #ifdef HAVE_STABLE_DIFFUSION
 #include "ui/StableDiffusionPanel.hpp"
 #endif
+#ifdef HAVE_NEURAL_FLOW
+#include "ui/NeuralFlowPanel.hpp"
+#endif
 #include "ui/ProgressDialog.h"
 #include "ui/ZoomComboBox.hpp"
 #include <QSettings>
@@ -1403,6 +1406,45 @@ MainWindow::MainWindow(QWidget* parent)
     m_stableDiffusionDock  = makePanelDock(tr("Stable Diffusion"),
                                            QStringLiteral("StableDiffusionDock"),
                                            m_stableDiffusionPanel);
+
+#ifdef HAVE_NEURAL_FLOW
+    // The node editor is an on-demand floating dock rather than a tab in the
+    // right-hand column: a graph is unreadable at sidebar width. It is created
+    // here and kept hidden — created rather than built on first use, so a saved
+    // workspace can restore its place, and hidden so no Chromium renderer and
+    // no model scan happen before it is opened (NeuralFlowPanel::showEvent).
+    //
+    // Only ever this one dock exists, which is what makes "open it, or raise it
+    // if it is already open" the whole of onOpenNeuralFlow().
+    m_neuralFlowDock = new QDockWidget(tr("Neural Flow"), this);
+    m_neuralFlowDock->setObjectName(QStringLiteral("NeuralFlowDock"));
+    m_neuralFlowDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea |
+                                      Qt::BottomDockWidgetArea);
+    m_neuralFlowDock->setFeatures(QDockWidget::DockWidgetMovable |
+                                  QDockWidget::DockWidgetFloatable |
+                                  QDockWidget::DockWidgetClosable);
+    m_neuralFlowPanel = new NeuralFlowPanel(m_neuralFlowDock);
+    m_neuralFlowDock->setWidget(m_neuralFlowPanel);
+    themePanelBg(m_neuralFlowPanel, thInit);
+    addDockWidget(Qt::RightDockWidgetArea, m_neuralFlowDock);
+    m_neuralFlowDock->setFloating(true);
+    {
+        // Sized and centred once, while it is still hidden, so the first open
+        // is a usable editor instead of a 420-pixel sliver. Afterwards the
+        // user's own geometry is never touched again.
+        const QRect available = QGuiApplication::primaryScreen()->availableGeometry();
+        const QSize wanted(qMin(1180, available.width() - 80),
+                           qMin(780, available.height() - 80));
+        m_neuralFlowDock->resize(wanted);
+        m_neuralFlowDock->move(available.center().x() - wanted.width() / 2,
+                               available.center().y() - wanted.height() / 2);
+    }
+    m_neuralFlowDock->hide();
+    windowMenu->addAction(m_neuralFlowDock->toggleViewAction());
+
+    connect(m_stableDiffusionPanel, &StableDiffusionPanel::neuralFlowRequested,
+            this, &MainWindow::onOpenNeuralFlow);
+#endif
 #endif
 
     connect(m_propsPanel, &PropertiesPanel::maskDensityChanged, this, [this](float density) {
@@ -1655,6 +1697,8 @@ MainWindow::MainWindow(QWidget* parent)
     for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock,
                             m_customShapesPanelDock, m_generativeFillDock })
         watchDockTitleBar(d);
+    if (m_neuralFlowDock)
+        watchDockTitleBar(m_neuralFlowDock);
 
     // Establish the default panel arrangement (also reused by the menu action).
     resetDockLayout();
@@ -2722,6 +2766,8 @@ QList<QDockWidget*> MainWindow::panelDocks() const
         m_generativeFillDock };
     if (m_stableDiffusionDock)
         docks.append(m_stableDiffusionDock);
+    if (m_neuralFlowDock)
+        docks.append(m_neuralFlowDock);
     return docks;
 }
 
@@ -3632,6 +3678,28 @@ void MainWindow::syncStableDiffusionPanelController()
     if (m_stableDiffusionPanel)
         m_stableDiffusionPanel->setController(m_ctrl);
 #endif
+    // The node editor reaches the document through the same canvas bridge, so
+    // it follows the active tab exactly like the panel above it.
+#ifdef HAVE_NEURAL_FLOW
+    if (m_neuralFlowPanel)
+        m_neuralFlowPanel->setController(m_ctrl);
+#endif
+}
+
+void MainWindow::onOpenNeuralFlow()
+{
+#ifdef HAVE_NEURAL_FLOW
+    if (!m_neuralFlowDock || !m_neuralFlowPanel)
+        return;
+
+    m_neuralFlowPanel->setController(m_ctrl);
+    // Never a second instance: this is the dock built during construction, so
+    // an already-open editor is only brought forward. Closing, resizing,
+    // docking and tabbing it stay the dock system's business.
+    m_neuralFlowDock->show();
+    m_neuralFlowDock->raise();
+    m_neuralFlowDock->activateWindow();
+#endif
 }
 
 int MainWindow::tabWidgetIndexForDocument(int documentIndex) const
@@ -3692,6 +3760,8 @@ void MainWindow::setHomeDockMode(bool homeActive)
     };
     if (m_stableDiffusionDock)
         editingDocks.append(m_stableDiffusionDock);
+    if (m_neuralFlowDock)
+        editingDocks.append(m_neuralFlowDock);
 
     if (homeActive) {
         if (!m_homeDockMode) {
@@ -6378,7 +6448,8 @@ void MainWindow::resetDockLayout()
     });
 
     // On-demand floating panels go back to their default hidden+floating state.
-    for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock, m_generativeFillDock }) {
+    for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
+                            m_generativeFillDock, m_neuralFlowDock }) {
         if (!d) continue;
         addDockWidget(Qt::RightDockWidgetArea, d);
         d->setFloating(true);

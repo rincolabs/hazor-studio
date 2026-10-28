@@ -43,7 +43,6 @@ signals:
 
 private:
     static QString timestamp();
-    static QVariantMap currentTheme();
 
     AgentController* m_controller = nullptr;
     QStringList m_agentNames;

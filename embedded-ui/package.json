@@ -1,0 +1,24 @@
+{
+  "name": "hazor-embedded-ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Web interfaces embedded into Hazor Studio through Qt WebEngine.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "litegraph.js": "0.7.18",
+    "vue": "3.5.44"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "@vitejs/plugin-vue": "6.0.10",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vue-tsc": "3.3.13"
+  }
+}

@@ -86,6 +86,18 @@ void StableDiffusionPanel::buildUi()
             this, &StableDiffusionPanel::onGenerateClicked);
     lay->addWidget(m_generateBtn);
 
+#ifdef HAVE_NEURAL_FLOW
+    // The way into the node editor. Not disabled while a generation runs: the
+    // editor is where the user watches it, and the run itself is on a worker
+    // thread.
+    m_neuralFlowBtn = new QPushButton(tr("Neural Flow"), this);
+    m_neuralFlowBtn->setCursor(Qt::PointingHandCursor);
+    m_neuralFlowBtn->setToolTip(tr("Open the Neural Flow node editor"));
+    connect(m_neuralFlowBtn, &QPushButton::clicked,
+            this, &StableDiffusionPanel::neuralFlowRequested);
+    lay->addWidget(m_neuralFlowBtn);
+#endif
+
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("sdPanelStatus"));
     m_status->setWordWrap(true);

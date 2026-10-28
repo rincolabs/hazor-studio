@@ -1,0 +1,6 @@
+# Installed by `npm ci`; never distributed with the application.
+node_modules/
+
+# Produced by `npm run build` and compiled into the Hazor binary by rcc.
+# Generated, machine-specific and large: it is a build artefact, not source.
+dist/
