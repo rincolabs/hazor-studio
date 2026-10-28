@@ -20,6 +20,7 @@ import {
   releaseGraphCanvas,
   resizeGraphCanvas,
 } from '../graph/litegraph'
+import { installTextareaOverlay } from '../nodes/textareaWidget'
 import type { ThemeVariables } from '../services/contract'
 
 const props = defineProps<{
@@ -37,6 +38,7 @@ const graph = shallowRef<LGraph | null>(null)
 const canvas = shallowRef<LGraphCanvas | null>(null)
 
 let observer: ResizeObserver | null = null
+let releaseTextareaOverlay: (() => void) | null = null
 let pixelRatio = 1
 
 onMounted(() => {
@@ -49,6 +51,7 @@ onMounted(() => {
   const created = createGraphCanvas(element)
   graph.value = created.graph
   canvas.value = created.canvas
+  releaseTextareaOverlay = installTextareaOverlay(created.graph, created.canvas, container, element)
   applyGraphTheme(created.canvas, props.theme, props.portTypes)
 
   observer = new ResizeObserver(() => {
@@ -74,6 +77,8 @@ watch(
 onBeforeUnmount(() => {
   observer?.disconnect()
   observer = null
+  releaseTextareaOverlay?.()
+  releaseTextareaOverlay = null
   if (canvas.value && graph.value) {
     releaseGraphCanvas(canvas.value, graph.value)
   }
@@ -103,5 +108,55 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   outline: none;
+}
+
+:global(.hazor-node-textarea) {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--hz-space-1);
+  box-sizing: border-box;
+  padding: var(--hz-space-1);
+  overflow: hidden;
+  transform-origin: 0 0;
+  border: 1px solid var(--hz-border);
+  border-radius: var(--hz-radius-sm);
+  background: var(--hz-surface-dark);
+  color: var(--hz-text);
+  font-family: var(--hz-font-family);
+}
+
+:global(.hazor-node-textarea__label) {
+  flex: none;
+  overflow: hidden;
+  color: var(--hz-text-secondary);
+  font-size: var(--hz-font-size-sm);
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.hazor-node-textarea__input) {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  resize: none;
+  padding: var(--hz-space-1);
+  border: 1px solid var(--hz-border);
+  border-radius: var(--hz-radius-sm);
+  outline: none;
+  background: var(--hz-surface);
+  color: var(--hz-text-bright);
+  font: inherit;
+  font-size: var(--hz-font-size-sm);
+  line-height: 1.35;
+}
+
+:global(.hazor-node-textarea__input:focus) {
+  border-color: var(--hz-border-focus);
 }
 </style>

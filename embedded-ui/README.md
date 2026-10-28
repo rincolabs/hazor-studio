@@ -61,6 +61,10 @@ src/
   it to the executable schema and sends it.
 - **Nothing remote.** No CDN, no font download, no telemetry. `base: './'` and
   a CSP that allows only `'self'` and `qrc:`.
+- **Native prompt editing.** Catalog properties of kind `text` reserve a custom
+  LiteGraph widget and place a DOM textarea over it. LiteGraph still owns node
+  layout, pan and zoom; the browser owns the caret, selection, clipboard, line
+  wrapping and text scrolling that a canvas widget cannot provide.
 - **One project.** A second panel is a directory under `src/` and a line in
   `vite.config.ts`, not another `package.json`.
 

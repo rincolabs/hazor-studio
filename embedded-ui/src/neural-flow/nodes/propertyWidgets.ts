@@ -21,6 +21,7 @@ import type { IWidget } from 'litegraph.js'
 import type { LGraphNode } from '../graph/litegraph'
 import type { PropertySpec } from '../services/contract'
 import { modelIdsFor } from './modelStore'
+import { addTextareaWidget } from './textareaWidget'
 
 /**
  * Shown for an enum whose empty value means "whatever the checkpoint
@@ -144,12 +145,7 @@ export function addPropertyWidget(node: LGraphNode, spec: PropertySpec): void {
 
   switch (spec.kind) {
     case 'text':
-      // litegraph opens a textarea dialog for a text widget marked multiline,
-      // which is as much of a prompt editor as this step needs.
-      node.addWidget<IWidget>('text', spec.label, value, undefined, {
-        property: spec.key,
-        multiline: true,
-      })
+      addTextareaWidget(node, spec.label, spec.key, String(value))
       break
     case 'string':
     case 'modelRefList':
