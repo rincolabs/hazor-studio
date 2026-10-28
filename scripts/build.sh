@@ -220,6 +220,15 @@ if [[ "$DO_BUILD" == "1" ]]; then
             local_stable_diffusion=ON
         fi
     fi
+    # Which ggml backend the module compiles against. CPU needs nothing extra;
+    # VULKAN and CUDA need a toolchain this script does not try to install, and
+    # CMake falls back to CPU with a warning when it is absent, so a wrong value
+    # here costs a slow generation rather than a failed build.
+    local_sd_backend="${HAZOR_SD_BACKEND:-CPU}"
+    local_sd_backend="${local_sd_backend^^}"
+    if [[ "$local_stable_diffusion" != "ON" && -n "${HAZOR_SD_BACKEND:-}" ]]; then
+        log "HAZOR_SD_BACKEND is ignored without HAZOR_ENABLE_STABLE_DIFFUSION=ON"
+    fi
 
     # RAW development is a core feature, so Lens Corrections (lensfun) is on by
     # default. HAZOR_RAWENGINE_WITH_LENSFUN=OFF exists only as an escape hatch
@@ -281,6 +290,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
         "-DRAWENGINE_WITH_LENSFUN=$rawengine_lensfun"
         "-DRAWENGINE_DEPS_DIR=$RAWENGINE_DEPS_DIR"
         "-DENABLE_STABLE_DIFFUSION=$local_stable_diffusion"
+        "-DHAZOR_SD_BACKEND=$local_sd_backend"
     )
     if [[ "$local_onnx" == "ON" ]]; then
         cmake_args+=(

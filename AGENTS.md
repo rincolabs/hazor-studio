@@ -109,6 +109,9 @@ src/
 ├── color/         Color management: profiles, display transforms, soft proof
 ├── io/            ImageIO (open/export), ImageCodec, ProjectFileService (.hzr)
 ├── ai/            ONNX inference: SAM selection, matting, inpaint, upscale
+│   └── sd/        Local Stable Diffusion (stable-diffusion.cpp): model registry,
+│                  runtime, generation service, job controller, workflow executor.
+│                  Optional, ENABLE_STABLE_DIFFUSION
 ├── agent/         Chat agent: AgentController, LLMClient, AgentPanel
 ├── tools/         ToolCatalog + ToolExecutor — the tool surface shared by the
 │                  chat agent and the MCP server

@@ -325,21 +325,146 @@ add_subdirectory(src/psd)
 # SD_CPP_SOURCE_DIR first (see docs/BUILD.md), then build with
 #   HAZOR_ENABLE_STABLE_DIFFUSION=ON ./scripts/build.sh
 option(ENABLE_STABLE_DIFFUSION
-    "Build the experimental local Stable Diffusion panel (stable-diffusion.cpp, CPU)" OFF)
+    "Build the experimental local Stable Diffusion module (stable-diffusion.cpp)" OFF)
 set(SD_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stable-diffusion.cpp" CACHE PATH
     "Checkout of leejet/stable-diffusion.cpp consumed by ENABLE_STABLE_DIFFUSION")
 
+# Which ggml backend gets compiled into the module. CPU is the default because
+# it needs no toolchain beyond the one that builds Hazor and is the only backend
+# ggml always has; VULKAN and CUDA are opt-in for a developer who has the
+# dependencies. The selection is a BUILD property only — which device the
+# inference really runs on is resolved at run time (src/ai/sd/SdBackend.cpp),
+# and a GPU build falls back to the CPU device when the machine has no usable
+# GPU, so one binary stays portable across machines.
+set(HAZOR_SD_BACKEND "CPU" CACHE STRING
+    "ggml backend compiled into the Stable Diffusion module: CPU, VULKAN or CUDA")
+set_property(CACHE HAZOR_SD_BACKEND PROPERTY STRINGS CPU VULKAN CUDA)
+# Floor for the Vulkan headers, as VK_HEADER_VERSION — the patch component of
+# the SDK version, which increases monotonically across 1.3.x and 1.4.x and so
+# compares correctly on its own. Set by the newest Vulkan API ggml-vulkan uses:
+# VK_EXT_layer_settings, which arrived in Vulkan-Headers 1.3.272.
+#
+# Read out of vulkan_core.h rather than from FindVulkan's Vulkan_VERSION, which
+# only exists in CMake 3.23 and later while this project requires 3.16 — using
+# it would silently reject every Vulkan SDK on an older CMake.
+set(HAZOR_SD_VULKAN_MIN_HEADER_VERSION "272" CACHE STRING
+    "Minimum VK_HEADER_VERSION accepted by HAZOR_SD_BACKEND=VULKAN")
+
 set(STABLE_DIFFUSION_FOUND OFF)
+set(HAZOR_SD_BACKEND_EFFECTIVE "CPU")
 if(ENABLE_STABLE_DIFFUSION)
     if(NOT EXISTS "${SD_CPP_SOURCE_DIR}/CMakeLists.txt")
         message(WARNING
             "ENABLE_STABLE_DIFFUSION is ON but no stable-diffusion.cpp checkout was found at "
             "SD_CPP_SOURCE_DIR='${SD_CPP_SOURCE_DIR}'. Building without the experimental "
-            "Stable Diffusion panel — see docs/BUILD.md for the clone command.")
+            "Stable Diffusion module — see docs/BUILD.md for the clone command.")
     else()
-        # CPU only (SD_CUDA/SD_VULKAN/SD_METAL/... stay at their OFF defaults):
-        # the point of this step is a working integration, not a tuned backend.
-        #
+        # ── Backend selection, with CPU as the fallback at every step ────────
+        # Every failure here degrades to CPU with a warning instead of failing
+        # the configure: the module is a developer opt-in, and refusing to build
+        # Hazor at all because a Vulkan SDK is missing would be the wrong
+        # trade. The effective choice is compiled into the binary as
+        # HAZOR_SD_BACKEND_NAME so the runtime can report what it really has
+        # rather than what was asked for.
+        string(TOUPPER "${HAZOR_SD_BACKEND}" _hazor_sd_backend)
+        if(NOT _hazor_sd_backend MATCHES "^(CPU|VULKAN|CUDA)$")
+            message(WARNING
+                "HAZOR_SD_BACKEND='${HAZOR_SD_BACKEND}' is not one of CPU, VULKAN or CUDA. "
+                "Falling back to CPU.")
+            set(_hazor_sd_backend "CPU")
+        endif()
+
+        if(_hazor_sd_backend STREQUAL "VULKAN")
+            # ggml-vulkan needs three things, and a missing one fails deep in its
+            # own configure: the headers and loader, the glslc shader compiler
+            # (its shaders are compiled at build time), and the SPIRV-Headers
+            # CMake config package. They are probed here so the diagnostic names
+            # the missing dependency instead of the symptom.
+            find_package(Vulkan QUIET COMPONENTS glslc)
+            find_package(SPIRV-Headers QUIET CONFIG)
+            set(_hazor_sd_vulkan_missing "")
+            if(NOT Vulkan_FOUND)
+                list(APPEND _hazor_sd_vulkan_missing "the Vulkan headers/loader (vulkan-headers)")
+            else()
+                # Presence is not enough, and this is the failure that actually
+                # happens: a distribution's Vulkan headers are often years older
+                # than ggml-vulkan expects, and the build then dies deep inside
+                # ggml-vulkan.cpp on a vk:: type that does not exist yet rather
+                # than on anything resembling a missing dependency. Ubuntu 22.04
+                # ships VK_HEADER_VERSION 204 (April 2022).
+                set(_hazor_sd_vk_header_version "")
+                if(EXISTS "${Vulkan_INCLUDE_DIR}/vulkan/vulkan_core.h")
+                    file(STRINGS "${Vulkan_INCLUDE_DIR}/vulkan/vulkan_core.h"
+                         _hazor_sd_vk_header_line
+                         REGEX "^#define[ \t]+VK_HEADER_VERSION[ \t]+[0-9]+")
+                    if(_hazor_sd_vk_header_line)
+                        string(REGEX MATCH "[0-9]+$" _hazor_sd_vk_header_version
+                               "${_hazor_sd_vk_header_line}")
+                    endif()
+                endif()
+                if(NOT _hazor_sd_vk_header_version)
+                    list(APPEND _hazor_sd_vulkan_missing
+                        "a readable VK_HEADER_VERSION in ${Vulkan_INCLUDE_DIR}/vulkan/vulkan_core.h")
+                elseif(_hazor_sd_vk_header_version LESS "${HAZOR_SD_VULKAN_MIN_HEADER_VERSION}")
+                    list(APPEND _hazor_sd_vulkan_missing
+                        "a Vulkan SDK with VK_HEADER_VERSION >= ${HAZOR_SD_VULKAN_MIN_HEADER_VERSION} (found ${_hazor_sd_vk_header_version})")
+                endif()
+            endif()
+            if(NOT Vulkan_GLSLC_EXECUTABLE)
+                list(APPEND _hazor_sd_vulkan_missing "the glslc shader compiler (shaderc)")
+            endif()
+            if(NOT SPIRV-Headers_FOUND)
+                list(APPEND _hazor_sd_vulkan_missing "SPIRV-Headers (spirv-headers)")
+            endif()
+            if(_hazor_sd_vulkan_missing)
+                list(JOIN _hazor_sd_vulkan_missing ", " _hazor_sd_vulkan_missing_text)
+                message(WARNING
+                    "HAZOR_SD_BACKEND=VULKAN but this machine is missing "
+                    "${_hazor_sd_vulkan_missing_text}. Building the Stable Diffusion "
+                    "module for the CPU instead — see docs/BUILD.md.")
+                set(_hazor_sd_backend "CPU")
+            else()
+                message(STATUS
+                    "Stable Diffusion: Vulkan backend (VK_HEADER_VERSION "
+                    "${_hazor_sd_vk_header_version}, glslc ${Vulkan_GLSLC_EXECUTABLE})")
+            endif()
+        elseif(_hazor_sd_backend STREQUAL "CUDA")
+            # nvcc is routinely installed outside PATH (/usr/local/cuda/bin), so
+            # it is searched for before check_language(CUDA) gives up on it.
+            if(NOT CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
+                find_program(HAZOR_SD_NVCC nvcc
+                    HINTS ENV CUDA_PATH ENV CUDA_HOME /usr/local/cuda
+                    PATH_SUFFIXES bin)
+                if(HAZOR_SD_NVCC)
+                    set(CMAKE_CUDA_COMPILER "${HAZOR_SD_NVCC}" CACHE FILEPATH
+                        "CUDA compiler for the Stable Diffusion module" FORCE)
+                endif()
+            endif()
+            include(CheckLanguage)
+            check_language(CUDA)
+            if(NOT CMAKE_CUDA_COMPILER)
+                message(WARNING
+                    "HAZOR_SD_BACKEND=CUDA but no CUDA compiler was found (set CUDACXX or "
+                    "install the CUDA toolkit). Building the Stable Diffusion module for "
+                    "the CPU instead.")
+                set(_hazor_sd_backend "CPU")
+            else()
+                # ggml-cuda picks CMAKE_CUDA_ARCHITECTURES=native (this machine's
+                # GPUs only) when GGML_NATIVE is on AND CMake is 3.24 or newer;
+                # below that it compiles the full fallback list of virtual and
+                # real architectures, which is correct but several times slower
+                # to build. Setting it here is left alone on purpose: pinning an
+                # architecture is the user's call, through
+                # -DCMAKE_CUDA_ARCHITECTURES=<cc> on the configure line.
+                message(STATUS "Stable Diffusion: CUDA backend (${CMAKE_CUDA_COMPILER})")
+            endif()
+        endif()
+
+        if(_hazor_sd_backend STREQUAL "CPU")
+            message(STATUS "Stable Diffusion: CPU backend")
+        endif()
+        set(HAZOR_SD_BACKEND_EFFECTIVE "${_hazor_sd_backend}")
+
         # These have to be FORCEd cache entries rather than plain variables: the
         # dependency's own CMakeLists declares cmake_minimum_required(VERSION
         # 3.12), which resets CMP0077 to OLD inside its scope, and with OLD an
@@ -349,6 +474,16 @@ if(ENABLE_STABLE_DIFFUSION)
         set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
         set(SD_WEBP OFF CACHE BOOL "" FORCE)             # pixels never hit a file
         set(SD_WEBM OFF CACHE BOOL "" FORCE)
+        # Both are set every time, not just when selected, so flipping
+        # HAZOR_SD_BACKEND in an existing build directory actually turns the
+        # previous backend off instead of accumulating them.
+        set(SD_VULKAN OFF CACHE BOOL "" FORCE)
+        set(SD_CUDA OFF CACHE BOOL "" FORCE)
+        if(_hazor_sd_backend STREQUAL "VULKAN")
+            set(SD_VULKAN ON CACHE BOOL "" FORCE)
+        elseif(_hazor_sd_backend STREQUAL "CUDA")
+            set(SD_CUDA ON CACHE BOOL "" FORCE)
+        endif()
         # cmake/toolchains/linux-x86_64.cmake sets CMAKE_SYSTEM_NAME even for the
         # host target, which makes CMAKE_CROSSCOMPILING true — and ggml reads
         # that as "do not tune for this machine", falling back to the generic
@@ -1210,10 +1345,41 @@ endif()
 # ENABLE_STABLE_DIFFUSION=OFF these two translation units are not compiled at
 # all, so no packaged target can grow a dependency on them by accident.
 if(STABLE_DIFFUSION_FOUND)
-    target_compile_definitions(Hazor PRIVATE HAVE_STABLE_DIFFUSION=1)
+    target_compile_definitions(Hazor PRIVATE
+        HAVE_STABLE_DIFFUSION=1
+        # The backend that was really compiled in, after the fallbacks above.
+        # src/ai/sd/SdBackend.cpp reports it as the "compiled" layer, which is
+        # deliberately distinct from the device the inference ends up on.
+        HAZOR_SD_BACKEND_NAME="${HAZOR_SD_BACKEND_EFFECTIVE}"
+    )
     target_sources(Hazor PRIVATE
-        src/ai/sd/StableDiffusionTxt2Img.hpp
-        src/ai/sd/StableDiffusionTxt2Img.cpp
+        # Models
+        src/ai/sd/SdModelManager.hpp
+        src/ai/sd/SdModelManager.cpp
+        # Runtime
+        src/ai/sd/SdBackend.hpp
+        src/ai/sd/SdBackend.cpp
+        src/ai/sd/SdRuntime.hpp
+        src/ai/sd/SdRuntime.cpp
+        # Generation
+        src/ai/sd/SdGenerationTypes.hpp
+        src/ai/sd/SdGenerationTypes.cpp
+        src/ai/sd/SdGenerationService.hpp
+        src/ai/sd/SdGenerationService.cpp
+        # Jobs
+        src/ai/sd/SdGenerationJob.hpp
+        src/ai/sd/SdGenerationJob.cpp
+        # Workflow
+        src/ai/sd/SdWorkflow.hpp
+        src/ai/sd/SdWorkflow.cpp
+        src/ai/sd/SdWorkflowValidator.hpp
+        src/ai/sd/SdWorkflowValidator.cpp
+        src/ai/sd/SdWorkflowExecutor.hpp
+        src/ai/sd/SdWorkflowExecutor.cpp
+        # Canvas integration
+        src/ai/sd/SdCanvasBridge.hpp
+        src/ai/sd/SdCanvasBridge.cpp
+        # Experimental panel
         src/ui/StableDiffusionPanel.hpp
         src/ui/StableDiffusionPanel.cpp
     )

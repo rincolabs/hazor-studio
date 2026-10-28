@@ -491,15 +491,19 @@ out, and it is an escape hatch, not a packaging default.
 
 ### stable-diffusion.cpp — *optional, Linux development only*
 
-Experimental local `txt2img`: the **Stable Diffusion** panel
-([`src/ui/StableDiffusionPanel.cpp`](../src/ui/StableDiffusionPanel.cpp)) runs
-one hardcoded prompt through
+Local image generation: a Stable Diffusion module under
+[`src/ai/sd/`](../src/ai/sd/) — model registry, inference runtime, generation
+service, job controller and a JSON workflow executor — driven by the
+**Stable Diffusion** panel
+([`src/ui/StableDiffusionPanel.cpp`](../src/ui/StableDiffusionPanel.cpp)),
+which runs a fixed `txt2img` workflow through
 [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
-on the CPU and inserts the result as a pixel layer
-([`src/ai/sd/`](../src/ai/sd/)). It is a viability probe, **not** a shipped
-feature: `ENABLE_STABLE_DIFFUSION` defaults to `OFF`, and with `OFF` neither
-source file is compiled, so AppImage, Flatpak, Windows and macOS builds are
-unaffected.
+and inserts the result as an ordinary pixel layer.
+
+It is still development-only, **not** a shipped feature:
+`ENABLE_STABLE_DIFFUSION` defaults to `OFF`, and with `OFF` none of its source
+files are compiled and no link edge exists, so AppImage, Flatpak, Windows and
+macOS builds are unaffected.
 
 The dependency is not vendored in git. Clone the pinned revision — and its
 `ggml` submodule — into `3rdparty/stable-diffusion.cpp/`:
@@ -529,17 +533,86 @@ independent barrier: it never passes the option, and its `skip:` list excludes
 `3rdparty/`, so the checkout is not even copied into the sandbox.
 
 CMake builds the dependency as a static
-library with examples, CLI, server and WebP/WebM I/O disabled, CPU backend only,
-and forces `-O2` plus host tuning (`GGML_NATIVE`) on its own translation units
-even in a Debug Hazor — `CMAKE_CXX_FLAGS_DEBUG` carries no `-O`, and the host
-toolchain file sets `CMAKE_SYSTEM_NAME`, which ggml otherwise reads as
-cross-compiling and answers with the generic x86-64 baseline.
+library with examples, CLI, server and WebP/WebM I/O disabled, and forces `-O2`
+plus host tuning (`GGML_NATIVE`) on its own translation units even in a Debug
+Hazor — `CMAKE_CXX_FLAGS_DEBUG` carries no `-O`, and the host toolchain file
+sets `CMAKE_SYSTEM_NAME`, which ggml otherwise reads as cross-compiling and
+answers with the generic x86-64 baseline.
 
-The checkpoint path and the prompt are compile-time constants at the top of
-[`src/ai/sd/StableDiffusionTxt2Img.cpp`](../src/ai/sd/StableDiffusionTxt2Img.cpp)
-(`kModelPath`, `kPrompt`) — there is no model picker and no persisted setting.
-Point `kModelPath` at a local Stable Diffusion 1.5 checkpoint able to do
-512×512 `txt2img`; a missing file is reported in the panel.
+#### Choosing a backend
+
+`HAZOR_SD_BACKEND` selects the ggml backend compiled into the module. It is a
+**build** property; which device the inference actually runs on is resolved at
+run time.
+
+```bash
+HAZOR_ENABLE_STABLE_DIFFUSION=ON HAZOR_SD_BACKEND=VULKAN ./scripts/build.sh
+HAZOR_ENABLE_STABLE_DIFFUSION=ON HAZOR_SD_BACKEND=CUDA   ./scripts/build.sh
+```
+
+| Value | Needs | Notes |
+|-------|-------|-------|
+| `CPU` (default) | nothing beyond Hazor's own toolchain | Always available; the only backend ggml is guaranteed to have |
+| `VULKAN` | Vulkan headers with `VK_HEADER_VERSION` ≥ 272, `glslc`, SPIRV-Headers | Vendor-neutral; the preferred GPU backend |
+| `CUDA` | a CUDA toolkit (`nvcc`) | Searched on `PATH`, `$CUDACXX`, `$CUDA_PATH`, `$CUDA_HOME` and `/usr/local/cuda` |
+
+**Every failure degrades to CPU with a warning rather than failing the
+configure.** An unknown value, a missing Vulkan SDK, a Vulkan SDK that is too
+old, or an absent `nvcc` all produce a CPU build and a `CMake Warning` naming
+the missing dependency. The backend that was really compiled is baked in as
+`HAZOR_SD_BACKEND_NAME` and reported by
+[`src/ai/sd/SdBackend.cpp`](../src/ai/sd/SdBackend.cpp).
+
+The Vulkan version floor is not pedantry: ggml-vulkan uses
+`VK_EXT_layer_settings`, which arrived in Vulkan-Headers 1.3.272, and an older
+SDK fails deep inside `ggml-vulkan.cpp` on `vk::` types that do not exist yet.
+Ubuntu 22.04's `libvulkan-dev` is `VK_HEADER_VERSION` 204 and is **too old**;
+use LunarG's SDK packages:
+
+```bash
+wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+  | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
+sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list \
+  https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+sudo apt update && sudo apt install vulkan-headers shaderc spirv-headers
+```
+
+On CMake older than 3.24, ggml-cuda cannot use
+`CMAKE_CUDA_ARCHITECTURES=native` and compiles its full fallback list of
+architectures instead, which takes considerably longer. Pass
+`-DCMAKE_CUDA_ARCHITECTURES=<cc>` (for example `61` for Pascal) to cut that
+down.
+
+#### Registering a model
+
+There is no model picker and no visual model manager. Weights are registered
+with [`SdModelManager`](../src/ai/sd/SdModelManager.hpp), which records *where
+models already live* — nothing is copied, downloaded or scanned at Hazor's
+startup — in a plain JSON file:
+
+```
+~/.local/share/Rincolabs/Hazor Studio/sd-models.json
+```
+
+Two environment variables cover the common development cases without editing
+that file. They are applied on top of it and are not persisted:
+
+| Variable | Effect |
+|----------|--------|
+| `HAZOR_SD_MODEL` | Registers one checkpoint and makes it the default model |
+| `HAZOR_SD_MODEL_DIR` | Registers a directory of checkpoints (a ComfyUI `models/checkpoints`, for example) |
+| `HAZOR_SD_VAE_DIR` | Registers a directory of VAEs |
+| `HAZOR_SD_LORA_DIR` | Registers a directory of LoRAs |
+
+```bash
+HAZOR_ENABLE_STABLE_DIFFUSION=ON \
+HAZOR_SD_MODEL=/models/v1-5-pruned-emaonly.safetensors \
+  ./scripts/build.sh
+```
+
+No absolute model path is committed in the source — it would be valid on
+exactly one machine. With nothing registered, the panel reports that no model
+is available and names the registry file.
 
 ### Bundled ONNX models (optional, cross-platform)
 
@@ -669,8 +742,10 @@ cmake --build build -j"$(nproc)" --target Hazor
 | `ENABLE_ONNXRUNTIME` | `ON` | Build with ONNX Runtime AI inference support |
 | `ENABLE_RAWENGINE` | `ON` | Build the native RAW engine (`rawengine` target) and link it into `Hazor` via [`src/raw/`](../src/raw/) (see [`docs/RAW-ENGINE.md`](RAW-ENGINE.md)) |
 | `RAWENGINE_WITH_LENSFUN` | `ON` | Build RawEngine with lensfun lens-correction support |
-| `ENABLE_STABLE_DIFFUSION` | `OFF` | Experimental local Stable Diffusion panel (Linux dev builds only — see above) |
+| `ENABLE_STABLE_DIFFUSION` | `OFF` | Experimental local Stable Diffusion module and panel (Linux dev builds only — see above) |
 | `SD_CPP_SOURCE_DIR` | `3rdparty/stable-diffusion.cpp` | Where `ENABLE_STABLE_DIFFUSION` looks for the pinned checkout |
+| `HAZOR_SD_BACKEND` | `CPU` | ggml backend compiled into the Stable Diffusion module: `CPU`, `VULKAN` or `CUDA`; falls back to `CPU` with a warning when the toolchain is absent |
+| `HAZOR_SD_VULKAN_MIN_HEADER_VERSION` | `272` | Minimum `VK_HEADER_VERSION` accepted by `HAZOR_SD_BACKEND=VULKAN` |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |
 | `HAZOR_STRICT_DEPENDENCIES` | `OFF` | Reject app dependencies outside `HAZOR_DEPENDENCY_ROOT` |
 | `HAZOR_DEVELOPMENT_PATHS` | `ON` | Embed source-tree fallback paths for local development only |
