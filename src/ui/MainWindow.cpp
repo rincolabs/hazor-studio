@@ -65,6 +65,9 @@
 #include "ai/runtime/AiRuntimeSettings.hpp"
 #include "ai/runtime/AiExecutionProvider.hpp"
 #include "ui/GenerativeFillDialog.hpp"
+#ifdef HAVE_STABLE_DIFFUSION
+#include "ui/StableDiffusionPanel.hpp"
+#endif
 #include "ui/ProgressDialog.h"
 #include "ui/ZoomComboBox.hpp"
 #include <QSettings>
@@ -1392,6 +1395,16 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::showLoadSelectionDialog);
     m_historyDock   = makePanelDock(tr("History"),    QStringLiteral("HistoryDock"),    m_historyPanel);
 
+#ifdef HAVE_STABLE_DIFFUSION
+    // Experimental local txt2img test panel (see src/ai/sd/). Built only in a
+    // developer build with ENABLE_STABLE_DIFFUSION=ON, which is why everything
+    // that walks the dock list below null-checks it instead of assuming it.
+    m_stableDiffusionPanel = new StableDiffusionPanel(this);
+    m_stableDiffusionDock  = makePanelDock(tr("Stable Diffusion"),
+                                           QStringLiteral("StableDiffusionDock"),
+                                           m_stableDiffusionPanel);
+#endif
+
     connect(m_propsPanel, &PropertiesPanel::maskDensityChanged, this, [this](float density) {
         if (m_ctrl) m_ctrl->setMaskDensity(m_ctrl->activeLayerIndex(), density);
     });
@@ -2702,10 +2715,14 @@ MainWindow::MainWindow(QWidget* parent)
 
 QList<QDockWidget*> MainWindow::panelDocks() const
 {
-    return { m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
-             m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
-             m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
-             m_generativeFillDock };
+    QList<QDockWidget*> docks = {
+        m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
+        m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
+        m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
+        m_generativeFillDock };
+    if (m_stableDiffusionDock)
+        docks.append(m_stableDiffusionDock);
+    return docks;
 }
 
 bool MainWindow::isDockTabbedInMainWindow(QDockWidget* dock) const
@@ -3507,6 +3524,7 @@ MainWindow::DocumentTab& MainWindow::createTabForDocument(
     m_propsPanel->setController(m_ctrl);
     m_histogramPanel->setController(m_ctrl);
     syncGenerativeFillPanelController();
+    syncStableDiffusionPanelController();
 
     if (m_presetManager && !m_presetManager->presetNames(Assistant).isEmpty())
         m_agentController->applyConfig(m_presetManager->activeAssistant());
@@ -3608,6 +3626,14 @@ void MainWindow::syncGenerativeFillPanelController()
         m_generativeFillPanel->setController(m_ctrl);
 }
 
+void MainWindow::syncStableDiffusionPanelController()
+{
+#ifdef HAVE_STABLE_DIFFUSION
+    if (m_stableDiffusionPanel)
+        m_stableDiffusionPanel->setController(m_ctrl);
+#endif
+}
+
 int MainWindow::tabWidgetIndexForDocument(int documentIndex) const
 {
     return documentIndex < 0 ? -1 : documentIndex + 1;
@@ -3658,12 +3684,14 @@ void MainWindow::onTabMoved(int from, int to)
 
 void MainWindow::setHomeDockMode(bool homeActive)
 {
-    const QList<QDockWidget*> editingDocks = {
+    QList<QDockWidget*> editingDocks = {
         m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
         m_historyDock, m_layersDock, m_channelsDock, m_agentDock,
         m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
         m_generativeFillDock
     };
+    if (m_stableDiffusionDock)
+        editingDocks.append(m_stableDiffusionDock);
 
     if (homeActive) {
         if (!m_homeDockMode) {
@@ -3717,6 +3745,7 @@ void MainWindow::onTabChanged(int index)
         syncChannelsPanel();
         m_histogramPanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
+        syncStableDiffusionPanelController();
 
         if (m_canvas->currentTool() == CanvasView::Tool::AiRemove) {
             // Temporarily hidden: AI Remove Tool will be released later.
@@ -3776,6 +3805,7 @@ void MainWindow::onTabChanged(int index)
         m_histogramPanel->setController(nullptr);
         m_propsPanel->setController(nullptr);
         syncGenerativeFillPanelController();
+        syncStableDiffusionPanelController();
         m_propsPanel->clear();
         m_historyPanel->clear();
         if (m_zoomCombo) {
@@ -3906,6 +3936,7 @@ void MainWindow::closeTabAt(int index)
         syncChannelsPanel();
         m_histogramPanel->setController(nullptr);
         syncGenerativeFillPanelController();
+        syncStableDiffusionPanelController();
         m_propsPanel->clear();
         if (m_zoomCombo) {
             m_zoomCombo->setZoom(1.0f);
@@ -3932,6 +3963,7 @@ void MainWindow::closeTabAt(int index)
         syncChannelsPanel();
         m_histogramPanel->setController(m_ctrl);
         syncGenerativeFillPanelController();
+        syncStableDiffusionPanelController();
         refreshPropertiesPanel();
         updateStatusFromDocument();
         m_canvas->update();
@@ -6287,10 +6319,12 @@ void MainWindow::resetDockLayout()
     // visible, so the regrouping below starts from a known state regardless of
     // where the user dragged / floated / closed them. Histogram is hidden again
     // after tabification so it only appears when opened from Window.
-    const QList<QDockWidget*> panels = {
+    QList<QDockWidget*> panels = {
         m_histogramDock, m_propsDock, m_colorDock, m_swatchesDock,
         m_historyDock, m_layersDock, m_channelsDock, m_agentDock
     };
+    if (m_stableDiffusionDock)
+        panels.append(m_stableDiffusionDock);
     for (QDockWidget* d : panels) {
         addDockWidget(Qt::RightDockWidgetArea, d);
         d->setFloating(false);
@@ -6310,6 +6344,10 @@ void MainWindow::resetDockLayout()
     // and the user switches between them constantly.
     tabifyDockWidget(m_layersDock, m_channelsDock);
     tabifyDockWidget(m_layersDock, m_agentDock);
+    // Experimental panel joins the Layers group: the result lands as a layer
+    // there, so the two are looked at together.
+    if (m_stableDiffusionDock)
+        tabifyDockWidget(m_layersDock, m_stableDiffusionDock);
 
     resizeDocks({m_histogramDock, m_layersDock}, {3, 7}, Qt::Vertical);
 

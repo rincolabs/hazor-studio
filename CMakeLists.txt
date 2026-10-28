@@ -315,6 +315,76 @@ endif()
 # not yet wired into Hazor's document system.
 add_subdirectory(src/psd)
 
+# ── stable-diffusion.cpp (experimental, local developer builds only) ─────────
+# OFF by default and never switched on by a packaging run: this is the bare
+# viability test for a local txt2img landing in a pixel layer (src/ai/sd/ +
+# src/ui/StableDiffusionPanel), not a shipped feature. With OFF, no source file
+# and no link edge is added — every other platform builds exactly as before.
+#
+# The dependency is not vendored in git: clone the pinned revision into
+# SD_CPP_SOURCE_DIR first (see docs/BUILD.md), then build with
+#   HAZOR_ENABLE_STABLE_DIFFUSION=ON ./scripts/build.sh
+option(ENABLE_STABLE_DIFFUSION
+    "Build the experimental local Stable Diffusion panel (stable-diffusion.cpp, CPU)" OFF)
+set(SD_CPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stable-diffusion.cpp" CACHE PATH
+    "Checkout of leejet/stable-diffusion.cpp consumed by ENABLE_STABLE_DIFFUSION")
+
+set(STABLE_DIFFUSION_FOUND OFF)
+if(ENABLE_STABLE_DIFFUSION)
+    if(NOT EXISTS "${SD_CPP_SOURCE_DIR}/CMakeLists.txt")
+        message(WARNING
+            "ENABLE_STABLE_DIFFUSION is ON but no stable-diffusion.cpp checkout was found at "
+            "SD_CPP_SOURCE_DIR='${SD_CPP_SOURCE_DIR}'. Building without the experimental "
+            "Stable Diffusion panel — see docs/BUILD.md for the clone command.")
+    else()
+        # CPU only (SD_CUDA/SD_VULKAN/SD_METAL/... stay at their OFF defaults):
+        # the point of this step is a working integration, not a tuned backend.
+        #
+        # These have to be FORCEd cache entries rather than plain variables: the
+        # dependency's own CMakeLists declares cmake_minimum_required(VERSION
+        # 3.12), which resets CMP0077 to OLD inside its scope, and with OLD an
+        # option() call discards a same-named normal variable instead of
+        # deferring to it.
+        set(SD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)   # no sd-cli, no server
+        set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        set(SD_WEBP OFF CACHE BOOL "" FORCE)             # pixels never hit a file
+        set(SD_WEBM OFF CACHE BOOL "" FORCE)
+        # cmake/toolchains/linux-x86_64.cmake sets CMAKE_SYSTEM_NAME even for the
+        # host target, which makes CMAKE_CROSSCOMPILING true — and ggml reads
+        # that as "do not tune for this machine", falling back to the generic
+        # x86-64 baseline (no AVX2/FMA). CPU sampling is pure matmul, so tuning
+        # is re-enabled explicitly — safe precisely because this configuration is
+        # host-only and never packaged.
+        set(GGML_NATIVE ON CACHE BOOL "" FORCE)
+        # AUTOMOC/AUTORCC are ON for Hazor and are inherited by subdirectories.
+        # Running moc over ggml's and sd's thousands of plain C/C++ sources is
+        # pointless and slow, so they are off for this add_subdirectory only.
+        set(_hazor_saved_automoc ${CMAKE_AUTOMOC})
+        set(_hazor_saved_autorcc ${CMAKE_AUTORCC})
+        set(CMAKE_AUTOMOC OFF)
+        set(CMAKE_AUTORCC OFF)
+        # CMAKE_CXX_FLAGS_DEBUG carries no -O, so a Debug Hazor would compile
+        # ggml unoptimised and the CPU sampling loop would be unusably slow.
+        # Directory-scoped, and restored below, so Hazor's own flags are intact.
+        if(NOT MSVC)
+            set(_hazor_saved_c_flags_debug "${CMAKE_C_FLAGS_DEBUG}")
+            set(_hazor_saved_cxx_flags_debug "${CMAKE_CXX_FLAGS_DEBUG}")
+            string(APPEND CMAKE_C_FLAGS_DEBUG " -O2")
+            string(APPEND CMAKE_CXX_FLAGS_DEBUG " -O2")
+        endif()
+        add_subdirectory("${SD_CPP_SOURCE_DIR}"
+                         "${CMAKE_CURRENT_BINARY_DIR}/stable-diffusion.cpp"
+                         EXCLUDE_FROM_ALL)
+        if(NOT MSVC)
+            set(CMAKE_C_FLAGS_DEBUG "${_hazor_saved_c_flags_debug}")
+            set(CMAKE_CXX_FLAGS_DEBUG "${_hazor_saved_cxx_flags_debug}")
+        endif()
+        set(CMAKE_AUTOMOC ${_hazor_saved_automoc})
+        set(CMAKE_AUTORCC ${_hazor_saved_autorcc})
+        set(STABLE_DIFFUSION_FOUND ON)
+    endif()
+endif()
+
 # Single source of truth for the app version: project(... VERSION ...) and
 # HAZOR_VERSION_SUFFIX above. Everything that displays a version (splash screen,
 # About dialog, MCP server info, packaging) derives from the generated header
@@ -1133,6 +1203,21 @@ endif()
 if(RAWENGINE_FOUND)
     target_compile_definitions(Hazor PRIVATE HAVE_RAWENGINE=1)
     target_link_libraries(Hazor PRIVATE rawengine)
+endif()
+
+# ── stable-diffusion.cpp link (experimental) ──────────────────
+# Unlike ONNX Runtime / RawEngine, the sources themselves are conditional: with
+# ENABLE_STABLE_DIFFUSION=OFF these two translation units are not compiled at
+# all, so no packaged target can grow a dependency on them by accident.
+if(STABLE_DIFFUSION_FOUND)
+    target_compile_definitions(Hazor PRIVATE HAVE_STABLE_DIFFUSION=1)
+    target_sources(Hazor PRIVATE
+        src/ai/sd/StableDiffusionTxt2Img.hpp
+        src/ai/sd/StableDiffusionTxt2Img.cpp
+        src/ui/StableDiffusionPanel.hpp
+        src/ui/StableDiffusionPanel.cpp
+    )
+    target_link_libraries(Hazor PRIVATE stable-diffusion)
 endif()
 
 # Theme sources — object library for reuse by tests

@@ -203,6 +203,24 @@ if [[ "$DO_BUILD" == "1" ]]; then
     if [[ "${HAZOR_ENABLE_RAWENGINE:-AUTO}" != "OFF" && -d "$RAWENGINE_DEPS_DIR/exiv2" ]]; then
         local_rawengine=ON
     fi
+    # Experimental local Stable Diffusion panel: a developer-only probe, so it is
+    # opt-in through the environment and restricted to the host Linux target.
+    # The flag is also refused for any packaging run, because the panel embeds an
+    # absolute model path and must not reach a distributable: the environment
+    # variable would otherwise be enough to put it inside an AppImage, and
+    # verify_no_local_paths() only looks for the source tree's own path, not an
+    # arbitrary one baked into a string constant.
+    local_stable_diffusion=OFF
+    if [[ "${HAZOR_ENABLE_STABLE_DIFFUSION:-OFF}" == "ON" ]]; then
+        if [[ "$TARGET" != "linux-x86_64" ]]; then
+            log "HAZOR_ENABLE_STABLE_DIFFUSION is ignored for $TARGET (host Linux only)"
+        elif [[ "$PACKAGE_FORMAT" != "none" ]]; then
+            log "HAZOR_ENABLE_STABLE_DIFFUSION is ignored for a --package $PACKAGE_FORMAT run (developer builds only)"
+        else
+            local_stable_diffusion=ON
+        fi
+    fi
+
     # RAW development is a core feature, so Lens Corrections (lensfun) is on by
     # default. HAZOR_RAWENGINE_WITH_LENSFUN=OFF exists only as an escape hatch
     # and currently does not compile — see docs/BUILD.md.
@@ -262,6 +280,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
         "-DENABLE_RAWENGINE=$local_rawengine"
         "-DRAWENGINE_WITH_LENSFUN=$rawengine_lensfun"
         "-DRAWENGINE_DEPS_DIR=$RAWENGINE_DEPS_DIR"
+        "-DENABLE_STABLE_DIFFUSION=$local_stable_diffusion"
     )
     if [[ "$local_onnx" == "ON" ]]; then
         cmake_args+=(
@@ -289,6 +308,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
     log "zlib: $ZLIB_LIBRARY"
     log "ONNX Runtime enabled: $local_onnx"
     log "RawEngine enabled: $local_rawengine (lensfun: $rawengine_lensfun)"
+    log "Stable Diffusion (experimental) enabled: $local_stable_diffusion"
     HAZOR_TARGET_ROOT="$TARGET_ROOT" HAZOR_TARGET_ARCH="$TARGET_ARCH" \
         cmake "${cmake_args[@]}"
     cmake --build "$BUILD_DIR" --parallel "$JOBS" --target Hazor

@@ -489,6 +489,58 @@ Fixing that is a prerequisite for ever offering a lensfun-free build;
 `HAZOR_ENABLE_RAWENGINE=OFF` remains the only working way to leave the engine
 out, and it is an escape hatch, not a packaging default.
 
+### stable-diffusion.cpp — *optional, Linux development only*
+
+Experimental local `txt2img`: the **Stable Diffusion** panel
+([`src/ui/StableDiffusionPanel.cpp`](../src/ui/StableDiffusionPanel.cpp)) runs
+one hardcoded prompt through
+[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+on the CPU and inserts the result as a pixel layer
+([`src/ai/sd/`](../src/ai/sd/)). It is a viability probe, **not** a shipped
+feature: `ENABLE_STABLE_DIFFUSION` defaults to `OFF`, and with `OFF` neither
+source file is compiled, so AppImage, Flatpak, Windows and macOS builds are
+unaffected.
+
+The dependency is not vendored in git. Clone the pinned revision — and its
+`ggml` submodule — into `3rdparty/stable-diffusion.cpp/`:
+
+```bash
+git clone --recursive https://github.com/leejet/stable-diffusion.cpp \
+    3rdparty/stable-diffusion.cpp
+git -C 3rdparty/stable-diffusion.cpp checkout 687915518efd69548965d24818f0d3bbbb903718
+git -C 3rdparty/stable-diffusion.cpp submodule update --init --recursive
+```
+
+| Pinned | Revision |
+|--------|----------|
+| `stable-diffusion.cpp` | `687915518efd69548965d24818f0d3bbbb903718` |
+| `ggml` (submodule) | `a5915eb0e47adef21c3f25b889a008925ea838c2` |
+
+Then build the host developer target with the panel enabled:
+
+```bash
+HAZOR_ENABLE_STABLE_DIFFUSION=ON ./scripts/build.sh
+```
+
+The environment variable is honoured only for `--target linux-x86_64` **and**
+only when no `--package` format is requested; [`build.sh`](../scripts/build.sh)
+logs that it ignored the flag otherwise. The Flatpak manifest adds a second,
+independent barrier: it never passes the option, and its `skip:` list excludes
+`3rdparty/`, so the checkout is not even copied into the sandbox.
+
+CMake builds the dependency as a static
+library with examples, CLI, server and WebP/WebM I/O disabled, CPU backend only,
+and forces `-O2` plus host tuning (`GGML_NATIVE`) on its own translation units
+even in a Debug Hazor — `CMAKE_CXX_FLAGS_DEBUG` carries no `-O`, and the host
+toolchain file sets `CMAKE_SYSTEM_NAME`, which ggml otherwise reads as
+cross-compiling and answers with the generic x86-64 baseline.
+
+The checkpoint path and the prompt are compile-time constants at the top of
+[`src/ai/sd/StableDiffusionTxt2Img.cpp`](../src/ai/sd/StableDiffusionTxt2Img.cpp)
+(`kModelPath`, `kPrompt`) — there is no model picker and no persisted setting.
+Point `kModelPath` at a local Stable Diffusion 1.5 checkpoint able to do
+512×512 `txt2img`; a missing file is reported in the panel.
+
 ### Bundled ONNX models (optional, cross-platform)
 
 Downloaded once and placed under the app's model directory; not required to
@@ -617,6 +669,8 @@ cmake --build build -j"$(nproc)" --target Hazor
 | `ENABLE_ONNXRUNTIME` | `ON` | Build with ONNX Runtime AI inference support |
 | `ENABLE_RAWENGINE` | `ON` | Build the native RAW engine (`rawengine` target) and link it into `Hazor` via [`src/raw/`](../src/raw/) (see [`docs/RAW-ENGINE.md`](RAW-ENGINE.md)) |
 | `RAWENGINE_WITH_LENSFUN` | `ON` | Build RawEngine with lensfun lens-correction support |
+| `ENABLE_STABLE_DIFFUSION` | `OFF` | Experimental local Stable Diffusion panel (Linux dev builds only — see above) |
+| `SD_CPP_SOURCE_DIR` | `3rdparty/stable-diffusion.cpp` | Where `ENABLE_STABLE_DIFFUSION` looks for the pinned checkout |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |
 | `HAZOR_STRICT_DEPENDENCIES` | `OFF` | Reject app dependencies outside `HAZOR_DEPENDENCY_ROOT` |
 | `HAZOR_DEVELOPMENT_PATHS` | `ON` | Embed source-tree fallback paths for local development only |

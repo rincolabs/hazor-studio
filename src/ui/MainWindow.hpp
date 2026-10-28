@@ -66,6 +66,7 @@ class BrushPresetManager;
 class BrushImportManager;
 class ColorEngine;
 class GenerativeFillDialog;
+class StableDiffusionPanel;
 class AiObjectSelectionController;
 struct AiCompatibilityMessage;
 struct DocumentSettings;
@@ -418,6 +419,7 @@ private:
     void applyRulerGuideSetting(const std::function<void(RulerGuideSettings&)>& mutate);
     void updateToolBarLayout();
     void syncGenerativeFillPanelController();
+    void syncStableDiffusionPanelController();
     void applyViewportStatusBarTheme();
     void showViewportStatusMessage(const QString& message, int timeoutMs,
                                    const QString& iconPath = QString());
@@ -631,6 +633,11 @@ private:
     QDockWidget* m_generativeFillDock = nullptr;
     GenerativeFillDialog* m_generativeFillPanel = nullptr;
     AgentPanel* m_agentPanel = nullptr;
+    // Experimental local Stable Diffusion panel: only constructed when the
+    // dependency is compiled in (ENABLE_STABLE_DIFFUSION), so both stay null in
+    // every packaged build and each use site is a plain null check.
+    QDockWidget* m_stableDiffusionDock = nullptr;
+    StableDiffusionPanel* m_stableDiffusionPanel = nullptr;
 
     // Right-side panel docks (each individually dockable) + the on-demand
     // floating Brush Settings dock. Held as members so resetDockLayout() can
