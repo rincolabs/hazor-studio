@@ -1,0 +1,87 @@
+/*
+ * Hazor AI Center — design tokens, ported verbatim from the approved design
+ * (tmp/webengine-ai-center/hazor-ai-center/screens/hazor-ai.css).
+ *
+ * Deliberately static, not themed: this design system is meant to become the
+ * standard for future Qt WebEngine panels, superseding the provisional
+ * theme-driven styling Neural Flow uses (@shared/design-system). Wiring these
+ * tokens to Hazor's live Theme would need ~15-20 new semantic fields (well,
+ * raised, input, sel, info, status *-bg variants) added to Theme and every
+ * theme implementation — a separate, larger change, out of scope here.
+ */
+:root {
+  --bg-0: #1f2122;
+  --bg-1: #252728;
+  --bg-2: #2d2f30;
+  --bg-3: #323435;
+  --bg-4: #37393a;
+  --surface: #444647;
+  --well: #3e4041;
+  --raised: #4c4e4f;
+  --hover: #56585a;
+  --input: #353738;
+  --line: #5b5d5e;
+  --line-soft: #37393a;
+  --text: #ffffff;
+  --text-2: #d3d3d3;
+  --text-3: #b6b8b9;
+  --accent: #2f6fd0;
+  --accent-h: #3b7ce0;
+  --accent-t: #8db8f5;
+  --sel: #33507c;
+  --ok: #8fe0a8;
+  --ok-bg: #2c4a37;
+  --warn: #f3cc7a;
+  --warn-bg: #4d4128;
+  --err: #ffa49a;
+  --err-bg: #563334;
+  --info: #a9c8f7;
+  --info-bg: #2c3f5c;
+  --mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace;
+  /* No remote font download (embedded-ui has no network access): Inter is
+     used where the OS provides it and falls back cleanly otherwise. */
+  --font: Inter, 'Segoe UI', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-1);
+}
+
+body {
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent-t);
+  text-decoration: none;
+}
+a:hover {
+  color: #b5d0f8;
+  text-decoration: underline;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-0);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+}

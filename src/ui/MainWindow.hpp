@@ -67,6 +67,7 @@ class BrushImportManager;
 class ColorEngine;
 class GenerativeFillDialog;
 class StableDiffusionPanel;
+class AiCenterWindow;
 class NeuralFlowPanel;
 class AiObjectSelectionController;
 struct AiCompatibilityMessage;
@@ -452,6 +453,12 @@ private:
     // execToolDialog's pattern: Qt::Tool + show() + deleteLater.
     void showAppSettings(int page, std::function<void(int)> onFinished = {});
 
+    // Opens the Hazor AI Center (lazily constructing it on first call),
+    // navigated to `section`/`subsection` (subsection empty = the section's
+    // default tab). No-op when the embedded interfaces are not compiled in
+    // (HAVE_AI_CENTER) — see AiCenterWindow.
+    void openAiCenter(const QString& section, const QString& subsection = QString());
+
     void showNewDocumentDialog(const DocumentSettings* initialSettings = nullptr);
     void createDocumentFromSettings(const DocumentSettings& settings);
     void onHomeTemplateRequested(const QString& name, int width, int height);
@@ -646,6 +653,10 @@ private:
     // the same plain null check covers a build without either.
     QDockWidget* m_neuralFlowDock = nullptr;
     NeuralFlowPanel* m_neuralFlowPanel = nullptr;
+    // Hazor AI Center: built lazily on first openAiCenter() call, only when
+    // the embedded interfaces are compiled in (HAVE_AI_CENTER) — same null
+    // check as the two members above cover a build without it.
+    AiCenterWindow* m_aiCenterWindow = nullptr;
 
     // Right-side panel docks (each individually dockable) + the on-demand
     // floating Brush Settings dock. Held as members so resetDockLayout() can

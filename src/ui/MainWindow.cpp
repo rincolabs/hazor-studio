@@ -38,7 +38,6 @@
 #include "ui/NewDocumentDialog.hpp"
 #include "ui/ExportImageDialog.hpp"
 #include "ui/RawDevelopWindow.hpp"
-#include "ui/AgentConfigWidget.hpp"
 #include "ui/AiUpscaleDialog.hpp"
 #include "ui/FillLayerDialog.hpp"
 #include "ui/ResizeLayerDialog.hpp"
@@ -70,6 +69,9 @@
 #endif
 #ifdef HAVE_NEURAL_FLOW
 #include "ui/NeuralFlowPanel.hpp"
+#endif
+#ifdef HAVE_AI_CENTER
+#include "ui/AiCenterWindow.hpp"
 #endif
 #include "ui/ProgressDialog.h"
 #include "ui/ZoomComboBox.hpp"
@@ -1444,6 +1446,11 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(m_stableDiffusionPanel, &StableDiffusionPanel::neuralFlowRequested,
             this, &MainWindow::onOpenNeuralFlow);
+#endif
+#ifdef HAVE_AI_CENTER
+    connect(m_stableDiffusionPanel, &StableDiffusionPanel::aiCenterRequested, this, [this] {
+        openAiCenter(QStringLiteral("models"), QStringLiteral("stable-diffusion"));
+    });
 #endif
 #endif
 
@@ -3702,6 +3709,39 @@ void MainWindow::onOpenNeuralFlow()
 #endif
 }
 
+void MainWindow::openAiCenter(const QString& section, const QString& subsection)
+{
+#ifdef HAVE_AI_CENTER
+    if (!m_aiCenterWindow) {
+        m_aiCenterWindow = new AiCenterWindow(m_presetManager,
+                                              m_agentController ? m_agentController->client() : nullptr,
+                                              m_mcpServer, this);
+        connect(m_aiCenterWindow, &AiCenterWindow::mcpRestartRequested,
+                this, &MainWindow::applyMcpSettings);
+
+        // The AI Center is now the only place runtime/provider/model settings
+        // change, so the AI selection tool's availability refresh (previously
+        // run once, when the old modal Settings dialog closed) becomes
+        // reactive instead — it has to be, since this window never "closes".
+        auto refreshAiSelection = [this] {
+            if (!m_canvas)
+                return;
+            if (auto* ai = m_canvas->aiSelectionController())
+                ai->onProviderOrSettingsChanged();
+            m_toolBar->bindAiController(m_canvas->aiSelectionController());
+            ensureAiControllerConnected();
+        };
+        connect(AiRuntimeManager::instance(), &AiRuntimeManager::settingsChanged, this, refreshAiSelection);
+        connect(AiRuntimeManager::instance(), &AiRuntimeManager::providerChanged, this, refreshAiSelection);
+        connect(AiModelRegistry::instance(), &AiModelRegistry::installedModelsChanged, this, refreshAiSelection);
+    }
+    m_aiCenterWindow->openSection(section, subsection);
+#else
+    Q_UNUSED(section);
+    Q_UNUSED(subsection);
+#endif
+}
+
 int MainWindow::tabWidgetIndexForDocument(int documentIndex) const
 {
     return documentIndex < 0 ? -1 : documentIndex + 1;
@@ -4078,9 +4118,7 @@ void MainWindow::showAppSettings(int page, std::function<void(int)> onFinished)
         return;
     }
 
-    auto* dlg = new AppSettingsDialog(page, m_presetManager,
-                                      m_agentController ? m_agentController->client() : nullptr,
-                                      this);
+    auto* dlg = new AppSettingsDialog(page, this);
     m_settingsDlg = dlg;
     if (onFinished)
         connect(dlg, &QDialog::finished, this, std::move(onFinished));
@@ -7809,6 +7847,15 @@ void MainWindow::setupAgents()
         if (m_generativeFillPanel)
             m_generativeFillPanel->reloadPresets();
     });
+    // Keeps the chat controller's own config in sync with whoever last saved
+    // or activated a preset — the AI Center included, which has no "dialog
+    // closed" moment to resync from the way the old Settings page did.
+    connect(m_presetManager, &AgentPresetManager::activePresetChanged, this,
+            [this](const AgentConfig& config) {
+        m_agentController->applyConfig(config);
+        m_agentPanel->setModelInfo(QStringLiteral("%1 (%2)")
+            .arg(config.provider.model, config.provider.displayName()));
+    });
 }
 
 void MainWindow::onAgentSelected(const QString& name)
@@ -7833,8 +7880,9 @@ void MainWindow::onGenerativeFill()
     if (!m_ctrl) return;
     if (m_presetManager->presetNames(Generative).isEmpty()) {
         AppMessageDialog::information(this, tr("Generative Fill"),
-            tr("No Generative preset is configured. Open the AI Agent settings "
-               "and create a preset of type \"Generative\" first."));
+            tr("No Image Generation preset is configured. Opening the AI Center "
+               "so you can create one."));
+        openAiCenter(QStringLiteral("image-generation"));
         return;
     }
     if (!m_generativeFillDock || !m_generativeFillPanel)
@@ -7854,23 +7902,11 @@ void MainWindow::onGenerativeFill()
 
 void MainWindow::onConfigureAgent()
 {
-    showAppSettings(AppSettingsDialog::PageAIAgent, [this](int result) {
-        if (result != QDialog::Accepted)
-            return;
-        m_presetManager->loadAll();
-        m_agentPanel->setAgentList(m_presetManager->presetNames(Assistant));
-        if (m_generativeFillPanel)
-            m_generativeFillPanel->reloadPresets();
-
-        QStringList assistants = m_presetManager->presetNames(Assistant);
-        QString name = m_presetManager->activeAssistantName();
-        if (m_presetManager->exists(name) &&
-            m_presetManager->preset(name).kind == Assistant) {
-            onAgentSelected(name);
-        } else if (!assistants.isEmpty()) {
-            onAgentSelected(assistants.first());
-        }
-    });
+    // The chat panel and the controller resync themselves reactively on
+    // AgentPresetManager::presetsChanged/activePresetChanged (see
+    // setupAgents()), which fire for edits made here exactly as they do for
+    // any other caller of the shared preset manager.
+    openAiCenter(QStringLiteral("assistants"));
 }
 
 void MainWindow::applyMcpSettings()
@@ -7910,17 +7946,10 @@ void MainWindow::onSettings()
 
 void MainWindow::onOpenAiSettings()
 {
-    showAppSettings(AppSettingsDialog::PageAIMachineLearning, [this](int) {
-        // Provider/model settings may have changed: reset AI caches/sessions and
-        // refresh the tool's availability + model list. Runs on cancel too, as it
-        // did when this was an exec() whose result was ignored.
-        if (m_canvas) {
-            if (auto* ai = m_canvas->aiSelectionController())
-                ai->onProviderOrSettingsChanged();
-            m_toolBar->bindAiController(m_canvas->aiSelectionController());
-            ensureAiControllerConnected();
-        }
-    });
+    // The AI selection tool's availability refresh is wired reactively to
+    // AiRuntimeManager/AiModelRegistry the first time the AI Center opens
+    // (see openAiCenter()), so nothing further is needed here on return.
+    openAiCenter(QStringLiteral("system"), QStringLiteral("runtime"));
 }
 
 void MainWindow::onCanvasContextMenuRequested(QPoint globalPos)

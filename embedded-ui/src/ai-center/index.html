@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Everything this page loads comes out of the Qt resource system: its own
+      bundle, and Qt's qwebchannel.js. No network, no CDN, no inline scripts.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' qrc:; img-src 'self' qrc: data:; style-src 'self' qrc: 'unsafe-inline'; script-src 'self' qrc:; connect-src 'none'"
+    />
+    <title>Hazor AI Center</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!--
+      Qt's own copy, so the JavaScript half of the channel can never be a
+      different version from the C++ half. It is a classic script and the
+      module below is deferred, so window.QWebChannel is there before the
+      application starts.
+    -->
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

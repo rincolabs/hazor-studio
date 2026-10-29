@@ -10,12 +10,10 @@ class GeneralSettingsPage;
 class ColorSettingsPage;
 class ShortcutSettingsPage;
 class RulerGuideSettingsPage;
-class AgentConfigWidget;
-class AiSettingsPage;
-class McpSettingsPage;
-class AgentPresetManager;
-class LLMClient;
 
+// AI Agent, AI / Machine Learning and MCP Server settings moved to the Hazor
+// AI Center (src/ui/AiCenterWindow.hpp) — see openAiCenter() in MainWindow.
+// This dialog keeps the settings that have no equivalent there.
 class AppSettingsDialog : public QDialog
 {
     Q_OBJECT
@@ -25,17 +23,11 @@ public:
         PageGeneral = 0,
         PageColorManagement = 1,
         PageKeyboardShortcuts = 2,
-        PageAIAgent = 3,
-        PageInterface = 4,
-        PageAIMachineLearning = 5,
-        PageMcpServer = 6,
+        PageInterface = 3,
         PageCount
     };
 
-    explicit AppSettingsDialog(int initialPage = PageGeneral,
-                               AgentPresetManager* presetMgr = nullptr,
-                               LLMClient* client = nullptr,
-                               QWidget* parent = nullptr);
+    explicit AppSettingsDialog(int initialPage = PageGeneral, QWidget* parent = nullptr);
 
     int selectedPage() const;
     // Switches to `page` on an already-open dialog. Needed because Settings is
@@ -52,7 +44,6 @@ private slots:
 private:
     void setupUi();
     void applyStyleSheet();
-    bool confirmAgentPendingChanges();
 
     QListWidget* m_sidebar = nullptr;
     QStackedWidget* m_pages = nullptr;
@@ -65,11 +56,6 @@ private:
     ColorSettingsPage* m_colorSettingsPage = nullptr;
     ShortcutSettingsPage* m_shortcutPage = nullptr;
     RulerGuideSettingsPage* m_rulerGuidePage = nullptr;
-    AgentConfigWidget* m_agentConfigWidget = nullptr;
-    AiSettingsPage* m_aiPage = nullptr;
-    McpSettingsPage* m_mcpPage = nullptr;
-    AgentPresetManager* m_presetManager = nullptr;
-    LLMClient* m_client = nullptr;
     int m_currentPage = -1;
     bool m_handlingPageChange = false;
 };

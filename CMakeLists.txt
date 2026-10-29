@@ -685,8 +685,6 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ai/upscale/RealEsrganProcessBackend.cpp
     src/ai/upscale/UpscaleService.hpp
     src/ai/upscale/UpscaleService.cpp
-    src/ui/AiSettingsPage.hpp
-    src/ui/AiSettingsPage.cpp
     src/ui/AiAlertService.hpp
     src/ui/AiAlertService.cpp
 
@@ -1023,8 +1021,6 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ui/ScrubbableValueInput.h
     src/ui/ProgressDialog.cpp
     src/ui/ProgressDialog.h
-    src/ui/AgentConfigWidget.cpp
-    src/ui/AgentConfigWidget.hpp
     src/ui/AiUpscaleDialog.cpp
     src/ui/AiUpscaleDialog.hpp
     src/ui/GenerativeFillDialog.cpp
@@ -1039,8 +1035,6 @@ add_executable(Hazor WIN32 MACOSX_BUNDLE
     src/ui/ColorSettingsPage.hpp
     src/ui/GeneralSettingsPage.cpp
     src/ui/GeneralSettingsPage.hpp
-    src/ui/McpSettingsPage.cpp
-    src/ui/McpSettingsPage.hpp
     src/ui/RulerGuideSettingsPage.cpp
     src/ui/RulerGuideSettingsPage.hpp
     src/ui/MainWindow.cpp
@@ -1397,13 +1391,17 @@ endif()
 # is used as-is when npm is absent, which is what makes a source tarball with the
 # dist included buildable without a JavaScript toolchain.
 #
-# Currently consumed only by the Neural Flow panel, so it follows the Stable
-# Diffusion module: there is nothing to host without it.
+# Not optional in practice: the AI Center is the only configuration surface
+# for Assistants, Image Generation, Models and System (the old Qt pages it
+# replaced are gone), so unlike the Neural Flow panel below, there is no
+# degraded-but-working fallback if this cannot be built. ENABLE_EMBEDDED_UI
+# stays a switch for a developer who explicitly wants to turn it off; what it
+# no longer does is silently succeed when turned on but unbuildable.
 option(ENABLE_EMBEDDED_UI
     "Compile the Vue interfaces under embedded-ui/ into the binary" ON)
 
 set(EMBEDDED_UI_FOUND OFF)
-if(ENABLE_EMBEDDED_UI AND STABLE_DIFFUSION_FOUND)
+if(ENABLE_EMBEDDED_UI)
     set(EMBEDDED_UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/embedded-ui")
     set(EMBEDDED_UI_DIST "${EMBEDDED_UI_DIR}/dist")
     set(EMBEDDED_UI_WORK "${CMAKE_CURRENT_BINARY_DIR}/embedded-ui")
@@ -1448,21 +1446,22 @@ if(ENABLE_EMBEDDED_UI AND STABLE_DIFFUSION_FOUND)
             VERBATIM)
 
         set(EMBEDDED_UI_QRC_DEPENDS "${EMBEDDED_UI_WORK}/npm-build.stamp")
-    elseif(EXISTS "${EMBEDDED_UI_DIST}/neural-flow/index.html")
+    elseif(EXISTS "${EMBEDDED_UI_DIST}/ai-center/index.html")
         message(STATUS
             "embedded-ui: npm was not found; using the prebuilt build in "
             "'${EMBEDDED_UI_DIST}'. Changes under embedded-ui/src will not be picked up.")
         set(EMBEDDED_UI_QRC_DEPENDS "")
     else()
-        # A warning rather than an error, for the same reason the Stable
-        # Diffusion backends degrade instead of failing: a missing developer
-        # tool must not be able to stop Hazor from building. The Neural Flow
-        # panel is simply not compiled, and the button that opens it is not
-        # added to the Stable Diffusion panel.
-        message(WARNING
+        # Unlike the optional backends (Stable Diffusion, Real-ESRGAN), this one
+        # is fatal: the AI Center has no Qt-widget fallback to degrade to, so a
+        # build that cannot produce it would silently ship with no way to
+        # configure Assistants, Image Generation, Models or System at all.
+        message(FATAL_ERROR
             "ENABLE_EMBEDDED_UI is ON but npm was not found and no prebuilt build exists at "
-            "'${EMBEDDED_UI_DIST}'. Building without the Neural Flow editor — install "
-            "Node.js, or run `npm ci && npm run build` in embedded-ui/ on a machine that has it.")
+            "'${EMBEDDED_UI_DIST}'. The AI Center (Assistants, Image Generation, Models, System) "
+            "has no fallback UI, so this cannot be skipped — install Node.js, run "
+            "`npm ci && npm run build` in embedded-ui/ on a machine that has it and retry, or "
+            "configure with -DENABLE_EMBEDDED_UI=OFF if you specifically want to build without it.")
     endif()
 
     if(DEFINED EMBEDDED_UI_QRC_DEPENDS)
@@ -1498,16 +1497,36 @@ if(ENABLE_EMBEDDED_UI AND STABLE_DIFFUSION_FOUND)
 endif()
 
 if(EMBEDDED_UI_FOUND)
-    target_compile_definitions(Hazor PRIVATE HAVE_NEURAL_FLOW=1)
+    target_sources(Hazor PRIVATE "${EMBEDDED_UI_RCC}")
+
+    # AI Center: Assistants, Image Generation, Models and System settings. Its
+    # Stable Diffusion tab degrades to an empty registry without the module
+    # (see the HAVE_STABLE_DIFFUSION guard in AiCenterBridge_StableDiffusion.cpp),
+    # so unlike Neural Flow this does not also need STABLE_DIFFUSION_FOUND.
+    target_compile_definitions(Hazor PRIVATE HAVE_AI_CENTER=1)
     target_sources(Hazor PRIVATE
-        "${EMBEDDED_UI_RCC}"
-        # Qt WebChannel surface + the dock that hosts the page. The existing
-        # WebViewHost does the embedding; nothing new is added for that.
-        src/ui/NeuralFlowBridge.hpp
-        src/ui/NeuralFlowBridge.cpp
-        src/ui/NeuralFlowPanel.hpp
-        src/ui/NeuralFlowPanel.cpp
+        src/ui/AiCenterWindow.hpp
+        src/ui/AiCenterWindow.cpp
+        src/ui/AiCenterBridge.hpp
+        src/ui/AiCenterBridge.cpp
+        src/ui/AiCenterBridge_Runtime.cpp
+        src/ui/AiCenterBridge_Models.cpp
+        src/ui/AiCenterBridge_Presets.cpp
+        src/ui/AiCenterBridge_StableDiffusion.cpp
+        src/ui/AiCenterBridge_Mcp.cpp
     )
+
+    if(STABLE_DIFFUSION_FOUND)
+        target_compile_definitions(Hazor PRIVATE HAVE_NEURAL_FLOW=1)
+        target_sources(Hazor PRIVATE
+            # Qt WebChannel surface + the dock that hosts the page. The existing
+            # WebViewHost does the embedding; nothing new is added for that.
+            src/ui/NeuralFlowBridge.hpp
+            src/ui/NeuralFlowBridge.cpp
+            src/ui/NeuralFlowPanel.hpp
+            src/ui/NeuralFlowPanel.cpp
+        )
+    endif()
 endif()
 
 # Theme sources — object library for reuse by tests

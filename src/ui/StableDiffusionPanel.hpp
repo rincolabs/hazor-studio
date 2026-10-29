@@ -45,6 +45,8 @@ signals:
     // panel only reports the intent — opening it from here would mean this
     // widget knowing about the docking system.
     void neuralFlowRequested();
+    // Same reasoning: MainWindow owns the AI Center window.
+    void aiCenterRequested();
 
 private:
     void buildUi();
@@ -62,4 +64,5 @@ private:
     QPushButton* m_generateBtn = nullptr;
     // Only built when the embedded interfaces are compiled in; null otherwise.
     QPushButton* m_neuralFlowBtn = nullptr;
+    QPushButton* m_aiCenterBtn = nullptr;
 };

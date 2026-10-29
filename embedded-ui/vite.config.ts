@@ -55,6 +55,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         'neural-flow': fileURLToPath(new URL('./src/neural-flow/index.html', import.meta.url)),
+        'ai-center': fileURLToPath(new URL('./src/ai-center/index.html', import.meta.url)),
       },
     },
   },

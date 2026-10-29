@@ -3,13 +3,8 @@
 #include "ColorSettingsPage.hpp"
 #include "ShortcutSettingsPage.hpp"
 #include "RulerGuideSettingsPage.hpp"
-#include "AgentConfigWidget.hpp"
-#include "AiSettingsPage.hpp"
-#include "McpSettingsPage.hpp"
 #include "ShortcutManager.hpp"
 #include "MainWindow.hpp"
-#include "agent/AgentPresetManager.hpp"
-#include "agent/LLMClient.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
@@ -22,9 +17,8 @@
 #include <QScrollArea>
 #include <QDebug>
 
-AppSettingsDialog::AppSettingsDialog(int initialPage, AgentPresetManager *presetMgr,
-                                     LLMClient *client, QWidget *parent)
-    : QDialog(parent), m_presetManager(presetMgr), m_client(client)
+AppSettingsDialog::AppSettingsDialog(int initialPage, QWidget *parent)
+    : QDialog(parent)
 {
     setWindowTitle(tr("Settings"));
     resize(850, 600);
@@ -76,11 +70,7 @@ void AppSettingsDialog::setupUi()
     m_sidebar->addItem(tr("General"));
     m_sidebar->addItem(tr("Color Management"));
     m_sidebar->addItem(tr("Keyboard Shortcuts"));
-    // m_sidebar->addItem(tr("Performance"));
-    m_sidebar->addItem(tr("AI Agent"));
     m_sidebar->addItem(tr("Interface"));
-    m_sidebar->addItem(tr("AI / Machine Learning"));
-    m_sidebar->addItem(tr("MCP Server"));
 
     m_sidebar->setCurrentRow(PageKeyboardShortcuts);
 
@@ -104,38 +94,8 @@ void AppSettingsDialog::setupUi()
     m_shortcutPage = new ShortcutSettingsPage(this);
     m_pages->addWidget(m_shortcutPage);
 
-    auto *th = ThemeManager::instance()->current();
-    QString pageBg = QStringLiteral("QWidget { background: transparent; }").arg(th->colorSurface.name());
-    QString labelColor = QStringLiteral("color: %1;").arg(th->colorTextPrimary.name());
-
-    // Performance placeholder
-    auto *perfPage = new QWidget(this);
-    perfPage->setStyleSheet(pageBg);
-    auto *perfLay = new QVBoxLayout(perfPage);
-    perfLay->setContentsMargins(24, 16, 24, 16);
-    auto *perfLabel = new QLabel(tr("Performance settings available in a future update."), perfPage);
-    perfLabel->setWordWrap(true);
-    perfLabel->setStyleSheet(labelColor);
-    perfLay->addWidget(perfLabel);
-    perfLay->addStretch();
-    // m_pages->addWidget(perfPage);
-
-    // AI Agent page
-    m_agentConfigWidget = new AgentConfigWidget(m_presetManager, m_client,
-                                                m_presetManager ? m_presetManager->activePresetName() : QString(), this);
-    m_agentConfigWidget->load();
-    m_pages->addWidget(m_agentConfigWidget);
-
     m_rulerGuidePage = new RulerGuideSettingsPage(this);
     m_pages->addWidget(m_rulerGuidePage);
-
-    // AI / Machine Learning page (ONNX runtime, providers, performance, models).
-    m_aiPage = new AiSettingsPage(this);
-    m_pages->addWidget(m_aiPage);
-
-    // MCP Server page (embedded local tool server for external AI agents).
-    m_mcpPage = new McpSettingsPage(this);
-    m_pages->addWidget(m_mcpPage);
 
     contentLay->addWidget(m_pages, 1);
 
@@ -176,36 +136,18 @@ void AppSettingsDialog::onPageSelected(int row)
     if (row < 0 || row >= m_pages->count())
         return;
 
-    const int agentPage = m_agentConfigWidget ? m_pages->indexOf(m_agentConfigWidget) : -1;
-    if (m_currentPage == agentPage && row != agentPage && !confirmAgentPendingChanges()) {
-        m_handlingPageChange = true;
-        m_sidebar->setCurrentRow(m_currentPage);
-        m_handlingPageChange = false;
-        return;
-    }
-
     m_pages->setCurrentIndex(row);
     m_currentPage = row;
 }
 
 void AppSettingsDialog::onAccept()
 {
-    if (!confirmAgentPendingChanges())
-        return;
-
     m_generalPage->saveSettings();
     if (m_colorSettingsPage)
         m_colorSettingsPage->saveSettings();
     m_shortcutPage->apply();
     if (m_rulerGuidePage)
         m_rulerGuidePage->saveSettings();
-    if (m_aiPage)
-        m_aiPage->saveSettings();
-    if (m_mcpPage) {
-        m_mcpPage->saveSettings();
-        if (auto* mw = qobject_cast<MainWindow*>(parentWidget()))
-            mw->applyMcpSettings();
-    }
     ShortcutManager::instance()->saveSettings();
     accept();
 }
@@ -217,17 +159,9 @@ void AppSettingsDialog::onCancel()
 
 void AppSettingsDialog::reject()
 {
-    if (!confirmAgentPendingChanges())
-        return;
-
     // Reload original settings to undo any changes made
     ShortcutManager::instance()->loadSettings();
     QDialog::reject();
-}
-
-bool AppSettingsDialog::confirmAgentPendingChanges()
-{
-    return !m_agentConfigWidget || m_agentConfigWidget->confirmPendingChanges();
 }
 
 void AppSettingsDialog::applyStyleSheet()
