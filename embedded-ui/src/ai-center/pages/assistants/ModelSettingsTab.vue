@@ -63,8 +63,8 @@ function resetDefaults(): void {
       <div class="row">
         <label class="lbl" for="mt">Max Tokens</label>
         <div>
-          <NumberField v-model="editor.draft.value.modelSettings.maxTokens" unit="tokens" :min="1" />
-          <div class="help">Upper limit for a single response. The model's own limit still applies.</div>
+          <NumberField v-model="editor.draft.value.modelSettings.maxTokens" unit="tokens" :min="1" :max="32768" />
+          <div class="help">1–32768. Upper limit for a single response; the model's own limit still applies.</div>
         </div>
       </div>
     </Group>

@@ -93,9 +93,6 @@ async function onClearCache(): Promise<void> {
         </div>
         <div v-else class="muted">No runtime errors recorded this session.</div>
         <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
-          <button type="button" class="btn" disabled title="Not available in this build">
-            <Icon name="folder" />Open AI Logs Folder
-          </button>
           <button type="button" class="btn danger" @click="confirmingClear = true">
             <Icon name="trash" />Clear AI Cache…
           </button>

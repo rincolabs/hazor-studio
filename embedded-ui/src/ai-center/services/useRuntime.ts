@@ -79,7 +79,44 @@ async function clearCache(): Promise<void> {
   }
 }
 
+/**
+ * Applied immediately rather than through the footer bar: it is a QSettings key
+ * the upscale backend reads on its next run, not part of the AiRuntimeSettings
+ * draft. An empty path clears the override.
+ */
+async function setRealEsrganPath(path: string): Promise<void> {
+  try {
+    const client = await getClient()
+    adopt(await client.applyRealEsrganPath(path))
+  } catch (reason) {
+    error.value = describeError(reason)
+  }
+}
+
+async function browseForRealEsrganPath(): Promise<void> {
+  try {
+    const client = await getClient()
+    const chosen = await client.browseForRealEsrganExecutable()
+    if (chosen) {
+      await setRealEsrganPath(chosen)
+    }
+  } catch (reason) {
+    error.value = describeError(reason)
+  }
+}
+
 export function useRuntime() {
   start()
-  return { state, draft, dirty, saving, error, apply, revert, clearCache }
+  return {
+    state,
+    draft,
+    dirty,
+    saving,
+    error,
+    apply,
+    revert,
+    clearCache,
+    setRealEsrganPath,
+    browseForRealEsrganPath,
+  }
 }

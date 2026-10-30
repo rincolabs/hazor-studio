@@ -621,14 +621,23 @@ void MainWindow::showAiUpscaleDialog(UpscaleTarget target)
         return;
 
     AiUpscaleDialog dlg(m_ctrl->upscaleBackendStatus(), target, this);
-    connect(&dlg, &AiUpscaleDialog::openModelManagerRequested,
-            this, &MainWindow::onOpenAiSettings);
+    // This dialog is modal, so the AI Center would open behind it and refuse
+    // input. Close the dialog first and navigate once exec() has returned —
+    // and land on the models page, which is what the button is about.
+    bool openModelManager = false;
+    connect(&dlg, &AiUpscaleDialog::openModelManagerRequested, &dlg, [&dlg, &openModelManager]() {
+        openModelManager = true;
+        dlg.reject();
+    });
     connect(&dlg, &AiUpscaleDialog::backendPathChanged, this, [this]() {
         showViewportStatusMessage(tr("Real-ESRGAN backend path updated."), 2500);
     });
 
-    if (dlg.exec() != QDialog::Accepted)
+    if (dlg.exec() != QDialog::Accepted) {
+        if (openModelManager)
+            openAiCenter(QStringLiteral("models"), QStringLiteral("vision"));
         return;
+    }
 
     UpscaleOptions options = dlg.options();
     if (options.target == UpscaleTarget::CurrentDocument

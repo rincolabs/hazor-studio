@@ -3,12 +3,28 @@
 #include "core/AppPaths.hpp"
 
 #include <QSettings>
+#include <QtGlobal>
 
 QString AiRuntimeSettings::resolvedModelsDirectory() const
 {
     if (!modelsDirectory.trimmed().isEmpty())
         return modelsDirectory;
     return AppPaths::subDir(QStringLiteral("models"));
+}
+
+void AiRuntimeSettings::clampToValidRange()
+{
+    // Upper bounds match what the AI Center offers; the lower ones are what the
+    // subsystems require (0 threads/MB means "automatic", but a negative count
+    // or a zero job/model cap would stall every AI job).
+    cpuThreadCount = qBound(0, cpuThreadCount, 256);
+    maxGpuMemoryMB = qBound(0, maxGpuMemoryMB, 131072);
+    maxCpuMemoryMB = qBound(0, maxCpuMemoryMB, 131072);
+    maxConcurrentAiJobs = qBound(1, maxConcurrentAiJobs, 8);
+    maxLoadedModels = qBound(1, maxLoadedModels, 8);
+    maxCachedDocuments = qBound(0, maxCachedDocuments, 32);
+    maxCachedEmbeddingsMB = qBound(0, maxCachedEmbeddingsMB, 131072);
+    workingResolutionLongestSide = qBound(256, workingResolutionLongestSide, 8192);
 }
 
 AiRuntimeSettings AiRuntimeSettings::load()
@@ -49,12 +65,8 @@ AiRuntimeSettings AiRuntimeSettings::load()
 
     settings.endGroup();
 
-    // Clamp to safe ranges (defensive against hand-edited config files).
-    if (s.cpuThreadCount < 0) s.cpuThreadCount = 0;
-    if (s.maxConcurrentAiJobs < 1) s.maxConcurrentAiJobs = 1;
-    if (s.maxLoadedModels < 1) s.maxLoadedModels = 1;
-    if (s.maxCachedDocuments < 0) s.maxCachedDocuments = 0;
-    if (s.workingResolutionLongestSide < 256) s.workingResolutionLongestSide = 256;
+    // Defensive against hand-edited config files.
+    s.clampToValidRange();
 
     return s;
 }

@@ -43,8 +43,7 @@ void AgentPresetManager::loadAll()
     ensureDefaults();
 
     // Load active Assistant preset (active_agent.txt)
-    QString activeFile = m_configDir + "/../active_agent.txt";
-    QFile af(activeFile);
+    QFile af(activeFilePath(Assistant));
     if (af.open(QIODevice::ReadOnly)) {
         m_activeName = QString::fromUtf8(af.readAll()).trimmed();
         af.close();
@@ -57,8 +56,7 @@ void AgentPresetManager::loadAll()
     }
 
     // Load active Generative preset (active_generative.txt)
-    QString genFile = m_configDir + "/../active_generative.txt";
-    QFile gf(genFile);
+    QFile gf(activeFilePath(Generative));
     if (gf.open(QIODevice::ReadOnly)) {
         m_activeGenerative = QString::fromUtf8(gf.readAll()).trimmed();
         gf.close();
@@ -172,9 +170,19 @@ void AgentPresetManager::rename(const QString& oldName, const QString& newName)
     if (f.open(QIODevice::WriteOnly))
         f.write(doc.toJson(QJsonDocument::Indented));
 
+    // The two active pointers are independent (active_agent.txt /
+    // active_generative.txt) and both are persisted, so a rename has to follow
+    // whichever one named the preset — in memory and on disk — or the next
+    // startup resolves a name that no longer exists.
     if (m_activeName == oldName) {
         m_activeName = newName;
+        writeActiveFile(Assistant, newName);
         emit activePresetChanged(cfg);
+    }
+    if (m_activeGenerative == oldName) {
+        m_activeGenerative = newName;
+        writeActiveFile(Generative, newName);
+        emit activeGenerativeChanged(cfg);
     }
 
     emit presetsChanged();
@@ -223,10 +231,7 @@ void AgentPresetManager::setActivePreset(const QString& name)
     m_activeName = name;
     emit activePresetChanged(m_presets.value(name));
 
-    QString activeFile = m_configDir + "/../active_agent.txt";
-    QFile f(activeFile);
-    if (f.open(QIODevice::WriteOnly))
-        f.write(name.toUtf8());
+    writeActiveFile(Assistant, name);
 }
 
 void AgentPresetManager::setActiveGenerative(const QString& name)
@@ -238,8 +243,18 @@ void AgentPresetManager::setActiveGenerative(const QString& name)
     m_activeGenerative = name;
     emit activeGenerativeChanged(m_presets.value(name));
 
-    QString genFile = m_configDir + "/../active_generative.txt";
-    QFile f(genFile);
+    writeActiveFile(Generative, name);
+}
+
+QString AgentPresetManager::activeFilePath(AgentKind kind) const
+{
+    return m_configDir + (kind == Generative ? QStringLiteral("/../active_generative.txt")
+                                            : QStringLiteral("/../active_agent.txt"));
+}
+
+void AgentPresetManager::writeActiveFile(AgentKind kind, const QString& name) const
+{
+    QFile f(activeFilePath(kind));
     if (f.open(QIODevice::WriteOnly))
         f.write(name.toUtf8());
 }

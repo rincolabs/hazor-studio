@@ -11,7 +11,15 @@
 #include "ai/runtime/AiRuntimeManager.hpp"
 #include "ui/AppDiagnostics.hpp"
 
+#include <QFileDialog>
+#include <QSettings>
+
 namespace {
+
+// The Real-ESRGAN override lives in QSettings rather than AiRuntimeSettings
+// because the process backend reads it directly (see
+// RealEsrganProcessBackend.cpp) and AiUpscaleDialog writes it.
+const char* const kRealEsrganExecutableKey = "ai/upscale/realesrganExecutable";
 
 QString workingResolutionToJs(AiWorkingResolution value)
 {
@@ -120,6 +128,8 @@ QVariantMap AiCenterBridge::runtimeStateVariant() const
     state[QStringLiteral("cachedEmbeddingCount")] = AiJobRunner::instance()->cachedEmbeddingCount();
     state[QStringLiteral("cachedEmbeddingBytes")] = AiJobRunner::instance()->cachedEmbeddingBytes();
     state[QStringLiteral("onnxRuntimeVersion")] = diag.runtimeVersion;
+    state[QStringLiteral("realesrganExecutable")] =
+        QSettings().value(QLatin1String(kRealEsrganExecutableKey)).toString();
     state[QStringLiteral("osName")] = app.osName;
     state[QStringLiteral("cpuArchitecture")] = app.cpuArchitecture;
     state[QStringLiteral("bundledModelCount")] = bundled;
@@ -176,6 +186,10 @@ QVariantMap AiCenterBridge::applyRuntimeSettings(const QVariantMap& patch)
     if (patch.contains(QStringLiteral("workingResolutionLongestSide")))
         s.workingResolutionLongestSide = patch.value(QStringLiteral("workingResolutionLongestSide")).toInt();
 
+    // The page's number fields are an affordance, not a guarantee (nothing stops
+    // a typed value), so the bounds are enforced here too — by their owner.
+    s.clampToValidRange();
+
     manager->setSettings(s); // persists, and reloads sessions when requiresSessionReload() says so
     return runtimeStateVariant();
 }
@@ -184,4 +198,25 @@ QVariantMap AiCenterBridge::clearAiCache()
 {
     AiRuntimeManager::instance()->clearCache();
     return runtimeStateVariant();
+}
+
+QVariantMap AiCenterBridge::applyRealEsrganPath(const QString& path)
+{
+    const QString trimmed = path.trimmed();
+    QSettings settings;
+    // Removing the key rather than storing "" is what RealEsrganProcessBackend
+    // reads as "use the packaged backend".
+    if (trimmed.isEmpty())
+        settings.remove(QLatin1String(kRealEsrganExecutableKey));
+    else
+        settings.setValue(QLatin1String(kRealEsrganExecutableKey), trimmed);
+
+    const QVariantMap state = runtimeStateVariant();
+    emit runtimeStateChanged(state);
+    return state;
+}
+
+QString AiCenterBridge::browseForRealEsrganExecutable()
+{
+    return QFileDialog::getOpenFileName(m_dialogParent, tr("Locate Real-ESRGAN Backend"));
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+import ComboField from '../../components/ComboField.vue'
 import Group from '../../components/Group.vue'
 import Icon from '../../components/Icon.vue'
 import SegmentedControl from '../../components/SegmentedControl.vue'
@@ -8,7 +9,7 @@ import type { ProviderType } from '../../services/contract'
 import type { PresetEditor } from '../../services/usePresetEditor'
 import TestPromptGroup from './TestPromptGroup.vue'
 
-const props = defineProps<{ editor: PresetEditor }>()
+defineProps<{ editor: PresetEditor }>()
 
 const showApiKey = ref(false)
 
@@ -28,9 +29,12 @@ const baseUrlHelp: Record<ProviderType, string> = {
       <div class="row">
         <span class="lbl">Provider Type</span>
         <div>
+          <!-- Not v-model: switching type re-prefills Base URL and API Key from
+               ProviderConfig's defaults, which the editor has to ask C++ for. -->
           <SegmentedControl
-            v-model="editor.draft.value.provider.type"
+            :model-value="editor.draft.value.provider.type"
             aria-label="Provider type"
+            @update:model-value="editor.setProviderType($event)"
             :options="[
               { value: 'local', label: 'Local' },
               { value: 'openai', label: 'OpenAI' },
@@ -67,13 +71,15 @@ const baseUrlHelp: Record<ProviderType, string> = {
         <label class="lbl" for="md">Model</label>
         <div>
           <div class="ctl" style="flex-wrap: nowrap">
-            <div class="selw">
-              <input id="md" v-model="editor.draft.value.provider.model" class="in mono" list="detected-models" />
-              <datalist id="detected-models">
-                <option v-for="m in editor.detectedModels.value" :key="m" :value="m" />
-              </datalist>
-              <svg v-if="editor.detectedModels.value.length" class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-            </div>
+            <ComboField
+              v-model="editor.draft.value.provider.model"
+              input-id="md"
+              mono
+              placeholder="Model name (e.g. qwen2.5:3b)"
+              :options="editor.detectedModels.value"
+              :list-label="`${editor.detectedModels.value.length} models detected`"
+              empty-label="Run Detect Models to list what the endpoint offers."
+            />
             <button type="button" class="btn" :disabled="editor.detectingModels.value" @click="editor.detectModels()">
               <Icon :name="editor.detectingModels.value ? 'spinner' : 'refresh'" :class="{ spin: editor.detectingModels.value }" />
               {{ editor.detectingModels.value ? 'Detecting…' : 'Detect Models' }}

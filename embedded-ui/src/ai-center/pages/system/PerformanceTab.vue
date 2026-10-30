@@ -23,7 +23,7 @@ const resolutionPolicies: Array<{ value: WorkingResolutionPolicy; title: string;
         <div class="row">
           <label class="lbl" for="ct">CPU Threads</label>
           <div>
-            <NumberField v-model="draft.cpuThreadCount" unit="Auto" aria-label="CPU Threads" />
+            <NumberField v-model="draft.cpuThreadCount" unit="Auto" :min="0" :max="256" aria-label="CPU Threads" />
             <div class="help">0 = Auto. Range 0–256.</div>
           </div>
         </div>
@@ -78,8 +78,8 @@ const resolutionPolicies: Array<{ value: WorkingResolutionPolicy; title: string;
         <div class="row" :style="!draft.embeddingCacheEnabled ? 'opacity:.75' : undefined">
           <label class="lbl" for="ce" :style="!draft.embeddingCacheEnabled ? 'color:#9c9e9f' : undefined">Maximum Cached Embedding Memory</label>
           <div>
-            <NumberField v-model="draft.maxCachedEmbeddingsMB" unit="MB" :min="0" :step="128" :disabled="!draft.embeddingCacheEnabled" aria-label="Maximum Cached Embedding Memory" />
-            <div class="help">0 = Auto. Steps of 128 MB.</div>
+            <NumberField v-model="draft.maxCachedEmbeddingsMB" unit="MB" :min="0" :max="131072" :step="128" :disabled="!draft.embeddingCacheEnabled" aria-label="Maximum Cached Embedding Memory" />
+            <div class="help">0 = Auto. 0–131072 MB in steps of 128.</div>
           </div>
         </div>
         <div v-if="!draft.embeddingCacheEnabled" class="muted" style="display: flex; gap: 6px; align-items: center; font-size: 11px">

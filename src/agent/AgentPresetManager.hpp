@@ -45,6 +45,11 @@ signals:
 private:
     QString sanitizedName(const QString& name) const;
     QString filePath(const QString& name) const;
+    // Where the active-preset pointer for `kind` is stored, and how it is
+    // written. Both setActive*() and rename() go through these so the pointer
+    // on disk can never disagree with the one in memory.
+    QString activeFilePath(AgentKind kind) const;
+    void writeActiveFile(AgentKind kind, const QString& name) const;
     void ensureDefaults();
     QString firstNameOfKind(AgentKind kind) const;
 

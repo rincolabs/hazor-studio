@@ -1294,142 +1294,130 @@ endif()
 # is used as-is when npm is absent, which is what makes a source tarball with the
 # dist included buildable without a JavaScript toolchain.
 #
-# Not optional in practice: the AI Center is the only configuration surface
-# for Assistants, Image Generation, Models and System (the old Qt pages it
-# replaced are gone), so unlike the Neural Flow panel below, there is no
-# degraded-but-working fallback if this cannot be built. ENABLE_EMBEDDED_UI
-# stays a switch for a developer who explicitly wants to turn it off; what it
-# no longer does is silently succeed when turned on but unbuildable.
-option(ENABLE_EMBEDDED_UI
-    "Compile the Vue interfaces under embedded-ui/ into the binary" ON)
+# Mandatory, with no switch to turn it off: the AI Center built from here is the
+# only configuration surface for Assistants, Image Generation, Models and System
+# (the Qt pages it replaced are gone). A build without it would ship an editor
+# whose AI settings cannot be reached at all, so a missing toolchain is a
+# configure error rather than a degraded binary. This is unlike the optional
+# backends (Stable Diffusion, Real-ESRGAN) and unlike the Neural Flow panel
+# below, which genuinely have nothing to show when their dependency is absent.
+set(EMBEDDED_UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/embedded-ui")
+set(EMBEDDED_UI_DIST "${EMBEDDED_UI_DIR}/dist")
+set(EMBEDDED_UI_WORK "${CMAKE_CURRENT_BINARY_DIR}/embedded-ui")
+set(EMBEDDED_UI_QRC "${EMBEDDED_UI_WORK}/embedded-ui.qrc")
+set(EMBEDDED_UI_RCC "${EMBEDDED_UI_WORK}/qrc_embedded_ui.cpp")
+file(MAKE_DIRECTORY "${EMBEDDED_UI_WORK}")
 
-set(EMBEDDED_UI_FOUND OFF)
-if(ENABLE_EMBEDDED_UI)
-    set(EMBEDDED_UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/embedded-ui")
-    set(EMBEDDED_UI_DIST "${EMBEDDED_UI_DIR}/dist")
-    set(EMBEDDED_UI_WORK "${CMAKE_CURRENT_BINARY_DIR}/embedded-ui")
-    set(EMBEDDED_UI_QRC "${EMBEDDED_UI_WORK}/embedded-ui.qrc")
-    set(EMBEDDED_UI_RCC "${EMBEDDED_UI_WORK}/qrc_embedded_ui.cpp")
-    file(MAKE_DIRECTORY "${EMBEDDED_UI_WORK}")
+find_program(NPM_EXECUTABLE NAMES npm npm.cmd
+    DOC "npm, used to build the embedded web interfaces under embedded-ui/")
 
-    find_program(NPM_EXECUTABLE NAMES npm npm.cmd
-        DOC "npm, used to build the embedded web interfaces under embedded-ui/")
+if(NPM_EXECUTABLE)
+    # CONFIGURE_DEPENDS so a file added under embedded-ui/src is noticed
+    # without a manual re-configure: these are the inputs of a generator,
+    # not a hand-maintained source list.
+    file(GLOB_RECURSE EMBEDDED_UI_SOURCES CONFIGURE_DEPENDS
+        "${EMBEDDED_UI_DIR}/src/*")
+    list(APPEND EMBEDDED_UI_SOURCES
+        "${EMBEDDED_UI_DIR}/package.json"
+        "${EMBEDDED_UI_DIR}/tsconfig.json"
+        "${EMBEDDED_UI_DIR}/vite.config.ts")
 
-    if(NPM_EXECUTABLE)
-        # CONFIGURE_DEPENDS so a file added under embedded-ui/src is noticed
-        # without a manual re-configure: these are the inputs of a generator,
-        # not a hand-maintained source list.
-        file(GLOB_RECURSE EMBEDDED_UI_SOURCES CONFIGURE_DEPENDS
-            "${EMBEDDED_UI_DIR}/src/*")
-        list(APPEND EMBEDDED_UI_SOURCES
-            "${EMBEDDED_UI_DIR}/package.json"
-            "${EMBEDDED_UI_DIR}/tsconfig.json"
-            "${EMBEDDED_UI_DIR}/vite.config.ts")
+    # `npm ci` is its own step with its own stamp, keyed on the lockfile:
+    # installing on every C++ build would add seconds to each one and would
+    # make the build depend on the network.
+    add_custom_command(
+        OUTPUT "${EMBEDDED_UI_WORK}/npm-ci.stamp"
+        COMMAND "${NPM_EXECUTABLE}" ci --no-audit --no-fund
+        COMMAND "${CMAKE_COMMAND}" -E touch "${EMBEDDED_UI_WORK}/npm-ci.stamp"
+        WORKING_DIRECTORY "${EMBEDDED_UI_DIR}"
+        DEPENDS "${EMBEDDED_UI_DIR}/package-lock.json"
+                "${EMBEDDED_UI_DIR}/package.json"
+        COMMENT "embedded-ui: installing frontend dependencies (npm ci)"
+        VERBATIM)
 
-        # `npm ci` is its own step with its own stamp, keyed on the lockfile:
-        # installing on every C++ build would add seconds to each one and would
-        # make the build depend on the network.
-        add_custom_command(
-            OUTPUT "${EMBEDDED_UI_WORK}/npm-ci.stamp"
-            COMMAND "${NPM_EXECUTABLE}" ci --no-audit --no-fund
-            COMMAND "${CMAKE_COMMAND}" -E touch "${EMBEDDED_UI_WORK}/npm-ci.stamp"
-            WORKING_DIRECTORY "${EMBEDDED_UI_DIR}"
-            DEPENDS "${EMBEDDED_UI_DIR}/package-lock.json"
-                    "${EMBEDDED_UI_DIR}/package.json"
-            COMMENT "embedded-ui: installing frontend dependencies (npm ci)"
-            VERBATIM)
+    add_custom_command(
+        OUTPUT "${EMBEDDED_UI_WORK}/npm-build.stamp"
+        COMMAND "${NPM_EXECUTABLE}" run build
+        COMMAND "${CMAKE_COMMAND}" -E touch "${EMBEDDED_UI_WORK}/npm-build.stamp"
+        WORKING_DIRECTORY "${EMBEDDED_UI_DIR}"
+        DEPENDS "${EMBEDDED_UI_WORK}/npm-ci.stamp" ${EMBEDDED_UI_SOURCES}
+        COMMENT "embedded-ui: building the web interfaces (vite build)"
+        VERBATIM)
 
-        add_custom_command(
-            OUTPUT "${EMBEDDED_UI_WORK}/npm-build.stamp"
-            COMMAND "${NPM_EXECUTABLE}" run build
-            COMMAND "${CMAKE_COMMAND}" -E touch "${EMBEDDED_UI_WORK}/npm-build.stamp"
-            WORKING_DIRECTORY "${EMBEDDED_UI_DIR}"
-            DEPENDS "${EMBEDDED_UI_WORK}/npm-ci.stamp" ${EMBEDDED_UI_SOURCES}
-            COMMENT "embedded-ui: building the web interfaces (vite build)"
-            VERBATIM)
-
-        set(EMBEDDED_UI_QRC_DEPENDS "${EMBEDDED_UI_WORK}/npm-build.stamp")
-    elseif(EXISTS "${EMBEDDED_UI_DIST}/ai-center/index.html")
-        message(STATUS
-            "embedded-ui: npm was not found; using the prebuilt build in "
-            "'${EMBEDDED_UI_DIST}'. Changes under embedded-ui/src will not be picked up.")
-        set(EMBEDDED_UI_QRC_DEPENDS "")
-    else()
-        # Unlike the optional backends (Stable Diffusion, Real-ESRGAN), this one
-        # is fatal: the AI Center has no Qt-widget fallback to degrade to, so a
-        # build that cannot produce it would silently ship with no way to
-        # configure Assistants, Image Generation, Models or System at all.
-        message(FATAL_ERROR
-            "ENABLE_EMBEDDED_UI is ON but npm was not found and no prebuilt build exists at "
-            "'${EMBEDDED_UI_DIST}'. The AI Center (Assistants, Image Generation, Models, System) "
-            "has no fallback UI, so this cannot be skipped — install Node.js, run "
-            "`npm ci && npm run build` in embedded-ui/ on a machine that has it and retry, or "
-            "configure with -DENABLE_EMBEDDED_UI=OFF if you specifically want to build without it.")
-    endif()
-
-    if(DEFINED EMBEDDED_UI_QRC_DEPENDS)
-        add_custom_command(
-            OUTPUT "${EMBEDDED_UI_QRC}"
-            COMMAND "${CMAKE_COMMAND}"
-                    -DDIST_DIR=${EMBEDDED_UI_DIST}
-                    -DQRC_FILE=${EMBEDDED_UI_QRC}
-                    -DRESOURCE_PREFIX=/embedded-ui
-                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedUiQrc.cmake"
-            DEPENDS ${EMBEDDED_UI_QRC_DEPENDS}
-                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedUiQrc.cmake"
-            COMMENT "embedded-ui: listing the build output for rcc"
-            VERBATIM)
-
-        # rcc is invoked explicitly rather than through AUTORCC: the .qrc does
-        # not exist until the frontend has been built, and AUTORCC resolves its
-        # inputs too early to wait for that.
-        add_custom_command(
-            OUTPUT "${EMBEDDED_UI_RCC}"
-            COMMAND "$<TARGET_FILE:Qt6::rcc>" --name embedded_ui
-                    --output "${EMBEDDED_UI_RCC}" "${EMBEDDED_UI_QRC}"
-            DEPENDS "${EMBEDDED_UI_QRC}"
-            COMMENT "embedded-ui: compiling the interfaces into a Qt resource"
-            VERBATIM)
-        # Nothing in rcc's output declares a QObject, and the generated file is
-        # megabytes of byte arrays; keep the autogen passes off it.
-        set_source_files_properties("${EMBEDDED_UI_RCC}" PROPERTIES
-            SKIP_AUTOGEN ON GENERATED ON)
-
-        set(EMBEDDED_UI_FOUND ON)
-    endif()
+    set(EMBEDDED_UI_QRC_DEPENDS "${EMBEDDED_UI_WORK}/npm-build.stamp")
+elseif(EXISTS "${EMBEDDED_UI_DIST}/ai-center/index.html")
+    message(STATUS
+        "embedded-ui: npm was not found; using the prebuilt build in "
+        "'${EMBEDDED_UI_DIST}'. Changes under embedded-ui/src will not be picked up.")
+    set(EMBEDDED_UI_QRC_DEPENDS "")
+else()
+    # Fatal, unlike the optional backends (Stable Diffusion, Real-ESRGAN): the
+    # AI Center has no Qt-widget fallback to degrade to, so a build that cannot
+    # produce it would ship with no way to configure Assistants, Image
+    # Generation, Models or System at all.
+    message(FATAL_ERROR
+        "embedded-ui: npm was not found and no prebuilt build exists at "
+        "'${EMBEDDED_UI_DIST}'. The AI Center (Assistants, Image Generation, Models, System) "
+        "is the only AI configuration surface and has no fallback UI, so it cannot be "
+        "skipped — install Node.js and reconfigure, or run `npm ci && npm run build` in "
+        "embedded-ui/ on a machine that has one and build from the resulting dist/.")
 endif()
 
-if(EMBEDDED_UI_FOUND)
-    target_sources(Hazor PRIVATE "${EMBEDDED_UI_RCC}")
+add_custom_command(
+    OUTPUT "${EMBEDDED_UI_QRC}"
+    COMMAND "${CMAKE_COMMAND}"
+            -DDIST_DIR=${EMBEDDED_UI_DIST}
+            -DQRC_FILE=${EMBEDDED_UI_QRC}
+            -DRESOURCE_PREFIX=/embedded-ui
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedUiQrc.cmake"
+    DEPENDS ${EMBEDDED_UI_QRC_DEPENDS}
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedUiQrc.cmake"
+    COMMENT "embedded-ui: listing the build output for rcc"
+    VERBATIM)
 
-    # AI Center: Assistants, Image Generation, Models and System settings. Its
-    # Stable Diffusion tab degrades to an empty registry without the module
-    # (see the HAVE_STABLE_DIFFUSION guard in AiCenterBridge_StableDiffusion.cpp),
-    # so unlike Neural Flow this does not also need STABLE_DIFFUSION_FOUND.
-    target_compile_definitions(Hazor PRIVATE HAVE_AI_CENTER=1)
+# rcc is invoked explicitly rather than through AUTORCC: the .qrc does not exist
+# until the frontend has been built, and AUTORCC resolves its inputs too early
+# to wait for that.
+add_custom_command(
+    OUTPUT "${EMBEDDED_UI_RCC}"
+    COMMAND "$<TARGET_FILE:Qt6::rcc>" --name embedded_ui
+            --output "${EMBEDDED_UI_RCC}" "${EMBEDDED_UI_QRC}"
+    DEPENDS "${EMBEDDED_UI_QRC}"
+    COMMENT "embedded-ui: compiling the interfaces into a Qt resource"
+    VERBATIM)
+# Nothing in rcc's output declares a QObject, and the generated file is megabytes
+# of byte arrays; keep the autogen passes off it.
+set_source_files_properties("${EMBEDDED_UI_RCC}" PROPERTIES
+    SKIP_AUTOGEN ON GENERATED ON)
+
+target_sources(Hazor PRIVATE "${EMBEDDED_UI_RCC}")
+
+# AI Center: Assistants, Image Generation, Models and System settings. Its
+# Stable Diffusion tab degrades to an empty registry without the module (see the
+# HAVE_STABLE_DIFFUSION guard in AiCenterBridge_StableDiffusion.cpp), so unlike
+# Neural Flow it does not need STABLE_DIFFUSION_FOUND either.
+target_sources(Hazor PRIVATE
+    src/ui/AiCenterWindow.hpp
+    src/ui/AiCenterWindow.cpp
+    src/ui/AiCenterBridge.hpp
+    src/ui/AiCenterBridge.cpp
+    src/ui/AiCenterBridge_Runtime.cpp
+    src/ui/AiCenterBridge_Models.cpp
+    src/ui/AiCenterBridge_Presets.cpp
+    src/ui/AiCenterBridge_StableDiffusion.cpp
+    src/ui/AiCenterBridge_Mcp.cpp
+)
+
+if(STABLE_DIFFUSION_FOUND)
+    target_compile_definitions(Hazor PRIVATE HAVE_NEURAL_FLOW=1)
     target_sources(Hazor PRIVATE
-        src/ui/AiCenterWindow.hpp
-        src/ui/AiCenterWindow.cpp
-        src/ui/AiCenterBridge.hpp
-        src/ui/AiCenterBridge.cpp
-        src/ui/AiCenterBridge_Runtime.cpp
-        src/ui/AiCenterBridge_Models.cpp
-        src/ui/AiCenterBridge_Presets.cpp
-        src/ui/AiCenterBridge_StableDiffusion.cpp
-        src/ui/AiCenterBridge_Mcp.cpp
+        # Qt WebChannel surface + the dock that hosts the page. The existing
+        # WebViewHost does the embedding; nothing new is added for that.
+        src/ui/NeuralFlowBridge.hpp
+        src/ui/NeuralFlowBridge.cpp
+        src/ui/NeuralFlowPanel.hpp
+        src/ui/NeuralFlowPanel.cpp
     )
-
-    if(STABLE_DIFFUSION_FOUND)
-        target_compile_definitions(Hazor PRIVATE HAVE_NEURAL_FLOW=1)
-        target_sources(Hazor PRIVATE
-            # Qt WebChannel surface + the dock that hosts the page. The existing
-            # WebViewHost does the embedding; nothing new is added for that.
-            src/ui/NeuralFlowBridge.hpp
-            src/ui/NeuralFlowBridge.cpp
-            src/ui/NeuralFlowPanel.hpp
-            src/ui/NeuralFlowPanel.cpp
-        )
-    endif()
 endif()
 
 # Theme sources — object library for reuse by tests

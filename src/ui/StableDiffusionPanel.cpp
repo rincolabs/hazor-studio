@@ -98,14 +98,12 @@ void StableDiffusionPanel::buildUi()
     lay->addWidget(m_neuralFlowBtn);
 #endif
 
-#ifdef HAVE_AI_CENTER
     m_aiCenterBtn = new QPushButton(tr("AI Center"), this);
     m_aiCenterBtn->setCursor(Qt::PointingHandCursor);
     m_aiCenterBtn->setToolTip(tr("Open the Hazor AI Center"));
     connect(m_aiCenterBtn, &QPushButton::clicked,
             this, &StableDiffusionPanel::aiCenterRequested);
     lay->addWidget(m_aiCenterBtn);
-#endif
 
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("sdPanelStatus"));

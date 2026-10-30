@@ -106,9 +106,11 @@ QVariantMap AiCenterBridge::sdModelsStateVariant() const
         if (!available)
             ++unavailableDirectories;
         int found = 0;
-        const QString cleanDir = QDir::cleanPath(dir.path);
+        // Compare against "<dir>/" so a sibling that merely shares a prefix
+        // ("models/vae" vs "models/vae-old") is not counted as inside this one.
+        const QString cleanPrefix = QDir::cleanPath(dir.path) + QLatin1Char('/');
         for (const SdModelEntry& entry : entries) {
-            if (entry.discovered && QDir::cleanPath(entry.path).startsWith(cleanDir))
+            if (entry.discovered && QDir::cleanPath(entry.path).startsWith(cleanPrefix))
                 ++found;
         }
         QVariantMap v;
@@ -123,8 +125,10 @@ QVariantMap AiCenterBridge::sdModelsStateVariant() const
 
     QStringList missingPaths;
     for (const SdModelEntry& entry : entries) {
+        // The path, not the id: this list is rendered as "Missing paths" in the
+        // Overview, next to the directories below it.
         if (!entry.fileExists())
-            missingPaths << entry.id;
+            missingPaths << entry.path;
     }
     for (const SdModelDirectory& dir : directories) {
         if (!QDir(dir.path).exists())

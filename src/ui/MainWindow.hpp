@@ -455,8 +455,8 @@ private:
 
     // Opens the Hazor AI Center (lazily constructing it on first call),
     // navigated to `section`/`subsection` (subsection empty = the section's
-    // default tab). No-op when the embedded interfaces are not compiled in
-    // (HAVE_AI_CENTER) — see AiCenterWindow.
+    // default tab). The only configuration surface for AI settings, so it is
+    // always compiled in — see AiCenterWindow.
     void openAiCenter(const QString& section, const QString& subsection = QString());
 
     void showNewDocumentDialog(const DocumentSettings* initialSettings = nullptr);
@@ -653,9 +653,9 @@ private:
     // the same plain null check covers a build without either.
     QDockWidget* m_neuralFlowDock = nullptr;
     NeuralFlowPanel* m_neuralFlowPanel = nullptr;
-    // Hazor AI Center: built lazily on first openAiCenter() call, only when
-    // the embedded interfaces are compiled in (HAVE_AI_CENTER) — same null
-    // check as the two members above cover a build without it.
+    // Hazor AI Center: built lazily on first openAiCenter() call. Unlike the
+    // two members above it is never absent from a build — the embedded
+    // interfaces it needs are a hard dependency.
     AiCenterWindow* m_aiCenterWindow = nullptr;
 
     // Right-side panel docks (each individually dockable) + the on-demand

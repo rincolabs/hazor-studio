@@ -7,9 +7,13 @@
 #include "agent/AgentConfig.hpp"
 #include "agent/AgentPresetManager.hpp"
 #include "agent/LLMClient.hpp"
+#include "tools/ToolCatalog.hpp"
 
 #include <QElapsedTimer>
 #include <QPointer>
+
+#include <string>
+#include <vector>
 
 QVariantMap AiCenterBridge::toVariant(const AgentConfig& c) const
 {
@@ -59,16 +63,21 @@ QVariantMap AiCenterBridge::toVariant(const AgentConfig& c) const
 
 AgentConfig AiCenterBridge::fromVariant(const QVariantMap& map, const AgentConfig& base) const
 {
+    // Every field falls back to `base`, so this is a patch and not a rebuild: a
+    // key the page does not send (outputMode, for one — no UI has ever exposed
+    // it) keeps the stored value instead of silently reverting to a default.
     AgentConfig c = base;
     c.name = map.value(QStringLiteral("name"), c.name).toString();
     c.description = map.value(QStringLiteral("description"), c.description).toString();
-    c.kind = agentKindFromString(map.value(QStringLiteral("kind")).toString());
+    if (map.contains(QStringLiteral("kind")))
+        c.kind = agentKindFromString(map.value(QStringLiteral("kind")).toString());
 
     const QVariantMap provider = map.value(QStringLiteral("provider")).toMap();
-    c.provider.type = ProviderConfig::typeFromString(provider.value(QStringLiteral("type")).toString());
-    c.provider.baseUrl = provider.value(QStringLiteral("baseUrl")).toString();
-    c.provider.apiKey = provider.value(QStringLiteral("apiKey")).toString();
-    c.provider.model = provider.value(QStringLiteral("model")).toString();
+    if (provider.contains(QStringLiteral("type")))
+        c.provider.type = ProviderConfig::typeFromString(provider.value(QStringLiteral("type")).toString());
+    c.provider.baseUrl = provider.value(QStringLiteral("baseUrl"), c.provider.baseUrl).toString();
+    c.provider.apiKey = provider.value(QStringLiteral("apiKey"), c.provider.apiKey).toString();
+    c.provider.model = provider.value(QStringLiteral("model"), c.provider.model).toString();
 
     const QVariantMap modelSettings = map.value(QStringLiteral("modelSettings")).toMap();
     c.modelSettings.temperature = modelSettings.value(QStringLiteral("temperature"), c.modelSettings.temperature).toDouble();
@@ -78,19 +87,22 @@ AgentConfig AiCenterBridge::fromVariant(const QVariantMap& map, const AgentConfi
     c.modelSettings.presencePenalty = modelSettings.value(QStringLiteral("presencePenalty"), c.modelSettings.presencePenalty).toDouble();
 
     const QVariantMap behavior = map.value(QStringLiteral("behavior")).toMap();
-    c.behavior.systemPrompt = behavior.value(QStringLiteral("systemPrompt")).toString();
-    c.behavior.enabledTools.clear();
-    for (const QVariant& tool : behavior.value(QStringLiteral("enabledTools")).toList())
-        c.behavior.enabledTools << tool.toString();
-    c.behavior.toolMode = AgentBehavior::toolModeFromString(behavior.value(QStringLiteral("toolMode")).toString());
+    c.behavior.systemPrompt = behavior.value(QStringLiteral("systemPrompt"), c.behavior.systemPrompt).toString();
+    if (behavior.contains(QStringLiteral("enabledTools"))) {
+        c.behavior.enabledTools.clear();
+        for (const QVariant& tool : behavior.value(QStringLiteral("enabledTools")).toList())
+            c.behavior.enabledTools << tool.toString();
+    }
+    if (behavior.contains(QStringLiteral("toolMode")))
+        c.behavior.toolMode = AgentBehavior::toolModeFromString(behavior.value(QStringLiteral("toolMode")).toString());
 
     const QVariantMap generative = map.value(QStringLiteral("generative")).toMap();
     c.generative.steps = generative.value(QStringLiteral("steps"), c.generative.steps).toInt();
     c.generative.strength = generative.value(QStringLiteral("strength"), c.generative.strength).toDouble();
     c.generative.seed = generative.value(QStringLiteral("seed"), c.generative.seed).toInt();
-    c.generative.negativePrompt = generative.value(QStringLiteral("negativePrompt")).toString();
-    c.generative.promptAssistEnabled = generative.value(QStringLiteral("promptAssistEnabled")).toBool();
-    c.generative.promptAssistPreset = generative.value(QStringLiteral("promptAssistPreset")).toString();
+    c.generative.negativePrompt = generative.value(QStringLiteral("negativePrompt"), c.generative.negativePrompt).toString();
+    c.generative.promptAssistEnabled = generative.value(QStringLiteral("promptAssistEnabled"), c.generative.promptAssistEnabled).toBool();
+    c.generative.promptAssistPreset = generative.value(QStringLiteral("promptAssistPreset"), c.generative.promptAssistPreset).toString();
 
     c.timeoutMs = map.value(QStringLiteral("timeoutMs"), c.timeoutMs).toInt();
     c.retries = map.value(QStringLiteral("retries"), c.retries).toInt();
@@ -102,23 +114,54 @@ AgentConfig AiCenterBridge::fromVariant(const QVariantMap& map, const AgentConfi
     return c;
 }
 
+QVariantMap AiCenterBridge::presetMutation(bool ok, const QString& error,
+                                           const AgentConfig& config) const
+{
+    QVariantMap result;
+    result[QStringLiteral("ok")] = ok;
+    result[QStringLiteral("error")] = error;
+    result[QStringLiteral("preset")] = toVariant(config);
+    return result;
+}
+
 QVariantMap AiCenterBridge::getPreset(const QString& name) const
 {
     return toVariant(m_presetManager->preset(name));
 }
 
+QVariantMap AiCenterBridge::providerDefaults(const QString& kind, const QString& type) const
+{
+    const ProviderConfig::Type providerType = ProviderConfig::typeFromString(type);
+    const AgentKind agentKind = agentKindFromString(kind);
+
+    QVariantMap defaults;
+    defaults[QStringLiteral("baseUrl")] = ProviderConfig::defaultBaseUrl(providerType, agentKind);
+    defaults[QStringLiteral("apiKey")] = ProviderConfig::defaultApiKey(providerType, agentKind);
+    return defaults;
+}
+
 QVariantMap AiCenterBridge::createPreset(const QString& kind, const QString& name,
                                          const QString& description, const QString& providerType)
 {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty())
+        return presetMutation(false, tr("Enter a name for the preset."), AgentConfig());
+    // AgentPresetManager keys presets by name, so saving onto an existing one
+    // would replace it with defaults rather than add anything.
+    if (m_presetManager->exists(trimmed))
+        return presetMutation(false, tr("A preset named \"%1\" already exists.").arg(trimmed),
+                              m_presetManager->preset(trimmed));
+
     AgentConfig cfg;
     cfg.kind = agentKindFromString(kind);
-    cfg.name = name;
+    cfg.name = trimmed;
     cfg.description = description;
     cfg.provider.type = ProviderConfig::typeFromString(providerType);
-    cfg.provider.baseUrl = ProviderConfig::defaultBaseUrl(cfg.provider.type);
+    cfg.provider.baseUrl = ProviderConfig::defaultBaseUrl(cfg.provider.type, cfg.kind);
+    cfg.provider.apiKey = ProviderConfig::defaultApiKey(cfg.provider.type, cfg.kind);
 
     m_presetManager->save(cfg); // emits presetsChanged, which emitPresetsChanged()/emitOverviewChanged() are connected to
-    return toVariant(cfg);
+    return presetMutation(true, QString(), cfg);
 }
 
 QString AiCenterBridge::duplicatePreset(const QString& name)
@@ -134,10 +177,33 @@ QVariantMap AiCenterBridge::deletePreset(const QString& name)
 
 QVariantMap AiCenterBridge::savePreset(const QString& name, const QVariantMap& preset)
 {
-    const AgentConfig base = m_presetManager->exists(name) ? m_presetManager->preset(name) : AgentConfig();
-    const AgentConfig cfg = fromVariant(preset, base);
-    m_presetManager->save(cfg);
-    return toVariant(cfg);
+    const bool existed = m_presetManager->exists(name);
+    const AgentConfig base = existed ? m_presetManager->preset(name) : AgentConfig();
+    AgentConfig cfg = fromVariant(preset, base);
+    cfg.name = cfg.name.trimmed();
+
+    // AgentPresetManager::save() drops a nameless preset on the floor, which
+    // would leave the editor showing changes that were never written.
+    if (cfg.name.isEmpty())
+        return presetMutation(false, tr("A preset needs a name."), base);
+
+    const bool renaming = (cfg.name != name);
+    if (renaming && m_presetManager->exists(cfg.name))
+        return presetMutation(false, tr("A preset named \"%1\" already exists.").arg(cfg.name), base);
+
+    if (renaming && existed) {
+        // save() alone would write a second preset under the new name and leave
+        // the old one — and the active-preset pointer — behind. Writing the
+        // edited values under the old name and then renaming is what moves the
+        // file, the map key and both active pointers together.
+        AgentConfig atOldName = cfg;
+        atOldName.name = name;
+        m_presetManager->save(atOldName);
+        m_presetManager->rename(name, cfg.name);
+    } else {
+        m_presetManager->save(cfg);
+    }
+    return presetMutation(true, QString(), cfg);
 }
 
 QVariantMap AiCenterBridge::setActivePreset(const QString& name, const QString& kind)
@@ -149,31 +215,47 @@ QVariantMap AiCenterBridge::setActivePreset(const QString& name, const QString& 
     return presetListsVariant();
 }
 
-void AiCenterBridge::testConnection(const QString& name)
+bool AiCenterBridge::prepareTestClient(const QString& name, const QVariantMap& preset,
+                                      AgentConfig* out)
 {
-    if (!m_client || !m_presetManager->exists(name))
-        return;
+    if (!m_testClient)
+        return false;
+
+    const AgentConfig base = m_presetManager->exists(name) ? m_presetManager->preset(name)
+                                                           : AgentConfig();
+    AgentConfig cfg = fromVariant(preset, base);
+    if (cfg.name.trimmed().isEmpty())
+        cfg.name = name;
+
     m_pendingTestName = name;
-    m_client->applyConfig(m_presetManager->preset(name));
-    m_client->testConnection(); // answers via connectionTestResult, connected once in the constructor
+    m_testClient->applyConfig(cfg);
+    if (out)
+        *out = cfg;
+    return true;
 }
 
-void AiCenterBridge::detectModels(const QString& name)
+void AiCenterBridge::testConnection(const QString& name, const QVariantMap& preset)
 {
-    if (!m_client || !m_presetManager->exists(name))
+    if (!prepareTestClient(name, preset, nullptr))
         return;
-    m_pendingTestName = name;
-    m_client->applyConfig(m_presetManager->preset(name));
-    m_client->fetchModels(); // answers via modelsFetched, connected once in the constructor
+    m_testClient->testConnection(); // answers via connectionTestResult, connected once in the constructor
 }
 
-void AiCenterBridge::testPrompt(const QString& name, const QString& prompt)
+void AiCenterBridge::detectModels(const QString& name, const QVariantMap& preset)
 {
-    if (!m_client || !m_presetManager->exists(name))
+    if (!prepareTestClient(name, preset, nullptr))
         return;
+    m_testClient->fetchModels(); // answers via modelsFetched, connected once in the constructor
+}
+
+void AiCenterBridge::testPrompt(const QString& name, const QVariantMap& preset,
+                                const QString& prompt)
+{
+    AgentConfig cfg;
+    if (!prepareTestClient(name, preset, &cfg))
+        return;
+
     const QString presetName = name;
-    m_client->applyConfig(m_presetManager->preset(name));
-
     auto timer = std::make_shared<QElapsedTimer>();
     timer->start();
 
@@ -184,7 +266,7 @@ void AiCenterBridge::testPrompt(const QString& name, const QString& prompt)
     auto errConn = std::make_shared<QMetaObject::Connection>();
     QPointer<AiCenterBridge> self(this);
 
-    *okConn = connect(m_client, &LLMClient::responseReceived, this,
+    *okConn = connect(m_testClient, &LLMClient::responseReceived, this,
         [self, presetName, timer, okConn, errConn](const QString& response) {
         if (self) {
             QVariantMap result;
@@ -197,7 +279,7 @@ void AiCenterBridge::testPrompt(const QString& name, const QString& prompt)
         QObject::disconnect(*okConn);
         QObject::disconnect(*errConn);
     });
-    *errConn = connect(m_client, &LLMClient::errorOccurred, this,
+    *errConn = connect(m_testClient, &LLMClient::errorOccurred, this,
         [self, presetName, timer, okConn, errConn](const QString& error) {
         if (self) {
             QVariantMap result;
@@ -211,6 +293,15 @@ void AiCenterBridge::testPrompt(const QString& name, const QString& prompt)
         QObject::disconnect(*errConn);
     });
 
-    const AgentConfig cfg = m_presetManager->preset(name);
-    m_client->sendAsync(cfg.behavior.systemPrompt, prompt);
+    // An empty system prompt means "whatever this preset's tools imply", the
+    // same fallback AgentController::regenerateSystemPrompt() applies — testing
+    // with no system prompt at all would not resemble the real agent.
+    QString systemPrompt = cfg.behavior.systemPrompt;
+    if (systemPrompt.isEmpty()) {
+        std::vector<std::string> enabled;
+        for (const QString& tool : cfg.behavior.enabledTools)
+            enabled.push_back(tool.toStdString());
+        systemPrompt = QString::fromStdString(ToolCatalog::systemPrompt(enabled));
+    }
+    m_testClient->sendAsync(systemPrompt, prompt);
 }

@@ -85,14 +85,19 @@ export function usePresetEditor(kind: AgentKind) {
     }
   }
 
-  async function create(name: string, description: string, providerType: ProviderType): Promise<void> {
+  /** Resolves to the refusal message when the backend rejected the name. */
+  async function create(name: string, description: string, providerType: ProviderType): Promise<string> {
     const client = await getClient()
-    const preset = await client.createPreset(kind, name, description, providerType)
+    const result = await client.createPreset(kind, name, description, providerType)
+    if (!result.ok) {
+      return result.error
+    }
     await refreshList()
-    draft.value = clone(preset)
-    saved.value = clone(preset)
-    selectedName.value = preset.name
+    draft.value = clone(result.preset)
+    saved.value = clone(result.preset)
+    selectedName.value = result.preset.name
     resetTestState()
+    return ''
   }
 
   async function duplicate(): Promise<void> {
@@ -119,22 +124,48 @@ export function usePresetEditor(kind: AgentKind) {
     }
   }
 
-  async function save(): Promise<void> {
-    if (!draft.value || !selectedName.value) return
+  /** False when the backend refused the save; `error` then holds the reason. */
+  async function save(): Promise<boolean> {
+    if (!draft.value || !selectedName.value) return false
     saving.value = true
     error.value = ''
     try {
       const client = await getClient()
+      // The backend renames when draft.name differs from the stored name, and
+      // refuses rather than overwriting when that name is taken.
       const result = await client.savePreset(selectedName.value, draft.value)
-      draft.value = clone(result)
-      saved.value = clone(result)
-      selectedName.value = result.name // save() also renames when the name field changed
+      if (!result.ok) {
+        error.value = result.error
+        return false
+      }
+      draft.value = clone(result.preset)
+      saved.value = clone(result.preset)
+      selectedName.value = result.preset.name
       await refreshList()
+      return true
     } catch (reason) {
       error.value = describeError(reason)
+      return false
     } finally {
       saving.value = false
     }
+  }
+
+  /**
+   * Switching provider type re-prefills the endpoint and key for the new one —
+   * the previous provider's URL is meaningless for it, and the defaults come
+   * from ProviderConfig rather than a copy kept here ("Local" is Ollama for an
+   * assistant and an A1111 server for image generation).
+   */
+  async function setProviderType(type: ProviderType): Promise<void> {
+    const preset = draft.value
+    if (!preset || preset.provider.type === type) return
+    preset.provider.type = type
+    detectedModels.value = [] // detected against the old endpoint
+    const client = await getClient()
+    const defaults = await client.providerDefaults(kind, type)
+    preset.provider.baseUrl = defaults.baseUrl
+    preset.provider.apiKey = defaults.apiKey
   }
 
   function discard(): void {
@@ -150,27 +181,29 @@ export function usePresetEditor(kind: AgentKind) {
     await refreshList()
   }
 
+  // The three tests send the draft, so they exercise the values on screen even
+  // when they have not been saved yet.
   async function testConnection(): Promise<void> {
-    if (!selectedName.value) return
+    if (!selectedName.value || !draft.value) return
     testingConnection.value = true
     connectionResult.value = null
     const client = await getClient()
-    client.testConnection(selectedName.value)
+    client.testConnection(selectedName.value, draft.value)
   }
 
   async function detectModels(): Promise<void> {
-    if (!selectedName.value) return
+    if (!selectedName.value || !draft.value) return
     detectingModels.value = true
     const client = await getClient()
-    client.detectModels(selectedName.value)
+    client.detectModels(selectedName.value, draft.value)
   }
 
   async function testPrompt(prompt: string): Promise<void> {
-    if (!selectedName.value) return
+    if (!selectedName.value || !draft.value) return
     testingPrompt.value = true
     promptResult.value = null
     const client = await getClient()
-    client.testPrompt(selectedName.value, prompt)
+    client.testPrompt(selectedName.value, draft.value, prompt)
   }
 
   // These three results are asynchronous (the backend call is a real network
@@ -201,6 +234,9 @@ export function usePresetEditor(kind: AgentKind) {
   void start()
 
   return {
+    // The kind this editor was built for, so dialogs can offer only the
+    // providers that make sense for it.
+    kind,
     list,
     selectedName,
     draft,
@@ -220,6 +256,7 @@ export function usePresetEditor(kind: AgentKind) {
     remove,
     save,
     discard,
+    setProviderType,
     setActive,
     testConnection,
     detectModels,

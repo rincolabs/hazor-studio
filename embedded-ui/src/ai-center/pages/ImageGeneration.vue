@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+import ComboField from '../components/ComboField.vue'
 import Group from '../components/Group.vue'
 import Icon from '../components/Icon.vue'
 import NumberField from '../components/NumberField.vue'
@@ -50,8 +51,10 @@ const baseUrlHelp: Record<ProviderType, string> = {
             <div class="row">
               <span class="lbl">Provider Type</span>
               <div>
+                <!-- Anthropic is absent on purpose: it has no image generation
+                     API, so it is not offered here or in the New Preset dialog. -->
                 <SegmentedControl
-                  v-model="editor.draft.value.provider.type"
+                  :model-value="editor.draft.value.provider.type"
                   aria-label="Provider type"
                   :options="[
                     { value: 'local', label: 'Local' },
@@ -59,6 +62,7 @@ const baseUrlHelp: Record<ProviderType, string> = {
                     { value: 'google', label: 'Google' },
                     { value: 'custom', label: 'Custom' },
                   ]"
+                  @update:model-value="editor.setProviderType($event)"
                 />
                 <div class="help">{{ baseUrlHelp[editor.draft.value.provider.type] }}</div>
               </div>
@@ -85,12 +89,14 @@ const baseUrlHelp: Record<ProviderType, string> = {
               <label class="lbl" for="md">Model</label>
               <div>
                 <div class="ctl" style="flex-wrap: nowrap">
-                  <div class="selw">
-                    <input id="md" v-model="editor.draft.value.provider.model" class="in mono" list="detected-gen-models" />
-                    <datalist id="detected-gen-models">
-                      <option v-for="m in editor.detectedModels.value" :key="m" :value="m" />
-                    </datalist>
-                  </div>
+                  <ComboField
+                    v-model="editor.draft.value.provider.model"
+                    input-id="md"
+                    mono
+                    :options="editor.detectedModels.value"
+                    :list-label="`${editor.detectedModels.value.length} models detected`"
+                    empty-label="Run Detect Models to list what the endpoint offers."
+                  />
                   <button type="button" class="btn" :disabled="editor.detectingModels.value" @click="editor.detectModels()">
                     <Icon :name="editor.detectingModels.value ? 'spinner' : 'refresh'" :class="{ spin: editor.detectingModels.value }" />
                     {{ editor.detectingModels.value ? 'Detecting…' : 'Detect Models' }}
@@ -115,11 +121,11 @@ const baseUrlHelp: Record<ProviderType, string> = {
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 20px">
               <div>
                 <label class="flbl" for="st">Steps</label>
-                <NumberField v-model="editor.draft.value.generative.steps" :min="1" />
+                <NumberField v-model="editor.draft.value.generative.steps" :min="1" :max="150" />
               </div>
               <div>
                 <label class="flbl" for="sd">Seed</label>
-                <NumberField v-model="editor.draft.value.generative.seed" unit="random" />
+                <NumberField v-model="editor.draft.value.generative.seed" unit="random" :min="-1" :max="2147483647" />
                 <div class="help">-1 picks a new seed for each generation.</div>
               </div>
               <div style="grid-column: 1 / -1">

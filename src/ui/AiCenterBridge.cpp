@@ -13,9 +13,10 @@
 
 #include <QDebug>
 
-AiCenterBridge::AiCenterBridge(AgentPresetManager* presetManager, LLMClient* client,
-                               McpServer* mcpServer, QObject* parent)
-    : QObject(parent), m_presetManager(presetManager), m_client(client), m_mcpServer(mcpServer)
+AiCenterBridge::AiCenterBridge(AgentPresetManager* presetManager, McpServer* mcpServer,
+                               QObject* parent)
+    : QObject(parent), m_presetManager(presetManager),
+      m_testClient(new LLMClient(this)), m_mcpServer(mcpServer)
 {
     connect(m_presetManager, &AgentPresetManager::presetsChanged, this, &AiCenterBridge::emitPresetsChanged);
     connect(m_presetManager, &AgentPresetManager::activePresetChanged, this, &AiCenterBridge::emitPresetsChanged);
@@ -52,26 +53,22 @@ AiCenterBridge::AiCenterBridge(AgentPresetManager* presetManager, LLMClient* cli
         });
     }
 
-    // Persistent, like AgentConfigWidget's own connections to the same shared
-    // LLMClient: these two signals are used only by the test-connection /
-    // detect-models path (live chat uses LLMClient::sendPrompt's callback
-    // overload instead), so one subscription for the bridge's lifetime is safe.
-    if (m_client) {
-        connect(m_client, &LLMClient::connectionTestResult, this,
-                [this](bool ok, const QString& details, const QStringList& models) {
-            QVariantMap result;
-            result[QStringLiteral("ok")] = ok;
-            result[QStringLiteral("message")] = details;
-            result[QStringLiteral("elapsedMs")] = 0;
-            result[QStringLiteral("models")] = QVariant(models);
-            emit connectionTestResult(m_pendingTestName, result);
-            if (ok && !models.isEmpty())
-                emit modelsDetected(m_pendingTestName, QVariant(models).toList());
-        });
-        connect(m_client, &LLMClient::modelsFetched, this, [this](const QStringList& models) {
+    // Persistent for the bridge's lifetime: m_testClient is ours alone, so
+    // nothing else can emit these and there is no chat traffic to tell apart.
+    connect(m_testClient, &LLMClient::connectionTestResult, this,
+            [this](bool ok, const QString& details, const QStringList& models) {
+        QVariantMap result;
+        result[QStringLiteral("ok")] = ok;
+        result[QStringLiteral("message")] = details;
+        result[QStringLiteral("elapsedMs")] = 0;
+        result[QStringLiteral("models")] = QVariant(models);
+        emit connectionTestResult(m_pendingTestName, result);
+        if (ok && !models.isEmpty())
             emit modelsDetected(m_pendingTestName, QVariant(models).toList());
-        });
-    }
+    });
+    connect(m_testClient, &LLMClient::modelsFetched, this, [this](const QStringList& models) {
+        emit modelsDetected(m_pendingTestName, QVariant(models).toList());
+    });
 }
 
 AiCenterBridge::~AiCenterBridge() = default;

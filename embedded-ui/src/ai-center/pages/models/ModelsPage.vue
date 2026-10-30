@@ -8,14 +8,18 @@ import { useSdModels } from '../../services/useSdModels'
 import StableDiffusionTab from './StableDiffusionTab.vue'
 import VisionTab from './VisionTab.vue'
 
-const props = defineProps<{ initialTab?: string }>()
+// `revision` changes on every navigation request, even one that repeats the
+// current subsection — watching initialTab alone would ignore a second deep
+// link to the tab the user has since navigated away from.
+const props = defineProps<{ initialTab?: string; revision?: number }>()
 
 const validTabs = ['vision', 'stable-diffusion']
 const tab = ref(props.initialTab && validTabs.includes(props.initialTab) ? props.initialTab : 'vision')
 
 watch(
-  () => props.initialTab,
-  (next) => {
+  () => props.revision,
+  () => {
+    const next = props.initialTab
     if (next && validTabs.includes(next)) {
       tab.value = next
     }

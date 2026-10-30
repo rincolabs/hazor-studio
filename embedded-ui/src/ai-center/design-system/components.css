@@ -58,6 +58,24 @@ textarea.in { height: auto; padding: 7px 8px; resize: vertical; line-height: 1.5
 .selw { position: relative; display: flex; min-width: 0; width: 100%; }
 .selw .in { appearance: none; -webkit-appearance: none; padding-right: 26px; }
 .selw .chev { position: absolute; right: 7px; top: 6px; pointer-events: none; color: var(--text-2); }
+
+/* Editable combobox: a free-text field plus a popup listing every suggestion.
+   Not a <datalist>, which filters its options by what is already in the field —
+   that turns "50 models detected" into three visible rows — and whose popup the
+   engine paints outside this stylesheet's reach. */
+.cmb { position: relative; display: flex; min-width: 0; width: 100%; }
+.cmb .in { padding-right: 26px; }
+.cmb-tog { position: absolute; right: 0; top: 0; width: 24px; height: 26px; display: flex; align-items: center; justify-content: center; background: transparent; border: 0; padding: 0; color: var(--text-2); cursor: pointer; }
+.cmb-tog:hover { color: var(--text); }
+.cmb-tog:disabled { color: #8c8e8f; cursor: not-allowed; }
+.cmb-pop { position: absolute; z-index: 20; top: calc(100% + 2px); left: 0; right: 0; max-height: 240px; overflow-y: auto; background: var(--bg-3); border: 1px solid var(--line); border-radius: 3px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); padding: 3px; }
+.cmb-h { padding: 5px 8px 6px; color: var(--text-3); font-size: 11px; border-bottom: 1px solid var(--line-soft); margin-bottom: 3px; }
+.cmb-opt { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 8px; background: transparent; border: 0; border-radius: 2px; color: var(--text-2); font: inherit; text-align: left; cursor: pointer; }
+.cmb-opt:hover, .cmb-opt.hl { background: var(--hover); color: var(--text); }
+.cmb-opt.on { background: var(--sel); color: var(--text); }
+.cmb-opt .i { opacity: 0; }
+.cmb-opt.on .i { opacity: 1; }
+
 .num { display: flex; align-items: center; width: 100%; max-width: 180px; background: var(--input); border: 1px solid var(--line); border-radius: 2px; }
 .num .in { border: 0; height: 24px; text-align: right; background: transparent; }
 .num .unit { padding: 0 8px 0 2px; color: var(--text-3); font-size: 11px; }

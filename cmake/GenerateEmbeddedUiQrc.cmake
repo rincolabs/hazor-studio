@@ -18,7 +18,7 @@ endif()
 if(NOT IS_DIRECTORY "${DIST_DIR}")
     message(FATAL_ERROR
         "No embedded-ui build found at '${DIST_DIR}'. Run `npm ci && npm run build` in "
-        "embedded-ui/, or configure with -DENABLE_EMBEDDED_UI=OFF.")
+        "embedded-ui/ — the interfaces it produces are not optional.")
 endif()
 
 file(GLOB_RECURSE _files RELATIVE "${DIST_DIR}" "${DIST_DIR}/*")

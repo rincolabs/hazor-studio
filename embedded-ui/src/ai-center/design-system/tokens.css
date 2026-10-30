@@ -10,6 +10,12 @@
  * theme implementation — a separate, larger change, out of scope here.
  */
 :root {
+  /* Native form popups (a <select> list, a date picker, the scrollbars) are
+     painted by the engine, not by this stylesheet. Without this they come up in
+     Chromium's light palette — black text on white, unreadable against the rest
+     of the UI, and not reachable by any CSS rule we could write. */
+  color-scheme: dark;
+
   --bg-0: #1f2122;
   --bg-1: #252728;
   --bg-2: #2d2f30;

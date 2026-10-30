@@ -62,6 +62,25 @@ struct ProviderConfig {
         return QStringLiteral("http://localhost:11434");
     }
 
+    // "Local" means a different server per kind: Ollama/llama.cpp for chat,
+    // an Automatic1111/Forge API for image generation. Everything that offers
+    // the user a fresh provider must agree on this, so it lives here rather
+    // than in whichever UI happens to prefill the field.
+    static QString defaultBaseUrl(Type t, AgentKind kind) {
+        if (kind == Generative && t == Local)
+            return QStringLiteral("http://localhost:7860");
+        return defaultBaseUrl(t);
+    }
+
+    // Ollama ignores the key but requires the header to be present, hence the
+    // "ollama" placeholder; local SD needs no key at all, and the hosted
+    // providers must be filled in by the user.
+    static QString defaultApiKey(Type t, AgentKind kind) {
+        if (t != Local)
+            return QString();
+        return kind == Generative ? QString() : QStringLiteral("ollama");
+    }
+
     QString displayName() const {
         switch (type) {
             case Local:     return QStringLiteral("Local (Ollama / llama.cpp)");

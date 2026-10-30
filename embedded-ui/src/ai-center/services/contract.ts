@@ -76,6 +76,8 @@ export interface RuntimeState {
   cachedEmbeddingCount: number
   cachedEmbeddingBytes: number
   onnxRuntimeVersion: string
+  /** Override for the Real-ESRGAN binary; empty means the packaged backend. */
+  realesrganExecutable: string
   osName: string
   cpuArchitecture: string
   /** Aggregated from AiModelRegistry::allModels(), grouped by origin — for the Diagnostics card. */
@@ -181,9 +183,18 @@ export type ToolMode = 'auto' | 'required' | 'none'
 export interface ProviderConfig {
   type: ProviderType
   baseUrl: string
-  /** Never the real secret unless explicitly revealed — see PresetsBridge. */
+  /**
+   * The real key: this page is the editor for it, so it round-trips in full.
+   * Rendered in a password field with an explicit reveal toggle, never logged.
+   */
   apiKey: string
   model: string
+}
+
+/** What a fresh provider of a given type starts with — resolved by ProviderConfig. */
+export interface ProviderDefaults {
+  baseUrl: string
+  apiKey: string
 }
 
 export interface ModelSettings {
@@ -237,6 +248,17 @@ export interface PresetSummary {
 export interface PresetListState {
   presets: PresetSummary[]
   activeName: string
+}
+
+/**
+ * Reply shape of createPreset/savePreset. A name collision or an empty name is
+ * refused by the backend rather than silently overwriting a preset, so the
+ * editor needs the reason to show — `preset` is then the unchanged stored one.
+ */
+export interface PresetMutation {
+  ok: boolean
+  error: string
+  preset: Preset
 }
 
 export interface ToolCatalogGroup {

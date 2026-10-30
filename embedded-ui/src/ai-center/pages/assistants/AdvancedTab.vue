@@ -19,15 +19,15 @@ defineProps<{ editor: PresetEditor }>()
         <div class="row" style="grid-template-columns: 150px minmax(0, 1fr)">
           <label class="lbl" for="to">Request Timeout</label>
           <div>
-            <NumberField v-model="editor.draft.value.timeoutMs" unit="ms" :min="0" />
-            <div class="help">Default 30000 ms.</div>
+            <NumberField v-model="editor.draft.value.timeoutMs" unit="ms" :min="1000" :max="300000" />
+            <div class="help">1000–300000 ms. Default 30000 ms.</div>
           </div>
         </div>
         <div class="row" style="grid-template-columns: 150px minmax(0, 1fr)">
           <label class="lbl" for="re">Retries</label>
           <div>
-            <NumberField v-model="editor.draft.value.retries" :min="0" />
-            <div class="help">Additional attempts after a failed request.</div>
+            <NumberField v-model="editor.draft.value.retries" :min="0" :max="10" />
+            <div class="help">0–10 additional attempts after a failed request.</div>
           </div>
         </div>
         <div class="row" style="grid-template-columns: 150px minmax(0, 1fr); align-items: center">
@@ -42,7 +42,7 @@ defineProps<{ editor: PresetEditor }>()
         <div class="row" style="grid-template-columns: 150px minmax(0, 1fr)">
           <label class="lbl" for="mh">Maximum History Turns</label>
           <div>
-            <NumberField v-model="editor.draft.value.maxHistoryTurns" unit="turns" :min="0" />
+            <NumberField v-model="editor.draft.value.maxHistoryTurns" unit="turns" :min="0" :max="200" />
             <div class="help">Older turns are dropped from the context.</div>
           </div>
         </div>
@@ -75,7 +75,7 @@ defineProps<{ editor: PresetEditor }>()
                 { value: 'error', label: 'error' },
               ]"
             />
-            <div class="help">Written to the AI logs folder.</div>
+            <div class="help">Stored with the preset. Agent logging reads it from here once wired up.</div>
           </div>
         </div>
       </Group>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+import Banner from '../components/Banner.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Icon from '../components/Icon.vue'
 import PresetList from '../components/PresetList.vue'
@@ -34,7 +35,11 @@ async function onDiscardAndSwitch(): Promise<void> {
 }
 
 async function onSaveAndSwitch(): Promise<void> {
-  await props.editor.save()
+  // Stay put when the save was refused (a name collision, an empty name):
+  // switching would throw the edits away along with the message explaining why.
+  if (!(await props.editor.save())) {
+    return
+  }
   const target = pendingSwitchTo.value
   pendingSwitchTo.value = null
   if (target) {
@@ -57,6 +62,7 @@ async function onSaveAndSwitch(): Promise<void> {
 
   <section class="ed" aria-label="Preset configuration">
     <template v-if="editor.draft.value">
+      <Banner v-if="editor.error.value" severity="err">{{ editor.error.value }}</Banner>
       <div class="ed-h">
         <div class="ed-fields">
           <div>

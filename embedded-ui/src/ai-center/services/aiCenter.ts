@@ -15,7 +15,9 @@ import type {
   OverviewState,
   Preset,
   PresetListState,
+  PresetMutation,
   PromptTestResult,
+  ProviderDefaults,
   RuntimeSettings,
   RuntimeState,
   SdModelCategory,
@@ -94,6 +96,15 @@ export class AiCenterClient {
     return invoke<RuntimeState>(this.bridge, 'clearAiCache')
   }
 
+  /** An empty path clears the override and restores the packaged backend. */
+  applyRealEsrganPath(path: string): Promise<RuntimeState> {
+    return invoke<RuntimeState>(this.bridge, 'applyRealEsrganPath', [path])
+  }
+
+  browseForRealEsrganExecutable(): Promise<string> {
+    return invoke<string>(this.bridge, 'browseForRealEsrganExecutable')
+  }
+
   // ── Models — Vision & Editing ────────────────────────────────────────────
 
   modelsVisionState(): Promise<ModelsVisionState> {
@@ -164,8 +175,13 @@ export class AiCenterClient {
     return invoke<Preset>(this.bridge, 'getPreset', [name])
   }
 
-  createPreset(kind: AgentKind, name: string, description: string, providerType: Preset['provider']['type']): Promise<Preset> {
-    return invoke<Preset>(this.bridge, 'createPreset', [kind, name, description, providerType])
+  /** The defaults "Local"/"OpenAI"/… imply for this kind — see ProviderConfig. */
+  providerDefaults(kind: AgentKind, type: Preset['provider']['type']): Promise<ProviderDefaults> {
+    return invoke<ProviderDefaults>(this.bridge, 'providerDefaults', [kind, type])
+  }
+
+  createPreset(kind: AgentKind, name: string, description: string, providerType: Preset['provider']['type']): Promise<PresetMutation> {
+    return invoke<PresetMutation>(this.bridge, 'createPreset', [kind, name, description, providerType])
   }
 
   duplicatePreset(name: string): Promise<string> {
@@ -176,27 +192,32 @@ export class AiCenterClient {
     return invoke(this.bridge, 'deletePreset', [name])
   }
 
-  savePreset(name: string, preset: Preset): Promise<Preset> {
-    return invoke<Preset>(this.bridge, 'savePreset', [name, preset])
+  /** `name` is the stored name; `preset.name` may rename it. */
+  savePreset(name: string, preset: Preset): Promise<PresetMutation> {
+    return invoke<PresetMutation>(this.bridge, 'savePreset', [name, preset])
   }
 
   setActivePreset(name: string, kind: AgentKind): Promise<{ assistants: PresetListState; generative: PresetListState }> {
     return invoke(this.bridge, 'setActivePreset', [name, kind])
   }
 
+  // The three tests carry the editor's draft, so they try the values on screen
+  // rather than the last saved ones; `name` only labels the reply. They run on
+  // the bridge's own LLMClient, never the chat agent's.
+
   /** Starts the test; the result arrives via the `connectionTestResult` signal. */
-  testConnection(name: string): void {
-    send(this.bridge, 'testConnection', [name])
+  testConnection(name: string, preset: Preset): void {
+    send(this.bridge, 'testConnection', [name, preset])
   }
 
   /** Starts detection; the result arrives via the `modelsDetected` signal. */
-  detectModels(name: string): void {
-    send(this.bridge, 'detectModels', [name])
+  detectModels(name: string, preset: Preset): void {
+    send(this.bridge, 'detectModels', [name, preset])
   }
 
   /** Starts the run; the result arrives via the `promptTestResult` signal. */
-  testPrompt(name: string, prompt: string): void {
-    send(this.bridge, 'testPrompt', [name, prompt])
+  testPrompt(name: string, preset: Preset, prompt: string): void {
+    send(this.bridge, 'testPrompt', [name, preset, prompt])
   }
 
   // ── MCP ───────────────────────────────────────────────────────────────────

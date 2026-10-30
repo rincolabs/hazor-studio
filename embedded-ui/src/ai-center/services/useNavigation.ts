@@ -11,6 +11,12 @@ import { getClient } from './client'
 
 const section = ref<SectionId>('overview')
 const subsection = ref('')
+// Bumped on every navigation request, including one that repeats the current
+// section and subsection. Pages watch it instead of `subsection` alone: the
+// second "open Models > Stable Diffusion" has to land on that tab even when
+// the user has since clicked over to Vision, and comparing values cannot tell
+// that apart from no navigation at all.
+const revision = ref(0)
 let started = false
 
 function start(): void {
@@ -22,6 +28,7 @@ function start(): void {
     client.on('navigationRequested', (nextSection, nextSubsection) => {
       section.value = nextSection
       subsection.value = nextSubsection
+      revision.value += 1
     })
     // AiCenterWindow::openSection() passed a deep link for this very first load;
     // every later "open to a different section" arrives as the signal above,
@@ -30,6 +37,7 @@ function start(): void {
     if (target) {
       section.value = target.section
       subsection.value = target.subsection
+      revision.value += 1
     }
   })
 }
@@ -40,7 +48,8 @@ export function useNavigation() {
   function navigate(nextSection: SectionId, nextSubsection = ''): void {
     section.value = nextSection
     subsection.value = nextSubsection
+    revision.value += 1
   }
 
-  return { section, subsection, navigate }
+  return { section, subsection, revision, navigate }
 }

@@ -666,7 +666,8 @@ backend the host's toolchain could produce, and `AppRun` can set up the run
 time the module needs. The Flatpak is left as it was — without
 `-DENABLE_STABLE_DIFFUSION=ON` the hazor-studio module logs a CMake warning
 about the missing prefix and builds without it, which also leaves out the
-Neural Flow panel (`EMBEDDED_UI_FOUND` gates it on `STABLE_DIFFUSION_FOUND`).
+Neural Flow panel (gated on `STABLE_DIFFUSION_FOUND`; the AI Center from the
+same `embedded-ui/` build is always compiled in).
 
 Adding it there later is not symmetrical work, and the asymmetry is not a
 preference: the KDE SDK has no CUDA toolkit, and a CUDA-enabled package cannot
@@ -799,20 +800,25 @@ CMake does the same thing as part of the Hazor build, in four steps:
 3. [`cmake/GenerateEmbeddedUiQrc.cmake`](../cmake/GenerateEmbeddedUiQrc.cmake)
    lists `embedded-ui/dist` into a generated `.qrc`. Generated rather than
    committed because Vite's asset names carry a content hash.
-4. `rcc` compiles that into the binary under the `/embedded-ui` prefix, so the
-   panel loads `qrc:/embedded-ui/neural-flow/index.html`.
+4. `rcc` compiles that into the binary under the `/embedded-ui` prefix, so each
+   surface loads from there — `qrc:/embedded-ui/ai-center/index.html` and
+   `qrc:/embedded-ui/neural-flow/index.html`.
 
 `rcc` is invoked explicitly instead of through `AUTORCC`, because the `.qrc`
 does not exist until the frontend has been built and `AUTORCC` resolves its
 inputs too early to wait for that.
 
-`ENABLE_EMBEDDED_UI` defaults to `ON` but only does anything when
-`ENABLE_STABLE_DIFFUSION` is also on, since the node editor is currently its
-only consumer. With npm absent, an existing `embedded-ui/dist` is used as-is —
-which is what makes a source tree with the build output included compilable
-without a JavaScript toolchain. With neither, CMake warns and builds Hazor
-without the Neural Flow panel; the button that opens it is then not added to
-the Stable Diffusion panel.
+This step has no build switch. The AI Center is the only place Assistants,
+Image Generation, Models and System settings can be configured, so a binary
+without it would have no reachable AI configuration at all. With npm absent, an
+existing `embedded-ui/dist` is used as-is — which is what makes a source tree
+with the build output included compilable without a JavaScript toolchain. With
+neither npm nor a prebuilt `dist`, the configure step fails with
+`FATAL_ERROR` instead of producing such a binary.
+
+The Neural Flow panel is the part that still degrades: it needs
+`STABLE_DIFFUSION_FOUND`, and without the module the panel is not compiled and
+the button that opens it is not added to the Stable Diffusion panel.
 
 `embedded-ui/node_modules` and `embedded-ui/dist` are build artefacts and are
 not tracked in git.
@@ -951,7 +957,6 @@ cmake --build build -j"$(nproc)" --target Hazor
 | `RAWENGINE_WITH_LENSFUN` | `ON` | Build RawEngine with lensfun lens-correction support |
 | `ENABLE_STABLE_DIFFUSION` | `ON` | Local Stable Diffusion module and panel (`linux-x86_64` only — cross-target builds force it off; needs the prepared package, see above) |
 | `STABLE_DIFFUSION_DIR` | — (set by `build.sh`) | Install prefix of the stable-diffusion.cpp package built by `./scripts/build.sh --prepare`; `ENABLE_STABLE_DIFFUSION` looks for `$STABLE_DIFFUSION_DIR/lib/cmake/stable-diffusion` |
-| `ENABLE_EMBEDDED_UI` | `ON` | Compile the Vue interfaces in [`embedded-ui/`](../embedded-ui/) into the binary (needs npm, or a prebuilt `dist`); only used when `ENABLE_STABLE_DIFFUSION` is on |
 | `USE_RHI` | `OFF` | Use the QRhi rendering backend (Vulkan/Metal/D3D12) instead of OpenGL |
 | `HAZOR_STRICT_DEPENDENCIES` | `OFF` | Reject app dependencies outside `HAZOR_DEPENDENCY_ROOT` |
 | `HAZOR_DEVELOPMENT_PATHS` | `ON` | Embed source-tree fallback paths for local development only |

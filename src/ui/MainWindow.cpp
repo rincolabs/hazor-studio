@@ -70,9 +70,7 @@
 #ifdef HAVE_NEURAL_FLOW
 #include "ui/NeuralFlowPanel.hpp"
 #endif
-#ifdef HAVE_AI_CENTER
 #include "ui/AiCenterWindow.hpp"
-#endif
 #include "ui/ProgressDialog.h"
 #include "ui/ZoomComboBox.hpp"
 #include <QSettings>
@@ -144,6 +142,7 @@
 #include <QPixmap>
 #include <QGuiApplication>
 #include <QWindow>
+#include <QWebEngineView>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QHBoxLayout>
@@ -1447,11 +1446,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_stableDiffusionPanel, &StableDiffusionPanel::neuralFlowRequested,
             this, &MainWindow::onOpenNeuralFlow);
 #endif
-#ifdef HAVE_AI_CENTER
     connect(m_stableDiffusionPanel, &StableDiffusionPanel::aiCenterRequested, this, [this] {
         openAiCenter(QStringLiteral("models"), QStringLiteral("stable-diffusion"));
     });
-#endif
 #endif
 
     connect(m_propsPanel, &PropertiesPanel::maskDensityChanged, this, [this](float density) {
@@ -3711,11 +3708,8 @@ void MainWindow::onOpenNeuralFlow()
 
 void MainWindow::openAiCenter(const QString& section, const QString& subsection)
 {
-#ifdef HAVE_AI_CENTER
     if (!m_aiCenterWindow) {
-        m_aiCenterWindow = new AiCenterWindow(m_presetManager,
-                                              m_agentController ? m_agentController->client() : nullptr,
-                                              m_mcpServer, this);
+        m_aiCenterWindow = new AiCenterWindow(m_presetManager, m_mcpServer, this);
         connect(m_aiCenterWindow, &AiCenterWindow::mcpRestartRequested,
                 this, &MainWindow::applyMcpSettings);
 
@@ -3736,10 +3730,6 @@ void MainWindow::openAiCenter(const QString& section, const QString& subsection)
         connect(AiModelRegistry::instance(), &AiModelRegistry::installedModelsChanged, this, refreshAiSelection);
     }
     m_aiCenterWindow->openSection(section, subsection);
-#else
-    Q_UNUSED(section);
-    Q_UNUSED(subsection);
-#endif
 }
 
 int MainWindow::tabWidgetIndexForDocument(int documentIndex) const
@@ -7681,6 +7671,27 @@ void MainWindow::dropEvent(QDropEvent* e)
     e->acceptProposedAction();
 }
 
+namespace {
+
+// True when `w` is inside one of the embedded web interfaces (the AI Center
+// window, the Neural Flow dock).
+//
+// Keyboard input there belongs to the page: it has its own text fields, its own
+// shortcuts and its own undo. MainWindow's filter below cannot tell which of
+// them has focus — a focused <input> is not a QWidget, so the QLineEdit/
+// QTextEdit checks all come back false — and would read a Backspace typed into
+// a prompt field as "delete the selected layer".
+bool isEmbeddedWebFocus(const QWidget* w)
+{
+    for (const QWidget* p = w; p; p = p->parentWidget()) {
+        if (qobject_cast<const QWebEngineView*>(p))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
     if (event->type() == QEvent::ShortcutOverride) {
@@ -7733,6 +7744,10 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if (event->type() == QEvent::KeyPress) {
         auto* keyEvent = static_cast<QKeyEvent*>(event);
         auto* w = qobject_cast<QWidget*>(obj);
+        // Hands the key to the page untouched: no shortcut dispatch, and no
+        // Delete/Backspace fallthrough to the document below.
+        if (isEmbeddedWebFocus(w))
+            return false;
         const bool textInputFocused = w
             && (qobject_cast<QLineEdit*>(w)
                 || qobject_cast<QTextEdit*>(w)

@@ -10,14 +10,18 @@ import BehaviorTab from './BehaviorTab.vue'
 import ModelSettingsTab from './ModelSettingsTab.vue'
 import ProviderTab from './ProviderTab.vue'
 
-const props = defineProps<{ initialTab?: string }>()
+// `revision` changes on every navigation request, even one that repeats the
+// current subsection — watching initialTab alone would ignore a second deep
+// link to the tab the user has since navigated away from.
+const props = defineProps<{ initialTab?: string; revision?: number }>()
 
 const validTabs = ['provider', 'model-settings', 'behavior', 'advanced']
 const tab = ref(props.initialTab && validTabs.includes(props.initialTab) ? props.initialTab : 'provider')
 
 watch(
-  () => props.initialTab,
-  (next) => {
+  () => props.revision,
+  () => {
+    const next = props.initialTab
     if (next && validTabs.includes(next)) {
       tab.value = next
     }

@@ -31,8 +31,8 @@ const char* kBridgeObjectName = "aiCenter";
 
 } // namespace
 
-AiCenterWindow::AiCenterWindow(AgentPresetManager* presetManager, LLMClient* client,
-                               McpServer* mcpServer, QWidget* parent)
+AiCenterWindow::AiCenterWindow(AgentPresetManager* presetManager, McpServer* mcpServer,
+                               QWidget* parent)
     : QWidget(parent, Qt::Window)
 {
     setObjectName(QStringLiteral("aiCenterWindow"));
@@ -52,7 +52,7 @@ AiCenterWindow::AiCenterWindow(AgentPresetManager* presetManager, LLMClient* cli
     m_failure->setWordWrap(true);
     m_stack->addWidget(m_failure);
 
-    m_bridge = new AiCenterBridge(presetManager, client, mcpServer, this);
+    m_bridge = new AiCenterBridge(presetManager, mcpServer, this);
     m_bridge->setDialogParent(this);
     connect(m_bridge, &AiCenterBridge::mcpRestartRequested, this, &AiCenterWindow::mcpRestartRequested);
 
@@ -107,8 +107,6 @@ AiCenterWindow::~AiCenterWindow() = default;
 
 void AiCenterWindow::openSection(const QString& section, const QString& subsection)
 {
-    m_pendingSection = section;
-    m_pendingSubsection = subsection;
     m_bridge->setNavigationTarget(section, subsection);
 
     if (!isVisible()) {

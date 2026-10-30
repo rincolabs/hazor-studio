@@ -49,6 +49,12 @@ struct AiRuntimeSettings {
     // Resolves modelsDirectory, falling back to the default app data location.
     QString resolvedModelsDirectory() const;
 
+    // Forces every numeric field back into the range the UI documents. The one
+    // owner of those bounds: load() applies it to hand-edited config files and
+    // AiCenterBridge::applyRuntimeSettings() to whatever the page sends, so a
+    // value the app cannot honour never reaches a session or QSettings.
+    void clampToValidRange();
+
     // Persistence (QSettings, "ai/" group).
     static AiRuntimeSettings load();
     void save() const;

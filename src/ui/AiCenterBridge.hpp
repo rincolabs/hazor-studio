@@ -32,8 +32,8 @@ class AiCenterBridge : public QObject {
     Q_OBJECT
 
 public:
-    explicit AiCenterBridge(AgentPresetManager* presetManager, LLMClient* client,
-                            McpServer* mcpServer, QObject* parent = nullptr);
+    explicit AiCenterBridge(AgentPresetManager* presetManager, McpServer* mcpServer,
+                            QObject* parent = nullptr);
     ~AiCenterBridge() override;
 
     // Dialogs (Browse..., file pickers) parent themselves to this.
@@ -61,6 +61,14 @@ public:
     Q_INVOKABLE QVariantMap runtimeState() const;
     Q_INVOKABLE QVariantMap applyRuntimeSettings(const QVariantMap& patch);
     Q_INVOKABLE QVariantMap clearAiCache();
+
+    // The Real-ESRGAN executable override ("ai/upscale/realesrganExecutable"),
+    // the one AI preference that is a QSettings key rather than an
+    // AiRuntimeSettings field. An empty path clears the override and goes back
+    // to the packaged backend — AiUpscaleDialog can only set one, so without
+    // this there is no way back from a bad path.
+    Q_INVOKABLE QVariantMap applyRealEsrganPath(const QString& path);
+    Q_INVOKABLE QString browseForRealEsrganExecutable();
 
     // ── Models — Vision & Editing (AiModelRegistry) ──────────────────────────
 
@@ -92,18 +100,34 @@ public:
 
     Q_INVOKABLE QVariantMap presetLists() const;
     Q_INVOKABLE QVariantMap getPreset(const QString& name) const;
+
+    // The defaults a fresh provider of `type` gets for `kind`. Read from
+    // ProviderConfig so the page never carries its own copy of them — "Local"
+    // means Ollama for an assistant and an A1111 server for image generation.
+    Q_INVOKABLE QVariantMap providerDefaults(const QString& kind, const QString& type) const;
+
+    // createPreset/savePreset answer with { ok, error, preset }: a name
+    // collision or an empty name has to reach the user as a message, not as a
+    // silently overwritten preset.
     Q_INVOKABLE QVariantMap createPreset(const QString& kind, const QString& name,
                                          const QString& description, const QString& providerType);
     Q_INVOKABLE QString duplicatePreset(const QString& name);
     Q_INVOKABLE QVariantMap deletePreset(const QString& name);
+    // `name` is the preset as it is stored; `preset["name"]` is what the user
+    // typed. When they differ this renames instead of writing a second preset.
     Q_INVOKABLE QVariantMap savePreset(const QString& name, const QVariantMap& preset);
     Q_INVOKABLE QVariantMap setActivePreset(const QString& name, const QString& kind);
 
     // Fire-and-forget: LLMClient's replies are genuinely asynchronous, so these
     // start the call and answer later through the matching signal below.
-    Q_INVOKABLE void testConnection(const QString& name);
-    Q_INVOKABLE void detectModels(const QString& name);
-    Q_INVOKABLE void testPrompt(const QString& name, const QString& prompt);
+    //
+    // They take the editor's draft rather than reading the stored preset: the
+    // whole point of a test is to try the values currently on screen, including
+    // unsaved ones. `name` only labels the reply.
+    Q_INVOKABLE void testConnection(const QString& name, const QVariantMap& preset);
+    Q_INVOKABLE void detectModels(const QString& name, const QVariantMap& preset);
+    Q_INVOKABLE void testPrompt(const QString& name, const QVariantMap& preset,
+                                const QString& prompt);
 
     // ── MCP (McpSettings / McpServer) ────────────────────────────────────────
 
@@ -138,6 +162,11 @@ private:
     QVariantMap mcpStateVariant() const;
     QVariantMap presetSummary(const AgentConfig& config) const;
     QVariantMap presetListsVariant() const;
+    // { ok, error, preset } — the one reply shape createPreset/savePreset use.
+    QVariantMap presetMutation(bool ok, const QString& error, const AgentConfig& config) const;
+    // Resolves the draft the three test calls were handed into a config, and
+    // points m_testClient at it. Returns false when the draft is unusable.
+    bool prepareTestClient(const QString& name, const QVariantMap& preset, AgentConfig* out);
     void emitPresetsChanged();
     void emitOverviewChanged();
 
@@ -147,7 +176,12 @@ private:
     QVariantMap toVariant(const AiRuntimeSettings& settings) const;
 
     AgentPresetManager* m_presetManager = nullptr;
-    LLMClient* m_client = nullptr;
+    // The bridge's own client, never the chat agent's. Test Connection / Detect
+    // Models / Test Prompt reconfigure whatever client they run on and their
+    // replies are broadcast on LLMClient's signals, so sharing AgentController's
+    // would repoint the live chat at the preset being tested and feed it the
+    // test's answer — tool calls included.
+    LLMClient* m_testClient = nullptr;
     McpServer* m_mcpServer = nullptr;
     QWidget* m_dialogParent = nullptr;
 

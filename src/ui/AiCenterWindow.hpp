@@ -4,7 +4,6 @@
 
 class AgentPresetManager;
 class AiCenterBridge;
-class LLMClient;
 class McpServer;
 class QLabel;
 class QStackedLayout;
@@ -29,8 +28,8 @@ class AiCenterWindow : public QWidget {
     Q_OBJECT
 
 public:
-    explicit AiCenterWindow(AgentPresetManager* presetManager, LLMClient* client,
-                            McpServer* mcpServer, QWidget* parent = nullptr);
+    explicit AiCenterWindow(AgentPresetManager* presetManager, McpServer* mcpServer,
+                            QWidget* parent = nullptr);
     ~AiCenterWindow() override;
 
     // Shows/raises the window and navigates to `section`/`subsection`
@@ -56,6 +55,4 @@ private:
     QStackedLayout* m_stack = nullptr;
     QLabel* m_failure = nullptr;
     bool m_loadStarted = false;
-    QString m_pendingSection;
-    QString m_pendingSubsection;
 };

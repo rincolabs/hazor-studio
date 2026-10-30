@@ -18,11 +18,35 @@ const emit = defineEmits<{ 'update:modelValue': [value: number] }>()
 
 const display = computed(() => String(props.modelValue))
 
-function onNumberInput(event: Event): void {
-  const value = Number((event.target as HTMLInputElement).value)
-  if (!Number.isNaN(value)) {
-    emit('update:modelValue', value)
+function clamp(value: number): number {
+  let next = value
+  if (props.min !== undefined) {
+    next = Math.max(props.min, next)
   }
+  if (props.max !== undefined) {
+    next = Math.min(props.max, next)
+  }
+  return next
+}
+
+/**
+ * The number box is a text input (no browser spinners in this design system),
+ * so `min`/`max` have to be enforced here — they used to bind to the range
+ * input only, which let a typed value sail past them into QSettings. Writing
+ * the clamped value back to the element matters: when it clamps to what
+ * `modelValue` already was, nothing re-renders and the box would keep showing
+ * what was typed.
+ */
+function onNumberInput(event: Event): void {
+  const input = event.target as HTMLInputElement
+  const parsed = Number(input.value)
+  if (input.value.trim() === '' || Number.isNaN(parsed)) {
+    input.value = display.value
+    return
+  }
+  const next = clamp(parsed)
+  input.value = String(next)
+  emit('update:modelValue', next)
 }
 </script>
 

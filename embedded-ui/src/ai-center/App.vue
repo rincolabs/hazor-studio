@@ -11,7 +11,7 @@ import SystemPage from './pages/system/SystemPage.vue'
 import { useNavigation } from './services/useNavigation'
 import { useOverview } from './services/useOverview'
 
-const { section, subsection, navigate } = useNavigation()
+const { section, subsection, revision, navigate } = useNavigation()
 const { overview, error } = useOverview()
 
 const alertCount = computed(() => overview.value?.alerts.length ?? 0)
@@ -59,10 +59,10 @@ const mcpOk = computed(() => Boolean(overview.value?.mcp.listening))
         @navigate="navigate"
       />
       <Overview v-if="section === 'overview'" />
-      <AssistantsPage v-else-if="section === 'assistants'" :initial-tab="subsection" />
+      <AssistantsPage v-else-if="section === 'assistants'" :initial-tab="subsection" :revision="revision" />
       <ImageGeneration v-else-if="section === 'image-generation'" />
-      <ModelsPage v-else-if="section === 'models'" :initial-tab="subsection" />
-      <SystemPage v-else-if="section === 'system'" :initial-tab="subsection" />
+      <ModelsPage v-else-if="section === 'models'" :initial-tab="subsection" :revision="revision" />
+      <SystemPage v-else-if="section === 'system'" :initial-tab="subsection" :revision="revision" />
     </template>
   </div>
 </template>

@@ -123,8 +123,10 @@ src/
 
 embedded-ui/       Vue 3 + TypeScript interfaces hosted in Qt WebEngine, built by
                    Vite and compiled into the binary as a Qt resource. One
-                   project, one entry point per panel (Neural Flow, the node
-                   editor). Optional, ENABLE_EMBEDDED_UI
+                   project, one entry point per surface (ai-center, the AI
+                   settings application; neural-flow, the node editor).
+                   Mandatory: no build switch, and a missing npm/dist fails
+                   the configure step
 
 docs/              BUILD.md, MCP.md, RENDER-PIPELINE.md
 scripts/           build.sh, run.sh, tests.sh, run-tests.sh
