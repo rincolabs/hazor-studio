@@ -203,30 +203,29 @@ if [[ "$DO_BUILD" == "1" ]]; then
     if [[ "${HAZOR_ENABLE_RAWENGINE:-AUTO}" != "OFF" && -d "$RAWENGINE_DEPS_DIR/exiv2" ]]; then
         local_rawengine=ON
     fi
-    # Experimental local Stable Diffusion panel: enabled by default for the host
-    # Linux developer build and restricted to that target. Set
-    # HAZOR_ENABLE_STABLE_DIFFUSION=OFF to leave it out explicitly.
-    # The flag is also refused for any packaging run, because the panel embeds an
-    # absolute model path and must not reach a distributable: the environment
-    # variable would otherwise be enough to put it inside an AppImage, and
-    # verify_no_local_paths() only looks for the source tree's own path, not an
-    # arbitrary one baked into a string constant.
+    # Local Stable Diffusion: on by default, and restricted to the host Linux
+    # target because that is the only one --prepare builds the dependency for.
+    # Set HAZOR_ENABLE_STABLE_DIFFUSION=OFF to leave it out explicitly.
+    #
+    # Packaging runs are no longer refused. The old refusal was there because
+    # the module could only be built one GPU backend at a time and tuned for
+    # the build machine, so it had no business in a distributable; it now ships
+    # every backend as a separately loadable module with no host tuning, which
+    # is the whole point of the prepared package (prepare_stable_diffusion()).
+    #
+    # Which backends: not a choice made here either. --prepare recorded them in
+    # the installed package the last time it ran, and CMakeLists.txt reads them
+    # back out of ggml's own config. This step only checks that a package
+    # exists to link.
     local_stable_diffusion=OFF
     if [[ "${HAZOR_ENABLE_STABLE_DIFFUSION:-ON}" == "ON" ]]; then
         if [[ "$TARGET" != "linux-x86_64" ]]; then
             log "HAZOR_ENABLE_STABLE_DIFFUSION is ignored for $TARGET (host Linux only)"
-        elif [[ "$PACKAGE_FORMAT" != "none" ]]; then
-            log "HAZOR_ENABLE_STABLE_DIFFUSION is ignored for a --package $PACKAGE_FORMAT run (developer builds only)"
+        elif [[ ! -f "$STABLE_DIFFUSION_CONFIG_FILE" ]]; then
+            log "Stable Diffusion requested but not prepared under $STABLE_DIFFUSION_PREFIX; run ./scripts/build.sh --prepare, or set HAZOR_ENABLE_STABLE_DIFFUSION=OFF"
         else
             local_stable_diffusion=ON
         fi
-    fi
-    # Which ggml backend the module compiles against. CUDA is the developer
-    # default; CMake falls back to CPU with a warning when nvcc is absent.
-    local_sd_backend="${HAZOR_SD_BACKEND:-CUDA}"
-    local_sd_backend="${local_sd_backend^^}"
-    if [[ "$local_stable_diffusion" != "ON" && -n "${HAZOR_SD_BACKEND:-}" ]]; then
-        log "HAZOR_SD_BACKEND is ignored without HAZOR_ENABLE_STABLE_DIFFUSION=ON"
     fi
 
     # RAW development is a core feature, so Lens Corrections (lensfun) is on by
@@ -289,8 +288,9 @@ if [[ "$DO_BUILD" == "1" ]]; then
         "-DRAWENGINE_WITH_LENSFUN=$rawengine_lensfun"
         "-DRAWENGINE_DEPS_DIR=$RAWENGINE_DEPS_DIR"
         "-DENABLE_STABLE_DIFFUSION=$local_stable_diffusion"
-        "-DHAZOR_SD_BACKEND=$local_sd_backend"
     )
+    [[ "$local_stable_diffusion" == "ON" ]] \
+        && cmake_args+=("-DSTABLE_DIFFUSION_DIR=$STABLE_DIFFUSION_PREFIX")
     if [[ "$local_onnx" == "ON" ]]; then
         cmake_args+=(
             "-DONNXRUNTIME_ROOT=$ONNXRUNTIME_DIR"
@@ -317,7 +317,11 @@ if [[ "$DO_BUILD" == "1" ]]; then
     log "zlib: $ZLIB_LIBRARY"
     log "ONNX Runtime enabled: $local_onnx"
     log "RawEngine enabled: $local_rawengine (lensfun: $rawengine_lensfun)"
-    log "Stable Diffusion (experimental) enabled: $local_stable_diffusion"
+    if [[ "$local_stable_diffusion" == "ON" ]]; then
+        log "Stable Diffusion enabled: ON (backends: $(sed 's/ archs=.*//' "$STABLE_DIFFUSION_PREFIX/.hazor-sd-backends" 2>/dev/null || echo unknown))"
+    else
+        log "Stable Diffusion enabled: OFF"
+    fi
     HAZOR_TARGET_ROOT="$TARGET_ROOT" HAZOR_TARGET_ARCH="$TARGET_ARCH" \
         cmake "${cmake_args[@]}"
     cmake --build "$BUILD_DIR" --parallel "$JOBS" --target Hazor

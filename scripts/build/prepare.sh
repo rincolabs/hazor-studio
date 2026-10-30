@@ -499,6 +499,355 @@ prepare_onnxruntime() {
     esac
 }
 
+# ── stable-diffusion.cpp (ggml inference backing the local SD module,
+#    src/ai/sd/) ────────────────────────────────────────────────────────────
+# Host Linux only: ENABLE_STABLE_DIFFUSION is never turned on for a cross
+# target, so there is nothing for Windows or macOS to link here.
+#
+# Built once into a versioned, installed CMake package under
+# STABLE_DIFFUSION_PREFIX — the OpenCV pattern above — instead of being
+# add_subdirectory'd into Hazor's own configure, which recompiled ggml and
+# stable-diffusion on every Hazor build (Debug: -g, no -O) and baked their
+# debug symbols, plus the CUDA fat binary, straight into the executable.
+#
+# ── One package, every backend ───────────────────────────────────────────────
+# This is a build for *other people's machines*, not for this one: the binary
+# ships as an AppImage and a Flatpak and has to run on whatever CPU and GPU the
+# user has. So everything is compiled, everything ships, and which one runs is
+# decided on the user's machine:
+#
+#   * GGML_BACKEND_DL=ON — each backend becomes a separate .so that ggml
+#     dlopen()s at run time from the directory holding the executable. One that
+#     cannot load (no Vulkan loader, no NVIDIA driver, no cuBLAS) is skipped
+#     rather than killing the process, which is what makes shipping CPU, Vulkan
+#     and CUDA side by side in one package safe. It implies shared ggml
+#     libraries, hence BUILD_SHARED_LIBS=ON and SD_BUILD_SHARED_GGML_LIB=ON —
+#     and that also fixes the install: ggml's own rules are
+#     `install(TARGETS ggml LIBRARY)`, which installs nothing at all for a
+#     static ggml, so find_package(stable-diffusion) could never be satisfied.
+#   * GGML_CPU_ALL_VARIANTS=ON — 14 x86 CPU backends, from the plain x86-64
+#     baseline to sapphirerapids. ggml scores them against the CPU it finds
+#     itself on and loads the best match.
+#   * GGML_NATIVE=OFF — never -march=native. With it on, the CPU backends are
+#     tuned for this machine's instruction set (and on CMake >= 3.24 ggml-cuda
+#     narrows to this machine's compute capability alone); that is exactly the
+#     binary that dies with SIGILL on a slightly older CPU. Left off, ggml-cuda
+#     also picks its own portable architecture list — PTX for Maxwell through
+#     Hopper plus device code for the common consumer GPUs — which is why
+#     CMAKE_CUDA_ARCHITECTURES is deliberately not pinned here.
+#
+# Each GPU backend is preflighted and dropped with a logged reason when its
+# toolchain is missing; the CPU backends always build. HAZOR_SD_BACKENDS
+# narrows the set by hand (`ALL`, or any comma-separated mix of CPU, VULKAN and
+# CUDA) when a developer wants a faster prepare, and HAZOR_SD_CUDA_ARCHS pins
+# CMAKE_CUDA_ARCHITECTURES for the same reason. Neither belongs in a build that
+# will be packaged.
+
+# Header-only CMake packages (Vulkan-Headers, SPIRV-Headers): configure,
+# install, done in seconds. The sentinel is a file the install must have
+# produced, so an interrupted run re-does the work instead of being mistaken
+# for a finished one.
+prepare_header_package() {
+    local name="$1"
+    local url="$2"
+    local commit="$3"
+    local prefix="$4"
+    local sentinel="$5"
+    [[ -f "$prefix/$sentinel" && -f "$prefix/.hazor-provenance" ]] && return 0
+    local source="$HAZOR_DOWNLOAD_DIR/sources/$name-$commit"
+    local build="$THIRD_PARTY_DIR/build-deps/$TARGET/$name-$HAZOR_VULKAN_SDK_VERSION"
+    checkout_pinned_source "$url" "$commit" "$source"
+    rm -rf -- "$build"
+    mkdir -p "$build"
+    local -a args
+    dependency_cmake_args args
+    args[3]="-DCMAKE_INSTALL_PREFIX=$prefix"
+    cmake -S "$source" -B "$build" "${args[@]}" >"$build.log" 2>&1 \
+        || die "$name configure failed; see $build.log"
+    cmake --install "$build" >>"$build.log" 2>&1 \
+        || die "$name install failed; see $build.log"
+    write_provenance "$prefix" "$name" "$HAZOR_VULKAN_SDK_VERSION" "$url@$commit"
+    log "$name $HAZOR_VULKAN_SDK_VERSION prepared under $prefix"
+}
+
+prepare_vulkan_build_headers() {
+    prepare_header_package vulkan-headers "$HAZOR_VULKAN_HEADERS_GIT_URL" \
+        "$HAZOR_VULKAN_HEADERS_COMMIT" "$VULKAN_HEADERS_PREFIX" \
+        include/vulkan/vulkan_core.h
+    prepare_header_package spirv-headers "$HAZOR_SPIRV_HEADERS_GIT_URL" \
+        "$HAZOR_SPIRV_HEADERS_COMMIT" "$SPIRV_HEADERS_PREFIX" \
+        include/spirv/unified1/spirv.h
+}
+
+# ggml-cuda needs nvcc on PATH or CMAKE_CUDA_COMPILER set; the compiler is
+# routinely installed outside PATH (/usr/local/cuda/bin).
+find_sd_nvcc() {
+    local candidate
+    for candidate in "${CUDACXX:-}" "${CUDA_PATH:-}/bin/nvcc" "${CUDA_HOME:-}/bin/nvcc" /usr/local/cuda/bin/nvcc; do
+        [[ -n "$candidate" && -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    command -v nvcc 2>/dev/null
+}
+
+# A cheap pre-check before a slow configure+build: ggml-vulkan's own
+# find_package(Vulkan ... REQUIRED) is a hard error, so without this a missing
+# shader compiler fails the whole package instead of dropping one backend.
+#
+# Deliberately not a `cmake -P` script calling find_package(Vulkan): in script
+# mode there is no compiler detection, so CMAKE_LIBRARY_ARCHITECTURE is unset,
+# find_library() never looks in /usr/lib/x86_64-linux-gnu, and the answer is
+# "no Vulkan" on every Debian-family host no matter what is installed. A
+# find_package(SPIRV-Headers CONFIG) there is worse: its config file calls
+# add_library(), which is not scriptable, and aborts the probe outright.
+#
+# The vendored headers settle the version floor, so what is probed is the half
+# ggml-vulkan still takes from the system — glslc, because it compiles the
+# shaders at build time, and the loader it links against, through the compiler
+# driver so the answer accounts for multiarch the way the real build will.
+sd_vulkan_usable() {
+    local missing=()
+    command -v glslc >/dev/null 2>&1 || missing+=("the glslc shader compiler (shaderc)")
+    local loader
+    loader="$("${CC:-cc}" -print-file-name=libvulkan.so 2>/dev/null)"
+    [[ -n "$loader" && "$loader" != "libvulkan.so" && -e "$loader" ]] \
+        || missing+=("the Vulkan loader link library libvulkan.so (libvulkan-dev)")
+    local header="$VULKAN_HEADERS_PREFIX/include/vulkan/vulkan_core.h"
+    local header_version=""
+    if [[ -f "$header" ]]; then
+        header_version="$(sed -n 's/^#define[ \t]*VK_HEADER_VERSION[ \t]*\([0-9]*\).*/\1/p' "$header" | head -1)"
+    fi
+    # VK_HEADER_VERSION is the patch component of the SDK version; it rises
+    # monotonically across 1.3.x and 1.4.x, so it compares correctly on its
+    # own. The floor is the newest Vulkan API ggml-vulkan uses,
+    # VK_EXT_layer_settings, which arrived in Vulkan-Headers 1.3.272. A build
+    # against older headers does not fail on a missing dependency — it fails
+    # deep inside ggml-vulkan.cpp on a vk:: type that does not exist yet.
+    local floor="${HAZOR_SD_VULKAN_MIN_HEADER_VERSION:-272}"
+    if [[ -z "$header_version" ]]; then
+        missing+=("a readable VK_HEADER_VERSION in $header")
+    elif [[ "$header_version" -lt "$floor" ]]; then
+        missing+=("Vulkan headers with VK_HEADER_VERSION >= $floor (found $header_version)")
+    fi
+    [[ -f "$SPIRV_HEADERS_PREFIX/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake" ]] \
+        || missing+=("the SPIRV-Headers CMake package under $SPIRV_HEADERS_PREFIX")
+    if [[ "${#missing[@]}" -gt 0 ]]; then
+        local item
+        for item in "${missing[@]}"; do
+            log "stable-diffusion.cpp: Vulkan backend needs $item"
+        done
+        return 1
+    fi
+}
+
+sd_build_dir() {
+    local tag="${*,,}"
+    printf '%s/build-deps/%s/stable-diffusion.cpp-%s-%s\n' \
+        "$THIRD_PARTY_DIR" "$TARGET" "$HAZOR_SD_CPP_VERSION" "${tag// /-}"
+}
+
+# Configures and builds one set of backends into its own build directory, so a
+# failed attempt never leaves half-built objects for the CPU-only retry (or the
+# next prepare run) to trip over. Failure is reported and handled by the
+# caller, never by dying.
+build_stable_diffusion() {
+    local source="$1"
+    local nvcc="$2"
+    shift 2
+    local -a backends=("$@")
+    local build
+    build="$(sd_build_dir "${backends[*]}")"
+    local -a args
+    dependency_cmake_args args
+    args[3]="-DCMAKE_INSTALL_PREFIX=$STABLE_DIFFUSION_PREFIX"
+    args+=(
+        # GNUInstallDirs resolves CMAKE_INSTALL_LIBDIR to lib64 on some hosts;
+        # STABLE_DIFFUSION_CONFIG_FILE assumes lib/, like RawEngine's
+        # rawengine_cmake_build() does for the same reason.
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_BINDIR=bin
+        # sd itself stays a static archive linked into Hazor; only ggml has to
+        # be shared, because GGML_BACKEND_DL requires it.
+        -DSD_BUILD_SHARED_LIBS=OFF
+        -DSD_BUILD_SHARED_GGML_LIB=ON
+        -DBUILD_SHARED_LIBS=ON
+        -DSD_BUILD_EXAMPLES=OFF
+        -DSD_WEBP=OFF
+        -DSD_WEBM=OFF
+        -DGGML_NATIVE=OFF
+        -DGGML_BACKEND_DL=ON
+        -DGGML_CPU=ON
+        -DGGML_CPU_ALL_VARIANTS=ON
+    )
+    local backend
+    for backend in "${backends[@]}"; do
+        case "$backend" in
+            CUDA)
+                # SD_CUDA, not just GGML_CUDA: it also compiles sd's own CUDA
+                # path (SD_USE_CUDA in src/core/ggml_extend_backend.cpp), which
+                # is what gates the MMA kernels behind the device's compute
+                # capability. The cost is a libcuda.so.1 dependency on the
+                # Hazor executable itself, which package.sh answers with the
+                # driver stub — see package_appimage().
+                args+=(-DSD_CUDA=ON "-DCMAKE_CUDA_COMPILER=$nvcc")
+                # nvcc does not take -ffile-prefix-map itself, so the host-pass
+                # form keeps this checkout's path out of the CUDA objects the
+                # way dependency_cmake_args() does for C and C++.
+                args+=("-DCMAKE_CUDA_FLAGS=-Xcompiler=-ffile-prefix-map=$ROOT_DIR=.")
+                [[ -n "${HAZOR_SD_CUDA_ARCHS:-}" ]] \
+                    && args+=("-DCMAKE_CUDA_ARCHITECTURES=$HAZOR_SD_CUDA_ARCHS")
+                ;;
+            VULKAN)
+                args+=(
+                    -DSD_VULKAN=ON
+                    "-DVulkan_INCLUDE_DIR=$VULKAN_HEADERS_PREFIX/include"
+                    "-DCMAKE_PREFIX_PATH=$SPIRV_HEADERS_PREFIX;$VULKAN_HEADERS_PREFIX"
+                )
+                ;;
+        esac
+    done
+    rm -rf -- "$build"
+    mkdir -p "$build"
+    log "stable-diffusion.cpp: building ${backends[*]} (this is the long one; log: $build.log)"
+    if ! cmake -S "$source" -B "$build" "${args[@]}" >"$build.log" 2>&1; then
+        log "stable-diffusion.cpp: ${backends[*]} configure failed; see $build.log"
+        return 1
+    fi
+    if ! cmake --build "$build" --parallel "$JOBS" >>"$build.log" 2>&1; then
+        log "stable-diffusion.cpp: ${backends[*]} build failed; see $build.log"
+        return 1
+    fi
+}
+
+# ALL (the default) or any comma/space-separated mix of CPU, VULKAN and CUDA.
+# CPU is added back unconditionally: ggml needs a CPU backend for the operators
+# no GPU backend implements, and it is the only fallback left on a machine with
+# no usable GPU.
+sd_requested_backends() {
+    local requested="${HAZOR_SD_BACKENDS:-ALL}"
+    requested="${requested^^}"
+    [[ "$requested" == "ALL" ]] && requested="CPU,VULKAN,CUDA"
+    local -a out=(CPU)
+    local token
+    for token in ${requested//,/ }; do
+        case "$token" in
+            CPU) ;;
+            VULKAN|CUDA) out+=("$token") ;;
+            *) log "HAZOR_SD_BACKENDS: ignoring unknown backend '$token' (expected CPU, VULKAN or CUDA)" ;;
+        esac
+    done
+    printf '%s\n' "${out[*]}"
+}
+
+# The CUDA driver stub, shipped inside the package that needs it.
+#
+# SD_CUDA makes libstable-diffusion.a call the driver API directly (cuInit, for
+# the compute-capability gate on the MMA kernels), so the Hazor executable
+# itself carries DT_NEEDED libcuda.so.1 — and a machine with no NVIDIA driver
+# has no such library, which stops the *editor* from starting rather than
+# merely costing it one optional backend. The CUDA toolkit's own stub satisfies
+# the loader and makes every call through it fail cleanly, so
+# package_appimage() can put it on LD_LIBRARY_PATH when, and only when, the
+# host has no real driver.
+#
+# Copied at prepare time because this is where nvcc's location is known: the
+# packaging step must not need a CUDA installation of its own.
+stage_sd_cuda_stub() {
+    local nvcc="$1"
+    local staged="$STABLE_DIFFUSION_PREFIX/cuda-stubs"
+    # No CUDA in the package means nothing links the driver, and a stub left
+    # behind by an earlier prepare would be staged into a package that must not
+    # carry one.
+    if [[ -z "$nvcc" ]]; then
+        [[ -d "$staged" ]] && rm -rf -- "$staged"
+        return 0
+    fi
+    local cuda_root stub
+    cuda_root="$(dirname "$(dirname "$nvcc")")"
+    stub="$cuda_root/lib64/stubs/libcuda.so"
+    if [[ ! -f "$stub" ]]; then
+        log "WARNING: no CUDA driver stub at $stub; an AppImage from this package will not start on a machine without an NVIDIA driver"
+        return 0
+    fi
+    mkdir -p "$staged"
+    # Installed under the soname, not the link name: the loader resolves
+    # libcuda.so.1, which is what the stub already declares as its SONAME.
+    cp -f "$stub" "$staged/libcuda.so.1"
+}
+
+prepare_stable_diffusion() {
+    [[ "$TARGET" == "linux-x86_64" ]] || return 0
+    validate_cross_toolchain
+
+    local -a requested=()
+    read -r -a requested <<<"$(sd_requested_backends)"
+
+    local nvcc=""
+    local -a backends=(CPU)
+    if [[ " ${requested[*]} " == *" VULKAN "* ]]; then
+        prepare_vulkan_build_headers
+        if sd_vulkan_usable; then
+            backends+=(VULKAN)
+        else
+            log "stable-diffusion.cpp: Vulkan backend skipped (see docs/BUILD.md)"
+        fi
+    fi
+    if [[ " ${requested[*]} " == *" CUDA "* ]]; then
+        if nvcc="$(find_sd_nvcc)"; then
+            log "stable-diffusion.cpp: CUDA backend will use $nvcc"
+        else
+            nvcc=""
+            log "stable-diffusion.cpp: CUDA backend skipped — no nvcc on \$CUDACXX, \$CUDA_PATH, \$CUDA_HOME, /usr/local/cuda or PATH"
+        fi
+        [[ -n "$nvcc" ]] && backends+=(CUDA)
+    fi
+
+    # What is installed is identified by the backend set and the CUDA
+    # architecture pin, so adding a toolchain (or narrowing the set by hand)
+    # rebuilds, while a plain re-run of --prepare does not.
+    local marker="$STABLE_DIFFUSION_PREFIX/.hazor-sd-backends"
+    local signature="${backends[*]} archs=${HAZOR_SD_CUDA_ARCHS:-portable}"
+    if [[ -f "$STABLE_DIFFUSION_CONFIG_FILE" && -f "$marker" ]] \
+        && [[ "$(cat "$marker")" == "$signature" ]]; then
+        # Staged here too, not only after an install: the stub is cheap, and
+        # this is the path every re-run of --prepare takes.
+        stage_sd_cuda_stub "$nvcc"
+        log "reusing prepared stable-diffusion.cpp (${backends[*]}) under $STABLE_DIFFUSION_PREFIX"
+        return 0
+    fi
+
+    local source="$HAZOR_DOWNLOAD_DIR/sources/stable-diffusion.cpp-$HAZOR_SD_CPP_COMMIT"
+    checkout_pinned_source "$HAZOR_SD_CPP_GIT_URL" "$HAZOR_SD_CPP_COMMIT" "$source"
+    checkout_pinned_submodule "$HAZOR_SD_CPP_GGML_GIT_URL" "$HAZOR_SD_CPP_GGML_COMMIT" "$source/ggml"
+
+    if ! build_stable_diffusion "$source" "$nvcc" "${backends[@]}"; then
+        if [[ "${#backends[@]}" -eq 1 ]]; then
+            # Not fatal: prepare_dependencies() still has RawEngine, RealESRGAN
+            # and the models to provision, and build.sh builds Hazor without the
+            # module when no package is installed. It says so loudly instead.
+            log "ERROR: stable-diffusion.cpp could not be built; Hazor will be built without the local Stable Diffusion module"
+            return 0
+        fi
+        log "stable-diffusion.cpp: retrying with the CPU backends only"
+        backends=(CPU)
+        signature="${backends[*]} archs=${HAZOR_SD_CUDA_ARCHS:-portable}"
+        if ! build_stable_diffusion "$source" "" CPU; then
+            log "ERROR: stable-diffusion.cpp could not be built; Hazor will be built without the local Stable Diffusion module"
+            return 0
+        fi
+    fi
+
+    # A stale install would otherwise keep backend modules the new build did not
+    # produce, and those are dlopen'd by filename at run time — a leftover
+    # libggml-cuda.so from an earlier prepare would still be loaded.
+    [[ -d "$STABLE_DIFFUSION_PREFIX" ]] && safe_remove_tree "$STABLE_DIFFUSION_PREFIX" "$ROOT_DIR"
+    cmake --install "$(sd_build_dir "${backends[*]}")" >/dev/null
+    stage_sd_cuda_stub "$nvcc"
+    printf '%s' "$signature" > "$marker"
+    write_provenance "$STABLE_DIFFUSION_PREFIX" "stable-diffusion.cpp" "$HAZOR_SD_CPP_VERSION" \
+        "$HAZOR_SD_CPP_GIT_URL@$HAZOR_SD_CPP_COMMIT (ggml@$HAZOR_SD_CPP_GGML_COMMIT, backends=${backends[*]})"
+    log "stable-diffusion.cpp prepared (${backends[*]} backends, $(find "$STABLE_DIFFUSION_BACKEND_DIR" -maxdepth 1 -name 'libggml-*.so' | wc -l) modules) under $STABLE_DIFFUSION_PREFIX"
+}
+
 # ── RawEngine dependencies ───────────────────────────────────────────────────
 # src/rawengine/ needs nine libraries. Each one is installed into
 # $RAWENGINE_DEPS_DIR/<name>/{include,lib} — the layout CMakeLists.txt's
@@ -1134,6 +1483,7 @@ prepare_dependencies() {
     prepare_zlib
     prepare_opencv
     prepare_onnxruntime
+    prepare_stable_diffusion
     prepare_rawengine
     prepare_realesrgan
     prepare_models

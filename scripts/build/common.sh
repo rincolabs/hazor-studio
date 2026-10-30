@@ -146,6 +146,20 @@ configure_target() {
     fi
     OPENCV_PREFIX="${OPENCV_PREFIX:-$TARGET_ROOT/opencv/$HAZOR_OPENCV_VERSION}"
     ZLIB_PREFIX="${ZLIB_PREFIX:-$TARGET_ROOT/zlib/$HAZOR_ZLIB_VERSION}"
+    # linux-x86_64 only (see prepare_stable_diffusion()); the variables are
+    # still defined for every target so configure_target() has one shape
+    # regardless of TARGET, the way OPENCV_PREFIX above does.
+    STABLE_DIFFUSION_PREFIX="${STABLE_DIFFUSION_PREFIX:-$TARGET_ROOT/stable-diffusion.cpp/$HAZOR_SD_CPP_VERSION}"
+    STABLE_DIFFUSION_CONFIG_FILE="$STABLE_DIFFUSION_PREFIX/lib/cmake/stable-diffusion/stable-diffusion-config.cmake"
+    # Where the ggml backend modules land. Not a choice: with GGML_BACKEND_DL
+    # and no GGML_BACKEND_DIR, ggml installs them into CMAKE_INSTALL_BINDIR,
+    # because the directory it searches first at run time is the one holding
+    # the executable (ggml-backend-reg.cpp, get_executable_path()). Setting
+    # GGML_BACKEND_DIR instead would bake an absolute path into
+    # libggml-base.so, which no relocatable package can use.
+    STABLE_DIFFUSION_BACKEND_DIR="$STABLE_DIFFUSION_PREFIX/bin"
+    VULKAN_HEADERS_PREFIX="${VULKAN_HEADERS_PREFIX:-$TARGET_ROOT/vulkan-headers/$HAZOR_VULKAN_SDK_VERSION}"
+    SPIRV_HEADERS_PREFIX="${SPIRV_HEADERS_PREFIX:-$TARGET_ROOT/spirv-headers/$HAZOR_VULKAN_SDK_VERSION}"
     RAWENGINE_DEPS_DIR="${RAWENGINE_DEPS_DIR:-$TARGET_ROOT/rawengine}"
     REALESRGAN_DIR="${REALESRGAN_DIR:-$TARGET_ROOT/realesrgan/$HAZOR_REALESRGAN_VERSION}"
     # Only the ncnn process executable (and its Windows DLLs) is platform
@@ -189,7 +203,9 @@ configure_target() {
     ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT_DIR/artifacts/$TARGET}"
     export TARGET TARGET_OS TARGET_ARCH TARGET_ROOT QT_HOST_DIR QT_TARGET_DIR
     export QT_SHARED_DIR
-    export OPENCV_PREFIX ZLIB_PREFIX RAWENGINE_DEPS_DIR ONNXRUNTIME_DIR
+    export OPENCV_PREFIX ZLIB_PREFIX STABLE_DIFFUSION_PREFIX STABLE_DIFFUSION_CONFIG_FILE
+    export STABLE_DIFFUSION_BACKEND_DIR VULKAN_HEADERS_PREFIX SPIRV_HEADERS_PREFIX
+    export RAWENGINE_DEPS_DIR ONNXRUNTIME_DIR
     export ONNX_MODELS_DIR REALESRGAN_DIR REALESRGAN_MODELS_DIR TOOLCHAIN_FILE
     export MINGW_TOOLCHAIN_DIR
 }
@@ -336,4 +352,20 @@ checkout_pinned_source() {
     git -C "$destination" fetch --depth 1 origin "$commit"
     git -C "$destination" checkout -q --detach FETCH_HEAD
     [[ "$(git -C "$destination" rev-parse HEAD)" == "$commit" ]] || die "failed to check out pinned commit $commit"
+}
+
+# A submodule path left uninitialised by checkout_pinned_source() above (it
+# never runs `git submodule update`) exists as an empty directory, which
+# checkout_pinned_source() itself would refuse as "exists but is not a git
+# checkout" — so the empty placeholder is cleared first, then the submodule is
+# fetched the same way as any other pinned source, independent of the
+# superproject's own submodule metadata.
+checkout_pinned_submodule() {
+    local url="$1"
+    local commit="$2"
+    local destination="$3"
+    if [[ -d "$destination" && ! -d "$destination/.git" ]]; then
+        rmdir "$destination" 2>/dev/null || true
+    fi
+    checkout_pinned_source "$url" "$commit" "$destination"
 }

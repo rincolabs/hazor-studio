@@ -28,6 +28,177 @@ rawengine_was_built() {
     [[ "$(sed -n 's|^ENABLE_RAWENGINE:[^=]*=||p' "$BUILD_DIR/CMakeCache.txt" | tail -n 1)" == "ON" ]]
 }
 
+stable_diffusion_was_built() {
+    [[ -f "$BUILD_DIR/CMakeCache.txt" ]] || return 1
+    [[ "$(sed -n 's|^ENABLE_STABLE_DIFFUSION:[^=]*=||p' "$BUILD_DIR/CMakeCache.txt" | tail -n 1)" == "ON" ]] \
+        || return 1
+    # The option alone records only what was *asked* for: with no prepared
+    # package CMake warns and builds Hazor without the module. The executable's
+    # own DT_NEEDED list is the authoritative answer, and the difference is 230 MB
+    # of backend modules staged for a binary that cannot load any of them.
+    local binary
+    binary="$(find_hazor_binary)"
+    [[ -f "$binary" ]] || return 1
+    patchelf --print-needed "$binary" 2>/dev/null | grep -q '^libggml'
+}
+
+# The ggml backend modules the local Stable Diffusion module runs on, plus the
+# CUDA driver stub that keeps the executable startable without an NVIDIA driver.
+#
+# linuxdeploy cannot find any of this on its own: the modules are dlopen'd by
+# filename, never linked, so they appear in no DT_NEEDED list. ggml looks for
+# them in the directory holding the executable (ggml-backend-reg.cpp,
+# get_executable_path()), which in an AppDir is usr/bin — real copies here, not
+# the symlinks the build directory gets.
+stage_stable_diffusion_appimage() {
+    local appdir="$1"
+    # A package built without the module must not ship its backends.
+    stable_diffusion_was_built || return 0
+    [[ -d "$STABLE_DIFFUSION_BACKEND_DIR" ]] || return 0
+
+    # Every module dlopen'd out of usr/bin resolves libggml-base.so.0 (the
+    # device registry) and, for the CPU variants, libgomp.so.1 through the
+    # loader path, not through an rpath of their own — the installed modules
+    # carry none. Both come from linuxdeploy's recursive deployment of the
+    # executable's own dependencies, so staging the modules without them
+    # produces a package where every single backend fails to load and the panel
+    # reports "no device" on every machine. Checked rather than assumed.
+    find "$appdir/usr/lib" -maxdepth 1 -name 'libggml-base.so*' -print -quit | grep -q . \
+        || die "libggml-base was not bundled into usr/lib; the staged ggml backend modules could not be loaded"
+    find "$appdir/usr/lib" -maxdepth 1 -name 'libgomp.so*' -print -quit | grep -q . \
+        || die "libgomp was not bundled into usr/lib; the ggml CPU backend modules could not be loaded"
+
+    local module count=0
+    mkdir -p "$appdir/usr/bin"
+    while IFS= read -r -d '' module; do
+        # -L: ggml's scan considers regular files only, so whatever the prefix
+        # holds has to arrive here as bytes under the unversioned name. The
+        # installed modules are plain files today; a prefix assembled any other
+        # way would otherwise ship a link into the build machine's 3rdparty.
+        cp -aL "$module" "$appdir/usr/bin/"
+        count=$((count + 1))
+    done < <(find "$STABLE_DIFFUSION_BACKEND_DIR" -maxdepth 1 -name 'libggml-*.so' -print0)
+    [[ "$count" -gt 0 ]] || die "no ggml backend modules found in $STABLE_DIFFUSION_BACKEND_DIR"
+
+    # linuxdeploy resolves the executable's DT_NEEDED libcuda.so.1 — SD_CUDA
+    # links the driver API — and happily bundles this machine's NVIDIA driver
+    # library, which its excludelist does not cover. Shipping a driver
+    # component is worse than shipping nothing: it is matched to the kernel
+    # module on the build machine and would be preferred over the user's own.
+    # Removed here the same way libonnxruntime is, along with the rest of the
+    # GPU stack that has to come from the user's system: the CUDA runtime and
+    # cuBLAS (hundreds of megabytes, and version-matched to the driver) and the
+    # Vulkan loader, which is the component that enumerates the host's own
+    # installed drivers. A backend module whose libraries are missing simply
+    # fails to dlopen and the next one is used.
+    find "$appdir/usr/lib" -maxdepth 1 \
+        \( -name 'libcuda.so*' -o -name 'libnvidia-*.so*' \
+           -o -name 'libcudart.so*' -o -name 'libcublas*.so*' \
+           -o -name 'libvulkan.so*' \) -delete 2>/dev/null || true
+
+    # With the driver library gone, a machine that has no NVIDIA driver has
+    # nothing to satisfy that same DT_NEEDED, and the editor would not start at
+    # all — losing the whole application over an optional backend. The CUDA
+    # toolkit's own stub satisfies the loader and makes every call through it
+    # fail cleanly, so it is injected only when the host really has no driver;
+    # where one exists, the host's is used and CUDA works for real.
+    local stub="$STABLE_DIFFUSION_PREFIX/cuda-stubs/libcuda.so.1"
+    if [[ -f "$stub" ]]; then
+        mkdir -p "$appdir/usr/lib/cuda-stubs" "$appdir/apprun-hooks"
+        cp -aL "$stub" "$appdir/usr/lib/cuda-stubs/"
+        cat > "$appdir/apprun-hooks/cuda-stub.sh" <<'HOOK'
+#!/bin/sh
+# Only when the host has no real libcuda.so.1: the stub must never shadow a
+# working driver. ldconfig is tried first (it knows whatever the distribution
+# configured), with the usual driver locations as the fallback for systems
+# where it is absent from PATH or does not cover them.
+hazor_has_libcuda() {
+    for ldc in ldconfig /sbin/ldconfig /usr/sbin/ldconfig; do
+        if command -v "$ldc" >/dev/null 2>&1; then
+            "$ldc" -p 2>/dev/null | grep -q 'libcuda\.so\.1' && return 0
+        fi
+    done
+    # The loader searches LD_LIBRARY_PATH before its cache, so a driver (or a
+    # toolkit install) reachable only that way still wins over the stub and
+    # must be found here too.
+    hazor_ifs="$IFS"
+    IFS=:
+    for dir in $LD_LIBRARY_PATH; do
+        [ -n "$dir" ] && [ -e "$dir/libcuda.so.1" ] && { IFS="$hazor_ifs"; return 0; }
+    done
+    IFS="$hazor_ifs"
+    # Distributions that keep the driver out of the cache, or out of PATH's
+    # reach of ldconfig: Debian's alternatives directory, NixOS's driver
+    # bind-mount, the lib64 split.
+    for dir in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib \
+               /usr/lib/x86_64-linux-gnu/nvidia/current /usr/lib64/nvidia \
+               /usr/lib/nvidia /run/opengl-driver/lib; do
+        [ -e "$dir/libcuda.so.1" ] && return 0
+    done
+    return 1
+}
+if ! hazor_has_libcuda; then
+    export LD_LIBRARY_PATH="$APPDIR/usr/lib/cuda-stubs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+HOOK
+    fi
+    log "AppImage: staged $count ggml backend module(s) into usr/bin"
+}
+
+# linuxdeploy writes its AppRun with one hardcoded `source` line per hook that
+# existed at the moment it ran — it does not scan the directory. Every hook this
+# script adds afterwards was therefore written into the AppDir and then never
+# executed: the xdgdesktopportal platform theme has silently never applied in a
+# released AppImage, and the CUDA stub above would not have either, which with
+# libcuda.so.1 as a DT_NEEDED of the executable means the *editor* fails to
+# start on any machine without an NVIDIA driver.
+#
+# The replacement sources the directory: linuxdeploy's own plugin hooks first,
+# then this project's, so ours still win where both set the same variable
+# (QT_QPA_PLATFORMTHEME, which linuxdeploy-plugin-qt points at gtk2 on
+# GNOME/XFCE). APPDIR is exported because the hooks use it and linuxdeploy's
+# AppRun never set it — the AppImage runtime does, but a directly executed
+# AppDir does not. `set -e` and the exec of AppRun.wrapped are kept verbatim
+# from linuxdeploy's own template.
+finalise_apprun_hooks() {
+    local appdir="$1"
+    require_file "$appdir/AppRun" "AppRun generated by linuxdeploy"
+    [[ -e "$appdir/AppRun.wrapped" ]] \
+        || die "AppRun.wrapped is missing; linuxdeploy did not generate a hook-capable AppRun"
+    cat > "$appdir/AppRun" <<'APPRUN'
+#! /usr/bin/env bash
+
+# generated by linuxdeploy, replaced by scripts/build/package.sh so that every
+# hook in apprun-hooks/ runs, not only the ones linuxdeploy knew about.
+
+# make sure errors in sourced scripts will cause this script to stop
+set -e
+
+this_dir="$(readlink -f "$(dirname "$0")")"
+export APPDIR="${APPDIR:-$this_dir}"
+
+for hook in "$this_dir"/apprun-hooks/linuxdeploy-plugin-*.sh; do
+    if [ -r "$hook" ]; then
+        source "$hook"
+    fi
+done
+for hook in "$this_dir"/apprun-hooks/*.sh; do
+    case "${hook##*/}" in
+        linuxdeploy-plugin-*) continue ;;
+    esac
+    if [ -r "$hook" ]; then
+        source "$hook"
+    fi
+done
+
+exec "$this_dir"/AppRun.wrapped "$@"
+APPRUN
+    chmod +x "$appdir/AppRun"
+    local hooks
+    hooks="$(find "$appdir/apprun-hooks" -maxdepth 1 -name '*.sh' -printf '%f ' 2>/dev/null)"
+    log "AppImage: AppRun sources every apprun-hook (${hooks:-none})"
+}
+
 # $2 ("on"/"off", optional) overrides the CMake-cache probe for packages whose
 # RAW engine state is decided by a packaging manifest rather than by this
 # build directory — the Flatpak builds its own copy inside the sandbox.
@@ -124,7 +295,10 @@ package_appimage() {
     export APPIMAGE_EXTRACT_AND_RUN=1
     export QMAKE="$QT_TARGET_DIR/bin/qmake"
     export EXTRA_QT_PLUGINS="svg"
-    export LD_LIBRARY_PATH="$QT_TARGET_DIR/lib:$OPENCV_PREFIX/lib:$ONNXRUNTIME_DIR/lib:${LD_LIBRARY_PATH:-}"
+    # stable-diffusion.cpp's prefix is on this list so linuxdeploy can resolve
+    # the executable's DT_NEEDED libggml.so / libggml-base.so and bundle them
+    # into usr/lib; the backend modules it cannot see are staged separately.
+    export LD_LIBRARY_PATH="$QT_TARGET_DIR/lib:$OPENCV_PREFIX/lib:$ONNXRUNTIME_DIR/lib:$STABLE_DIFFUSION_PREFIX/lib:${LD_LIBRARY_PATH:-}"
     "$tools/linuxdeploy-x86_64.AppImage" \
         --appdir "$appdir" \
         --executable "$binary" \
@@ -141,6 +315,9 @@ package_appimage() {
     find "$appdir/usr/lib" -maxdepth 1 -name 'libQt6DBus.so*' -print -quit | grep -q . \
         || die "libQt6DBus was not bundled for the xdgdesktopportal plugin"
 
+    stage_stable_diffusion_appimage "$appdir"
+    # After the last hook is written, never before it.
+    finalise_apprun_hooks "$appdir"
     copy_runtime_assets "$appdir/3rdparty"
     write_runtime_notices "$appdir/usr/share/licenses/hazor-studio"
     if [[ -d "$ONNXRUNTIME_DIR" ]]; then

@@ -10,13 +10,16 @@
 // Three different things are easy to confuse here, and conflating them is how a
 // CPU run gets reported as GPU acceleration:
 //
-//   * the COMPILED backend  — which ggml backend this binary was built with
-//                             (HAZOR_SD_BACKEND at configure time). A fixed
+//   * the COMPILED backends — which ggml backends were built into the package
+//                             this binary links (HAZOR_SD_BACKENDS at configure
+//                             time, normally CPU + Vulkan + CUDA). A fixed
 //                             property of the build; it cannot change at run
 //                             time and it proves nothing about the machine.
-//   * the AVAILABLE devices — what ggml actually finds on THIS machine now: a
-//                             Vulkan build on a box with no driver, or no GPU
-//                             at all, enumerates the CPU device only.
+//   * the AVAILABLE devices — what ggml actually finds on THIS machine now.
+//                             The backends ship as separate dlopen'd modules,
+//                             so a CUDA module with no NVIDIA driver present,
+//                             or a Vulkan module with no loader, simply does
+//                             not register and its devices never appear.
 //   * the EFFECTIVE device  — the one the loaded context was built against and
 //                             the one the sampling really ran on. The only
 //                             honest answer to "was that GPU accelerated?".
@@ -26,7 +29,7 @@
 // resolve a device before paying for a 4 GiB load.
 namespace sdlocal {
 
-// The ggml backend compiled into this binary, from HAZOR_SD_BACKEND.
+// A ggml backend that may be compiled into the package this binary links.
 enum class SdCompiledBackend { Cpu, Vulkan, Cuda };
 
 // What a request asks for. Auto prefers a GPU when the build and the machine
@@ -60,8 +63,15 @@ struct SdDeviceChoice {
     bool isValid() const { return device.isValid(); }
 };
 
-SdCompiledBackend compiledBackend();
-QString compiledBackendName();          // "CPU" | "VULKAN" | "CUDA"
+// Every backend built into the linked package, from HAZOR_SD_BACKENDS. CPU is
+// always among them. This is a build property: it says what the binary *can*
+// use, never what this machine will actually load.
+QVector<SdCompiledBackend> compiledBackends();
+bool hasCompiledBackend(SdCompiledBackend backend);
+// True when any GPU backend was compiled in, which is the only question most
+// callers have. Still not a promise that a GPU is reachable here.
+bool hasCompiledGpuBackend();
+QString compiledBackendsName();         // "CPU VULKAN CUDA"
 QString backendName(SdCompiledBackend backend);
 
 // Every ggml device on this machine, GPUs first. Loads the dynamic ggml backend

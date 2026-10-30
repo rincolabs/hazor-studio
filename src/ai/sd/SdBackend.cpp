@@ -17,11 +17,12 @@
 namespace sdlocal {
 namespace {
 
-// HAZOR_SD_BACKEND is turned into this macro by CMakeLists.txt. The default
-// keeps a build that somehow missed the definition honest: CPU is the only
-// backend ggml always has.
-#ifndef HAZOR_SD_BACKEND_NAME
-#define HAZOR_SD_BACKEND_NAME "CPU"
+// The backends the linked package was built with, space separated, turned into
+// this macro by CMakeLists.txt out of ggml's own GGML_AVAILABLE_BACKENDS. The
+// default keeps a build that somehow missed the definition honest: CPU is the
+// only backend ggml always has.
+#ifndef HAZOR_SD_BACKENDS
+#define HAZOR_SD_BACKENDS "CPU"
 #endif
 
 // `enum` is required, not stylistic: ggml-backend.h declares both an enum
@@ -50,14 +51,42 @@ QString tr_(const char* text)
 
 } // namespace
 
-SdCompiledBackend compiledBackend()
+QVector<SdCompiledBackend> compiledBackends()
 {
-    const QLatin1String name(HAZOR_SD_BACKEND_NAME);
-    if (name == QLatin1String("VULKAN"))
-        return SdCompiledBackend::Vulkan;
-    if (name == QLatin1String("CUDA"))
-        return SdCompiledBackend::Cuda;
-    return SdCompiledBackend::Cpu;
+    // Parsed once: the macro is a compile-time constant, so the answer cannot
+    // change, and chooseDevice() asks for it on every resolve.
+    static const QVector<SdCompiledBackend> backends = [] {
+        QVector<SdCompiledBackend> out;
+        const QStringList names = QString::fromLatin1(HAZOR_SD_BACKENDS)
+                                      .split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        for (const QString& name : names) {
+            if (name.compare(QLatin1String("VULKAN"), Qt::CaseInsensitive) == 0)
+                out.push_back(SdCompiledBackend::Vulkan);
+            else if (name.compare(QLatin1String("CUDA"), Qt::CaseInsensitive) == 0)
+                out.push_back(SdCompiledBackend::Cuda);
+            else if (name.compare(QLatin1String("CPU"), Qt::CaseInsensitive) == 0)
+                out.push_back(SdCompiledBackend::Cpu);
+        }
+        // ggml cannot run an operator without a CPU backend, and the package
+        // is never built without one, so an empty or unparsable list means the
+        // define is wrong rather than that the CPU is really absent.
+        if (out.isEmpty())
+            out.push_back(SdCompiledBackend::Cpu);
+        return out;
+    }();
+    return backends;
+}
+
+bool hasCompiledBackend(SdCompiledBackend backend)
+{
+    const QVector<SdCompiledBackend> backends = compiledBackends();
+    return std::find(backends.begin(), backends.end(), backend) != backends.end();
+}
+
+bool hasCompiledGpuBackend()
+{
+    return hasCompiledBackend(SdCompiledBackend::Vulkan)
+        || hasCompiledBackend(SdCompiledBackend::Cuda);
 }
 
 QString backendName(SdCompiledBackend backend)
@@ -70,9 +99,12 @@ QString backendName(SdCompiledBackend backend)
     return QStringLiteral("CPU");
 }
 
-QString compiledBackendName()
+QString compiledBackendsName()
 {
-    return backendName(compiledBackend());
+    QStringList names;
+    for (SdCompiledBackend backend : compiledBackends())
+        names << backendName(backend);
+    return names.join(QLatin1Char(' '));
 }
 
 QVector<SdDevice> availableDevices()
@@ -160,13 +192,17 @@ SdDeviceChoice chooseDevice(SdDevicePreference preference)
     // — is the whole point: the caller reports a CPU run as a CPU run.
     choice.device = cpuDevice();
     choice.downgraded = true;
-    if (compiledBackend() == SdCompiledBackend::Cpu) {
+    if (!hasCompiledGpuBackend()) {
         choice.reason = tr_("No GPU backend is compiled into this build "
-                            "(HAZOR_SD_BACKEND=CPU); running on the CPU.");
+                            "(HAZOR_SD_BACKENDS=CPU); running on the CPU.");
     } else {
-        choice.reason = tr_("The %1 backend is compiled in but no GPU device was "
-                            "found on this machine; running on the CPU.")
-                            .arg(compiledBackendName());
+        // The GPU backends ship as separate modules, so this is the common
+        // case on a machine with no driver for any of them: the modules are
+        // there, none of them loaded, and saying which were tried is the
+        // difference between a diagnosable report and a shrug.
+        choice.reason = tr_("No GPU device was found on this machine for any "
+                            "compiled backend (%1); running on the CPU.")
+                            .arg(compiledBackendsName());
     }
     if (preference == SdDevicePreference::Gpu)
         qWarning().noquote() << "[SD]" << choice.reason;
@@ -214,7 +250,7 @@ QString describeBackendEnvironment()
                               : QString());
     }
     return QStringLiteral("compiled=%1 | devices: %2")
-        .arg(compiledBackendName(),
+        .arg(compiledBackendsName(),
              parts.isEmpty() ? QStringLiteral("none") : parts.join(QStringLiteral(", ")));
 }
 

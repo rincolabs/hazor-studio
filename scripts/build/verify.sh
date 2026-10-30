@@ -116,6 +116,87 @@ verify_no_local_paths() {
     [[ "$failed" -eq 0 ]] || die "packaged files reference the local source path: $ROOT_DIR"
 }
 
+appdir_needed_libraries() {
+    readelf -d "$1" 2>/dev/null | sed -n 's|.*(NEEDED).*\[\(.*\)\]|\1|p'
+}
+
+# AppRun is the only thing that runs before the editor, and linuxdeploy writes
+# it with one hardcoded `source` line per hook that existed when it ran — so a
+# hook added afterwards is silently dead. package.sh replaces AppRun to source
+# the directory instead; this is what keeps that from regressing, because
+# nothing else in the package would look different if it did.
+verify_appimage_apprun_hooks() {
+    local appdir="$DIST_DIR/AppDir"
+    local apprun="$appdir/AppRun"
+    require_file "$apprun" "AppDir AppRun"
+    bash -n "$apprun" || die "the AppDir's AppRun is not valid bash"
+    grep -qF 'apprun-hooks/*.sh' "$apprun" \
+        || die "AppRun does not source apprun-hooks/*.sh, so hooks written after linuxdeploy ran would never execute"
+    local hook count=0
+    while IFS= read -r -d '' hook; do
+        # Sourced the way AppRun sources it — same `set -e`, same APPDIR — so a
+        # hook whose last command fails is caught here instead of by a user
+        # whose AppImage refuses to start.
+        APPDIR="$appdir" bash -c 'set -e; source "$1"' hazor-verify "$hook" \
+            || die "apprun-hook $(basename "$hook") fails when sourced; it would stop the AppImage from starting"
+        count=$((count + 1))
+    done < <(find "$appdir/apprun-hooks" -maxdepth 1 -name '*.sh' -print0)
+    log "AppImage: $count apprun-hook(s) sourced by AppRun, each verified to source cleanly"
+}
+
+# The local Stable Diffusion module is the one part of the package whose GPU
+# support is resolved on the user's machine rather than here, so the package has
+# to carry every backend and none of the host's GPU stack.
+verify_appimage_stable_diffusion() {
+    local appdir="$DIST_DIR/AppDir"
+    local binary="$appdir/usr/bin/Hazor"
+    require_file "$binary" "packaged Hazor executable"
+    local needed
+    needed="$(appdir_needed_libraries "$binary")"
+    if ! grep -q '^libggml' <<<"$needed"; then
+        # Built without the module: then it must not have been staged either.
+        find "$appdir/usr/bin" -maxdepth 1 -name 'libggml-*.so' -print -quit | grep -q . \
+            && die "ggml backend modules were staged for a Hazor binary that does not link the Stable Diffusion module"
+        return 0
+    fi
+
+    local modules
+    modules="$(find "$appdir/usr/bin" -maxdepth 1 -name 'libggml-*.so' | wc -l)"
+    [[ "$modules" -gt 0 ]] \
+        || die "the Hazor binary links the Stable Diffusion module but no ggml backend module was staged into usr/bin"
+    # ggml dlopen()s the modules out of the executable's directory, and they
+    # resolve these two through the loader path: without them every backend
+    # fails to load on every machine.
+    find "$appdir/usr/lib" -maxdepth 1 -name 'libggml-base.so*' -print -quit | grep -q . \
+        || die "AppImage staging is missing libggml-base"
+    find "$appdir/usr/lib" -maxdepth 1 -name 'libgomp.so*' -print -quit | grep -q . \
+        || die "AppImage staging is missing libgomp, which the ggml CPU backend modules link"
+    # The baseline variant is the one that runs on any x86-64: every other CPU
+    # module is gated on instruction sets a user's machine may not have.
+    require_file "$appdir/usr/bin/libggml-cpu-x64.so" \
+        "baseline x86-64 ggml CPU backend module (the fallback for older CPUs)"
+
+    # Bundling any of these would override the user's own GPU stack with the
+    # build machine's: the driver is matched to its kernel module and the Vulkan
+    # loader is what enumerates the drivers actually installed there.
+    local host_gpu_libs
+    host_gpu_libs="$(find "$appdir/usr/lib" -maxdepth 1 \
+        \( -name 'libcuda.so*' -o -name 'libnvidia-*.so*' -o -name 'libcudart.so*' \
+           -o -name 'libcublas*.so*' -o -name 'libvulkan.so*' \) -printf '%f ' 2>/dev/null)"
+    [[ -z "$host_gpu_libs" ]] \
+        || die "the AppImage bundles host GPU libraries that must come from the user's system: $host_gpu_libs"
+
+    # A CUDA-enabled package makes libcuda.so.1 a hard dependency of the
+    # executable, so the stub and its hook are what keep the editor startable on
+    # a machine with no NVIDIA driver at all.
+    if grep -q '^libcuda\.so\.1$' <<<"$needed"; then
+        require_file "$appdir/usr/lib/cuda-stubs/libcuda.so.1" \
+            "CUDA driver stub (the executable links libcuda.so.1)"
+        require_file "$appdir/apprun-hooks/cuda-stub.sh" "CUDA driver stub AppRun hook"
+    fi
+    log "AppImage: $modules ggml backend module(s) staged, no host GPU libraries bundled"
+}
+
 verify_package() {
     [[ "$PACKAGE_FORMAT" != "none" ]] || return
     require_command strings
@@ -127,6 +208,8 @@ verify_package() {
                 "Qt xdgdesktopportal plugin"
             find "$DIST_DIR/AppDir/usr/lib" -maxdepth 1 -name 'libQt6DBus.so*' \
                 -print -quit | grep -q . || die "AppImage staging is missing libQt6DBus"
+            verify_appimage_apprun_hooks
+            verify_appimage_stable_diffusion
             ;;
         flatpak)
             require_file "$(artifact_path linux-x86_64 flatpak)" "Flatpak bundle"

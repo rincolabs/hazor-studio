@@ -9,6 +9,25 @@ readonly HAZOR_OPENCV_COMMIT="4223495e6cd67011f86b8ecd9be1fa105018f3b1"
 readonly HAZOR_ZLIB_VERSION="1.3.2"
 readonly HAZOR_ZLIB_COMMIT="da607da739fa6047df13e66a2af6b8bec7c2a498"
 readonly HAZOR_ONNXRUNTIME_VERSION="1.26.0"
+# leejet/stable-diffusion.cpp has no release versioning of its own (pinned by
+# commit only, like HAZOR_OSXCROSS_COMMIT below); the short hash doubles as
+# the version component of its install path under 3rdparty/targets/.
+readonly HAZOR_SD_CPP_COMMIT="687915518efd69548965d24818f0d3bbbb903718"
+readonly HAZOR_SD_CPP_GGML_COMMIT="a5915eb0e47adef21c3f25b889a008925ea838c2"
+readonly HAZOR_SD_CPP_VERSION="${HAZOR_SD_CPP_COMMIT:0:12}"
+# ggml-vulkan's build-time dependencies, vendored rather than required from the
+# distribution. Both are header-only, install in seconds, and are pinned as the
+# matched pair of one Vulkan SDK release — mixing versions between them is what
+# produces "unknown SPIR-V capability" errors out of glslc.
+#
+# They are vendored because the floor is unreachable on supported hosts:
+# ggml-vulkan needs VK_HEADER_VERSION >= 272 (VK_EXT_layer_settings) and Ubuntu
+# 22.04 ships 204, while SPIRV-Headers is not in the KDE Flatpak SDK at all.
+# glslc is the one Vulkan build dependency still taken from the system: it is a
+# compiler (shaderc + glslang + SPIRV-Tools), far too heavy to build here.
+readonly HAZOR_VULKAN_SDK_VERSION="1.4.321.0"
+readonly HAZOR_VULKAN_HEADERS_COMMIT="2cd90f9d20df57eac214c148f3aed885372ddcfe"
+readonly HAZOR_SPIRV_HEADERS_COMMIT="2a611a970fdbc41ac2e3e328802aed9985352dca"
 readonly HAZOR_REALESRGAN_VERSION="20220424"
 readonly HAZOR_SAM_VERSION="20230629"
 readonly HAZOR_BIREFNET_VERSION="20240101"
@@ -17,6 +36,10 @@ readonly HAZOR_OSXCROSS_COMMIT="27d21e4977c9751d01199c7a226a6faf494c3dd9"
 
 readonly HAZOR_OPENCV_GIT_URL="https://github.com/opencv/opencv.git"
 readonly HAZOR_ZLIB_GIT_URL="https://github.com/madler/zlib.git"
+readonly HAZOR_SD_CPP_GIT_URL="https://github.com/leejet/stable-diffusion.cpp.git"
+readonly HAZOR_SD_CPP_GGML_GIT_URL="https://github.com/leejet/ggml.git"
+readonly HAZOR_VULKAN_HEADERS_GIT_URL="https://github.com/KhronosGroup/Vulkan-Headers.git"
+readonly HAZOR_SPIRV_HEADERS_GIT_URL="https://github.com/KhronosGroup/SPIRV-Headers.git"
 readonly HAZOR_OSXCROSS_GIT_URL="https://github.com/tpoechtrager/osxcross.git"
 
 readonly HAZOR_ORT_LINUX_PACKAGE="onnxruntime-linux-x64-gpu-${HAZOR_ONNXRUNTIME_VERSION}"
