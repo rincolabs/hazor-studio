@@ -1238,9 +1238,12 @@ MainWindow::MainWindow(QWidget* parent)
     // panel. With the second child hidden, the tabs consume the complete canvas
     // area; opening it produces the requested top/bottom workspace split.
     m_workspaceSplitter = new QSplitter(Qt::Vertical, centralHost);
-    m_workspaceSplitter->setChildrenCollapsible(false);
+    m_workspaceSplitter->setChildrenCollapsible(true);
 
     m_tabWidget = new QTabWidget(m_workspaceSplitter);
+    // The tab widget's content-derived minimum size must not pin the divider at
+    // the initial 50/50 split; the user may shrink the canvas almost entirely.
+    m_tabWidget->setMinimumHeight(1);
     m_tabWidget->setTabsClosable(true);
     m_tabWidget->setMovable(true);
     m_tabWidget->tabBar()->setElideMode(Qt::ElideRight);

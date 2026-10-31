@@ -38,13 +38,12 @@ import type {
   WorkflowError,
 } from './services/contract'
 import { NeuralFlowClient } from './services/neuralFlow'
-import { statusKindFor, statusLabelFor } from './services/status'
+import { statusDetailFor, statusKindFor, statusLabelFor } from './services/status'
 
 const client = shallowRef<NeuralFlowClient | null>(null)
 const catalog = shallowRef<NodeCatalog | null>(null)
 const models = ref<ModelEntry[]>([])
 const defaultModelId = ref('')
-const backend = ref('')
 const modelConfigPath = ref('')
 const hasDocument = ref(false)
 const connectionError = ref('')
@@ -68,7 +67,7 @@ const subscriptions: Array<() => void> = []
 
 const busy = computed(() => runState.value === 'loading' || runState.value === 'generating')
 const stateKind = computed(() => statusKindFor(runState.value))
-const stateLabel = computed(() => statusLabelFor(runState.value))
+const stateLabel = computed(() => statusLabelFor(runState.value, progress.value))
 const progressFraction = computed(() =>
   progress.value && progress.value.steps > 0 ? progress.value.step / progress.value.steps : null,
 )
@@ -90,13 +89,10 @@ const detail = computed(() => {
     const extra = runErrors.value.length - 1
     return extra > 0 ? `${first?.message} (+${extra})` : (first?.message ?? '')
   }
-  if (runState.value === 'generating' && progress.value) {
-    return `step ${progress.value.step} of ${progress.value.steps}`
-  }
   if (runState.value === 'completed' && lastResult.value) {
     return describeResult(lastResult.value)
   }
-  return runDetail.value
+  return statusDetailFor(runState.value, progress.value, runDetail.value)
 })
 
 /**
@@ -179,6 +175,9 @@ function subscribe(connected: NeuralFlowClient): void {
       clearRunFeedback()
     }),
     connected.on('workflowStateChanged', (state, stateDetail) => {
+      // Loading reports model tensors and generating reports denoising steps.
+      // Never let the first bar's final count masquerade as the next phase.
+      if (state !== runState.value) progress.value = null
       runState.value = state
       runDetail.value = stateDetail
       syncNodeRunState()
@@ -226,7 +225,6 @@ async function connect(): Promise<void> {
     models.value = state.models ?? []
     setModels(models.value)
     defaultModelId.value = state.defaultModelId ?? ''
-    backend.value = state.backend ?? ''
     modelConfigPath.value = state.modelConfigPath ?? ''
     hasDocument.value = Boolean(state.hasDocument)
     // A run already in flight when the panel is opened: the state signals will
@@ -322,7 +320,6 @@ void connect()
       :busy="busy"
       :can-run="canRun"
       :refreshing="refreshing"
-      :backend="backend"
       @run="run"
       @cancel="cancel"
       @refresh-models="refreshModels"

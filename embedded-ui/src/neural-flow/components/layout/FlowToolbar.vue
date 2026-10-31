@@ -12,8 +12,6 @@ defineProps<{
   busy: boolean
   canRun: boolean
   refreshing: boolean
-  /** Compiled backend, devices found and device in use, in one line. */
-  backend: string
 }>()
 
 const emit = defineEmits<{
@@ -29,8 +27,6 @@ const emit = defineEmits<{
     <div class="tb-left">
       <span class="tb-logo"><Icon name="flow" :size="15" /></span>
       <h1 class="tb-title">Neural Flow</h1>
-      <span v-if="backend" class="tb-div" />
-      <span v-if="backend" class="tb-backend" :title="backend">{{ backend }}</span>
     </div>
 
     <div class="tb-right">
@@ -107,15 +103,6 @@ const emit = defineEmits<{
   white-space: nowrap;
   letter-spacing: -0.005em;
 }
-.tb-backend {
-  color: var(--text-3);
-  font-family: var(--mono);
-  font-size: 11px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
 .tb-div {
   width: 1px;
   height: 18px;
@@ -127,8 +114,7 @@ const emit = defineEmits<{
   min-width: 72px;
 }
 @media (max-width: 760px) {
-  .tb-lbl,
-  .tb-backend {
+  .tb-lbl {
     display: none;
   }
   .tb .btn {

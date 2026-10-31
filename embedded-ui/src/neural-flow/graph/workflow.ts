@@ -24,6 +24,7 @@ import type {
   WorkflowDocument,
   WorkflowNode,
 } from '../services/contract'
+import { nodeRunLabelFor } from '../services/status'
 
 /** Space between the columns and rows of the starting graph. */
 const COLUMN_GAP = 90
@@ -265,8 +266,7 @@ export function showRunState(
   const runningType = RUNNING_NODE_TYPE[state]
   const counted = progress !== null && progress.steps > 0
   const fraction = counted ? progress.step / progress.steps : 0
-  // Loading reports no progress at all, so the badge says "working", not "0%".
-  const label = counted ? `${progress.step}/${progress.steps}` : '…'
+  const label = nodeRunLabelFor(state, progress)
 
   for (const node of graphNodes(graph)) {
     // An error is the more important thing to say, and it outlives the run.
