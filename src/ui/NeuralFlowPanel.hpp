@@ -9,8 +9,9 @@ class QStackedLayout;
 class QWebChannel;
 class WebViewHost;
 
-// The "Hazor Neural Flow" dock: the Vue node editor from embedded-ui/, hosted
-// in the Qt WebEngine view Hazor already uses for the AI Agent panel.
+// The "Hazor Neural Flow" workspace panel: the Vue node editor from
+// embedded-ui/, hosted in the Qt WebEngine view Hazor already uses for the AI
+// Agent panel.
 //
 // This class is only the host. It creates the view, registers the one
 // QWebChannel object the page may talk to (NeuralFlowBridge) and loads the

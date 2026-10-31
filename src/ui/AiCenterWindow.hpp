@@ -12,8 +12,8 @@ class WebViewHost;
 
 // Top-level window for the Hazor AI Center: the Vue dashboard from
 // embedded-ui/, hosted in the same WebViewHost/QWebChannel infrastructure
-// Neural Flow uses, but as its own window rather than a dock — this is a
-// full settings-style application with its own navigation, not a panel
+// Neural Flow uses, but as its own window rather than a workspace panel — this
+// is a full settings-style application with its own navigation, not a panel
 // alongside the canvas.
 //
 // Like NeuralFlowPanel, this is only the host: it creates the view, registers

@@ -54,6 +54,7 @@ class AppSettingsDialog;
 class ProgressDialog;
 class QTimer;
 class QDockWidget;
+class QSplitter;
 class HomeWorkspace;
 
 class ImageController;
@@ -422,8 +423,10 @@ private:
     void updateToolBarLayout();
     void syncGenerativeFillPanelController();
     void syncStableDiffusionPanelController();
-    // Opens the Neural Flow node editor, or raises it when it is already open.
+    // Opens the Neural Flow node editor below the canvas, or focuses it when it
+    // is already open.
     void onOpenNeuralFlow();
+    void showNeuralFlowPanel(double bottomRatio);
     void applyViewportStatusBarTheme();
     void showViewportStatusMessage(const QString& message, int timeoutMs,
                                    const QString& iconPath = QString());
@@ -623,6 +626,7 @@ private:
     SwatchesPanel* m_swatchesPanel = nullptr;
     ColorMixerPanel* m_colorMixerPanel = nullptr;
     ColorPaletteBar* m_colorPaletteBar = nullptr;
+    QSplitter* m_workspaceSplitter = nullptr;
     QWidget* m_viewportStatusBar = nullptr;
     QLabel* m_statusIconLabel = nullptr;
     QLabel* m_statusMessageLabel = nullptr;
@@ -648,11 +652,14 @@ private:
     // every packaged build and each use site is a plain null check.
     QDockWidget* m_stableDiffusionDock = nullptr;
     StableDiffusionPanel* m_stableDiffusionPanel = nullptr;
-    // Neural Flow node editor: built only when the Stable Diffusion module and
-    // the compiled embedded interfaces are both present (HAVE_NEURAL_FLOW), so
-    // the same plain null check covers a build without either.
+    // Neural Flow node editor: the existing panel lives in the bottom half of
+    // m_workspaceSplitter. It is built only when the Stable Diffusion module
+    // and the compiled embedded interfaces are both present (HAVE_NEURAL_FLOW),
+    // so the same plain null check covers a build without either.
     QDockWidget* m_neuralFlowDock = nullptr;
     NeuralFlowPanel* m_neuralFlowPanel = nullptr;
+    bool m_neuralFlowVisibleBeforeHome = false;
+    double m_neuralFlowRatioBeforeHome = 0.5;
     // Hazor AI Center: built lazily on first openAiCenter() call. Unlike the
     // two members above it is never absent from a build — the embedded
     // interfaces it needs are a hard dependency.

@@ -147,6 +147,7 @@
 #include <QScrollArea>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
+#include <QSplitter>
 #include <QSizePolicy>
 #include <QTimer>
 #include <QMimeData>
@@ -1233,7 +1234,13 @@ MainWindow::MainWindow(QWidget* parent)
                      t->colorSurface.name()));
     };
 
-    m_tabWidget = new QTabWidget(centralHost);
+    // The splitter owns the document workspace and the on-demand Neural Flow
+    // panel. With the second child hidden, the tabs consume the complete canvas
+    // area; opening it produces the requested top/bottom workspace split.
+    m_workspaceSplitter = new QSplitter(Qt::Vertical, centralHost);
+    m_workspaceSplitter->setChildrenCollapsible(false);
+
+    m_tabWidget = new QTabWidget(m_workspaceSplitter);
     m_tabWidget->setTabsClosable(true);
     m_tabWidget->setMovable(true);
     m_tabWidget->tabBar()->setElideMode(Qt::ElideRight);
@@ -1245,7 +1252,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_tabWidget->tabBar()->setTabButton(homeIndex, QTabBar::LeftSide, nullptr);
     m_tabWidget->tabBar()->setTabButton(homeIndex, QTabBar::RightSide, nullptr);
     setupTabBg(m_tabWidget, thInit->colorPanelBackground);
-    centralLayout->addWidget(m_tabWidget, 1);
+    m_workspaceSplitter->addWidget(m_tabWidget);
+    m_workspaceSplitter->setStretchFactor(0, 1);
+    centralLayout->addWidget(m_workspaceSplitter, 1);
 
     m_viewportStatusBar = new QWidget(centralHost);
     m_viewportStatusBar->setObjectName(QStringLiteral("ViewportStatusBar"));
@@ -1409,39 +1418,30 @@ MainWindow::MainWindow(QWidget* parent)
                                            m_stableDiffusionPanel);
 
 #ifdef HAVE_NEURAL_FLOW
-    // The node editor is an on-demand floating dock rather than a tab in the
-    // right-hand column: a graph is unreadable at sidebar width. It is created
-    // here and kept hidden — created rather than built on first use, so a saved
-    // workspace can restore its place, and hidden so no Chromium renderer and
-    // no model scan happen before it is opened (NeuralFlowPanel::showEvent).
-    //
-    // Only ever this one dock exists, which is what makes "open it, or raise it
-    // if it is already open" the whole of onOpenNeuralFlow().
-    m_neuralFlowDock = new QDockWidget(tr("Neural Flow"), this);
-    m_neuralFlowDock->setObjectName(QStringLiteral("NeuralFlowDock"));
-    m_neuralFlowDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea |
-                                      Qt::BottomDockWidgetArea);
-    m_neuralFlowDock->setFeatures(QDockWidget::DockWidgetMovable |
-                                  QDockWidget::DockWidgetFloatable |
-                                  QDockWidget::DockWidgetClosable);
+    // Keep the existing closeable host and NeuralFlowPanel, but make the host a
+    // fixed child of the central splitter instead of registering it with the
+    // QMainWindow dock system. The new object name also prevents a workspace
+    // state saved by an older build from restoring it as a floating window.
+    // It stays hidden so no Chromium renderer and no model scan happen before
+    // the editor is first opened (NeuralFlowPanel::showEvent).
+    m_neuralFlowDock = new QDockWidget(tr("Neural Flow"), m_workspaceSplitter);
+    m_neuralFlowDock->setObjectName(QStringLiteral("NeuralFlowWorkspacePanel"));
+    m_neuralFlowDock->setAllowedAreas(Qt::NoDockWidgetArea);
+    m_neuralFlowDock->setFeatures(QDockWidget::DockWidgetClosable);
     m_neuralFlowPanel = new NeuralFlowPanel(m_neuralFlowDock);
     m_neuralFlowDock->setWidget(m_neuralFlowPanel);
     themePanelBg(m_neuralFlowPanel, thInit);
-    addDockWidget(Qt::RightDockWidgetArea, m_neuralFlowDock);
-    m_neuralFlowDock->setFloating(true);
-    {
-        // Sized and centred once, while it is still hidden, so the first open
-        // is a usable editor instead of a 420-pixel sliver. Afterwards the
-        // user's own geometry is never touched again.
-        const QRect available = QGuiApplication::primaryScreen()->availableGeometry();
-        const QSize wanted(qMin(1180, available.width() - 80),
-                           qMin(780, available.height() - 80));
-        m_neuralFlowDock->resize(wanted);
-        m_neuralFlowDock->move(available.center().x() - wanted.width() / 2,
-                               available.center().y() - wanted.height() / 2);
-    }
+    m_workspaceSplitter->addWidget(m_neuralFlowDock);
+    m_workspaceSplitter->setStretchFactor(1, 1);
     m_neuralFlowDock->hide();
-    windowMenu->addAction(m_neuralFlowDock->toggleViewAction());
+    QAction* neuralFlowAction = m_neuralFlowDock->toggleViewAction();
+    windowMenu->addAction(neuralFlowAction);
+    connect(neuralFlowAction, &QAction::triggered, this, [this](bool checked) {
+        if (!checked)
+            return;
+        m_neuralFlowPanel->setController(m_ctrl);
+        showNeuralFlowPanel(0.5);
+    });
 
     connect(m_stableDiffusionPanel, &StableDiffusionPanel::neuralFlowRequested,
             this, &MainWindow::onOpenNeuralFlow);
@@ -1701,8 +1701,6 @@ MainWindow::MainWindow(QWidget* parent)
     for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock,
                             m_customShapesPanelDock, m_generativeFillDock })
         watchDockTitleBar(d);
-    if (m_neuralFlowDock)
-        watchDockTitleBar(m_neuralFlowDock);
 
     // Establish the default panel arrangement (also reused by the menu action).
     resetDockLayout();
@@ -2770,8 +2768,6 @@ QList<QDockWidget*> MainWindow::panelDocks() const
         m_generativeFillDock };
     if (m_stableDiffusionDock)
         docks.append(m_stableDiffusionDock);
-    if (m_neuralFlowDock)
-        docks.append(m_neuralFlowDock);
     return docks;
 }
 
@@ -3697,12 +3693,34 @@ void MainWindow::onOpenNeuralFlow()
         return;
 
     m_neuralFlowPanel->setController(m_ctrl);
-    // Never a second instance: this is the dock built during construction, so
-    // an already-open editor is only brought forward. Closing, resizing,
-    // docking and tabbing it stay the dock system's business.
-    m_neuralFlowDock->show();
+    // Never a second instance: opening a hidden editor starts at an even split;
+    // opening it again preserves the divider position chosen by the user.
+    if (m_neuralFlowDock->isHidden())
+        showNeuralFlowPanel(0.5);
     m_neuralFlowDock->raise();
     m_neuralFlowDock->activateWindow();
+#endif
+}
+
+void MainWindow::showNeuralFlowPanel(double bottomRatio)
+{
+#ifdef HAVE_NEURAL_FLOW
+    if (!m_workspaceSplitter || !m_neuralFlowDock)
+        return;
+
+    m_neuralFlowDock->show();
+    QTimer::singleShot(0, this, [this, bottomRatio]() {
+        if (!m_workspaceSplitter || !m_neuralFlowDock || m_neuralFlowDock->isHidden())
+            return;
+
+        const int available = qMax(0, m_workspaceSplitter->height()
+                                      - m_workspaceSplitter->handleWidth());
+        const double ratio = std::clamp(bottomRatio, 0.0, 1.0);
+        const int bottomHeight = qRound(static_cast<double>(available) * ratio);
+        m_workspaceSplitter->setSizes({available - bottomHeight, bottomHeight});
+    });
+#else
+    Q_UNUSED(bottomRatio);
 #endif
 }
 
@@ -3790,8 +3808,6 @@ void MainWindow::setHomeDockMode(bool homeActive)
     };
     if (m_stableDiffusionDock)
         editingDocks.append(m_stableDiffusionDock);
-    if (m_neuralFlowDock)
-        editingDocks.append(m_neuralFlowDock);
 
     if (homeActive) {
         if (!m_homeDockMode) {
@@ -3800,11 +3816,22 @@ void MainWindow::setHomeDockMode(bool homeActive)
             // makes the Home layout temporary rather than a workspace change.
             m_documentDockState = saveState(WorkspaceManager::kStateVersion);
             m_homeDockMode = true;
+
+            m_neuralFlowVisibleBeforeHome = m_neuralFlowDock
+                && !m_neuralFlowDock->isHidden();
+            if (m_neuralFlowVisibleBeforeHome && m_workspaceSplitter) {
+                const QList<int> sizes = m_workspaceSplitter->sizes();
+                const int total = sizes.value(0) + sizes.value(1);
+                if (total > 0)
+                    m_neuralFlowRatioBeforeHome = static_cast<double>(sizes.value(1)) / total;
+            }
         }
         for (QDockWidget* dock : editingDocks) {
             if (dock)
                 dock->hide();
         }
+        if (m_neuralFlowDock)
+            m_neuralFlowDock->hide();
         return;
     }
 
@@ -3823,6 +3850,9 @@ void MainWindow::setHomeDockMode(bool homeActive)
         else
             resetDockLayout();
     }
+    if (m_neuralFlowVisibleBeforeHome)
+        showNeuralFlowPanel(m_neuralFlowRatioBeforeHome);
+    m_neuralFlowVisibleBeforeHome = false;
 }
 
 void MainWindow::onTabChanged(int index)
@@ -6477,12 +6507,14 @@ void MainWindow::resetDockLayout()
 
     // On-demand floating panels go back to their default hidden+floating state.
     for (QDockWidget* d : { m_brushSettingsDock, m_brushPanelDock, m_customShapesPanelDock,
-                            m_generativeFillDock, m_neuralFlowDock }) {
+                            m_generativeFillDock }) {
         if (!d) continue;
         addDockWidget(Qt::RightDockWidgetArea, d);
         d->setFloating(true);
         d->hide();
     }
+    if (m_neuralFlowDock)
+        m_neuralFlowDock->hide();
 
     if (homeActive)
         setHomeDockMode(true);
@@ -7674,7 +7706,7 @@ void MainWindow::dropEvent(QDropEvent* e)
 namespace {
 
 // True when `w` is inside one of the embedded web interfaces (the AI Center
-// window, the Neural Flow dock).
+// window, the Neural Flow workspace panel).
 //
 // Keyboard input there belongs to the page: it has its own text fields, its own
 // shortcuts and its own undo. MainWindow's filter below cannot tell which of
