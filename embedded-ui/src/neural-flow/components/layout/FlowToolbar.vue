@@ -3,6 +3,7 @@
 import Icon from '../ui/Icon.vue'
 import StatusIndicator from './StatusIndicator.vue'
 import type { StatusKind } from '../../services/status'
+import type { DeviceEntry } from '../../services/contract'
 
 defineProps<{
   stateKind: StatusKind
@@ -12,6 +13,9 @@ defineProps<{
   busy: boolean
   canRun: boolean
   refreshing: boolean
+  devices: DeviceEntry[]
+  /** "" means the backend resolves the device itself. */
+  device: string
 }>()
 
 const emit = defineEmits<{
@@ -19,7 +23,14 @@ const emit = defineEmits<{
   cancel: []
   refreshModels: []
   add: [button: HTMLElement]
+  'update:device': [name: string]
 }>()
+
+/** "NVIDIA GeForce RTX 4070" reads better than "CUDA0" when there is one. */
+function deviceLabel(entry: DeviceEntry): string {
+  const memory = entry.totalMiB > 0 ? ` · ${Math.round(entry.totalMiB / 1024)} GiB` : ''
+  return entry.description ? `${entry.name} — ${entry.description}${memory}` : entry.name
+}
 </script>
 
 <template>
@@ -32,6 +43,19 @@ const emit = defineEmits<{
     <div class="tb-right">
       <StatusIndicator :kind="stateKind" :label="stateLabel" :detail="detail" :progress="progress" />
       <span class="tb-div" />
+      <select
+        class="tb-device"
+        :value="device"
+        :disabled="busy"
+        title="Inference device"
+        aria-label="Inference device"
+        @change="emit('update:device', ($event.target as HTMLSelectElement).value)"
+      >
+        <option value="">Device: Auto</option>
+        <option v-for="entry in devices" :key="entry.name" :value="entry.name">
+          {{ deviceLabel(entry) }}
+        </option>
+      </select>
       <button
         class="btn ghost"
         type="button"
@@ -113,6 +137,24 @@ const emit = defineEmits<{
 .tb-run {
   min-width: 72px;
 }
+.tb-device {
+  flex: 0 1 auto;
+  max-width: 220px;
+  height: var(--control-h);
+  padding: 0 6px;
+  background: var(--input);
+  color: var(--text-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-field);
+  font: inherit;
+  text-overflow: ellipsis;
+}
+.tb-device:hover:enabled {
+  border-color: var(--text-3);
+}
+.tb-device:disabled {
+  color: var(--text-disabled);
+}
 @media (max-width: 760px) {
   .tb-lbl {
     display: none;
@@ -121,6 +163,9 @@ const emit = defineEmits<{
     width: var(--control-h);
     padding: 0;
     min-width: 0;
+  }
+  .tb-device {
+    max-width: 110px;
   }
 }
 </style>

@@ -123,9 +123,38 @@ QVariantMap NeuralFlowBridge::initialState()
     // device in use — as one line, so the editor can say where a run will go
     // instead of implying a GPU it may not have.
     state.insert(QStringLiteral("backend"), sdlocal::describeBackendEnvironment());
+    state.insert(QStringLiteral("devices"), availableDevices());
+    state.insert(QStringLiteral("pinnedDevice"), pinnedDevice());
     state.insert(QStringLiteral("modelConfigPath"),
                  sdlocal::SdModelManager::instance().configPath());
     return state;
+}
+
+QVariantList NeuralFlowBridge::availableDevices() const
+{
+    QVariantList out;
+    for (const sdlocal::SdDevice& device : sdlocal::availableDevices()) {
+        QVariantMap entry;
+        entry.insert(QStringLiteral("name"), device.name);
+        entry.insert(QStringLiteral("description"), device.description);
+        entry.insert(QStringLiteral("gpu"), device.gpu);
+        entry.insert(QStringLiteral("totalMiB"),
+                     static_cast<qulonglong>(device.totalBytes / (1024ull * 1024ull)));
+        out.append(entry);
+    }
+    return out;
+}
+
+QString NeuralFlowBridge::pinnedDevice() const
+{
+    return sdlocal::pinnedDeviceName();
+}
+
+void NeuralFlowBridge::setPinnedDevice(const QString& name)
+{
+    sdlocal::setPinnedDeviceName(name);
+    qInfo().noquote() << "[SD] device pin |"
+                      << (name.isEmpty() ? QStringLiteral("auto") : name);
 }
 
 // ── Execution ───────────────────────────────────────────────────────────────

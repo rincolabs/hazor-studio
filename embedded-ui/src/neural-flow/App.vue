@@ -33,6 +33,7 @@ import { registerCatalogNodes } from './nodes/registerNodes'
 import type {
   CompletedInfo,
   GenerationState,
+  DeviceEntry,
   ModelEntry,
   NodeCatalog,
   WorkflowError,
@@ -48,6 +49,8 @@ const modelConfigPath = ref('')
 const hasDocument = ref(false)
 const connectionError = ref('')
 const refreshing = ref(false)
+const devices = ref<DeviceEntry[]>([])
+const device = ref('')
 const graphComponent = ref<InstanceType<typeof NeuralGraph> | null>(null)
 
 const runState = ref<GenerationState>('idle')
@@ -226,6 +229,8 @@ async function connect(): Promise<void> {
     setModels(models.value)
     defaultModelId.value = state.defaultModelId ?? ''
     modelConfigPath.value = state.modelConfigPath ?? ''
+    devices.value = state.devices ?? []
+    device.value = state.pinnedDevice ?? ''
     hasDocument.value = Boolean(state.hasDocument)
     // A run already in flight when the panel is opened: the state signals will
     // carry it from here.
@@ -246,6 +251,15 @@ function onGraphReady(ready: LGraph, readyCanvas: LGraphCanvas): void {
     buildStartingGraph(ready, activeCatalog, defaultModelId.value)
   }
   graphReady.value = true
+}
+
+/**
+ * Which ggml device every run uses. A machine-level choice, like ComfyUI's
+ * launch flags: it is persisted by the backend, not stored in the document.
+ */
+function pinDevice(name: string): void {
+  device.value = name
+  client.value?.setPinnedDevice(name)
 }
 
 function openAddMenu(button: HTMLElement): void {
@@ -320,6 +334,9 @@ void connect()
       :busy="busy"
       :can-run="canRun"
       :refreshing="refreshing"
+      :devices="devices"
+      :device="device"
+      @update:device="pinDevice"
       @run="run"
       @cancel="cancel"
       @refresh-models="refreshModels"

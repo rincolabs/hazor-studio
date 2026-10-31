@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <QSettings>
 #include <QStringList>
 
 #include <algorithm>
@@ -48,6 +49,8 @@ QString tr_(const char* text)
 {
     return QCoreApplication::translate("StableDiffusion", text);
 }
+
+const char* kPinnedDeviceKey = "stablediffusion/device";
 
 } // namespace
 
@@ -164,6 +167,20 @@ SdDevice cpuDevice()
     return d;
 }
 
+QString pinnedDeviceName()
+{
+    return QSettings().value(QLatin1String(kPinnedDeviceKey)).toString().trimmed();
+}
+
+void setPinnedDeviceName(const QString& name)
+{
+    QSettings settings;
+    if (name.trimmed().isEmpty())
+        settings.remove(QLatin1String(kPinnedDeviceKey));
+    else
+        settings.setValue(QLatin1String(kPinnedDeviceKey), name.trimmed());
+}
+
 SdDeviceChoice chooseDevice(SdDevicePreference preference)
 {
     const QVector<SdDevice> devices = availableDevices();
@@ -172,6 +189,23 @@ SdDeviceChoice chooseDevice(SdDevicePreference preference)
     choice.gpuRequested = preference != SdDevicePreference::Cpu;
     choice.gpuAvailable = std::any_of(devices.begin(), devices.end(),
                                       [](const SdDevice& d) { return d.gpu; });
+
+    // A pin names one ggml device and outranks the preference, because that is
+    // the only way to say "CUDA, not Vulkan" on a machine that registers both.
+    // A pin for a device that is gone is ignored rather than fatal.
+    const QString pinned = pinnedDeviceName();
+    if (!pinned.isEmpty()) {
+        for (const SdDevice& d : devices) {
+            if (d.name.compare(pinned, Qt::CaseInsensitive) != 0)
+                continue;
+            choice.device = d;
+            choice.downgraded = choice.gpuRequested && !d.gpu;
+            choice.reason = tr_("Device %1 (%2) pinned.").arg(d.name, d.description);
+            return choice;
+        }
+        qWarning().noquote() << "[SD] pinned device" << pinned
+                             << "is not present; resolving by preference instead";
+    }
 
     if (preference == SdDevicePreference::Cpu) {
         choice.device = cpuDevice();

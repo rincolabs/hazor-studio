@@ -68,6 +68,16 @@ public:
     // because it is the only heavy call here: nothing watches the filesystem.
     Q_INVOKABLE QVariantList refreshModels();
 
+    // Every ggml device this machine registered, GPUs first:
+    // [{ name: "CUDA0", description, gpu, totalMiB }].
+    Q_INVOKABLE QVariantList availableDevices() const;
+
+    // The pinned device name, or "" for "let the backend resolve it". A
+    // machine-level choice rather than a workflow one, so it is persisted here
+    // and not carried in a document.
+    Q_INVOKABLE QString pinnedDevice() const;
+    Q_INVOKABLE void setPinnedDevice(const QString& name);
+
     // Validates and starts a run of `workflowJson`, which must be a document in
     // the schema sdlocal::SdWorkflowDefinition parses.
     //

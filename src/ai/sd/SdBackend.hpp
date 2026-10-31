@@ -82,9 +82,17 @@ QVector<SdDevice> availableDevices();
 // build that cannot reach its GPU has to be able to name a CPU target.
 SdDevice cpuDevice();
 
-// Resolves `preference` against availableDevices(). Never returns a GPU that is
-// not there, and never silently calls a CPU device a GPU: when a GPU was asked
-// for and none is usable the choice comes back with downgraded=true and a reason.
+// The ggml device the user pinned ("CUDA0"), or empty for "resolve by
+// preference". A machine-level choice, not a workflow one: a package that
+// loads both the CUDA and the Vulkan module would otherwise run on whichever
+// ggml happens to register first. Persisted with QSettings.
+QString pinnedDeviceName();
+void setPinnedDeviceName(const QString& name);
+
+// Resolves `preference` against availableDevices(), honouring the pin above.
+// Never returns a GPU that is not there, and never silently calls a CPU device
+// a GPU: when a GPU was asked for and none is usable the choice comes back with
+// downgraded=true and a reason.
 SdDeviceChoice chooseDevice(SdDevicePreference preference);
 
 QString devicePreferenceName(SdDevicePreference preference);

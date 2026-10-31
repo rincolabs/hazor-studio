@@ -17,6 +17,7 @@ import {
 
 import type {
   CompletedInfo,
+  DeviceEntry,
   ExecuteResponse,
   GenerationState,
   InitialState,
@@ -60,6 +61,15 @@ export class NeuralFlowClient {
 
   availableModels(): Promise<ModelEntry[]> {
     return invoke<ModelEntry[]>(this.bridge, 'availableModels')
+  }
+
+  availableDevices(): Promise<DeviceEntry[]> {
+    return invoke<DeviceEntry[]>(this.bridge, 'availableDevices')
+  }
+
+  /** Pins the ggml device every run uses; "" resolves by preference again. */
+  setPinnedDevice(name: string): void {
+    send(this.bridge, 'setPinnedDevice', [name])
   }
 
   /** Rescans the registered directories. The only slow call here. */

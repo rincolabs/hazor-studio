@@ -126,6 +126,15 @@ export interface ModelEntry {
   isDefault: boolean
 }
 
+/** One ggml device the machine registered, as `SdBackend::availableDevices()`. */
+export interface DeviceEntry {
+  /** The exact token `sd_ctx_params_t::backend` takes, e.g. "CUDA0". */
+  name: string
+  description: string
+  gpu: boolean
+  totalMiB: number
+}
+
 /** Hazor's active theme, flattened for CSS (src/theme/WebThemeVariables.cpp). */
 export type ThemeVariables = Record<string, string | number>
 
@@ -138,6 +147,9 @@ export interface InitialState {
   hasDocument: boolean
   /** Compiled backend, devices found and device in use, in one line. */
   backend: string
+  devices: DeviceEntry[]
+  /** The pinned device name, or "" for "resolve by preference". */
+  pinnedDevice: string
   modelConfigPath: string
 }
 
