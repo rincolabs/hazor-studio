@@ -15,10 +15,26 @@ const categoryLabel: Record<SdModelCategory, string> = {
   checkpoint: 'Checkpoint',
   diffusionModel: 'Diffusion Model / UNet',
   textEncoder: 'Text Encoder',
+  visionEncoder: 'Vision Encoder',
   vae: 'VAE',
   lora: 'LoRA',
+  embedding: 'Embedding',
+  controlNet: 'ControlNet',
+  ipAdapter: 'IP-Adapter',
+  photoMaker: 'PhotoMaker',
+  pulid: 'PuLID',
+  identityEmbedding: 'Identity Embedding',
+  upscaler: 'Upscaler (ESRGAN)',
+  adetailer: 'ADetailer Detector',
 }
-const encoderRoleSuffix: Record<string, string> = { clipL: 'CLIP-L', clipG: 'CLIP-G', t5xxl: 'T5-XXL' }
+const encoderRoleSuffix: Record<string, string> = {
+  clipL: 'CLIP-L',
+  clipG: 'CLIP-G',
+  t5xxl: 'T5-XXL',
+  llm: 'LLM',
+  llmVision: 'LLM Vision',
+  clipVision: 'CLIP Vision',
+}
 const sourceLabel: Record<SdModelEntry['source'], string> = {
   directory: 'Directory',
   registeredFile: 'Registered file',
@@ -91,8 +107,9 @@ async function onRescan(): Promise<void> {
 
     <EmptyState v-if="state && state.entries.length === 0" icon="sdNode" title="No Stable Diffusion models registered">
       <div style="max-width: 460px">
-        Register checkpoints, UNet models, text encoders, VAEs and LoRAs so Neural Flow can use them. Add a single
-        file, or a whole folder such as an existing ComfyUI models directory.
+        Register checkpoints, UNet models, text encoders, VAEs, LoRAs, ControlNets, IP-Adapters, PhotoMaker,
+        PuLID and upscaler models so Neural Flow can use them. Add a single file, or a whole folder such as an
+        existing ComfyUI models directory.
       </div>
       <div style="display: flex; gap: 8px">
         <button type="button" class="btn pri" @click="showRegisterFile = true">Add File…</button>

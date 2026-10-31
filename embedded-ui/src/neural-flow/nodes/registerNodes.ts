@@ -27,16 +27,6 @@ import { MIN_NODE_WIDTH, addPropertyWidget, toWidgetValue } from './propertyWidg
 const NODE_TYPE_PREFIX = 'hazor'
 
 /**
- * How many slots an input that accepts several connections gets.
- *
- * LiteGraph has no multi-connection input: an input slot holds one link, and
- * connecting a second replaces the first. The backend's LoRA input does accept
- * a stack, so it is given a fixed handful of slots that all map back to the
- * same port — a stack deeper than this needs a hand-written document.
- */
-const MULTI_INPUT_SLOTS = 3
-
-/**
  * The group label an optional input's row is shown under (e.g. "Optional ·
  * LoRA"). Purely presentational — a port this editor leaves ungrouped is
  * still drawn, just without the small caps header above it — and derived
@@ -46,17 +36,29 @@ const OPTIONAL_GROUP_LABELS: Record<string, string> = {
   lora: 'LoRA',
   init_image: 'Image-to-image',
   mask: 'Image-to-image',
+  references: 'Reference images',
+  control: 'ControlNet',
+  ip_adapter: 'IP-Adapter',
+  photo_maker: 'PhotoMaker',
+  pulid: 'PuLID',
 }
 
 /** Which property (if any) a category's nodes show under their title. */
 const SUBTITLE_PROPERTY: Record<string, string> = {
   checkpoint: 'modelId',
   lora: 'modelId',
+  controlnet_loader: 'modelId',
+  ip_adapter_loader: 'modelId',
+  photo_maker: 'modelId',
+  pulid: 'modelId',
+  upscale: 'modelId',
+  adetailer: 'modelId',
 }
 
 /** A node built from the catalog. `hazorType` is what a document records. */
 export interface HazorNode extends LGraphNode, HazorVisualNode {
   hazorType: string
+  reconcilingInputs?: boolean
 }
 
 export function litegraphTypeFor(definition: NodeDefinition): string {
@@ -67,31 +69,76 @@ export function litegraphTypeFor(definition: NodeDefinition): string {
  * The backend port id behind each input slot, by slot index.
  *
  * LiteGraph identifies a connection by slot index; the backend identifies it
- * by port name. This mapping is the whole of the difference, and it is derived
- * from the definition rather than stored on the slots, so it survives a
- * serialise/restore that would drop anything extra hung off them.
+ * by port name. The stable id lives on each slot because a variadic port can
+ * grow and shrink independently of the catalog's declaration order.
  */
-export function inputSlotPorts(definition: NodeDefinition): string[] {
-  const ports: string[] = []
-  for (const input of definition.inputs) {
-    const slots = input.multiple ? MULTI_INPUT_SLOTS : 1
-    for (let index = 0; index < slots; index += 1) {
-      ports.push(input.id)
-    }
-  }
-  return ports
+export function inputPortForSlot(
+  node: LGraphNode,
+  definition: NodeDefinition,
+  slot: number,
+): string | undefined {
+  const input = node.inputs?.[slot] as HazorInputSlot | undefined
+  if (input?.hazorPortId) return input.hazorPortId
+  // Compatibility with graphs serialised before slots carried the backend id.
+  return definition.inputs[slot]?.id
 }
 
-/** Labels for those slots: a repeated port is numbered. */
-function inputSlotLabels(definition: NodeDefinition): string[] {
-  const labels: string[] = []
-  for (const input of definition.inputs) {
-    const slots = input.multiple ? MULTI_INPUT_SLOTS : 1
-    for (let index = 0; index < slots; index += 1) {
-      labels.push(slots === 1 ? input.id : `${input.id} ${index + 1}`)
-    }
+export function inputSlotForPort(node: LGraphNode, portId: string): number {
+  return (node.inputs ?? []).findIndex(
+    (input) => (input as HazorInputSlot).hazorPortId === portId || input.name === portId,
+  )
+}
+
+function inputExtra(spec: PortSpec): HazorSlotExtra {
+  return {
+    optional: !spec.required,
+    group: OPTIONAL_GROUP_LABELS[spec.id],
+    hazorPortId: spec.id,
+    variadic: spec.multiple,
   }
-  return labels
+}
+
+/**
+ * LiteGraph stores one link per input slot. A variadic backend port therefore
+ * keeps exactly one empty trailing slot: connecting it grows another, and
+ * disconnecting compacts redundant empty slots. There is no guessed maximum.
+ */
+function reconcileVariadicInputs(node: HazorNode, definition: NodeDefinition): void {
+  if (node.reconcilingInputs) return
+  node.reconcilingInputs = true
+  try {
+    for (const spec of definition.inputs) {
+      if (!spec.multiple) continue
+      let slots = node.inputs
+        .map((input, index) => ({ input: input as HazorInputSlot, index }))
+        .filter(({ input }) => input.hazorPortId === spec.id)
+
+      if (slots.length === 0 || slots.every(({ input }) => input.link != null)) {
+        node.addInput(spec.id, spec.type, inputExtra(spec))
+        slots = node.inputs
+          .map((input, index) => ({ input: input as HazorInputSlot, index }))
+          .filter(({ input }) => input.hazorPortId === spec.id)
+      }
+
+      const empty = slots.filter(({ input }) => input.link == null)
+      for (let index = empty.length - 1; index >= 1; index -= 1) {
+        node.removeInput(empty[index]!.index)
+      }
+
+      const current = node.inputs.filter(
+        (input) => (input as HazorInputSlot).hazorPortId === spec.id,
+      ) as HazorInputSlot[]
+      current.forEach((input, index) => {
+        input.name = `${spec.id} ${index + 1}`
+      })
+    }
+  } finally {
+    node.reconcilingInputs = false
+  }
+  layoutSlots(node)
+  const size = computeNodeSize.call(node)
+  node.size = [Math.max(node.size[0], MIN_NODE_WIDTH), size[1]]
+  node.setDirtyCanvas(true, true)
 }
 
 /**
@@ -143,11 +190,6 @@ function subtitleFor(node: HazorNode, property: string | undefined): string {
 }
 
 function buildNodeClass(definition: NodeDefinition): { new (): LGraphNode } {
-  const labels = inputSlotLabels(definition)
-  const ports = inputSlotPorts(definition)
-  const inputsById = new Map<string, PortSpec>(
-    definition.inputs.map((input) => [input.id, input]),
-  )
   const subtitleProperty = SUBTITLE_PROPERTY[definition.type]
 
   // A plain constructor function, not a class extending LGraphNode:
@@ -175,12 +217,9 @@ function buildNodeClass(definition: NodeDefinition): { new (): LGraphNode } {
     this.properties = {}
     this.serialize_widgets = true
 
-    ports.forEach((portId, slot) => {
-      const spec = inputsById.get(portId)
-      if (!spec) return
-      const extra: HazorSlotExtra = { optional: !spec.required, group: OPTIONAL_GROUP_LABELS[portId] }
-      this.addInput(labels[slot] as string, spec.type, extra)
-    })
+    for (const spec of definition.inputs) {
+      this.addInput(spec.id, spec.type, inputExtra(spec))
+    }
     for (const output of definition.outputs) {
       this.addOutput(output.id, output.type)
     }
@@ -212,10 +251,13 @@ function buildNodeClass(definition: NodeDefinition): { new (): LGraphNode } {
   HazorFlowNode.prototype.onPropertyChanged = function (this: HazorNode): void {
     this.hz.subtitle = subtitleFor(this, subtitleProperty)
   }
+  HazorFlowNode.prototype.onConnectionsChange = function (this: HazorNode): void {
+    reconcileVariadicInputs(this, definition)
+  }
   HazorFlowNode.prototype.onConfigure = function (this: HazorNode): void {
     // After a clone (copy/paste): redo the layout-dependent fields a plain
     // `configure()` does not restore on its own.
-    layoutSlots(this)
+    reconcileVariadicInputs(this, definition)
     this.hz.subtitle = subtitleFor(this, subtitleProperty)
   }
 

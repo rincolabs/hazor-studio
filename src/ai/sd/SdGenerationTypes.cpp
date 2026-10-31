@@ -12,6 +12,9 @@ QString operationName(SdOperation operation)
     switch (operation) {
     case SdOperation::Img2Img:  return QStringLiteral("img2img");
     case SdOperation::Inpaint:  return QStringLiteral("inpaint");
+    case SdOperation::Canny:    return QStringLiteral("canny");
+    case SdOperation::Upscale:  return QStringLiteral("upscale");
+    case SdOperation::ADetailer:return QStringLiteral("adetailer");
     case SdOperation::Txt2Img:  break;
     }
     return QStringLiteral("txt2img");
@@ -32,6 +35,9 @@ bool operationFromName(const QString& name, SdOperation& out)
         out = SdOperation::Inpaint;
         return true;
     }
+    if (n == QLatin1String("canny")) { out = SdOperation::Canny; return true; }
+    if (n == QLatin1String("upscale")) { out = SdOperation::Upscale; return true; }
+    if (n == QLatin1String("adetailer")) { out = SdOperation::ADetailer; return true; }
     return false;
 }
 

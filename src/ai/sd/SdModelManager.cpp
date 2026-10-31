@@ -67,6 +67,13 @@ bool hasWeightSuffix(const QString& fileName)
 SdTextEncoderRole inferEncoderRole(const QString& path)
 {
     const QString name = QFileInfo(path).fileName().toLower();
+    if (name.contains(QLatin1String("clip_vision")) || name.contains(QLatin1String("clip-vision")))
+        return SdTextEncoderRole::ClipVision;
+    if (name.contains(QLatin1String("llm_vision")) || name.contains(QLatin1String("llm-vision")))
+        return SdTextEncoderRole::LlmVision;
+    if (name.contains(QLatin1String("llm")) || name.contains(QLatin1String("qwen"))
+        || name.contains(QLatin1String("gemma")) || name.contains(QLatin1String("llama")))
+        return SdTextEncoderRole::Llm;
     if (name.contains(QLatin1String("t5")))
         return SdTextEncoderRole::T5xxl;
     if (name.contains(QLatin1String("clip_g")) || name.contains(QLatin1String("clip-g"))
@@ -100,8 +107,17 @@ QString modelCategoryName(SdModelCategory category)
     case SdModelCategory::Checkpoint:     return QStringLiteral("checkpoint");
     case SdModelCategory::DiffusionModel: return QStringLiteral("diffusion_model");
     case SdModelCategory::TextEncoder:    return QStringLiteral("text_encoder");
+    case SdModelCategory::VisionEncoder:  return QStringLiteral("vision_encoder");
     case SdModelCategory::Vae:            return QStringLiteral("vae");
     case SdModelCategory::Lora:           return QStringLiteral("lora");
+    case SdModelCategory::Embedding:      return QStringLiteral("embedding");
+    case SdModelCategory::ControlNet:     return QStringLiteral("control_net");
+    case SdModelCategory::IpAdapter:      return QStringLiteral("ip_adapter");
+    case SdModelCategory::PhotoMaker:     return QStringLiteral("photo_maker");
+    case SdModelCategory::PuLid:          return QStringLiteral("pulid");
+    case SdModelCategory::IdentityEmbedding: return QStringLiteral("identity_embedding");
+    case SdModelCategory::Upscaler:       return QStringLiteral("upscaler");
+    case SdModelCategory::ADetailer:      return QStringLiteral("adetailer");
     }
     return QStringLiteral("checkpoint");
 }
@@ -118,8 +134,38 @@ bool modelCategoryFromName(const QString& name, SdModelCategory& out)
         out = SdModelCategory::TextEncoder;
         return true;
     }
+    if (n == QLatin1String("vision_encoder") || n == QLatin1String("clip_vision")) {
+        out = SdModelCategory::VisionEncoder;
+        return true;
+    }
     if (n == QLatin1String("vae")) { out = SdModelCategory::Vae; return true; }
     if (n == QLatin1String("lora")) { out = SdModelCategory::Lora; return true; }
+    if (n == QLatin1String("embedding")) { out = SdModelCategory::Embedding; return true; }
+    if (n == QLatin1String("control_net") || n == QLatin1String("controlnet")) {
+        out = SdModelCategory::ControlNet;
+        return true;
+    }
+    if (n == QLatin1String("ip_adapter") || n == QLatin1String("ipadapter")) {
+        out = SdModelCategory::IpAdapter;
+        return true;
+    }
+    if (n == QLatin1String("photo_maker") || n == QLatin1String("photomaker")) {
+        out = SdModelCategory::PhotoMaker;
+        return true;
+    }
+    if (n == QLatin1String("pulid")) { out = SdModelCategory::PuLid; return true; }
+    if (n == QLatin1String("identity_embedding")) {
+        out = SdModelCategory::IdentityEmbedding;
+        return true;
+    }
+    if (n == QLatin1String("upscaler") || n == QLatin1String("esrgan")) {
+        out = SdModelCategory::Upscaler;
+        return true;
+    }
+    if (n == QLatin1String("adetailer") || n == QLatin1String("detector")) {
+        out = SdModelCategory::ADetailer;
+        return true;
+    }
     return false;
 }
 
@@ -129,6 +175,9 @@ QString textEncoderRoleName(SdTextEncoderRole role)
     case SdTextEncoderRole::ClipL: return QStringLiteral("clip_l");
     case SdTextEncoderRole::ClipG: return QStringLiteral("clip_g");
     case SdTextEncoderRole::T5xxl: return QStringLiteral("t5xxl");
+    case SdTextEncoderRole::Llm: return QStringLiteral("llm");
+    case SdTextEncoderRole::LlmVision: return QStringLiteral("llm_vision");
+    case SdTextEncoderRole::ClipVision: return QStringLiteral("clip_vision");
     case SdTextEncoderRole::Auto:  break;
     }
     return QStringLiteral("auto");
@@ -141,6 +190,9 @@ bool textEncoderRoleFromName(const QString& name, SdTextEncoderRole& out)
     if (n == QLatin1String("clip_l") || n == QLatin1String("clip-l")) { out = SdTextEncoderRole::ClipL; return true; }
     if (n == QLatin1String("clip_g") || n == QLatin1String("clip-g")) { out = SdTextEncoderRole::ClipG; return true; }
     if (n == QLatin1String("t5xxl") || n == QLatin1String("t5")) { out = SdTextEncoderRole::T5xxl; return true; }
+    if (n == QLatin1String("llm")) { out = SdTextEncoderRole::Llm; return true; }
+    if (n == QLatin1String("llm_vision") || n == QLatin1String("llm-vision")) { out = SdTextEncoderRole::LlmVision; return true; }
+    if (n == QLatin1String("clip_vision") || n == QLatin1String("clip-vision")) { out = SdTextEncoderRole::ClipVision; return true; }
     return false;
 }
 
@@ -155,9 +207,15 @@ QStringList SdModelFiles::paths() const
 {
     QStringList out;
     for (const QString& p : { checkpointPath, diffusionModelPath, clipLPath,
-                              clipGPath, t5xxlPath, vaePath }) {
+                              clipGPath, t5xxlPath, llmPath, llmVisionPath,
+                              clipVisionPath, vaePath, controlNetPath, ipAdapterPath,
+                              photoMakerPath, pulidPath }) {
         if (!p.isEmpty())
             out << p;
+    }
+    for (const SdResolvedModelFile& embedding : embeddings) {
+        if (!embedding.path.isEmpty())
+            out << embedding.path;
     }
     return out;
 }
@@ -620,8 +678,17 @@ bool SdModelManager::resolve(const SdModelSelection& selection, SdModelFiles& ou
         out.diffusionModelPath = entry.path;
         break;
     case SdModelCategory::TextEncoder:
+    case SdModelCategory::VisionEncoder:
     case SdModelCategory::Vae:
     case SdModelCategory::Lora:
+    case SdModelCategory::Embedding:
+    case SdModelCategory::ControlNet:
+    case SdModelCategory::IpAdapter:
+    case SdModelCategory::PhotoMaker:
+    case SdModelCategory::PuLid:
+    case SdModelCategory::IdentityEmbedding:
+    case SdModelCategory::Upscaler:
+    case SdModelCategory::ADetailer:
         // Refusing is the point of recording categories: a VAE or a LoRA handed
         // to new_sd_ctx() as model_path fails deep inside the loader with a
         // tensor-name error that says nothing about the real mistake.
@@ -657,12 +724,16 @@ bool SdModelManager::resolve(const SdModelSelection& selection, SdModelFiles& ou
         case SdTextEncoderRole::ClipL: slot = &out.clipLPath; break;
         case SdTextEncoderRole::ClipG: slot = &out.clipGPath; break;
         case SdTextEncoderRole::T5xxl: slot = &out.t5xxlPath; break;
+        case SdTextEncoderRole::Llm: slot = &out.llmPath; break;
+        case SdTextEncoderRole::LlmVision: slot = &out.llmVisionPath; break;
+        case SdTextEncoderRole::ClipVision: slot = &out.clipVisionPath; break;
         case SdTextEncoderRole::Auto:  break;
         }
         if (!slot) {
             if (error) {
                 *error = tr_("Cannot tell which text encoder \"%1\" is. Set its role to "
-                             "clip_l, clip_g or t5xxl.").arg(encoder.id);
+                             "clip_l, clip_g, t5xxl, llm, llm_vision or clip_vision.")
+                             .arg(encoder.id);
             }
             return false;
         }
@@ -695,6 +766,13 @@ bool SdModelManager::resolve(const SdModelSelection& selection, SdModelFiles& ou
             return false;
         }
         out.vaePath = vae.path;
+    }
+
+    for (const QString& embeddingId : selection.embeddingIds) {
+        SdResolvedModelFile embedding;
+        if (!resolveFile(embeddingId, SdModelCategory::Embedding, embedding, error))
+            return false;
+        out.embeddings.push_back(embedding);
     }
 
     // A bare diffusion model carries neither a text encoder nor a VAE, so a
@@ -742,6 +820,35 @@ bool SdModelManager::resolveLora(const QString& id, float weight, SdResolvedLora
     out.id = entry.id;
     out.path = entry.path;
     out.weight = weight;
+    return true;
+}
+
+bool SdModelManager::resolveFile(const QString& id, SdModelCategory category,
+                                 SdResolvedModelFile& out, QString* error) const
+{
+    out = SdResolvedModelFile {};
+    SdModelEntry entry;
+    if (!model(id.trimmed(), entry)) {
+        if (error)
+            *error = tr_("Unknown %1 model id \"%2\".")
+                         .arg(modelCategoryName(category), id);
+        return false;
+    }
+    if (entry.category != category) {
+        if (error) {
+            *error = tr_("\"%1\" is a %2, not a %3 model.")
+                         .arg(entry.id, modelCategoryName(entry.category),
+                              modelCategoryName(category));
+        }
+        return false;
+    }
+    if (!entry.fileExists()) {
+        if (error)
+            *error = tr_("Model file not found: %1").arg(entry.path);
+        return false;
+    }
+    out.id = entry.id;
+    out.path = entry.path;
     return true;
 }
 

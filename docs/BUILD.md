@@ -504,10 +504,16 @@ which runs a fixed `txt2img` workflow through
 and inserts the result as an ordinary pixel layer.
 
 The same workflow executor also backs **Neural Flow**, the node editor opened
-from that panel's *Neural Flow* button. It opens in a resizable panel below the
-canvas, initially sharing the workspace evenly with it; closing the panel gives
-the full area back to the canvas. Its interface is a Vue application compiled
-into the binary — see
+from that panel's *Neural Flow* button. Its typed graph is evaluated from the
+Image Output nodes backwards and then in dependency order: configuration
+values can branch, LoRAs transform and chain on the model value with no fixed
+count, and multiple Generate nodes run sequentially when one output feeds a
+later operation. Each generation is still translated into one supported
+`sd_img_gen_params_t` call; the graph does not claim operations the prepared
+stable-diffusion.cpp revision cannot execute. The editor opens in a resizable
+panel below the canvas, initially sharing the workspace evenly with it; closing
+the panel gives the full area back to the canvas. Its interface is a Vue
+application compiled into the binary — see
 [Embedded web interfaces](#embedded-web-interfaces-embedded-ui-optional-developer-toolchain)
 below.
 

@@ -26,15 +26,24 @@ namespace sdlocal {
 enum class SdModelCategory {
     Checkpoint,      // complete model        -> sd_ctx_params_t::model_path
     DiffusionModel,  // UNet/DiT weights only -> diffusion_model_path (+ encoders + VAE)
-    TextEncoder,     // CLIP-L / CLIP-G / T5-XXL -> clip_l_path / clip_g_path / t5xxl_path
+    TextEncoder,     // CLIP-L / CLIP-G / T5-XXL / LLM text encoders
+    VisionEncoder,   // CLIP Vision / multimodal LLM vision encoder
     Vae,             // -> vae_path
     Lora,            // per-generation sd_lora_t; never a context parameter
+    Embedding,       // textual inversion embedding
+    ControlNet,
+    IpAdapter,
+    PhotoMaker,
+    PuLid,
+    IdentityEmbedding,
+    Upscaler,        // stable-diffusion.cpp RGB ESRGAN GGUF model
+    ADetailer,        // detector model consumed by adetail_image()
 };
 
 // Which text-encoder slot a TextEncoder entry fills. Auto infers it from the
 // file name, which is how every published component release names them
 // (clip_l*, clip_g*, t5xxl*); an explicit role wins when the name is unusual.
-enum class SdTextEncoderRole { Auto, ClipL, ClipG, T5xxl };
+enum class SdTextEncoderRole { Auto, ClipL, ClipG, T5xxl, Llm, LlmVision, ClipVision };
 
 QString modelCategoryName(SdModelCategory category);
 bool modelCategoryFromName(const QString& name, SdModelCategory& out);
@@ -83,10 +92,22 @@ struct SdModelSelection {
     // Optional for a Checkpoint (which usually embeds its VAE), required for a
     // DiffusionModel.
     QString vaeId;
+    QStringList embeddingIds;
 
     bool operator==(const SdModelSelection& o) const
     {
-        return modelId == o.modelId && textEncoderIds == o.textEncoderIds && vaeId == o.vaeId;
+        return modelId == o.modelId && textEncoderIds == o.textEncoderIds
+            && vaeId == o.vaeId && embeddingIds == o.embeddingIds;
+    }
+};
+
+struct SdResolvedModelFile {
+    QString id;
+    QString path;
+
+    bool operator==(const SdResolvedModelFile& o) const
+    {
+        return id == o.id && path == o.path;
     }
 };
 
@@ -104,7 +125,15 @@ struct SdModelFiles {
     QString clipLPath;
     QString clipGPath;
     QString t5xxlPath;
+    QString llmPath;
+    QString llmVisionPath;
+    QString clipVisionPath;
     QString vaePath;
+    QString controlNetPath;
+    QString ipAdapterPath;
+    QString photoMakerPath;
+    QString pulidPath;
+    QVector<SdResolvedModelFile> embeddings;
 
     bool isValid() const { return !checkpointPath.isEmpty() || !diffusionModelPath.isEmpty(); }
     QStringList paths() const;   // every non-empty path, for logging
@@ -119,7 +148,15 @@ struct SdModelFiles {
             && clipLPath == o.clipLPath
             && clipGPath == o.clipGPath
             && t5xxlPath == o.t5xxlPath
-            && vaePath == o.vaePath;
+            && llmPath == o.llmPath
+            && llmVisionPath == o.llmVisionPath
+            && clipVisionPath == o.clipVisionPath
+            && vaePath == o.vaePath
+            && controlNetPath == o.controlNetPath
+            && ipAdapterPath == o.ipAdapterPath
+            && photoMakerPath == o.photoMakerPath
+            && pulidPath == o.pulidPath
+            && embeddings == o.embeddings;
     }
     bool operator!=(const SdModelFiles& o) const { return !(*this == o); }
 };
@@ -172,6 +209,8 @@ public:
                  QString* error = nullptr) const;
     bool resolveLora(const QString& id, float weight, SdResolvedLora& out,
                      QString* error = nullptr) const;
+    bool resolveFile(const QString& id, SdModelCategory category,
+                     SdResolvedModelFile& out, QString* error = nullptr) const;
 
     // Rescans every registered directory. Explicit on purpose — this is the
     // only heavy operation here and it is never triggered by startup.

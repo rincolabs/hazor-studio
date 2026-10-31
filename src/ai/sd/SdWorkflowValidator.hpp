@@ -20,19 +20,17 @@ class SdModelManager;
 
 // A validated graph, ready to execute. Produced only on success.
 struct SdWorkflowPlan {
-    // Dependency order. A node appears after everything it reads from, so the
-    // executor evaluates each exactly once.
+    // Dependency order for the subgraph that reaches an image output. A node
+    // appears after everything it reads from, so the executor evaluates each
+    // exactly once even when its value is branched to several consumers.
     QStringList order;
+    QStringList generateNodeIds;
+    QStringList outputNodeIds;
 
-    QString generateNodeId;
-    QString outputNodeId;
-
-    // Derived from how the Generate node is wired, not from a property: no
-    // init image is txt2img, an init image is img2img, an init image and a
-    // mask is inpainting.
-    SdOperation operation = SdOperation::Txt2Img;
-
-    bool isValid() const { return !generateNodeId.isEmpty() && !outputNodeId.isEmpty(); }
+    bool isValid() const
+    {
+        return !generateNodeIds.isEmpty() && !outputNodeIds.isEmpty() && !order.isEmpty();
+    }
 };
 
 class SdWorkflowValidator {

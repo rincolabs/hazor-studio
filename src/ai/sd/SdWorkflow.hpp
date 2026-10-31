@@ -11,8 +11,10 @@
 // for now it is written by hand and by the experimental panel, and executed
 // entirely in C++. It is deliberately NOT ComfyUI's internal format — the node
 // types here are the operations this module actually has, not a surface to be
-// compatible with — and it is deliberately not a general dataflow language:
-// configuration nodes carry parameters, and exactly one node runs an inference.
+// compatible with — and it is deliberately not a general scripting language:
+// typed configuration nodes transform values and Generate nodes run inference.
+// The graph may branch and may contain several Generate nodes; only ancestors
+// of requested Image Output nodes are evaluated.
 //
 // Nothing here knows about Qt widgets, documents, or any node-graph library.
 namespace sdlocal {
@@ -21,12 +23,21 @@ enum class SdNodeType {
     // ── Configuration: produce parameters, never run inference ──────────────
     Checkpoint,
     Lora,
+    ControlNetLoader,
+    ControlNetApply,
+    IpAdapterLoader,
+    IpAdapterApply,
+    PhotoMaker,
+    PuLid,
     Prompt,
     NegativePrompt,
     Sampling,
     // ── Input: pull pixels from the host application ────────────────────────
     InputImage,
     InputMask,
+    Canny,
+    Upscale,
+    ADetailer,
     // ── Processing: the one node that calls the generation service ──────────
     Generate,
     // ── Output: hands the result back to the host application ──────────────
@@ -39,9 +50,14 @@ enum class SdPortType {
     Model,
     Conditioning,
     Sampling,
-    Lora,
     Image,
     Mask,
+    ControlNet,
+    Control,
+    IpAdapter,
+    ImageConditioning,
+    PhotoMaker,
+    PuLid,
 };
 
 QString nodeTypeName(SdNodeType type);
@@ -53,9 +69,8 @@ struct SdPortSpec {
     QString id;
     SdPortType type = SdPortType::Model;
     bool required = false;
-    // Accepts more than one incoming connection. Only the Generate node's LoRA
-    // input does: a stack of LoRAs is the normal case, and modelling it as one
-    // port per LoRA would cap the stack at whatever number was guessed here.
+    // Accepts more than one incoming connection. The editor grows variadic
+    // inputs on demand; this is a graph contract, never a fixed slot count.
     bool multiple = false;
 };
 
@@ -84,7 +99,6 @@ enum class SdWorkflowErrorCode {
     DuplicateConnection,
     CircularDependency,
     NoGenerateNode,
-    MultipleGenerateNodes,
     NoImageOutput,
     OutputNotConnected,
     ModelUnavailable,

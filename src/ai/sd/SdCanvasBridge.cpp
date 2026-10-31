@@ -55,7 +55,8 @@ void SdCanvasBridge::endRun()
     m_inRun = false;
 }
 
-bool SdCanvasBridge::captureImage(SdImageSource source, QImage& out, QString* error) const
+bool SdCanvasBridge::captureImage(SdImageSource source, int layerIndex, QImage& out,
+                                  QString* error) const
 {
     Document* doc = m_controller ? m_controller->document() : nullptr;
     if (!doc || doc->size.isEmpty()) {
@@ -73,9 +74,21 @@ bool SdCanvasBridge::captureImage(SdImageSource source, QImage& out, QString* er
     ctx.targetType = RenderTargetType::Export;
     ctx.highQuality = true;
 
-    QImage image = source == SdImageSource::CurrentLayer
-        ? DocumentCompositor::compositeOnlyFlatIndex(doc, doc->activeFlatIndex, ctx)
-        : DocumentCompositor::composite(doc, ctx);
+    QImage image;
+    if (source == SdImageSource::Layer) {
+        const int flatIndex = layerIndex >= 0 ? layerIndex : doc->activeFlatIndex;
+        image = DocumentCompositor::compositeOnlyFlatIndex(doc, flatIndex, ctx);
+        if (image.isNull()) {
+            if (error) {
+                *error = layerIndex >= 0
+                    ? tr_("No raster layer at index %1.").arg(layerIndex)
+                    : tr_("The active layer could not be rendered.");
+            }
+            return false;
+        }
+    } else {
+        image = DocumentCompositor::composite(doc, ctx);
+    }
     if (image.isNull()) {
         if (error)
             *error = tr_("The document could not be rendered.");

@@ -162,6 +162,8 @@ rendering pipeline, OpenCV-backed image processing, and an integrated AI layer.
 - **AI selection & matting** — ONNX-powered object selection (SAM) and
   background removal / matting (BiRefNet, ModNet, RMBG), with CPU/CUDA/TensorRT
   execution providers selectable at runtime.
+- **Neural Flow** — a typed node graph for local image generation, with dynamic
+  branches, chained LoRAs and multi-stage Stable Diffusion workflows.
 - **MCP server** — a [Model Context Protocol](https://modelcontextprotocol.io)
   server (port 8085) so external agents and automation scripts can drive the
   editor (see [docs/MCP.md](docs/MCP.md)).

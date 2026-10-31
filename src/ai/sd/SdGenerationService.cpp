@@ -206,6 +206,92 @@ qint64 seedFromGenerationInfo(const QString& json, qint64 fallback)
     return fallback;
 }
 
+sd_cache_mode_t cacheMode(const QString& name)
+{
+    const QString n = name.trimmed().toLower();
+    if (n == QLatin1String("easycache")) return SD_CACHE_EASYCACHE;
+    if (n == QLatin1String("ucache")) return SD_CACHE_UCACHE;
+    if (n == QLatin1String("dbcache")) return SD_CACHE_DBCACHE;
+    if (n == QLatin1String("taylorseer")) return SD_CACHE_TAYLORSEER;
+    if (n == QLatin1String("cache-dit")) return SD_CACHE_CACHE_DIT;
+    if (n == QLatin1String("spectrum")) return SD_CACHE_SPECTRUM;
+    return SD_CACHE_DISABLED;
+}
+
+sd_hires_upscaler_t hiresUpscaler(const QString& name)
+{
+    const QByteArray utf8 = name.trimmed().toUtf8();
+    const sd_hires_upscaler_t parsed = str_to_sd_hires_upscaler(utf8.constData());
+    return parsed >= SD_HIRES_UPSCALER_NONE && parsed < SD_HIRES_UPSCALER_COUNT
+        ? parsed : SD_HIRES_UPSCALER_NONE;
+}
+
+SdGenerationResult runCanny(const SdGenerationRequest& request)
+{
+    SdGenerationResult out;
+    out.modelId = request.load.files.modelId;
+    SdImageBuffer image = toSdImage(request.initImage, 3);
+    if (image.empty()) {
+        out.state = SdGenerationState::Failed;
+        out.error = tr_("Canny needs an input image.");
+        return out;
+    }
+    if (!preprocess_canny(image.image, request.cannyHigh, request.cannyLow,
+                          request.cannyWeak, request.cannyStrong, request.cannyInverse)) {
+        out.state = SdGenerationState::Failed;
+        out.error = tr_("Canny preprocessing failed.");
+        return out;
+    }
+    out.image = toQImage(image.image);
+    out.size = out.image.size();
+    out.state = out.image.isNull() ? SdGenerationState::Failed : SdGenerationState::Completed;
+    if (out.image.isNull())
+        out.error = tr_("Canny returned an empty image.");
+    return out;
+}
+
+SdGenerationResult runUpscale(const SdGenerationRequest& request, const QString& deviceName)
+{
+    SdGenerationResult out;
+    out.deviceName = deviceName;
+    out.gpu = !deviceName.startsWith(QLatin1String("CPU"), Qt::CaseInsensitive);
+    SdImageBuffer image = toSdImage(request.initImage, 3);
+    if (image.empty()) {
+        out.state = SdGenerationState::Failed;
+        out.error = tr_("Upscale needs an input image.");
+        return out;
+    }
+    const QByteArray model = request.auxiliaryModelPath.toUtf8();
+    const QByteArray backend = deviceName.toUtf8();
+    struct UpscalerGuard {
+        upscaler_ctx_t* ctx = nullptr;
+        ~UpscalerGuard() { if (ctx) free_upscaler_ctx(ctx); }
+    } upscaler;
+    upscaler.ctx = new_upscaler_ctx(model.constData(), false,
+                                    request.load.threads > 0 ? request.load.threads
+                                                             : sd_get_num_physical_cores(),
+                                    request.tileSize, backend.constData(), nullptr);
+    if (!upscaler.ctx) {
+        out.state = SdGenerationState::Failed;
+        out.error = tr_("The ESRGAN model is incompatible or could not be loaded.");
+        return out;
+    }
+    ResultGuard result;
+    if (!upscale(upscaler.ctx, image.image, static_cast<uint32_t>(request.upscaleFactor),
+                 &result.result)
+        || !result.result || result.result->count < 1 || !result.result->items) {
+        out.state = SdGenerationState::Failed;
+        out.error = tr_("Upscale failed (see the log for details).");
+        return out;
+    }
+    out.image = toQImage(result.result->items[0].image);
+    out.size = out.image.size();
+    out.state = out.image.isNull() ? SdGenerationState::Failed : SdGenerationState::Completed;
+    if (out.image.isNull())
+        out.error = tr_("The upscaler returned an empty image.");
+    return out;
+}
+
 } // namespace
 
 // ── Sampler / scheduler vocabulary ──────────────────────────────────────────
@@ -281,22 +367,29 @@ bool SdGenerationService::validateRequest(const SdGenerationRequest& request, QS
         return false;
     };
 
-    if (!request.load.files.isValid())
+    const bool needsDiffusionModel = request.operation != SdOperation::Canny
+        && request.operation != SdOperation::Upscale;
+    if (needsDiffusionModel && !request.load.files.isValid())
         return fail(tr_("No model was selected for this generation."));
     QString missing;
-    if (!request.load.files.allPresent(&missing))
+    if (needsDiffusionModel && !request.load.files.allPresent(&missing))
         return fail(tr_("Model file not found: %1").arg(missing));
+    if ((request.operation == SdOperation::Upscale
+         || request.operation == SdOperation::ADetailer)
+        && request.auxiliaryModelPath.isEmpty()) {
+        return fail(tr_("This operation needs an auxiliary model."));
+    }
 
     // The library's latent geometry is a multiple of the VAE scale factor; a
     // stray 500x500 would be silently rounded somewhere deep in the pipeline.
-    if (request.width <= 0 || request.height <= 0)
+    if (needsDiffusionModel && (request.width <= 0 || request.height <= 0))
         return fail(tr_("The output size must be positive."));
-    if (request.width % 8 != 0 || request.height % 8 != 0)
+    if (needsDiffusionModel && (request.width % 8 != 0 || request.height % 8 != 0))
         return fail(tr_("The output size must be a multiple of 8 (got %1×%2).")
                         .arg(request.width).arg(request.height));
-    if (request.sampling.steps <= 0)
+    if (needsDiffusionModel && request.sampling.steps <= 0)
         return fail(tr_("The step count must be at least 1."));
-    if (request.batchCount <= 0)
+    if (needsDiffusionModel && request.batchCount <= 0)
         return fail(tr_("The batch count must be at least 1."));
     if (!isKnownSampler(request.sampling.sampler))
         return fail(tr_("Unknown sampler \"%1\".").arg(request.sampling.sampler));
@@ -324,7 +417,24 @@ bool SdGenerationService::validateRequest(const SdGenerationRequest& request, QS
                             .arg(request.initImage.width()).arg(request.initImage.height()));
         }
         break;
+    case SdOperation::Canny:
+    case SdOperation::Upscale:
+    case SdOperation::ADetailer:
+        if (request.initImage.isNull())
+            return fail(tr_("This image operation needs an input image."));
+        break;
     }
+
+    if (!request.controlImage.isNull() && request.load.files.controlNetPath.isEmpty())
+        return fail(tr_("A control image needs a ControlNet model."));
+    if (!request.ipAdapterImage.isNull() && request.load.files.ipAdapterPath.isEmpty())
+        return fail(tr_("An IP-Adapter image needs an IP-Adapter model."));
+    if (!request.photoMakerImages.isEmpty() && request.load.files.photoMakerPath.isEmpty())
+        return fail(tr_("PhotoMaker identity images need a PhotoMaker model."));
+    if (!request.pulidEmbeddingPath.isEmpty() && request.load.files.pulidPath.isEmpty())
+        return fail(tr_("A PuLID embedding needs PuLID weights."));
+    if (request.sampling.customSigmas.size() == 1)
+        return fail(tr_("Custom sigmas must be empty or contain at least two values."));
 
     for (const SdResolvedLora& lora : request.loras) {
         if (lora.path.isEmpty())
@@ -354,6 +464,22 @@ SdGenerationResult SdGenerationService::run(const SdGenerationRequest& request,
     qInfo().noquote() << "[SD] run |" << operationName(request.operation)
                       << "| model=" << request.load.files.modelId
                       << "|" << describeBackendEnvironment();
+
+    if (request.operation == SdOperation::Canny) {
+        reportState(sink, SdGenerationState::Generating, tr_("Canny"));
+        return runCanny(request);
+    }
+    if (request.operation == SdOperation::Upscale) {
+        const SdDeviceChoice choice = chooseDevice(request.load.device);
+        if (!choice.isValid()) {
+            out.state = SdGenerationState::Failed;
+            out.error = tr_("No inference device is available.");
+            return out;
+        }
+        reportState(sink, SdGenerationState::Loading, request.auxiliaryModelPath);
+        reportState(sink, SdGenerationState::Generating, tr_("Upscale"));
+        return runUpscale(request, choice.device.name);
+    }
 
     out = attempt(request, sink, QString());
 
@@ -446,6 +572,11 @@ SdGenerationResult SdGenerationService::attempt(const SdGenerationRequest& reque
     const QByteArray negativePrompt = request.negativePrompt.toUtf8();
     const QByteArray sampler = request.sampling.sampler.trimmed().toUtf8();
     const QByteArray scheduler = request.sampling.scheduler.trimmed().toUtf8();
+    const QByteArray referenceArgs = request.referenceImageArgs.toUtf8();
+    const QByteArray photoMakerEmbedding = request.photoMakerEmbeddingPath.toUtf8();
+    const QByteArray pulidEmbedding = request.pulidEmbeddingPath.toUtf8();
+    const QByteArray hiresModel = request.hires.modelPath.toUtf8();
+    const QByteArray imagePreprocess = request.imagePreprocess.toUtf8();
 
     std::vector<QByteArray> loraPaths;
     std::vector<sd_lora_t> loras;
@@ -464,6 +595,35 @@ SdGenerationResult SdGenerationService::attempt(const SdGenerationRequest& reque
         ? SdImageBuffer {} : toSdImage(request.initImage, 3);
     const SdImageBuffer maskImage = request.operation == SdOperation::Inpaint
         ? toSdImage(request.maskImage, 1) : SdImageBuffer {};
+    const SdImageBuffer controlImage = toSdImage(request.controlImage, 3);
+    const SdImageBuffer ipAdapterImage = toSdImage(request.ipAdapterImage, 3);
+
+    std::vector<SdImageBuffer> referenceBuffers;
+    std::vector<sd_image_t> referenceViews;
+    referenceBuffers.reserve(request.referenceImages.size());
+    referenceViews.reserve(request.referenceImages.size());
+    for (const QImage& image : request.referenceImages)
+        referenceBuffers.push_back(toSdImage(image, 3));
+    for (const SdImageBuffer& image : referenceBuffers) {
+        if (!image.empty())
+            referenceViews.push_back(image.image);
+    }
+
+    std::vector<SdImageBuffer> photoMakerBuffers;
+    std::vector<sd_image_t> photoMakerViews;
+    photoMakerBuffers.reserve(request.photoMakerImages.size());
+    photoMakerViews.reserve(request.photoMakerImages.size());
+    for (const QImage& image : request.photoMakerImages)
+        photoMakerBuffers.push_back(toSdImage(image, 3));
+    for (const SdImageBuffer& image : photoMakerBuffers) {
+        if (!image.empty())
+            photoMakerViews.push_back(image.image);
+    }
+
+    std::vector<float> customSigmas(request.sampling.customSigmas.cbegin(),
+                                    request.sampling.customSigmas.cend());
+    std::vector<int> slgLayers(request.sampling.skipLayerGuidanceLayers.cbegin(),
+                               request.sampling.skipLayerGuidanceLayers.cend());
 
     try {
         sd_img_gen_params_t params;
@@ -478,6 +638,22 @@ SdGenerationResult SdGenerationService::attempt(const SdGenerationRequest& reque
         params.clip_skip = request.sampling.clipSkip;
         params.sample_params.sample_steps = request.sampling.steps;
         params.sample_params.guidance.txt_cfg = request.sampling.cfgScale;
+        params.sample_params.guidance.img_cfg = request.sampling.imageCfgScale;
+        if (request.sampling.distilledGuidance > 0.0f) {
+            params.sample_params.guidance.distilled_guidance =
+                request.sampling.distilledGuidance;
+        }
+        params.sample_params.guidance.slg.layers = slgLayers.empty() ? nullptr : slgLayers.data();
+        params.sample_params.guidance.slg.layer_count = slgLayers.size();
+        params.sample_params.guidance.slg.layer_start = request.sampling.skipLayerGuidanceStart;
+        params.sample_params.guidance.slg.layer_end = request.sampling.skipLayerGuidanceEnd;
+        params.sample_params.guidance.slg.scale = request.sampling.skipLayerGuidanceScale;
+        params.sample_params.eta = request.sampling.eta;
+        params.sample_params.shifted_timestep = request.sampling.shiftedTimestep;
+        if (request.sampling.flowShift != 0.0f)
+            params.sample_params.flow_shift = request.sampling.flowShift;
+        params.sample_params.custom_sigmas = customSigmas.empty() ? nullptr : customSigmas.data();
+        params.sample_params.custom_sigmas_count = static_cast<int>(customSigmas.size());
         // Left at the init value (SAMPLE_METHOD_COUNT / SCHEDULER_COUNT) when
         // unset, which is the library's "whatever this checkpoint declares" —
         // the only safe default across SD 1.x, SDXL, SD3 and Flux.
@@ -495,6 +671,51 @@ SdGenerationResult SdGenerationService::attempt(const SdGenerationRequest& reque
         }
         if (!maskImage.empty())
             params.mask_image = maskImage.image;
+        if (!referenceViews.empty()) {
+            params.ref_images = referenceViews.data();
+            params.ref_images_count = static_cast<int>(referenceViews.size());
+            params.ref_image_args = referenceArgs.constData();
+        }
+        if (!controlImage.empty()) {
+            params.control_image = controlImage.image;
+            params.control_strength = request.controlStrength;
+        }
+        if (!ipAdapterImage.empty()) {
+            params.ip_adapter_image = ipAdapterImage.image;
+            params.ip_adapter_strength = request.ipAdapterStrength;
+        }
+        if (!photoMakerViews.empty()) {
+            params.pm_params.id_images = photoMakerViews.data();
+            params.pm_params.id_images_count = static_cast<int>(photoMakerViews.size());
+            params.pm_params.id_embed_path = photoMakerEmbedding.isEmpty()
+                ? nullptr : photoMakerEmbedding.constData();
+            params.pm_params.style_strength = request.photoMakerStyleStrength;
+        }
+        if (!pulidEmbedding.isEmpty()) {
+            params.pulid_params.id_embedding_path = pulidEmbedding.constData();
+            params.pulid_params.id_weight = request.pulidWeight;
+        }
+        params.vae_tiling_params.enabled = request.vaeTiling.enabled;
+        params.vae_tiling_params.tile_size_w = request.vaeTiling.tileWidth;
+        params.vae_tiling_params.tile_size_h = request.vaeTiling.tileHeight;
+        params.vae_tiling_params.target_overlap = request.vaeTiling.overlap;
+        params.cache.mode = cacheMode(request.cache.mode);
+        params.cache.reuse_threshold = request.cache.reuseThreshold;
+        params.cache.start_percent = request.cache.startPercent;
+        params.cache.end_percent = request.cache.endPercent;
+        params.hires.enabled = request.hires.enabled;
+        params.hires.upscaler = hiresUpscaler(request.hires.upscaler);
+        params.hires.model_path = hiresModel.isEmpty() ? nullptr : hiresModel.constData();
+        params.hires.scale = request.hires.scale;
+        params.hires.target_width = request.hires.targetWidth;
+        params.hires.target_height = request.hires.targetHeight;
+        params.hires.steps = request.hires.steps;
+        params.hires.denoising_strength = request.hires.denoisingStrength;
+        params.hires.upscale_tile_size = request.hires.tileSize;
+        params.circular_x = request.circularX;
+        params.circular_y = request.circularY;
+        params.image_preprocess.rules = imagePreprocess.isEmpty()
+            ? nullptr : imagePreprocess.constData();
 
         ResultGuard result;
         QElapsedTimer timer;
@@ -504,7 +725,28 @@ SdGenerationResult SdGenerationService::attempt(const SdGenerationRequest& reque
             // Publishes the context so a cancel from the GUI thread can reach
             // it, and unpublishes before the result is touched.
             SdRuntime::GenerationScope scope(m_runtime);
-            generated = generate_image(m_runtime.context(), &params, &result.result);
+            if (request.operation == SdOperation::ADetailer) {
+                const QByteArray detector = request.auxiliaryModelPath.toUtf8();
+                const QByteArray backend = m_runtime.device().name.toUtf8();
+                struct ADetailerGuard {
+                    adetailer_ctx_t* ctx = nullptr;
+                    ~ADetailerGuard() { if (ctx) free_adetailer_ctx(ctx); }
+                } detailer;
+                detailer.ctx = new_adetailer_ctx(
+                    detector.constData(),
+                    request.load.threads > 0 ? request.load.threads : sd_get_num_physical_cores(),
+                    backend.constData(), nullptr);
+                if (detailer.ctx) {
+                    sd_adetailer_params_t adParams {};
+                    adParams.prompt = prompt.isEmpty() ? nullptr : prompt.constData();
+                    adParams.negative_prompt = negativePrompt.isEmpty()
+                        ? nullptr : negativePrompt.constData();
+                    generated = adetail_image(detailer.ctx, m_runtime.context(), initImage.image,
+                                              &adParams, &params, &result.result);
+                }
+            } else {
+                generated = generate_image(m_runtime.context(), &params, &result.result);
+            }
         }
         out.generateMs = timer.elapsed();
 

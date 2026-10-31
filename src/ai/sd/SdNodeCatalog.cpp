@@ -201,6 +201,7 @@ QString nodeCategoryName(SdNodeCategory category)
     case SdNodeCategory::Conditioning: return QStringLiteral("conditioning");
     case SdNodeCategory::Sampling:     return QStringLiteral("sampling");
     case SdNodeCategory::Input:        return QStringLiteral("input");
+    case SdNodeCategory::Processing:   return QStringLiteral("processing");
     case SdNodeCategory::Generation:   return QStringLiteral("generation");
     case SdNodeCategory::Output:       return QStringLiteral("output");
     }
@@ -214,6 +215,7 @@ QString nodeCategoryLabel(SdNodeCategory category)
     case SdNodeCategory::Conditioning: return tr_("Conditioning");
     case SdNodeCategory::Sampling:     return tr_("Sampling");
     case SdNodeCategory::Input:        return tr_("Input");
+    case SdNodeCategory::Processing:   return tr_("Processing");
     case SdNodeCategory::Generation:   return tr_("Generation");
     case SdNodeCategory::Output:       return tr_("Output");
     }
@@ -224,12 +226,21 @@ SdNodeCategory nodeCategory(SdNodeType type)
 {
     switch (type) {
     case SdNodeType::Checkpoint:
-    case SdNodeType::Lora:           return SdNodeCategory::Models;
+    case SdNodeType::Lora:
+    case SdNodeType::ControlNetLoader:
+    case SdNodeType::IpAdapterLoader: return SdNodeCategory::Models;
+    case SdNodeType::ControlNetApply:
+    case SdNodeType::IpAdapterApply:
+    case SdNodeType::PhotoMaker:
+    case SdNodeType::PuLid:
     case SdNodeType::Prompt:
     case SdNodeType::NegativePrompt: return SdNodeCategory::Conditioning;
     case SdNodeType::Sampling:       return SdNodeCategory::Sampling;
     case SdNodeType::InputImage:
     case SdNodeType::InputMask:      return SdNodeCategory::Input;
+    case SdNodeType::Canny:
+    case SdNodeType::Upscale:
+    case SdNodeType::ADetailer:      return SdNodeCategory::Processing;
     case SdNodeType::Generate:       return SdNodeCategory::Generation;
     case SdNodeType::ImageOutput:    return SdNodeCategory::Output;
     }
@@ -239,7 +250,8 @@ SdNodeCategory nodeCategory(SdNodeType type)
 QVector<SdNodeCategory> allNodeCategories()
 {
     return { SdNodeCategory::Models, SdNodeCategory::Conditioning, SdNodeCategory::Sampling,
-             SdNodeCategory::Input, SdNodeCategory::Generation, SdNodeCategory::Output };
+             SdNodeCategory::Input, SdNodeCategory::Processing,
+             SdNodeCategory::Generation, SdNodeCategory::Output };
 }
 
 QString nodeTypeLabel(SdNodeType type)
@@ -247,11 +259,20 @@ QString nodeTypeLabel(SdNodeType type)
     switch (type) {
     case SdNodeType::Checkpoint:     return tr_("Load Checkpoint");
     case SdNodeType::Lora:           return tr_("Load LoRA");
+    case SdNodeType::ControlNetLoader:return tr_("Load ControlNet");
+    case SdNodeType::ControlNetApply:return tr_("Apply ControlNet");
+    case SdNodeType::IpAdapterLoader:return tr_("Load IP-Adapter");
+    case SdNodeType::IpAdapterApply:return tr_("Apply IP-Adapter");
+    case SdNodeType::PhotoMaker:     return tr_("PhotoMaker Identity");
+    case SdNodeType::PuLid:          return tr_("PuLID Identity");
     case SdNodeType::Prompt:         return tr_("Positive Prompt");
     case SdNodeType::NegativePrompt: return tr_("Negative Prompt");
     case SdNodeType::Sampling:       return tr_("Sampling Parameters");
     case SdNodeType::InputImage:     return tr_("Input Image");
     case SdNodeType::InputMask:      return tr_("Input Mask");
+    case SdNodeType::Canny:          return tr_("Canny Edge");
+    case SdNodeType::Upscale:        return tr_("ESRGAN Upscale");
+    case SdNodeType::ADetailer:      return tr_("ADetailer");
     case SdNodeType::Generate:       return tr_("Generate");
     case SdNodeType::ImageOutput:    return tr_("Canvas Output");
     }
@@ -263,9 +284,13 @@ QVector<SdNodeType> allNodeTypes()
     // Palette order: the types of one category stay together, and the order
     // inside a category is the order a graph is normally built in.
     return { SdNodeType::Checkpoint, SdNodeType::Lora,
+             SdNodeType::ControlNetLoader, SdNodeType::IpAdapterLoader,
              SdNodeType::Prompt, SdNodeType::NegativePrompt,
+             SdNodeType::ControlNetApply, SdNodeType::IpAdapterApply,
+             SdNodeType::PhotoMaker, SdNodeType::PuLid,
              SdNodeType::Sampling,
              SdNodeType::InputImage, SdNodeType::InputMask,
+             SdNodeType::Canny, SdNodeType::Upscale, SdNodeType::ADetailer,
              SdNodeType::Generate,
              SdNodeType::ImageOutput };
 }
@@ -292,6 +317,9 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
                          "Required only when the model is bare diffusion weights."),
             modelRef("vaeId", tr_("VAE"), QString(), { SdModelCategory::Vae },
                      "Leave empty to use the VAE the checkpoint embeds."),
+            modelRefList("embeddingIds", tr_("Textual inversions"),
+                         { SdModelCategory::Embedding },
+                         "Embeddings are registered by name and loaded with the context."),
             enumeration("weightType", tr_("Weight type"), weightTypeName(SdWeightType::Auto),
                         weightTypeOptions(), /*allowsEmpty*/ true,
                         "f16 halves the memory an fp32 checkpoint needs."),
@@ -302,11 +330,55 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
                     "0 uses one thread per physical core."),
             boolean("allowCpuFallback", tr_("Allow CPU fallback"), true,
                     "Retry on the CPU when the GPU cannot load or run the model."),
+            boolean("enableMmap", tr_("Memory map weights"), true),
+            boolean("flashAttention", tr_("Flash attention"), false),
+            boolean("diffusionFlashAttention", tr_("Diffusion flash attention"), false),
+            boolean("vaeConvDirect", tr_("Direct VAE convolution"), false),
+            boolean("batchedCfg", tr_("Batched CFG"), false),
+            boolean("autoFit", tr_("Auto-fit memory"), true),
+            integer("conditioningCacheSize", tr_("Conditioning cache"), 4, 0, 64),
         };
     case SdNodeType::Lora:
         return {
             modelRef("modelId", tr_("LoRA"), QString(), { SdModelCategory::Lora }),
             number("weight", tr_("Weight"), 1.0, -10.0, 10.0, 0.05),
+        };
+    case SdNodeType::ControlNetLoader:
+        return {
+            modelRef("modelId", tr_("ControlNet"), QString(),
+                     { SdModelCategory::ControlNet }),
+        };
+    case SdNodeType::ControlNetApply:
+        return {
+            number("strength", tr_("Strength"), 0.9, 0.0, 10.0, 0.05),
+        };
+    case SdNodeType::IpAdapterLoader:
+        return {
+            modelRef("modelId", tr_("IP-Adapter"), QString(),
+                     { SdModelCategory::IpAdapter }),
+            modelRef("visionEncoderId", tr_("Vision encoder"), QString(),
+                     { SdModelCategory::VisionEncoder },
+                     "Required by adapters that do not embed their vision encoder."),
+        };
+    case SdNodeType::IpAdapterApply:
+        return {
+            number("strength", tr_("Strength"), 1.0, 0.0, 10.0, 0.05),
+        };
+    case SdNodeType::PhotoMaker:
+        return {
+            modelRef("modelId", tr_("PhotoMaker"), QString(),
+                     { SdModelCategory::PhotoMaker }),
+            modelRef("embeddingId", tr_("Identity embedding"), QString(),
+                     { SdModelCategory::IdentityEmbedding }),
+            number("styleStrength", tr_("Style strength"), 20.0, 0.0, 100.0, 0.5),
+        };
+    case SdNodeType::PuLid:
+        return {
+            modelRef("modelId", tr_("PuLID weights"), QString(),
+                     { SdModelCategory::PuLid }),
+            modelRef("embeddingId", tr_("Identity embedding"), QString(),
+                     { SdModelCategory::IdentityEmbedding }),
+            number("weight", tr_("Identity weight"), 0.8, 0.0, 5.0, 0.05),
         };
     case SdNodeType::Prompt:
         return { text("text", tr_("Prompt"), "What the image should contain.") };
@@ -332,14 +404,31 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
                     "-1 uses the model default."),
             number("denoisingStrength", tr_("Denoising strength"), 0.75, 0.0, 1.0, 0.05,
                    "img2img and inpainting only."),
+            number("imageCfgScale", tr_("Image CFG"), 1.0, 0.0, 100.0, 0.1),
+            number("distilledGuidance", tr_("Distilled guidance"), 0.0, 0.0, 100.0, 0.1,
+                   "0 keeps the model default."),
+            number("eta", tr_("Eta"), 0.0, 0.0, 1.0, 0.01),
+            integer("shiftedTimestep", tr_("Shifted timestep"), 0, 0, 1000),
+            number("flowShift", tr_("Flow shift"), 0.0, -100.0, 100.0, 0.1,
+                   "0 keeps the model default."),
+            line("customSigmas", tr_("Custom sigmas"), QString(),
+                 "Comma-separated non-negative values; at least two when set."),
+            line("skipLayerGuidanceLayers", tr_("SLG layers"), QString(),
+                 "Comma-separated layer indices."),
+            number("skipLayerGuidanceStart", tr_("SLG start"), 0.01, 0.0, 1.0, 0.01),
+            number("skipLayerGuidanceEnd", tr_("SLG end"), 0.2, 0.0, 1.0, 0.01),
+            number("skipLayerGuidanceScale", tr_("SLG scale"), 0.0, -100.0, 100.0, 0.1),
         };
     case SdNodeType::InputImage:
         return {
-            enumeration("source", tr_("Source"), QStringLiteral("composite"),
-                        { QStringLiteral("composite"), QStringLiteral("current_layer") },
+            enumeration("source", tr_("Source"), QStringLiteral("canvas"),
+                        { QStringLiteral("canvas"), QStringLiteral("layer"),
+                          QStringLiteral("composite"), QStringLiteral("current_layer") },
                         /*allowsEmpty*/ true,
                         "Pixels are read from the active document when the run starts.",
                         /*strictOptions*/ true),
+            integer("layerIndex", tr_("Layer index"), -1, -1, 100000, 1.0,
+                    "-1 uses the active layer; otherwise uses the selected flat layer index."),
         };
     case SdNodeType::InputMask:
         return {
@@ -348,6 +437,31 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
                         "The active selection, white where the engine regenerates.",
                         /*strictOptions*/ true),
         };
+    case SdNodeType::Canny:
+        return {
+            number("highThreshold", tr_("High threshold"), 0.8, 0.0, 1.0, 0.01),
+            number("lowThreshold", tr_("Low threshold"), 0.1, 0.0, 1.0, 0.01),
+            number("weak", tr_("Weak edge"), 0.5, 0.0, 1.0, 0.01),
+            number("strong", tr_("Strong edge"), 1.0, 0.0, 1.0, 0.01),
+            boolean("inverse", tr_("Invert"), false),
+        };
+    case SdNodeType::Upscale:
+        return {
+            modelRef("modelId", tr_("ESRGAN model"), QString(),
+                     { SdModelCategory::Upscaler },
+                     "stable-diffusion.cpp requires an RGB ESRGAN GGUF model."),
+            integer("factor", tr_("Scale factor"), 2, 1, 8),
+            integer("tileSize", tr_("Tile size"), 0, 0, 4096, 8.0,
+                    "0 lets the backend choose."),
+            enumeration("device", tr_("Device"),
+                        devicePreferenceName(SdDevicePreference::Auto),
+                        devicePreferenceOptions(), true),
+        };
+    case SdNodeType::ADetailer:
+        return {
+            modelRef("modelId", tr_("Detector"), QString(),
+                     { SdModelCategory::ADetailer }),
+        };
     case SdNodeType::Generate: {
         // Part of the contract and validated, but not offered: the generation
         // service hands back the first image of a batch and discards the rest,
@@ -355,7 +469,43 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
         SdPropertySpec batch = integer("batchCount", tr_("Batch count"), 1, 1, 16, 1.0);
         batch.editable = false;
         batch.hint = tr_("This build inserts the first image of a batch only.");
-        return { batch };
+        return {
+            batch,
+            boolean("vaeTiling", tr_("VAE tiling"), false),
+            integer("vaeTileWidth", tr_("VAE tile width"), 256, 64, 4096, 8.0),
+            integer("vaeTileHeight", tr_("VAE tile height"), 256, 64, 4096, 8.0),
+            number("vaeTileOverlap", tr_("VAE tile overlap"), 0.5, 0.0, 1.0, 0.05),
+            enumeration("cacheMode", tr_("Cache"), QStringLiteral("disabled"),
+                        { QStringLiteral("disabled"), QStringLiteral("easycache"),
+                          QStringLiteral("ucache"), QStringLiteral("dbcache"),
+                          QStringLiteral("taylorseer"), QStringLiteral("cache-dit"),
+                          QStringLiteral("spectrum") }, false, "", true),
+            number("cacheThreshold", tr_("Cache threshold"), 0.2, 0.0, 10.0, 0.01),
+            number("cacheStart", tr_("Cache start"), 0.0, 0.0, 1.0, 0.01),
+            number("cacheEnd", tr_("Cache end"), 1.0, 0.0, 1.0, 0.01),
+            boolean("hiresEnabled", tr_("High-resolution fix"), false),
+            enumeration("hiresUpscaler", tr_("High-res upscaler"), QStringLiteral("Latent"),
+                        { QStringLiteral("Latent"), QStringLiteral("Latent (nearest)"),
+                          QStringLiteral("Latent (nearest-exact)"),
+                          QStringLiteral("Latent (antialiased)"),
+                          QStringLiteral("Latent (bicubic)"),
+                          QStringLiteral("Latent (bicubic antialiased)"),
+                          QStringLiteral("Lanczos"), QStringLiteral("Nearest"),
+                          QStringLiteral("Model") }, false, "", true),
+            modelRef("hiresModelId", tr_("High-res ESRGAN"), QString(),
+                     { SdModelCategory::Upscaler }),
+            number("hiresScale", tr_("High-res scale"), 2.0, 0.1, 8.0, 0.1),
+            integer("hiresWidth", tr_("High-res width"), 0, 0, 32768, 8.0),
+            integer("hiresHeight", tr_("High-res height"), 0, 0, 32768, 8.0),
+            integer("hiresSteps", tr_("High-res steps"), 0, 0, 1000),
+            number("hiresDenoising", tr_("High-res denoising"), 0.5, 0.0001, 1.0, 0.05),
+            integer("hiresTileSize", tr_("High-res tile"), 0, 0, 4096, 8.0),
+            boolean("circularX", tr_("Circular X"), false),
+            boolean("circularY", tr_("Circular Y"), false),
+            line("referenceArgs", tr_("Reference image arguments"), QString()),
+            line("imagePreprocess", tr_("Image preprocess rules"), QString(),
+                 "Semicolon-separated stable-diffusion.cpp preprocessing rules."),
+        };
     }
     case SdNodeType::ImageOutput:
         return {
@@ -488,16 +638,28 @@ QJsonObject describeNodeCatalog()
 
     QJsonArray portTypes;
     for (const SdPortType type : { SdPortType::Model, SdPortType::Conditioning,
-                                   SdPortType::Sampling, SdPortType::Lora,
-                                   SdPortType::Image, SdPortType::Mask })
+                                   SdPortType::Sampling, SdPortType::Image,
+                                   SdPortType::Mask, SdPortType::ControlNet,
+                                   SdPortType::Control, SdPortType::IpAdapter,
+                                   SdPortType::ImageConditioning, SdPortType::PhotoMaker,
+                                   SdPortType::PuLid })
         portTypes.append(portTypeName(type));
 
     QJsonArray modelCategories;
     for (const SdModelCategory category : { SdModelCategory::Checkpoint,
                                             SdModelCategory::DiffusionModel,
                                             SdModelCategory::TextEncoder,
+                                            SdModelCategory::VisionEncoder,
                                             SdModelCategory::Vae,
-                                            SdModelCategory::Lora })
+                                            SdModelCategory::Lora,
+                                            SdModelCategory::Embedding,
+                                            SdModelCategory::ControlNet,
+                                            SdModelCategory::IpAdapter,
+                                            SdModelCategory::PhotoMaker,
+                                            SdModelCategory::PuLid,
+                                            SdModelCategory::IdentityEmbedding,
+                                            SdModelCategory::Upscaler,
+                                            SdModelCategory::ADetailer })
         modelCategories.append(modelCategoryName(category));
 
     QJsonObject root;

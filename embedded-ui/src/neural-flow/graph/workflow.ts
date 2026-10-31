@@ -14,7 +14,8 @@ import { MIN_NODE_WIDTH, toWireValue } from '../nodes/propertyWidgets'
 import {
   type HazorNode,
   createNode,
-  inputSlotPorts,
+  inputPortForSlot,
+  inputSlotForPort,
 } from '../nodes/registerNodes'
 import type {
   GenerationState,
@@ -84,7 +85,6 @@ export function toWorkflowDocument(graph: LGraph, catalog: NodeCatalog): Workflo
       properties: wireProperties(definition, node),
     })
 
-    const ports = inputSlotPorts(definition)
     const inputs = node.inputs ?? []
     for (let slot = 0; slot < inputs.length; slot += 1) {
       const linkId = inputs[slot]?.link
@@ -100,7 +100,7 @@ export function toWorkflowDocument(graph: LGraph, catalog: NodeCatalog): Workflo
         ? definitions.get((origin as HazorNode).hazorType)
         : undefined
       const output = originDefinition?.outputs[link.origin_slot]
-      const input = ports[slot]
+      const input = inputPortForSlot(node, definition, slot)
       if (!origin || !output || !input) {
         continue
       }
@@ -199,7 +199,7 @@ export function buildStartingGraph(
     if (!from || !to) {
       continue
     }
-    const inputSlot = inputSlotPorts(to.definition).indexOf(wire.input)
+    const inputSlot = inputSlotForPort(to.node, wire.input)
     if (inputSlot < 0 || from.definition.outputs.length === 0) {
       continue
     }

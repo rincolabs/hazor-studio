@@ -33,11 +33,20 @@ QString nodeTypeName(SdNodeType type)
     switch (type) {
     case SdNodeType::Checkpoint:     return QStringLiteral("checkpoint");
     case SdNodeType::Lora:           return QStringLiteral("lora");
+    case SdNodeType::ControlNetLoader:return QStringLiteral("controlnet_loader");
+    case SdNodeType::ControlNetApply:return QStringLiteral("controlnet_apply");
+    case SdNodeType::IpAdapterLoader:return QStringLiteral("ip_adapter_loader");
+    case SdNodeType::IpAdapterApply:return QStringLiteral("ip_adapter_apply");
+    case SdNodeType::PhotoMaker:     return QStringLiteral("photo_maker");
+    case SdNodeType::PuLid:          return QStringLiteral("pulid");
     case SdNodeType::Prompt:         return QStringLiteral("prompt");
     case SdNodeType::NegativePrompt: return QStringLiteral("negative_prompt");
     case SdNodeType::Sampling:       return QStringLiteral("sampling");
     case SdNodeType::InputImage:     return QStringLiteral("input_image");
     case SdNodeType::InputMask:      return QStringLiteral("input_mask");
+    case SdNodeType::Canny:          return QStringLiteral("canny");
+    case SdNodeType::Upscale:        return QStringLiteral("upscale");
+    case SdNodeType::ADetailer:      return QStringLiteral("adetailer");
     case SdNodeType::Generate:       return QStringLiteral("generate");
     case SdNodeType::ImageOutput:    return QStringLiteral("image_output");
     }
@@ -52,6 +61,12 @@ bool nodeTypeFromName(const QString& name, SdNodeType& out)
         return true;
     }
     if (n == QLatin1String("lora"))            { out = SdNodeType::Lora; return true; }
+    if (n == QLatin1String("controlnet_loader")) { out = SdNodeType::ControlNetLoader; return true; }
+    if (n == QLatin1String("controlnet_apply")) { out = SdNodeType::ControlNetApply; return true; }
+    if (n == QLatin1String("ip_adapter_loader")) { out = SdNodeType::IpAdapterLoader; return true; }
+    if (n == QLatin1String("ip_adapter_apply")) { out = SdNodeType::IpAdapterApply; return true; }
+    if (n == QLatin1String("photo_maker")) { out = SdNodeType::PhotoMaker; return true; }
+    if (n == QLatin1String("pulid")) { out = SdNodeType::PuLid; return true; }
     if (n == QLatin1String("prompt"))          { out = SdNodeType::Prompt; return true; }
     if (n == QLatin1String("negative_prompt")) { out = SdNodeType::NegativePrompt; return true; }
     if (n == QLatin1String("sampling") || n == QLatin1String("sampling_params")) {
@@ -60,6 +75,9 @@ bool nodeTypeFromName(const QString& name, SdNodeType& out)
     }
     if (n == QLatin1String("input_image"))  { out = SdNodeType::InputImage; return true; }
     if (n == QLatin1String("input_mask"))   { out = SdNodeType::InputMask; return true; }
+    if (n == QLatin1String("canny"))        { out = SdNodeType::Canny; return true; }
+    if (n == QLatin1String("upscale"))      { out = SdNodeType::Upscale; return true; }
+    if (n == QLatin1String("adetailer"))    { out = SdNodeType::ADetailer; return true; }
     if (n == QLatin1String("generate"))     { out = SdNodeType::Generate; return true; }
     if (n == QLatin1String("image_output") || n == QLatin1String("canvas_output")) {
         out = SdNodeType::ImageOutput;
@@ -74,9 +92,14 @@ QString portTypeName(SdPortType type)
     case SdPortType::Model:        return QStringLiteral("model");
     case SdPortType::Conditioning: return QStringLiteral("conditioning");
     case SdPortType::Sampling:     return QStringLiteral("sampling");
-    case SdPortType::Lora:         return QStringLiteral("lora");
     case SdPortType::Image:        return QStringLiteral("image");
     case SdPortType::Mask:         return QStringLiteral("mask");
+    case SdPortType::ControlNet:   return QStringLiteral("control_net");
+    case SdPortType::Control:      return QStringLiteral("control");
+    case SdPortType::IpAdapter:    return QStringLiteral("ip_adapter");
+    case SdPortType::ImageConditioning: return QStringLiteral("image_conditioning");
+    case SdPortType::PhotoMaker:   return QStringLiteral("photo_maker");
+    case SdPortType::PuLid:        return QStringLiteral("pulid");
     }
     return QStringLiteral("unknown");
 }
@@ -84,31 +107,58 @@ QString portTypeName(SdPortType type)
 // ── Node signatures ─────────────────────────────────────────────────────────
 //
 // Fixed per type, which is what makes the graph checkable before anything is
-// loaded. Configuration nodes have no inputs: they are parameters, not stages,
-// and giving them inputs is how a graph starts looking like it should run an
-// inference per node.
+// loaded. Configuration transformers such as LoRA consume and produce the
+// same typed value; they do not run inference, and can therefore be chained or
+// branched without inventing numbered inputs on Generate.
 
 QVector<SdPortSpec> nodeInputs(SdNodeType type)
 {
     switch (type) {
+    case SdNodeType::Lora:
+        return { port("model", SdPortType::Model, /*required*/ true) };
+    case SdNodeType::ControlNetApply:
+        return { port("control_net", SdPortType::ControlNet, true),
+                 port("image", SdPortType::Image, true) };
+    case SdNodeType::IpAdapterApply:
+        return { port("ip_adapter", SdPortType::IpAdapter, true),
+                 port("image", SdPortType::Image, true) };
+    case SdNodeType::PhotoMaker:
+        return { port("images", SdPortType::Image, true, true) };
+    case SdNodeType::Canny:
+    case SdNodeType::Upscale:
+        return { port("image", SdPortType::Image, true) };
+    case SdNodeType::ADetailer:
+        return {
+            port("model", SdPortType::Model, true),
+            port("image", SdPortType::Image, true),
+            port("positive", SdPortType::Conditioning, true),
+            port("negative", SdPortType::Conditioning),
+            port("sampling", SdPortType::Sampling, true),
+        };
     case SdNodeType::Generate:
         return {
             port("model", SdPortType::Model, /*required*/ true),
             port("positive", SdPortType::Conditioning, /*required*/ true),
             port("negative", SdPortType::Conditioning),
             port("sampling", SdPortType::Sampling, /*required*/ true),
-            port("lora", SdPortType::Lora, /*required*/ false, /*multiple*/ true),
             // Presence of these two is what selects the operation: neither is
             // txt2img, an image alone is img2img, an image and a mask is
             // inpainting. There is no "operation" switch to contradict the
             // wiring.
             port("init_image", SdPortType::Image),
             port("mask", SdPortType::Mask),
+            port("references", SdPortType::Image, false, true),
+            port("control", SdPortType::Control),
+            port("ip_adapter", SdPortType::ImageConditioning),
+            port("photo_maker", SdPortType::PhotoMaker),
+            port("pulid", SdPortType::PuLid),
         };
     case SdNodeType::ImageOutput:
         return { port("image", SdPortType::Image, /*required*/ true) };
     case SdNodeType::Checkpoint:
-    case SdNodeType::Lora:
+    case SdNodeType::ControlNetLoader:
+    case SdNodeType::IpAdapterLoader:
+    case SdNodeType::PuLid:
     case SdNodeType::Prompt:
     case SdNodeType::NegativePrompt:
     case SdNodeType::Sampling:
@@ -123,12 +173,21 @@ QVector<SdPortSpec> nodeOutputs(SdNodeType type)
 {
     switch (type) {
     case SdNodeType::Checkpoint:     return { port("model", SdPortType::Model) };
-    case SdNodeType::Lora:           return { port("lora", SdPortType::Lora) };
+    case SdNodeType::Lora:           return { port("model", SdPortType::Model) };
+    case SdNodeType::ControlNetLoader:return { port("control_net", SdPortType::ControlNet) };
+    case SdNodeType::ControlNetApply:return { port("control", SdPortType::Control) };
+    case SdNodeType::IpAdapterLoader:return { port("ip_adapter", SdPortType::IpAdapter) };
+    case SdNodeType::IpAdapterApply:return { port("image_conditioning", SdPortType::ImageConditioning) };
+    case SdNodeType::PhotoMaker:     return { port("photo_maker", SdPortType::PhotoMaker) };
+    case SdNodeType::PuLid:          return { port("pulid", SdPortType::PuLid) };
     case SdNodeType::Prompt:
     case SdNodeType::NegativePrompt: return { port("conditioning", SdPortType::Conditioning) };
     case SdNodeType::Sampling:       return { port("sampling", SdPortType::Sampling) };
     case SdNodeType::InputImage:     return { port("image", SdPortType::Image) };
     case SdNodeType::InputMask:      return { port("mask", SdPortType::Mask) };
+    case SdNodeType::Canny:
+    case SdNodeType::Upscale:
+    case SdNodeType::ADetailer:      return { port("image", SdPortType::Image) };
     case SdNodeType::Generate:       return { port("image", SdPortType::Image) };
     case SdNodeType::ImageOutput:    break;
     }
@@ -175,7 +234,6 @@ QString workflowErrorCodeName(SdWorkflowErrorCode code)
     case SdWorkflowErrorCode::DuplicateConnection:   return QStringLiteral("duplicate_connection");
     case SdWorkflowErrorCode::CircularDependency:    return QStringLiteral("circular_dependency");
     case SdWorkflowErrorCode::NoGenerateNode:        return QStringLiteral("no_generate_node");
-    case SdWorkflowErrorCode::MultipleGenerateNodes: return QStringLiteral("multiple_generate_nodes");
     case SdWorkflowErrorCode::NoImageOutput:         return QStringLiteral("no_image_output");
     case SdWorkflowErrorCode::OutputNotConnected:    return QStringLiteral("output_not_connected");
     case SdWorkflowErrorCode::ModelUnavailable:      return QStringLiteral("model_unavailable");

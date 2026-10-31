@@ -138,8 +138,22 @@ export interface ModelsVisionState {
 
 // ── Models — Stable Diffusion (sdlocal::SdModelManager) ────────────────────
 
-export type SdModelCategory = 'checkpoint' | 'diffusionModel' | 'textEncoder' | 'vae' | 'lora'
-export type SdTextEncoderRole = 'auto' | 'clipL' | 'clipG' | 't5xxl'
+export type SdModelCategory =
+  | 'checkpoint'
+  | 'diffusionModel'
+  | 'textEncoder'
+  | 'visionEncoder'
+  | 'vae'
+  | 'lora'
+  | 'embedding'
+  | 'controlNet'
+  | 'ipAdapter'
+  | 'photoMaker'
+  | 'pulid'
+  | 'identityEmbedding'
+  | 'upscaler'
+  | 'adetailer'
+export type SdTextEncoderRole = 'auto' | 'clipL' | 'clipG' | 't5xxl' | 'llm' | 'llmVision' | 'clipVision'
 // No 'environment' case: SdModelEntry carries no flag distinguishing an
 // environment-variable-sourced pinned entry from an explicitly registered
 // one, so both surface identically here (a known, flagged simplification).

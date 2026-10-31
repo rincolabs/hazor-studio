@@ -293,13 +293,110 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         }
         return ok;
     }
+    case SdNodeType::ControlNetLoader: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::ControlNet, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            return false;
+        }
+        return true;
+    }
+    case SdNodeType::IpAdapterLoader: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::IpAdapter, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        const QString visionEncoderId = p.value(QStringLiteral("visionEncoderId")).toString().trimmed();
+        if (!visionEncoderId.isEmpty()
+            && !models.resolveFile(visionEncoderId, SdModelCategory::VisionEncoder, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        return ok;
+    }
+    case SdNodeType::PhotoMaker: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::PhotoMaker, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        const QString embeddingId = p.value(QStringLiteral("embeddingId")).toString().trimmed();
+        if (!embeddingId.isEmpty()
+            && !models.resolveFile(embeddingId, SdModelCategory::IdentityEmbedding, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        return ok;
+    }
+    case SdNodeType::PuLid: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::PuLid, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        const QString embeddingId = p.value(QStringLiteral("embeddingId")).toString().trimmed();
+        if (!embeddingId.isEmpty()
+            && !models.resolveFile(embeddingId, SdModelCategory::IdentityEmbedding, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        return ok;
+    }
+    case SdNodeType::Upscale: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::Upscaler, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        return ok;
+    }
+    case SdNodeType::ADetailer: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::ADetailer, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        return ok;
+    }
+    case SdNodeType::Generate: {
+        // The high-res pass optionally names an ESRGAN model; everything else
+        // about it is a plain number or a strict enum the generic pass above
+        // already checked.
+        const QString hiresModelId = p.value(QStringLiteral("hiresModelId")).toString().trimmed();
+        if (!hiresModelId.isEmpty()) {
+            SdResolvedModelFile resolved;
+            QString error;
+            if (!models.resolveFile(hiresModelId, SdModelCategory::Upscaler, resolved, &error)) {
+                addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+                ok = false;
+            }
+        }
+        return ok;
+    }
     // Nothing a spec could not already answer: their enums are strict and the
-    // generic pass checked them.
+    // generic pass checked them, and their model references (when any) are
+    // plain strings resolved by the executor from a connected loader's value
+    // rather than from a property on the node itself.
     case SdNodeType::Prompt:
     case SdNodeType::NegativePrompt:
     case SdNodeType::InputImage:
     case SdNodeType::InputMask:
-    case SdNodeType::Generate:
+    case SdNodeType::ControlNetApply:
+    case SdNodeType::IpAdapterApply:
+    case SdNodeType::Canny:
     case SdNodeType::ImageOutput:
         break;
     }
@@ -337,6 +434,57 @@ bool resolvePortNames(SdWorkflowConnection& c, const SdWorkflowNode& from,
     return true;
 }
 
+// Version-1 workflows created by the first Neural Flow UI wired several LoRA
+// values directly into Generate.lora. Convert that representation into the
+// model-transform chain the dynamic graph uses now. The order of the old
+// connections is retained, so the generated request receives the same LoRAs
+// in the same order. New documents never contain the legacy port.
+void normaliseLegacyLoraChains(SdWorkflowDefinition& definition)
+{
+    for (const SdWorkflowNode& generate : definition.nodes) {
+        if (generate.type != SdNodeType::Generate)
+            continue;
+
+        QVector<SdWorkflowConnection> loras;
+        QVector<SdWorkflowConnection> models;
+        for (const SdWorkflowConnection& connection : definition.connections) {
+            if (connection.toNode != generate.id)
+                continue;
+            if (connection.toPort == QLatin1String("lora"))
+                loras.push_back(connection);
+            else if (connection.toPort == QLatin1String("model"))
+                models.push_back(connection);
+        }
+        if (loras.isEmpty() || models.size() != 1)
+            continue;
+
+        QVector<SdWorkflowConnection> migrated;
+        migrated.reserve(definition.connections.size() + loras.size());
+        for (const SdWorkflowConnection& connection : definition.connections) {
+            const bool oldModel = connection.toNode == generate.id
+                && connection.toPort == QLatin1String("model");
+            const bool oldLora = connection.toNode == generate.id
+                && connection.toPort == QLatin1String("lora");
+            if (!oldModel && !oldLora)
+                migrated.push_back(connection);
+        }
+
+        QString fromNode = models.first().fromNode;
+        QString fromPort = models.first().fromPort;
+        for (const SdWorkflowConnection& legacy : loras) {
+            migrated.push_back(SdWorkflowConnection {
+                fromNode, fromPort, legacy.fromNode, QStringLiteral("model")
+            });
+            fromNode = legacy.fromNode;
+            fromPort = QStringLiteral("model");
+        }
+        migrated.push_back(SdWorkflowConnection {
+            fromNode, fromPort, generate.id, QStringLiteral("model")
+        });
+        definition.connections = migrated;
+    }
+}
+
 } // namespace
 
 bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
@@ -346,6 +494,7 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
                                    QVector<SdWorkflowError>& errors)
 {
     normalised = definition;
+    normaliseLegacyLoraChains(normalised);
     plan = SdWorkflowPlan {};
     const int errorsBefore = static_cast<int>(errors.size());
 
@@ -359,10 +508,6 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
         seen.insert(node.id);
     }
 
-    // ── Properties, including model availability ────────────────────────────
-    for (const SdWorkflowNode& node : definition.nodes)
-        validateProperties(node, models, errors);
-
     // ── Connections: endpoints, ports and types ─────────────────────────────
     // Counted per destination port so a required input can be found missing and
     // a single-connection port can be found over-subscribed.
@@ -373,8 +518,8 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
     };
 
     for (SdWorkflowConnection& c : normalised.connections) {
-        const SdWorkflowNode* from = definition.node(c.fromNode);
-        const SdWorkflowNode* to = definition.node(c.toNode);
+        const SdWorkflowNode* from = normalised.node(c.fromNode);
+        const SdWorkflowNode* to = normalised.node(c.toNode);
         if (!from) {
             addError(errors, SdWorkflowErrorCode::UnknownNode,
                      tr_("Connection from unknown node \"%1\".").arg(c.fromNode), c.fromNode);
@@ -423,8 +568,32 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
         dependencies[to->id] << from->id;
     }
 
-    // ── Required inputs ─────────────────────────────────────────────────────
-    for (const SdWorkflowNode& node : definition.nodes) {
+    // Only ancestors of output nodes participate in this run. This lets a user
+    // keep an unfinished alternative branch on the canvas without having it
+    // load a model, capture pixels or invalidate an otherwise runnable result.
+    QSet<QString> active;
+    for (const SdWorkflowNode& node : normalised.nodes) {
+        if (node.type == SdNodeType::ImageOutput) {
+            active.insert(node.id);
+            plan.outputNodeIds << node.id;
+        }
+    }
+    bool activeGrew = true;
+    while (activeGrew) {
+        activeGrew = false;
+        for (const SdWorkflowConnection& connection : normalised.connections) {
+            if (active.contains(connection.toNode) && !active.contains(connection.fromNode)) {
+                active.insert(connection.fromNode);
+                activeGrew = true;
+            }
+        }
+    }
+
+    // ── Properties and required inputs in the executable subgraph ──────────
+    for (const SdWorkflowNode& node : normalised.nodes) {
+        if (!active.contains(node.id))
+            continue;
+        validateProperties(node, models, errors);
         for (const SdPortSpec& spec : nodeInputs(node.type)) {
             if (!spec.required)
                 continue;
@@ -437,69 +606,71 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
         }
     }
 
-    // ── Exactly one Generate, reaching exactly one output ───────────────────
-    const QVector<const SdWorkflowNode*> generates = definition.nodesOfType(SdNodeType::Generate);
-    if (generates.isEmpty()) {
+    // Every operation node in the active subgraph — Generate and the three
+    // standalone image operations that also call the generation service
+    // (Canny, Upscale, ADetailer). There may be any number: image values can
+    // branch to several outputs or feed a later operation as its input image.
+    const auto isOperation = [](SdNodeType type) {
+        return type == SdNodeType::Generate || type == SdNodeType::Canny
+            || type == SdNodeType::Upscale || type == SdNodeType::ADetailer;
+    };
+    for (const SdWorkflowNode& node : normalised.nodes) {
+        if (active.contains(node.id) && isOperation(node.type))
+            plan.generateNodeIds << node.id;
+    }
+    if (plan.generateNodeIds.isEmpty()) {
         addError(errors, SdWorkflowErrorCode::NoGenerateNode,
-                 tr_("The workflow has no generate node."));
-    } else if (generates.size() > 1) {
-        // The executor builds one generation request per run by design; chained
-        // generations are a later step, not something to half-support now.
-        addError(errors, SdWorkflowErrorCode::MultipleGenerateNodes,
-                 tr_("This build runs one generate node per workflow; this one has %1.")
-                     .arg(generates.size()));
-    } else {
-        plan.generateNodeId = generates.first()->id;
+                 tr_("No generate node contributes to an image output."));
     }
 
-    const QVector<const SdWorkflowNode*> outputs = definition.nodesOfType(SdNodeType::ImageOutput);
-    if (outputs.isEmpty()) {
+    if (plan.outputNodeIds.isEmpty()) {
         addError(errors, SdWorkflowErrorCode::NoImageOutput,
                  tr_("The workflow has no image output node."));
-    } else if (outputs.size() > 1) {
-        addError(errors, SdWorkflowErrorCode::NoImageOutput,
-                 tr_("This build runs one image output per workflow; this one has %1.")
-                     .arg(outputs.size()));
-    } else {
-        plan.outputNodeId = outputs.first()->id;
     }
 
-    if (!plan.generateNodeId.isEmpty() && !plan.outputNodeId.isEmpty()) {
-        const bool connected = std::any_of(
-            normalised.connections.cbegin(), normalised.connections.cend(),
-            [&plan](const SdWorkflowConnection& c) {
-                return c.fromNode == plan.generateNodeId && c.toNode == plan.outputNodeId
-                    && c.toPort == QLatin1String("image");
-            });
-        if (!connected) {
-            addError(errors, SdWorkflowErrorCode::OutputNotConnected,
-                     tr_("The generate node is not connected to the image output."),
-                     plan.generateNodeId, QStringLiteral("image"));
+    // An Image Output is a requested result. It may be downstream of several
+    // processing nodes, but it must ultimately depend on a Generate operation;
+    // forwarding a captured canvas image is not a generation workflow.
+    for (const QString& outputId : plan.outputNodeIds) {
+        QSet<QString> ancestors { outputId };
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (const SdWorkflowConnection& connection : normalised.connections) {
+                if (ancestors.contains(connection.toNode)
+                    && !ancestors.contains(connection.fromNode)) {
+                    ancestors.insert(connection.fromNode);
+                    grew = true;
+                }
+            }
         }
+        const bool hasGenerate = std::any_of(
+            plan.generateNodeIds.cbegin(), plan.generateNodeIds.cend(),
+            [&ancestors](const QString& id) { return ancestors.contains(id); });
+        if (!hasGenerate) {
+            addError(errors, SdWorkflowErrorCode::OutputNotConnected,
+                     tr_("The image output does not depend on a generate node."),
+                     outputId, QStringLiteral("image"));
+        }
+    }
 
-        // The operation follows the wiring, so an inpaint without a mask simply
-        // is an img2img and never reaches the engine as a half-configured one.
-        const auto wired = [&normalised, &plan](const char* portId) {
+    // The operation follows each Generate node's wiring, so a mask without an
+    // init image is rejected at that node rather than becoming a partial call.
+    for (const QString& generateId : plan.generateNodeIds) {
+        const auto wired = [&normalised, &generateId](const char* portId) {
             return std::any_of(normalised.connections.cbegin(), normalised.connections.cend(),
-                               [&plan, portId](const SdWorkflowConnection& c) {
-                                   return c.toNode == plan.generateNodeId
+                               [&generateId, portId](const SdWorkflowConnection& c) {
+                                   return c.toNode == generateId
                                        && c.toPort == QLatin1String(portId);
                                });
         };
         const bool hasInit = wired("init_image");
         const bool hasMask = wired("mask");
-        if (hasInit && hasMask)
-            plan.operation = SdOperation::Inpaint;
-        else if (hasInit)
-            plan.operation = SdOperation::Img2Img;
-        else
-            plan.operation = SdOperation::Txt2Img;
-
         if (hasMask && !hasInit) {
             addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
                      tr_("A mask needs an input image: connect one to \"init_image\" "
                          "or remove the mask."),
-                     plan.generateNodeId, QStringLiteral("init_image"));
+                     generateId, QStringLiteral("init_image"));
         }
     }
 
@@ -508,7 +679,7 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
     // satisfied is exactly the set of nodes in (or downstream of) a cycle.
     {
         QStringList remaining;
-        for (const SdWorkflowNode& node : definition.nodes)
+        for (const SdWorkflowNode& node : normalised.nodes)
             remaining << node.id;
 
         QSet<QString> resolved;
@@ -522,7 +693,8 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
                                                    return resolved.contains(dep);
                                                });
                 if (ready) {
-                    plan.order << id;
+                    if (active.contains(id))
+                        plan.order << id;
                     resolved.insert(id);
                     remaining.removeAt(i);
                     progressed = true;

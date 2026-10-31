@@ -23,6 +23,9 @@ enum class SdOperation {
     Txt2Img,
     Img2Img,
     Inpaint,
+    Canny,
+    Upscale,
+    ADetailer,
 };
 
 QString operationName(SdOperation operation);
@@ -69,11 +72,25 @@ struct SdModelLoadOptions {
     // unusable driver, or too little VRAM for the checkpoint — the run is
     // always reported as the CPU run it became, never as GPU acceleration.
     bool allowCpuFallback = true;
+    bool enableMmap = true;
+    bool flashAttention = false;
+    bool diffusionFlashAttention = false;
+    bool vaeConvDirect = false;
+    bool batchedCfg = false;
+    bool autoFit = true;
+    int conditioningCacheSize = 4;
 
     bool operator==(const SdModelLoadOptions& o) const
     {
         return files == o.files && device == o.device && weightType == o.weightType
-            && threads == o.threads;
+            && threads == o.threads
+            && enableMmap == o.enableMmap
+            && flashAttention == o.flashAttention
+            && diffusionFlashAttention == o.diffusionFlashAttention
+            && vaeConvDirect == o.vaeConvDirect
+            && batchedCfg == o.batchedCfg
+            && autoFit == o.autoFit
+            && conditioningCacheSize == o.conditioningCacheSize;
     }
     bool operator!=(const SdModelLoadOptions& o) const { return !(*this == o); }
 };
@@ -92,6 +109,42 @@ struct SdSamplingParams {
     QString sampler;
     QString scheduler;
     int clipSkip = -1;               // -1 -> model default
+    float imageCfgScale = 1.0f;
+    float distilledGuidance = 0.0f; // 0 keeps the model/library default
+    float eta = 0.0f;
+    int shiftedTimestep = 0;
+    float flowShift = 0.0f;
+    QVector<float> customSigmas;
+    QVector<int> skipLayerGuidanceLayers;
+    float skipLayerGuidanceStart = 0.01f;
+    float skipLayerGuidanceEnd = 0.2f;
+    float skipLayerGuidanceScale = 0.0f;
+};
+
+struct SdVaeTilingParams {
+    bool enabled = false;
+    int tileWidth = 256;
+    int tileHeight = 256;
+    float overlap = 0.5f;
+};
+
+struct SdCacheParams {
+    QString mode = QStringLiteral("disabled");
+    float reuseThreshold = 0.2f;
+    float startPercent = 0.0f;
+    float endPercent = 1.0f;
+};
+
+struct SdHiresParams {
+    bool enabled = false;
+    QString upscaler = QStringLiteral("latent");
+    QString modelPath;
+    float scale = 2.0f;
+    int targetWidth = 0;
+    int targetHeight = 0;
+    int steps = 0;
+    float denoisingStrength = 0.5f;
+    int tileSize = 0;
 };
 
 struct SdGenerationRequest {
@@ -114,6 +167,35 @@ struct SdGenerationRequest {
     QImage initImage;
     QImage maskImage;                // Inpaint only
     float denoisingStrength = 0.75f; // sd_img_gen_params_t::strength
+
+    QVector<QImage> referenceImages;
+    QString referenceImageArgs;
+    QImage controlImage;
+    float controlStrength = 0.9f;
+    QImage ipAdapterImage;
+    float ipAdapterStrength = 1.0f;
+    QVector<QImage> photoMakerImages;
+    QString photoMakerEmbeddingPath;
+    float photoMakerStyleStrength = 20.0f;
+    QString pulidEmbeddingPath;
+    float pulidWeight = 0.8f;
+
+    SdVaeTilingParams vaeTiling;
+    SdCacheParams cache;
+    SdHiresParams hires;
+    bool circularX = false;
+    bool circularY = false;
+    QString imagePreprocess;
+
+    // Standalone processing operations.
+    QString auxiliaryModelPath;      // ESRGAN or ADetailer detector
+    int upscaleFactor = 2;
+    int tileSize = 0;
+    float cannyHigh = 0.8f;
+    float cannyLow = 0.1f;
+    float cannyWeak = 0.5f;
+    float cannyStrong = 1.0f;
+    bool cannyInverse = false;
 
     // Identity of the run, for logs and for the result. Not used by the engine.
     QString label;

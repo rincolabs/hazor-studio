@@ -27,11 +27,20 @@ namespace {
 QString sdCategoryToJs(SdModelCategory category)
 {
     switch (category) {
-    case SdModelCategory::Checkpoint:     return QStringLiteral("checkpoint");
-    case SdModelCategory::DiffusionModel: return QStringLiteral("diffusionModel");
-    case SdModelCategory::TextEncoder:    return QStringLiteral("textEncoder");
-    case SdModelCategory::Vae:            return QStringLiteral("vae");
-    case SdModelCategory::Lora:           return QStringLiteral("lora");
+    case SdModelCategory::Checkpoint:        return QStringLiteral("checkpoint");
+    case SdModelCategory::DiffusionModel:    return QStringLiteral("diffusionModel");
+    case SdModelCategory::TextEncoder:       return QStringLiteral("textEncoder");
+    case SdModelCategory::VisionEncoder:     return QStringLiteral("visionEncoder");
+    case SdModelCategory::Vae:               return QStringLiteral("vae");
+    case SdModelCategory::Lora:              return QStringLiteral("lora");
+    case SdModelCategory::Embedding:         return QStringLiteral("embedding");
+    case SdModelCategory::ControlNet:        return QStringLiteral("controlNet");
+    case SdModelCategory::IpAdapter:         return QStringLiteral("ipAdapter");
+    case SdModelCategory::PhotoMaker:        return QStringLiteral("photoMaker");
+    case SdModelCategory::PuLid:             return QStringLiteral("pulid");
+    case SdModelCategory::IdentityEmbedding: return QStringLiteral("identityEmbedding");
+    case SdModelCategory::Upscaler:          return QStringLiteral("upscaler");
+    case SdModelCategory::ADetailer:         return QStringLiteral("adetailer");
     }
     return QStringLiteral("checkpoint");
 }
@@ -40,18 +49,30 @@ SdModelCategory sdCategoryFromJs(const QString& value)
 {
     if (value == QStringLiteral("diffusionModel")) return SdModelCategory::DiffusionModel;
     if (value == QStringLiteral("textEncoder")) return SdModelCategory::TextEncoder;
+    if (value == QStringLiteral("visionEncoder")) return SdModelCategory::VisionEncoder;
     if (value == QStringLiteral("vae")) return SdModelCategory::Vae;
     if (value == QStringLiteral("lora")) return SdModelCategory::Lora;
+    if (value == QStringLiteral("embedding")) return SdModelCategory::Embedding;
+    if (value == QStringLiteral("controlNet")) return SdModelCategory::ControlNet;
+    if (value == QStringLiteral("ipAdapter")) return SdModelCategory::IpAdapter;
+    if (value == QStringLiteral("photoMaker")) return SdModelCategory::PhotoMaker;
+    if (value == QStringLiteral("pulid")) return SdModelCategory::PuLid;
+    if (value == QStringLiteral("identityEmbedding")) return SdModelCategory::IdentityEmbedding;
+    if (value == QStringLiteral("upscaler")) return SdModelCategory::Upscaler;
+    if (value == QStringLiteral("adetailer")) return SdModelCategory::ADetailer;
     return SdModelCategory::Checkpoint;
 }
 
 QString sdEncoderRoleToJs(SdTextEncoderRole role)
 {
     switch (role) {
-    case SdTextEncoderRole::ClipL: return QStringLiteral("clipL");
-    case SdTextEncoderRole::ClipG: return QStringLiteral("clipG");
-    case SdTextEncoderRole::T5xxl: return QStringLiteral("t5xxl");
-    case SdTextEncoderRole::Auto:  return QStringLiteral("auto");
+    case SdTextEncoderRole::ClipL:      return QStringLiteral("clipL");
+    case SdTextEncoderRole::ClipG:      return QStringLiteral("clipG");
+    case SdTextEncoderRole::T5xxl:      return QStringLiteral("t5xxl");
+    case SdTextEncoderRole::Llm:        return QStringLiteral("llm");
+    case SdTextEncoderRole::LlmVision:  return QStringLiteral("llmVision");
+    case SdTextEncoderRole::ClipVision: return QStringLiteral("clipVision");
+    case SdTextEncoderRole::Auto:       return QStringLiteral("auto");
     }
     return QStringLiteral("auto");
 }
@@ -61,11 +82,16 @@ SdTextEncoderRole sdEncoderRoleFromJs(const QString& value)
     if (value == QStringLiteral("clipL")) return SdTextEncoderRole::ClipL;
     if (value == QStringLiteral("clipG")) return SdTextEncoderRole::ClipG;
     if (value == QStringLiteral("t5xxl")) return SdTextEncoderRole::T5xxl;
+    if (value == QStringLiteral("llm")) return SdTextEncoderRole::Llm;
+    if (value == QStringLiteral("llmVision")) return SdTextEncoderRole::LlmVision;
+    if (value == QStringLiteral("clipVision")) return SdTextEncoderRole::ClipVision;
     return SdTextEncoderRole::Auto;
 }
 
 const char* const kAllCategories[] = {
-    "checkpoint", "diffusionModel", "textEncoder", "vae", "lora"
+    "checkpoint", "diffusionModel", "textEncoder", "visionEncoder", "vae", "lora",
+    "embedding", "controlNet", "ipAdapter", "photoMaker", "pulid", "identityEmbedding",
+    "upscaler", "adetailer"
 };
 
 } // namespace
@@ -248,7 +274,9 @@ QVariantMap emptySdState(const QString& lastScanAt)
     overviewSummary[QStringLiteral("defaultModelId")] = QString();
 
     QVariantMap countsByCategory;
-    for (const char* cat : { "checkpoint", "diffusionModel", "textEncoder", "vae", "lora" })
+    for (const char* cat : { "checkpoint", "diffusionModel", "textEncoder", "visionEncoder",
+                             "vae", "lora", "embedding", "controlNet", "ipAdapter", "photoMaker",
+                             "pulid", "identityEmbedding", "upscaler", "adetailer" })
         countsByCategory[QString::fromLatin1(cat)] = 0;
 
     QVariantMap state;

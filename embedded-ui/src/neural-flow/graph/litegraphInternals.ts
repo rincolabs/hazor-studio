@@ -166,6 +166,10 @@ export interface HazorSlotExtra extends Partial<INodeInputSlot> {
   pos?: Vector2
   group?: string
   optional?: boolean
+  /** Stable backend port id; slot names may be numbered for variadic inputs. */
+  hazorPortId?: string
+  /** The backend port accepts an unbounded number of incoming links. */
+  variadic?: boolean
 }
 
 export type HazorInputSlot = INodeInputSlot & HazorSlotExtra

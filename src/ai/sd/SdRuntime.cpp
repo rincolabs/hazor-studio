@@ -7,6 +7,7 @@
 
 #include <exception>
 #include <new>
+#include <vector>
 
 #include <stable-diffusion.h>
 
@@ -45,7 +46,17 @@ struct CtxStrings {
     QByteArray clipLPath;
     QByteArray clipGPath;
     QByteArray t5xxlPath;
+    QByteArray llmPath;
+    QByteArray llmVisionPath;
+    QByteArray clipVisionPath;
     QByteArray vaePath;
+    QByteArray controlNetPath;
+    QByteArray ipAdapterPath;
+    QByteArray photoMakerPath;
+    QByteArray pulidPath;
+    std::vector<QByteArray> embeddingNames;
+    std::vector<QByteArray> embeddingPaths;
+    std::vector<sd_embedding_t> embeddings;
     QByteArray backend;
 
     // Empty paths must stay null: the loader tests these pointers for presence,
@@ -220,8 +231,27 @@ bool SdRuntime::ensureContext(const SdModelLoadOptions& options,
     strings.clipLPath = options.files.clipLPath.toUtf8();
     strings.clipGPath = options.files.clipGPath.toUtf8();
     strings.t5xxlPath = options.files.t5xxlPath.toUtf8();
+    strings.llmPath = options.files.llmPath.toUtf8();
+    strings.llmVisionPath = options.files.llmVisionPath.toUtf8();
+    strings.clipVisionPath = options.files.clipVisionPath.toUtf8();
     strings.vaePath = options.files.vaePath.toUtf8();
+    strings.controlNetPath = options.files.controlNetPath.toUtf8();
+    strings.ipAdapterPath = options.files.ipAdapterPath.toUtf8();
+    strings.photoMakerPath = options.files.photoMakerPath.toUtf8();
+    strings.pulidPath = options.files.pulidPath.toUtf8();
     strings.backend = choice.device.name.toUtf8();
+    strings.embeddingNames.reserve(options.files.embeddings.size());
+    strings.embeddingPaths.reserve(options.files.embeddings.size());
+    strings.embeddings.reserve(options.files.embeddings.size());
+    for (const SdResolvedModelFile& embedding : options.files.embeddings) {
+        strings.embeddingNames.push_back(embedding.id.toUtf8());
+        strings.embeddingPaths.push_back(embedding.path.toUtf8());
+    }
+    for (size_t i = 0; i < strings.embeddingNames.size(); ++i) {
+        strings.embeddings.push_back(sd_embedding_t {
+            strings.embeddingNames[i].constData(), strings.embeddingPaths[i].constData()
+        });
+    }
 
     // Model loading is C++ underneath a C API: a bad allocation or a malformed
     // checkpoint can come back as an exception, and it must not cross the
@@ -235,12 +265,30 @@ bool SdRuntime::ensureContext(const SdModelLoadOptions& options,
         ctxParams.clip_l_path           = CtxStrings::cstr(strings.clipLPath);
         ctxParams.clip_g_path           = CtxStrings::cstr(strings.clipGPath);
         ctxParams.t5xxl_path            = CtxStrings::cstr(strings.t5xxlPath);
+        ctxParams.llm_path              = CtxStrings::cstr(strings.llmPath);
+        ctxParams.llm_vision_path       = CtxStrings::cstr(strings.llmVisionPath);
+        ctxParams.clip_vision_path      = CtxStrings::cstr(strings.clipVisionPath);
         ctxParams.vae_path              = CtxStrings::cstr(strings.vaePath);
+        ctxParams.control_net_path      = CtxStrings::cstr(strings.controlNetPath);
+        ctxParams.ip_adapter_path       = CtxStrings::cstr(strings.ipAdapterPath);
+        ctxParams.photo_maker_path      = CtxStrings::cstr(strings.photoMakerPath);
+        ctxParams.pulid_weights_path    = CtxStrings::cstr(strings.pulidPath);
+        if (!strings.embeddings.empty()) {
+            ctxParams.embeddings = strings.embeddings.data();
+            ctxParams.embedding_count = static_cast<uint32_t>(strings.embeddings.size());
+        }
         // Naming the device explicitly rather than leaving `backend` null: the
         // library's default would pick the best device it can find, which is
         // the one thing that makes the effective backend unknowable.
         ctxParams.backend               = CtxStrings::cstr(strings.backend);
         ctxParams.wtype                 = toSdType(options.weightType);
+        ctxParams.enable_mmap           = options.enableMmap;
+        ctxParams.flash_attn             = options.flashAttention;
+        ctxParams.diffusion_flash_attn   = options.diffusionFlashAttention;
+        ctxParams.vae_conv_direct        = options.vaeConvDirect;
+        ctxParams.batched_cfg            = options.batchedCfg;
+        ctxParams.auto_fit               = options.autoFit;
+        ctxParams.conditioning_cache_size = options.conditioningCacheSize;
         if (options.threads > 0)
             ctxParams.n_threads = options.threads;
 

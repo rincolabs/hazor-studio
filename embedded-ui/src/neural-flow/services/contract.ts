@@ -27,7 +27,21 @@ export type PropertyKind =
   | 'modelRefList'
 
 /** `sdlocal::SdModelCategory`. */
-export type ModelCategory = 'checkpoint' | 'diffusion_model' | 'text_encoder' | 'vae' | 'lora'
+export type ModelCategory =
+  | 'checkpoint'
+  | 'diffusion_model'
+  | 'text_encoder'
+  | 'vision_encoder'
+  | 'vae'
+  | 'lora'
+  | 'embedding'
+  | 'control_net'
+  | 'ip_adapter'
+  | 'photo_maker'
+  | 'pulid'
+  | 'identity_embedding'
+  | 'upscaler'
+  | 'adetailer'
 
 /** `sdlocal::SdGenerationState`. */
 export type GenerationState =
@@ -43,7 +57,7 @@ export interface PortSpec {
   id: string
   type: string
   required: boolean
-  /** Accepts more than one incoming connection — only the LoRA input does. */
+  /** Accepts an unbounded number of incoming connections. */
   multiple: boolean
 }
 

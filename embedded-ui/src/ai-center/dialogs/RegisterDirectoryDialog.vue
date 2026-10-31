@@ -21,7 +21,16 @@ const categoryOptions: Array<{ value: SdModelCategory; label: string }> = [
   { value: 'checkpoint', label: 'Checkpoint' },
   { value: 'diffusionModel', label: 'Diffusion Model / UNet' },
   { value: 'textEncoder', label: 'Text Encoder' },
+  { value: 'visionEncoder', label: 'Vision Encoder' },
   { value: 'vae', label: 'VAE' },
+  { value: 'embedding', label: 'Embedding / Textual Inversion' },
+  { value: 'controlNet', label: 'ControlNet' },
+  { value: 'ipAdapter', label: 'IP-Adapter' },
+  { value: 'photoMaker', label: 'PhotoMaker' },
+  { value: 'pulid', label: 'PuLID' },
+  { value: 'identityEmbedding', label: 'Identity Embedding (PhotoMaker / PuLID)' },
+  { value: 'upscaler', label: 'Upscaler (ESRGAN)' },
+  { value: 'adetailer', label: 'ADetailer Detector' },
 ]
 
 const canRegister = computed(() => path.value.trim() !== '' && !registering.value)

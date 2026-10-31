@@ -23,7 +23,7 @@ namespace sdlocal {
 
 enum class SdImageSource {
     Composite,     // every visible layer, flattened — the default
-    CurrentLayer,  // the active layer alone
+    Layer,         // one specific layer, by flat index
 };
 
 class SdCanvasBridge : public QObject {
@@ -45,7 +45,9 @@ public:
 
     // Pixels in document space, Format_RGBA8888. Must be called on the GUI
     // thread: both read the live document through Hazor's existing compositor.
-    bool captureImage(SdImageSource source, QImage& out, QString* error) const;
+    // `layerIndex` is the flat layer index to read when `source` is `Layer`;
+    // -1 uses the document's active layer. Ignored for `Composite`.
+    bool captureImage(SdImageSource source, int layerIndex, QImage& out, QString* error) const;
     // The active selection as an 8-bit coverage mask at document resolution.
     // White is the selected area, which is also the area the engine
     // regenerates, so no polarity flip happens anywhere.
