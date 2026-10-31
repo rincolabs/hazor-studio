@@ -2,30 +2,34 @@
 /**
  * The LiteGraph editor, wrapped as a Vue component.
  *
- * It owns the graph and the canvas for the lifetime of the component and
- * nothing else: no workflow conversion, no bridge, no node catalog. The parent
- * gets both objects through `ready` and drives them.
+ * It owns the graph and the canvas for the lifetime of the component, plus
+ * the menu wiring (Shift+A, right-click, combo popups) that has to live next
+ * to the canvas element itself. Workflow conversion and the bridge stay with
+ * the parent, which gets both litegraph objects through `ready`.
  *
  * The surface has no size of its own — the panel is resized by Hazor's dock
  * system — so it follows the element's box through a ResizeObserver and is
  * allocated at the screen's pixel density rather than at a fixed resolution.
  */
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 
+import { closeMenu, openMenu } from '../composables/useMenu'
+import { attachCanvasMenuBridge, type CanvasMenuBridge } from '../graph/canvasMenuBridge'
 import {
   type LGraph,
   type LGraphCanvas,
-  applyGraphTheme,
   createGraphCanvas,
   releaseGraphCanvas,
   resizeGraphCanvas,
 } from '../graph/litegraph'
+import { widgetHooks } from '../graph/canvasWidgets'
 import { installTextareaOverlay } from '../nodes/textareaWidget'
-import type { ThemeVariables } from '../services/contract'
+import { litegraphTypeFor } from '../nodes/registerNodes'
+import { openAddNodeMenu, openWorkspaceContextMenu } from './menu/catalogMenu'
+import type { NodeCatalog, NodeDefinition } from '../services/contract'
 
 const props = defineProps<{
-  theme: ThemeVariables
-  portTypes: string[]
+  catalog: NodeCatalog
 }>()
 
 const emit = defineEmits<{
@@ -39,7 +43,12 @@ const canvas = shallowRef<LGraphCanvas | null>(null)
 
 let observer: ResizeObserver | null = null
 let releaseTextareaOverlay: (() => void) | null = null
+let menuBridge: CanvasMenuBridge | null = null
 let pixelRatio = 1
+
+function pickByDefinition(definition: NodeDefinition, pick: (type: string) => void): void {
+  pick(litegraphTypeFor(definition))
+}
 
 onMounted(() => {
   const element = surface.value
@@ -52,7 +61,15 @@ onMounted(() => {
   graph.value = created.graph
   canvas.value = created.canvas
   releaseTextareaOverlay = installTextareaOverlay(created.graph, created.canvas, container, element)
-  applyGraphTheme(created.canvas, props.theme, props.portTypes)
+
+  widgetHooks.openMenu = openMenu
+  menuBridge = attachCanvasMenuBridge({
+    canvas: created.canvas,
+    openAddMenu: (x, y, pick) =>
+      openAddNodeMenu(props.catalog, x, y, (definition) => pickByDefinition(definition, pick)),
+    openCanvasMenu: (x, y, pick) =>
+      openWorkspaceContextMenu(props.catalog, x, y, (definition) => pickByDefinition(definition, pick)),
+  })
 
   observer = new ResizeObserver(() => {
     pixelRatio = resizeGraphCanvas(created.canvas, element, pixelRatio)
@@ -65,16 +82,11 @@ onMounted(() => {
   emit('ready', created.graph, created.canvas)
 })
 
-watch(
-  () => props.theme,
-  (theme) => {
-    if (canvas.value) {
-      applyGraphTheme(canvas.value, theme, props.portTypes)
-    }
-  },
-)
-
 onBeforeUnmount(() => {
+  closeMenu()
+  widgetHooks.openMenu = null
+  menuBridge?.detach()
+  menuBridge = null
   observer?.disconnect()
   observer = null
   releaseTextareaOverlay?.()
@@ -85,22 +97,41 @@ onBeforeUnmount(() => {
   canvas.value = null
   graph.value = null
 })
+
+/** Opens the Add Node menu anchored at a client position, e.g. under the toolbar's Add button. */
+function openAddAt(clientX: number, clientY: number): void {
+  if (!menuBridge) return
+  openAddNodeMenu(props.catalog, clientX, clientY, (definition) =>
+    pickByDefinition(definition, menuBridge!.pickType),
+  )
+}
+
+defineExpose({ openAddAt })
 </script>
 
 <template>
   <div ref="host" class="neural-graph">
     <!-- tabindex so litegraph's keyboard shortcuts (delete, copy, paste) reach it. -->
     <canvas ref="surface" class="neural-graph__surface" tabindex="0"></canvas>
+    <div class="neural-graph__hint">
+      <span class="kbd">Shift</span><span class="kbd">A</span><span>Add node</span>
+      <span class="sep" />
+      <span class="kbd">Right-click</span><span>Context menu</span>
+      <span class="sep" />
+      <span>Wheel zoom · drag background to pan</span>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .neural-graph {
   position: relative;
+  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: var(--hz-background);
+  background: var(--ws-bg);
 }
 
 .neural-graph__surface {
@@ -110,6 +141,39 @@ onBeforeUnmount(() => {
   outline: none;
 }
 
+.neural-graph__hint {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  background: rgba(37, 39, 40, 0.88);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.neural-graph__hint .sep {
+  width: 1px;
+  height: 12px;
+  margin: 0 4px;
+  background: var(--line);
+}
+
+@media (max-width: 760px) {
+  .neural-graph__hint {
+    display: none;
+  }
+}
+
+/* The frame is the wrapper's, so the footer sits inside it — see the design's
+   `.nf-ta` in tmp/neural-flow-ui/src/styles/nodes.css. */
 :global(.hazor-node-textarea) {
   position: absolute;
   top: 0;
@@ -117,26 +181,22 @@ onBeforeUnmount(() => {
   z-index: 1;
   display: flex;
   flex-direction: column;
-  gap: var(--hz-space-1);
   box-sizing: border-box;
-  padding: var(--hz-space-1);
   overflow: hidden;
   transform-origin: 0 0;
-  border: 1px solid var(--hz-border);
-  border-radius: var(--hz-radius-sm);
-  background: var(--hz-surface-dark);
-  color: var(--hz-text);
-  font-family: var(--hz-font-family);
+  border: 1px solid var(--widget-border);
+  border-radius: 3px;
+  background: var(--widget-bg);
+  color: var(--text);
+  font-family: var(--font);
 }
 
-:global(.hazor-node-textarea__label) {
-  flex: none;
-  overflow: hidden;
-  color: var(--hz-text-secondary);
-  font-size: var(--hz-font-size-sm);
-  line-height: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+:global(.hazor-node-textarea:hover) {
+  border-color: var(--widget-border-hover);
+}
+
+:global(.hazor-node-textarea:focus-within) {
+  border-color: var(--accent);
 }
 
 :global(.hazor-node-textarea__input) {
@@ -145,18 +205,30 @@ onBeforeUnmount(() => {
   min-height: 0;
   box-sizing: border-box;
   resize: none;
-  padding: var(--hz-space-1);
-  border: 1px solid var(--hz-border);
-  border-radius: var(--hz-radius-sm);
+  padding: 6px 10px 2px;
+  border: 0;
   outline: none;
-  background: var(--hz-surface);
-  color: var(--hz-text-bright);
+  background: transparent;
+  color: var(--text);
   font: inherit;
-  font-size: var(--hz-font-size-sm);
-  line-height: 1.35;
+  font-size: 11.5px;
+  line-height: 1.45;
+  user-select: text;
 }
 
-:global(.hazor-node-textarea__input:focus) {
-  border-color: var(--hz-border-focus);
+:global(.hazor-node-textarea__input::placeholder) {
+  color: var(--text-disabled);
+}
+
+:global(.hazor-node-textarea__foot) {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 4px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 10px;
+  white-space: nowrap;
 }
 </style>

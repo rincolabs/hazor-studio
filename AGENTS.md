@@ -185,11 +185,15 @@ under `src/renderer/`.
    [`ToolExecutor`](src/tools/ToolExecutor.cpp). A new editor operation exposed
    to automation is registered once, there.
 
-8. **No hardcoded colours in UI or canvas code.** Everything comes from the
-   active [`Theme`](src/theme/Theme.hpp) via `ThemeManager::instance()->current()`.
-   The embedded web interfaces get the same values through
-   [`WebThemeVariables.cpp`](src/theme/WebThemeVariables.cpp), which is the one
-   translation of a `Theme` into web values — not one per panel.
+8. **No hardcoded colours in native UI or canvas code.** Everything in the Qt
+   Widgets UI and OpenGL/canvas rendering comes from the active
+   [`Theme`](src/theme/Theme.hpp) via `ThemeManager::instance()->current()`.
+   This rule does not reach into the embedded web interfaces: the Qt WebEngine
+   panels under [`embedded-ui/`](embedded-ui/) are a separate surface with
+   their own shared, static web design system
+   ([`embedded-ui/src/shared/design-system/`](embedded-ui/src/shared/design-system/)) —
+   one fixed palette for every web panel (AI Center, Neural Flow, …), not the
+   native `Theme` and not a palette per panel.
 
 9. **One source of version truth:** `project(... VERSION ...)` in
    [`CMakeLists.txt`](CMakeLists.txt) → generated `Version.hpp`. Never hardcode

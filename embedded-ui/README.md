@@ -42,7 +42,11 @@ backend instead of inventing one.
 src/
 ├── shared/                     Used by more than one panel
 │   ├── bridge/qtBridge.ts      Qt WebChannel transport: connect, call, subscribe
-│   └── design-system/          Tokens, base styling, and applying Hazor's theme
+│   └── design-system/          The shared static web design system: tokens
+│                                (colors, type, radii) and base component
+│                                classes (buttons, badges, icons, …) every
+│                                panel below is built from
+├── ai-center/                  The AI settings application
 └── neural-flow/                The node editor
     ├── services/               The backend contract, its client, run status
     ├── nodes/                  Catalog -> LiteGraph node types and widgets

@@ -1,4 +1,6 @@
-import '@shared/design-system/theme.css'
+import '@shared/design-system/tokens.css'
+import '@shared/design-system/components.css'
+import './styles/app.css'
 
 import { createApp } from 'vue'
 

@@ -1,0 +1,56 @@
+/*
+ * Neural Flow app shell + small cross-component utilities. Built on the
+ * shared web design system (@shared/design-system) — nothing here restates
+ * one of its tokens or component classes.
+ */
+
+/* The editor must fit the window exactly: no document-level scrolling, ever
+   (the workspace and its own panels scroll internally where they need to). */
+html,
+body,
+#app {
+  /* #app needs the height too, and `clip` also blocks programmatic scrolling. */
+  height: 100%;
+  overflow: clip;
+}
+
+/* A tool, not a document: dragging a selection across node titles while
+   panning is noise rather than a feature. Text actually being edited (the
+   prompt textarea overlay, a menu search field) opts back in locally. */
+body {
+  user-select: none;
+}
+
+/* Keyboard hint badge, used by the menu system and the workspace hint. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Scrollable panel content (menus, dialogs) — never the document itself. */
+.scroll-y {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.scroll-y::-webkit-scrollbar {
+  width: 10px;
+}
+.scroll-y::-webkit-scrollbar-thumb {
+  background: var(--raised);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+.scroll-y::-webkit-scrollbar-track {
+  background: transparent;
+}

@@ -14,28 +14,27 @@
 import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 
 import { QtBridgeError, isHostedByQt } from '@shared/bridge/qtBridge'
-import { applyThemeVariables } from '@shared/design-system/applyTheme'
 
-import FlowHeader from './components/FlowHeader.vue'
+import Icon from './components/ui/Icon.vue'
+import FlowToolbar from './components/layout/FlowToolbar.vue'
+import MenuHost from './components/menu/MenuHost.vue'
 import NeuralGraph from './components/NeuralGraph.vue'
-import NodePalette from './components/NodePalette.vue'
 import type { LGraph, LGraphCanvas } from './graph/litegraph'
 import {
   buildStartingGraph,
   clearErrorHighlights,
   highlightErrorNodes,
   nodeForDocumentId,
+  showRunState,
   toWorkflowDocument,
 } from './graph/workflow'
 import { setModels } from './nodes/modelStore'
-import { createNode, registerCatalogNodes } from './nodes/registerNodes'
+import { registerCatalogNodes } from './nodes/registerNodes'
 import type {
   CompletedInfo,
   GenerationState,
   ModelEntry,
   NodeCatalog,
-  NodeDefinition,
-  ThemeVariables,
   WorkflowError,
 } from './services/contract'
 import { NeuralFlowClient } from './services/neuralFlow'
@@ -43,13 +42,14 @@ import { statusKindFor, statusLabelFor } from './services/status'
 
 const client = shallowRef<NeuralFlowClient | null>(null)
 const catalog = shallowRef<NodeCatalog | null>(null)
-const theme = ref<ThemeVariables>({})
 const models = ref<ModelEntry[]>([])
 const defaultModelId = ref('')
 const backend = ref('')
 const modelConfigPath = ref('')
 const hasDocument = ref(false)
 const connectionError = ref('')
+const refreshing = ref(false)
+const graphComponent = ref<InstanceType<typeof NeuralGraph> | null>(null)
 
 const runState = ref<GenerationState>('idle')
 const runDetail = ref('')
@@ -69,6 +69,9 @@ const subscriptions: Array<() => void> = []
 const busy = computed(() => runState.value === 'loading' || runState.value === 'generating')
 const stateKind = computed(() => statusKindFor(runState.value))
 const stateLabel = computed(() => statusLabelFor(runState.value))
+const progressFraction = computed(() =>
+  progress.value && progress.value.steps > 0 ? progress.value.step / progress.value.steps : null,
+)
 
 const canRun = computed(
   () => !busy.value && graphReady.value && client.value !== null && hasDocument.value,
@@ -103,9 +106,6 @@ const detail = computed(() => {
  */
 const notices = computed(() => {
   const list: string[] = []
-  if (connectionError.value) {
-    list.push(connectionError.value)
-  }
   if (client.value && !hasDocument.value) {
     list.push(
       'Open or create a document first: a generated image is inserted as a new pixel layer in the active one.',
@@ -150,8 +150,15 @@ function showErrors(errors: WorkflowError[]): void {
   progress.value = null
   runState.value = 'failed'
   if (graph) {
-    const colour = theme.value.danger
-    highlightErrorNodes(graph, errors, typeof colour === 'string' ? colour : '#d05a5a')
+    highlightErrorNodes(graph, errors)
+    canvas?.setDirty(true, true)
+  }
+}
+
+/** Mirrors the run onto the graph: badge, progress bar and flowing links. */
+function syncNodeRunState(): void {
+  if (graph) {
+    showRunState(graph, runState.value, progress.value)
     canvas?.setDirty(true, true)
   }
 }
@@ -174,9 +181,11 @@ function subscribe(connected: NeuralFlowClient): void {
     connected.on('workflowStateChanged', (state, stateDetail) => {
       runState.value = state
       runDetail.value = stateDetail
+      syncNodeRunState()
     }),
     connected.on('workflowProgress', (step, steps) => {
       progress.value = { step, steps }
+      syncNodeRunState()
     }),
     connected.on('workflowCompleted', (result) => {
       lastResult.value = result
@@ -194,13 +203,6 @@ function subscribe(connected: NeuralFlowClient): void {
     }),
     connected.on('documentAvailabilityChanged', (available) => {
       hasDocument.value = available
-    }),
-    connected.on('themeChanged', (next) => {
-      theme.value = next
-      applyThemeVariables(next)
-      if (graph) {
-        clearErrorHighlights(graph)
-      }
     }),
   )
 }
@@ -224,8 +226,6 @@ async function connect(): Promise<void> {
     models.value = state.models ?? []
     setModels(models.value)
     defaultModelId.value = state.defaultModelId ?? ''
-    theme.value = state.theme ?? {}
-    applyThemeVariables(state.theme)
     backend.value = state.backend ?? ''
     modelConfigPath.value = state.modelConfigPath ?? ''
     hasDocument.value = Boolean(state.hasDocument)
@@ -250,21 +250,9 @@ function onGraphReady(ready: LGraph, readyCanvas: LGraphCanvas): void {
   graphReady.value = true
 }
 
-function addNode(definition: NodeDefinition): void {
-  if (!graph || !canvas) {
-    return
-  }
-  const node = createNode(graph, definition)
-  if (!node) {
-    return
-  }
-  // Dropped into the middle of what is on screen, in graph coordinates, so it
-  // lands in view whatever the pan and zoom are.
-  const area = canvas.ds.visible_area
-  if (area && area[2] > 0 && area[3] > 0) {
-    node.pos = [area[0] + area[2] * 0.35, area[1] + area[3] * 0.35]
-  }
-  canvas.setDirty(true, true)
+function openAddMenu(button: HTMLElement): void {
+  const rect = button.getBoundingClientRect()
+  graphComponent.value?.openAddAt(rect.right - 220, rect.bottom + 4)
 }
 
 async function run(): Promise<void> {
@@ -299,6 +287,7 @@ async function refreshModels(): Promise<void> {
   if (!activeClient) {
     return
   }
+  refreshing.value = true
   try {
     const next = await activeClient.refreshModels()
     models.value = next ?? []
@@ -308,6 +297,8 @@ async function refreshModels(): Promise<void> {
     const message = describe(error)
     connectionError.value = message
     activeClient.reportError('refreshModels', message)
+  } finally {
+    refreshing.value = false
   }
 }
 
@@ -323,39 +314,38 @@ void connect()
 
 <template>
   <div class="neural-flow">
-    <FlowHeader
+    <FlowToolbar
       :state-label="stateLabel"
       :state-kind="stateKind"
       :detail="detail"
+      :progress="progressFraction"
       :busy="busy"
       :can-run="canRun"
+      :refreshing="refreshing"
       :backend="backend"
       @run="run"
       @cancel="cancel"
       @refresh-models="refreshModels"
+      @add="openAddMenu"
     />
 
-    <div v-if="notices.length > 0" class="neural-flow__notices">
-      <p v-for="notice in notices" :key="notice" class="neural-flow__notice">{{ notice }}</p>
+    <div v-if="connectionError || notices.length > 0" class="neural-flow__banners">
+      <div v-if="connectionError" class="bn err">
+        <Icon name="warning" :size="14" />
+        <span>{{ connectionError }}</span>
+      </div>
+      <div v-for="notice in notices" :key="notice" class="bn warn">
+        <Icon name="warning" :size="14" />
+        <span>{{ notice }}</span>
+      </div>
     </div>
 
-    <div class="neural-flow__body">
-      <template v-if="catalog">
-        <NodePalette
-          :categories="catalog.categories"
-          :nodes="catalog.nodes"
-          @add="addNode"
-        />
-        <NeuralGraph
-          :theme="theme"
-          :port-types="catalog.portTypes"
-          @ready="onGraphReady"
-        />
-      </template>
+    <main class="neural-flow__stage">
+      <NeuralGraph v-if="catalog" ref="graphComponent" :catalog="catalog" @ready="onGraphReady" />
       <p v-else class="neural-flow__placeholder">
         {{ connectionError ? 'The node catalog could not be loaded.' : 'Connecting to Hazor…' }}
       </p>
-    </div>
+    </main>
 
     <ul v-if="runErrors.length > 0" class="neural-flow__errors">
       <li v-for="(error, index) in runErrors.slice(0, 4)" :key="`${error.code}-${index}`">
@@ -365,6 +355,8 @@ void connect()
         {{ error.message }}
       </li>
     </ul>
+
+    <MenuHost />
   </div>
 </template>
 
@@ -372,54 +364,55 @@ void connect()
 .neural-flow {
   display: flex;
   flex-direction: column;
+  width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 
-.neural-flow__notices {
+.neural-flow__banners {
   flex: none;
-  border-bottom: 1px solid var(--hz-border);
-  background: var(--hz-surface-dark);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
-.neural-flow__notice {
-  margin: 0;
-  padding: var(--hz-space-1) var(--hz-space-3);
-  color: var(--hz-warning);
-  font-size: var(--hz-font-size-sm);
+.neural-flow__banners .bn {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
 }
 
-.neural-flow__body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
-  /* Without this the grid refuses to shrink below its content and the canvas
-     grows the panel instead of fitting it. */
+.neural-flow__stage {
+  position: relative;
+  flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  overflow: hidden;
 }
 
 .neural-flow__placeholder {
-  grid-column: 1 / -1;
+  flex: 1;
   margin: 0;
   display: grid;
   place-items: center;
-  color: var(--hz-text-secondary);
+  color: var(--text-3);
 }
 
 .neural-flow__errors {
   flex: none;
   margin: 0;
-  padding: var(--hz-space-2) var(--hz-space-3) var(--hz-space-2) var(--hz-space-4);
+  padding: 8px 12px 8px 28px;
   max-height: 25%;
   overflow-y: auto;
   list-style: disc;
-  background: var(--hz-surface-dark);
-  border-top: 1px solid var(--hz-border);
-  color: var(--hz-danger);
-  font-size: var(--hz-font-size-sm);
+  background: var(--err-bg);
+  border-top: 1px solid var(--line-soft);
+  color: var(--err);
+  font-size: var(--fs-sm);
 }
 
 .neural-flow__errors-node {
-  color: var(--hz-text-bright);
+  color: var(--text);
   font-weight: 600;
 }
 </style>

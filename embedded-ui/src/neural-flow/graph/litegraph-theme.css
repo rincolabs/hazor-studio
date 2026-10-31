@@ -1,0 +1,170 @@
+/*
+ * Hazor theme for litegraph's own DOM UI (loaded after litegraph.css):
+ * node/slot/group context menus, the value prompt dialog, the search box.
+ * Everything else about the look is drawn on canvas (canvasRenderer.ts /
+ * canvasWidgets.ts); this file is what stays native.
+ */
+
+.lgraphcanvas {
+  font-family: var(--font, Inter, sans-serif);
+  background: var(--ws-bg, #232526);
+  display: block;
+}
+
+.litegraph.litecontextmenu,
+.litegraph.litecontextmenu.dark {
+  font-family: var(--font, Inter, sans-serif);
+  font-size: 12px;
+  color: var(--text-2, #d3d3d3);
+  padding: 4px;
+  min-width: 180px;
+  background-color: var(--raised, #3a3c3d) !important;
+  border: 1px solid var(--hover, #56585a);
+  border-radius: 4px;
+  box-shadow: var(--shadow-pop, 0 10px 28px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.35)) !important;
+}
+.litegraph.litecontextmenu .litemenu-title {
+  margin: 0 0 4px;
+  padding: 4px 8px;
+  color: var(--text-3, #b6b8b9);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: none;
+  border-bottom: 1px solid var(--bg-4, #4c4e4f);
+}
+.litegraph.litecontextmenu .litemenu-entry,
+.litegraph .litemenu-entry {
+  margin: 0;
+  padding: 0 8px 0 10px;
+  height: 24px;
+  line-height: 24px;
+  border-radius: 3px;
+  color: var(--text-2, #d3d3d3);
+  background-color: transparent !important;
+  cursor: default;
+}
+/* litegraph.css paints entries with !important — override at the same specificity. */
+.litegraph.litecontextmenu .litemenu-entry.submenu:not(.separator),
+.litegraph.litecontextmenu.dark .litemenu-entry.submenu:not(.separator) {
+  background-color: transparent !important;
+}
+.litegraph.litecontextmenu .litemenu-entry.submenu:hover:not(.disabled):not(.separator),
+.litegraph.litecontextmenu.dark .litemenu-entry.submenu:hover:not(.disabled):not(.separator),
+.litegraph .litemenu-entry:hover:not(.disabled):not(.separator) {
+  background-color: var(--accent, #2f6fd0) !important;
+  color: #fff;
+}
+.litegraph .litemenu-entry.has_submenu {
+  border-right: 0;
+}
+.litegraph .litemenu-entry.has_submenu::after {
+  content: '›';
+  float: right;
+  color: var(--text-3, #b6b8b9);
+  font-size: 14px;
+}
+.litegraph .litemenu-entry.disabled {
+  color: var(--text-disabled, #8c8e8f);
+  opacity: 1;
+}
+.litegraph .litemenu-entry.separator,
+.litegraph.litecontextmenu .litemenu-entry.separator {
+  display: block;
+  height: 1px !important;
+  min-height: 0;
+  margin: 4px 2px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background-color: var(--bg-4, #4c4e4f) !important;
+}
+
+/* Value prompt (number / seed widgets) */
+.graphdialog {
+  font-family: var(--font, Inter, sans-serif);
+  font-size: 12px;
+  color: var(--text-2, #d3d3d3);
+  background-color: var(--surface, #444647);
+  border: 1px solid #5a5c5d;
+  border-radius: 5px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  padding: 6px 6px 6px 10px;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.graphdialog .name {
+  color: var(--text-3, #b6b8b9);
+  font-size: 11px;
+  padding: 0;
+  min-height: 0;
+}
+.graphdialog input,
+.graphdialog textarea,
+.graphdialog select {
+  height: 26px;
+  margin: 0;
+  padding: 0 8px;
+  min-width: 120px;
+  background: var(--input, #353738);
+  border: 1px solid var(--line, #5b5d5e);
+  border-radius: 2px !important;
+  color: var(--text, #fff);
+  font: inherit;
+  outline: none;
+}
+.graphdialog input:focus,
+.graphdialog textarea:focus {
+  border-color: var(--accent, #2f6fd0);
+  box-shadow: 0 0 0 1px var(--accent, #2f6fd0);
+}
+.graphdialog textarea {
+  height: 80px;
+  padding: 6px 8px;
+}
+.graphdialog button {
+  height: 26px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--accent, #2f6fd0);
+  border-radius: 2px !important;
+  background: var(--accent, #2f6fd0);
+  color: #fff;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.graphdialog button:hover {
+  background: var(--accent-h, #3b7ce0);
+}
+
+/* Native search box (routed to the Hazor Add menu; kept themed in case it is ever reached). */
+.litegraph.litesearchbox {
+  font-family: var(--font, Inter, sans-serif);
+  background-color: var(--raised, #3a3c3d);
+  border: 1px solid var(--hover, #56585a);
+  border-radius: 4px;
+  box-shadow: var(--shadow-pop, 0 10px 28px rgba(0, 0, 0, 0.5));
+  padding: 6px;
+}
+.litegraph.litesearchbox input {
+  background: var(--input, #353738);
+  border: 1px solid var(--line, #5b5d5e);
+  border-radius: 2px;
+  color: var(--text, #fff);
+  height: 26px;
+  padding: 0 8px;
+}
+.litegraph.lite-search-item {
+  background: transparent;
+  color: var(--text-2, #d3d3d3);
+  padding: 3px 8px;
+  border-radius: 3px;
+}
+.litegraph.lite-search-item.selected,
+.litegraph.lite-search-item:hover {
+  background: var(--accent, #2f6fd0);
+  color: #fff;
+}

@@ -9,40 +9,22 @@
  * Its job here is presentation and interaction with the graph, nothing else:
  * the execution loop (`graph.start()` / `runStep()`) is never started, because
  * no inference happens in the browser.
+ *
+ * The look itself — node frame, widgets, the grid — is the "B — Tinted" style
+ * from the approved Neural Flow design, static like the rest of the shared
+ * web design system (see AGENTS.md on the native `Theme` vs. this one).
  */
 import { LGraph, LGraphCanvas, LGraphNode, LiteGraph } from 'litegraph.js'
 import 'litegraph.js/css/litegraph.css'
+import './litegraph-theme.css'
 
-import type { ThemeVariables } from '../services/contract'
+import { installCanvasMenuRouting } from './canvasMenuBridge'
+import { installCanvasRenderer } from './canvasRenderer'
+import { SOCKET_COLORS, T } from './canvasTheme'
+import { installCanvasWidgets } from './canvasWidgets'
+import type { GraphInternals, UndeclaredCanvasMembers, UndeclaredLiteGraphConstants } from './litegraphInternals'
 
 export { LGraph, LGraphCanvas, LGraphNode, LiteGraph }
-
-/**
- * Constants litegraph.js has but its community type definitions do not
- * declare. Collected in one interface so the cast that reaches them is in one
- * place and the names are reviewable, instead of `any` sprinkled through the
- * theming below.
- */
-interface UndeclaredConstants {
-  NODE_SELECTED_TITLE_COLOR: string
-  NODE_BOX_OUTLINE_COLOR: string
-  WIDGET_BGCOLOR: string
-  WIDGET_OUTLINE_COLOR: string
-  WIDGET_TEXT_COLOR: string
-  WIDGET_SECONDARY_TEXT_COLOR: string
-}
-
-/** Likewise for the canvas: `clear_background_color` and the per-type colours. */
-interface UndeclaredCanvasMembers {
-  clear_background_color: string
-  default_connection_color_byType: Record<string, string>
-  default_connection_color_byTypeOff: Record<string, string>
-}
-
-/** The node list, which the definitions keep private although there is no public iterator. */
-interface GraphInternals {
-  _nodes: LGraphNode[]
-}
 
 export function graphNodes(graph: LGraph): LGraphNode[] {
   return (graph as unknown as GraphInternals)._nodes ?? []
@@ -60,143 +42,108 @@ const ZOOM_STEP = 1.1
  */
 const MAX_PIXEL_RATIO = 3
 
-function colour(theme: ThemeVariables, key: string, fallback: string): string {
-  const value = theme[key]
-  return typeof value === 'string' && value.length > 0 ? value : fallback
-}
+let installed = false
 
 /**
- * One colour per port type, so a MODEL link is told apart from a CONDITIONING
- * one at a glance.
- *
- * Taken from Hazor's theme rather than invented: these are semantic slots the
- * theme already defines, which is what keeps the editor in step with the rest
- * of the application when the theme changes. `danger` is deliberately not used
- * — red means an error everywhere else in Hazor.
+ * Global constants and the renderer/widget/menu overrides. Idempotent and
+ * called once, before the first canvas is created, so every `LGraphCanvas`
+ * instance (there is only ever one, but a dev-server HMR reload can still ask
+ * twice) picks up the same look.
  */
-function portColours(theme: ThemeVariables, portTypes: string[]): Record<string, string> {
-  const palette = [
-    colour(theme, 'accent', '#4f8cc9'),
-    colour(theme, 'success', '#5aa469'),
-    colour(theme, 'warning', '#c79a3c'),
-    colour(theme, 'borderFocus', '#5a8dd6'),
-    colour(theme, 'textBright', '#f2f2f2'),
-    colour(theme, 'textSecondary', '#9a9a9a'),
-  ]
-  const colours: Record<string, string> = {}
-  portTypes.forEach((type, index) => {
-    colours[type] = palette[index % palette.length] as string
-  })
-  return colours
-}
+function installHazorLook(): void {
+  if (installed) return
+  installed = true
 
-/**
- * Dims a colour towards the panel background, for the hollow state of a port
- * that has nothing connected to it.
- */
-function dim(value: string, background: string): string {
-  // Only #rrggbb is produced by QColor::name(), so nothing more general is
-  // needed; anything else is handed back untouched rather than mangled.
-  const mix = (a: string, b: string): string | null => {
-    const parse = (hex: string): [number, number, number] | null => {
-      const match = /^#([0-9a-f]{6})$/i.exec(hex)
-      if (!match) {
-        return null
-      }
-      const n = Number.parseInt(match[1] as string, 16)
-      return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
-    }
-    const first = parse(a)
-    const second = parse(b)
-    if (!first || !second) {
-      return null
-    }
-    const blended = first.map((channel, index) =>
-      Math.round(channel * 0.45 + (second[index] as number) * 0.55),
-    )
-    return `#${blended.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
-  }
-  return mix(value, background) ?? value
-}
-
-/**
- * Applies Hazor's active theme to the node graph.
- *
- * Safe to call again when the theme changes: every value is assigned, none
- * accumulated.
- */
-export function applyGraphTheme(
-  canvasInstance: LGraphCanvas,
-  theme: ThemeVariables,
-  portTypes: string[],
-): void {
-  const background = colour(theme, 'background', '#1b1b1b')
-  const surface = colour(theme, 'surface', '#252525')
-  const surfaceDark = colour(theme, 'surfaceDark', '#1e1e1e')
-  const border = colour(theme, 'border', '#3a3a3a')
-  const text = colour(theme, 'text', '#d8d8d8')
-  const textBright = colour(theme, 'textBright', '#f2f2f2')
-  const textSecondary = colour(theme, 'textSecondary', '#9a9a9a')
-  const accent = colour(theme, 'accent', '#4f8cc9')
-
-  const constants = LiteGraph as unknown as UndeclaredConstants
-
-  // Geometry: the defaults are built for short names like "value", and these
-  // nodes carry labels like "Denoising strength".
-  LiteGraph.NODE_WIDTH = 230
-  LiteGraph.NODE_TITLE_HEIGHT = 26
-  LiteGraph.NODE_TITLE_TEXT_Y = 18
-  LiteGraph.NODE_SLOT_HEIGHT = 18
-  LiteGraph.NODE_WIDGET_HEIGHT = 20
+  LiteGraph.NODE_SLOT_HEIGHT = T.rowH
+  LiteGraph.NODE_WIDGET_HEIGHT = T.rowH
   LiteGraph.NODE_TEXT_SIZE = 12
   LiteGraph.NODE_SUBTEXT_SIZE = 11
-  // NODE_DEFAULT_SHAPE is not set here: litegraph 0.7.18 declares it and never
-  // reads it. drawNodeShape() falls back to ROUND_SHAPE on its own, which is
-  // the shape wanted anyway, and assigning the constant would only look like
-  // it were doing something.
+  LiteGraph.NODE_TITLE_HEIGHT = T.titleH
+  LiteGraph.NODE_TITLE_TEXT_Y = 21
+  LiteGraph.NODE_TITLE_COLOR = T.text
+  LiteGraph.NODE_TEXT_COLOR = T.text2
+  LiteGraph.NODE_DEFAULT_COLOR = T.nodeHead
+  LiteGraph.NODE_DEFAULT_BGCOLOR = T.nodeBg
+  LiteGraph.NODE_DEFAULT_BOXCOLOR = T.text3
+  LiteGraph.LINK_COLOR = '#8a8d8f'
+  LiteGraph.CONNECTING_LINK_COLOR = T.accentText
+  // Flat, like the rest of Hazor's panels — `drawNodeShape` paints its own
+  // shadow directly, conditioned on `render_shadows` and zoom.
+  LiteGraph.DEFAULT_SHADOW_COLOR = T.shadow
 
-  LiteGraph.NODE_DEFAULT_COLOR = surfaceDark
-  LiteGraph.NODE_DEFAULT_BGCOLOR = surface
-  LiteGraph.NODE_DEFAULT_BOXCOLOR = border
-  LiteGraph.NODE_TITLE_COLOR = textSecondary
-  LiteGraph.NODE_TEXT_COLOR = text
-  constants.NODE_SELECTED_TITLE_COLOR = textBright
-  constants.NODE_BOX_OUTLINE_COLOR = accent
-  constants.WIDGET_BGCOLOR = surfaceDark
-  constants.WIDGET_OUTLINE_COLOR = border
-  constants.WIDGET_TEXT_COLOR = text
-  constants.WIDGET_SECONDARY_TEXT_COLOR = textSecondary
-  // Flat, like the rest of Hazor's panels. The library's drop shadow is what
-  // makes a default litegraph canvas look like a different application.
-  LiteGraph.DEFAULT_SHADOW_COLOR = 'rgba(0, 0, 0, 0)'
+  const constants = LiteGraph as unknown as UndeclaredLiteGraphConstants
+  constants.NODE_SELECTED_TITLE_COLOR = T.text
+  constants.NODE_BOX_OUTLINE_COLOR = T.accent
+  constants.WIDGET_BGCOLOR = T.widgetBg
+  constants.WIDGET_OUTLINE_COLOR = T.widgetBorder
+  constants.WIDGET_TEXT_COLOR = T.text
+  constants.WIDGET_SECONDARY_TEXT_COLOR = T.text3
+
+  Object.assign(LGraphCanvas.link_type_colors, SOCKET_COLORS)
+
+  installCanvasRenderer()
+  installCanvasWidgets()
+  installCanvasMenuRouting()
+}
+
+/**
+ * Per-canvas settings and the grid background. Safe to call more than once;
+ * every value is assigned, none accumulated.
+ */
+function themeCanvas(canvasInstance: LGraphCanvas): void {
+  canvasInstance.title_text_font = `600 12px ${T.font}`
+  canvasInstance.inner_text_font = `400 11.5px ${T.font}`
+  canvasInstance.node_title_color = T.text
+  canvasInstance.default_link_color = '#8a8d8f'
+  canvasInstance.render_shadows = true
+  canvasInstance.render_canvas_border = false
+  canvasInstance.render_connections_border = true
+  canvasInstance.render_connection_arrows = false
+  canvasInstance.render_curved_connections = true
+  canvasInstance.connections_width = 2
+  canvasInstance.round_radius = T.radius
+  canvasInstance.render_title_colored = true
+  // In 0.7.x this flag only controls the arrow/centre dot drawn on each link.
+  // Off = clean wires; clicking the middle of a link still opens its menu.
+  canvasInstance.highquality_render = false
+  canvasInstance.show_info = false // hides the "T: / I: / N:" debug text
+  canvasInstance.links_render_mode = LiteGraph.SPLINE_LINK
 
   const canvasMembers = canvasInstance as unknown as UndeclaredCanvasMembers
-  canvasMembers.clear_background_color = background
-  canvasInstance.render_shadows = false
-  canvasInstance.render_canvas_border = false
-  canvasInstance.round_radius = 5
-  canvasInstance.connections_width = 2
-  canvasInstance.links_render_mode = LiteGraph.SPLINE_LINK
-  canvasInstance.default_link_color = textSecondary
-  LiteGraph.LINK_COLOR = textSecondary
-  LiteGraph.CONNECTING_LINK_COLOR = accent
-
-  const colours = portColours(theme, portTypes)
-  canvasMembers.default_connection_color_byType = { ...colours }
-  canvasMembers.default_connection_color_byTypeOff = Object.fromEntries(
-    Object.entries(colours).map(([type, value]) => [type, dim(value, background)]),
-  )
+  canvasMembers.clear_background_color = T.wsBg
+  // Off, or litegraph tiles its own grid image under the one drawn below.
+  canvasMembers.background_image = null
+  canvasMembers.default_connection_color_byType = { ...SOCKET_COLORS }
+  canvasMembers.default_connection_color_byTypeOff = { ...SOCKET_COLORS }
   canvasInstance.default_connection_color = {
-    input_off: border,
-    input_on: accent,
-    output_off: border,
-    output_on: accent,
-  }
-  for (const [type, value] of Object.entries(colours)) {
-    LGraphCanvas.link_type_colors[type] = value
+    input_off: T.nodeBorder,
+    input_on: T.accent,
+    output_off: T.nodeBorder,
+    output_on: T.accent,
   }
 
-  canvasInstance.setDirty(true, true)
+  // Grid: 20px minor, 100px major, following pan/zoom. Replaces litegraph's
+  // own background image, which this theme does not set.
+  canvasInstance.onDrawBackground = function (this: LGraphCanvas, ctx, visibleArea) {
+    const [x0, y0, w, h] = visibleArea
+    const scale = this.ds.scale
+    const draw = (step: number, color: string): void => {
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1 / scale
+      ctx.beginPath()
+      for (let x = Math.floor(x0 / step) * step; x < x0 + w; x += step) {
+        ctx.moveTo(x, y0)
+        ctx.lineTo(x, y0 + h)
+      }
+      for (let y = Math.floor(y0 / step) * step; y < y0 + h; y += step) {
+        ctx.moveTo(x0, y)
+        ctx.lineTo(x0 + w, y)
+      }
+      ctx.stroke()
+    }
+    if (scale > 0.45) draw(20, T.gridMinor)
+    draw(100, T.gridMajor)
+  }
 }
 
 /**
@@ -212,7 +159,7 @@ export function applyGraphTheme(
  * The wheel handler goes with it for two reasons: the same conversion, and
  * because upstream anchors the zoom at the event's raw viewport coordinates,
  * which are the canvas's own only when the canvas starts at the top-left
- * corner of the page. This one has a header above it and a palette beside it.
+ * corner of the page. This one has a toolbar above it.
  */
 function installPointerCorrections(
   canvasInstance: LGraphCanvas,
@@ -278,15 +225,15 @@ export function createGraphCanvas(element: HTMLCanvasElement): {
   graph: LGraph
   canvas: LGraphCanvas
 } {
+  installHazorLook()
+
   const graph = new LGraph()
   const canvasInstance = new LGraphCanvas(element, graph)
+  themeCanvas(canvasInstance)
 
   canvasInstance.allow_dragcanvas = true
   canvasInstance.allow_dragnodes = true
-  // The search box adds its own node browser, built around the demo library's
-  // naming. The palette and the context menu are the two ways in here.
-  canvasInstance.allow_searchbox = false
-  canvasInstance.highquality_render = true
+  canvasInstance.allow_searchbox = true
 
   // The corrections replace two methods, and the constructor has already
   // registered a *bound* reference to the original wheel handler
@@ -339,6 +286,8 @@ export function releaseGraphCanvas(canvasInstance: LGraphCanvas, graph: LGraph):
   // litegraph listens on the document as well as on the canvas, so dropping
   // the element is not enough to stop it receiving events.
   canvasInstance.unbindEvents()
+  // The constructor started a requestAnimationFrame loop; it outlives the element.
+  canvasInstance.stopRendering()
   // Never started — there is no inference in the browser — but stopping an
   // execution loop that was never running is free, and this is the method that
   // would have to be called if one ever were.

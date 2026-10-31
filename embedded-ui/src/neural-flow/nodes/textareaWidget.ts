@@ -24,6 +24,7 @@ interface TextareaEntry {
   node: LGraphNode
   wrapper: HTMLDivElement
   textarea: HTMLTextAreaElement
+  count: HTMLSpanElement
   frame: number
 }
 
@@ -48,6 +49,8 @@ const TEXTAREA_HEIGHT = 122
 
 /** LiteGraph uses the same inset for its built-in widgets. */
 const WIDGET_MARGIN = 15
+
+const countLabel = (value: string): string => `${value.length} chars`
 
 class TextareaOverlayManager {
   private readonly entries = new Map<TextareaWidget, TextareaEntry>()
@@ -93,6 +96,7 @@ class TextareaOverlayManager {
     // input event. Do not move the caret while the person is actively typing.
     if (document.activeElement !== entry.textarea && entry.textarea.value !== widget.value) {
       entry.textarea.value = widget.value
+      entry.count.textContent = countLabel(widget.value)
     }
   }
 
@@ -124,22 +128,31 @@ class TextareaOverlayManager {
     const wrapper = document.createElement('div')
     wrapper.className = 'hazor-node-textarea'
 
-    const label = document.createElement('label')
-    label.className = 'hazor-node-textarea__label'
-    label.textContent = widget.options?.label ?? widget.name ?? ''
+    const name = widget.options?.label ?? widget.name ?? ''
 
     const textarea = document.createElement('textarea')
     textarea.className = 'hazor-node-textarea__input'
     textarea.value = widget.value
-    textarea.setAttribute('aria-label', label.textContent)
+    textarea.setAttribute('aria-label', name)
     textarea.wrap = 'soft'
     textarea.spellcheck = true
 
-    wrapper.append(label, textarea)
+    // Footer: the label the canvas widgets put on the left, and how long the
+    // prompt is on the right — a prompt is the one value worth measuring.
+    const foot = document.createElement('div')
+    foot.className = 'hazor-node-textarea__foot'
+    const label = document.createElement('span')
+    label.textContent = name
+    const count = document.createElement('span')
+    count.textContent = countLabel(widget.value)
+    foot.append(label, count)
+
+    wrapper.append(textarea, foot)
     this.host.append(wrapper)
 
     textarea.addEventListener('input', () => {
       widget.value = textarea.value
+      count.textContent = countLabel(textarea.value)
       node.setProperty(widget.options?.property ?? '', textarea.value)
       node.graph?.change()
       node.setDirtyCanvas(true, false)
@@ -165,7 +178,7 @@ class TextareaOverlayManager {
       wrapper.addEventListener(type, stopPropagation)
     }
 
-    const entry = { node, wrapper, textarea, frame: this.frame }
+    const entry = { node, wrapper, textarea, count, frame: this.frame }
     this.entries.set(widget, entry)
     return entry
   }

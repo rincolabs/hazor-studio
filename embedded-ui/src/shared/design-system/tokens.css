@@ -1,48 +1,145 @@
 /*
- * Design tokens for Hazor's embedded interfaces.
+ * Hazor's shared web design system — tokens and base rules for every Qt
+ * WebEngine panel under embedded-ui/ (AI Center, Neural Flow, and any panel
+ * added later). The AI Center block below was ported verbatim from the
+ * approved design (tmp/webengine-ai-center/hazor-ai-center/screens/hazor-ai.css);
+ * the Neural Flow block adds what the node editor's redesign needs on top of
+ * it (tmp/neural-flow-ui/src/styles/tokens.css).
  *
- * The colours are placeholders. Every one of them is overwritten at runtime
- * from the active Hazor theme, which arrives over the Qt WebChannel as a flat
- * map (src/theme/WebThemeVariables.cpp) and is written onto this same custom
- * property set. What is here is what the page looks like for the few
- * milliseconds before the bridge answers, and what it looks like under
- * `npm run dev` outside Hazor.
- *
- * The non-colour tokens are not themed and so are the real values.
- *
- * This is deliberately not a design system. It is the smallest set of names
- * that keeps two panels from inventing their own spacing scale.
+ * Deliberately static, not themed: this is a separate surface from Hazor's
+ * native Qt Widgets UI and canvas rendering, which follow `Theme` via
+ * `ThemeManager::instance()->current()` (see AGENTS.md). Wiring these tokens
+ * to that native Theme instead would need ~15-20 new semantic fields (well,
+ * raised, input, sel, info, status *-bg variants, plus Neural Flow's node and
+ * socket colors) added to Theme and every theme implementation — a separate,
+ * larger change this design system intentionally does not take on.
  */
 :root {
-  /* ── Themed: replaced from Hazor's Theme ──────────────────────────────── */
-  --hz-background: #1b1b1b;
-  --hz-surface: #252525;
-  --hz-surface-dark: #1e1e1e;
-  --hz-surface-hover: #2f2f2f;
-  --hz-surface-selected: #343434;
-  --hz-text: #d8d8d8;
-  --hz-text-bright: #f2f2f2;
-  --hz-text-secondary: #9a9a9a;
-  --hz-text-disabled: #6a6a6a;
-  --hz-border: #3a3a3a;
-  --hz-border-focus: #5a8dd6;
-  --hz-accent: #4f8cc9;
-  --hz-accent-hover: #5e9bd8;
-  --hz-danger: #d05a5a;
-  --hz-success: #5aa469;
-  --hz-warning: #c79a3c;
-  --hz-font-family: "Inter", "Segoe UI", system-ui, sans-serif;
-  --hz-font-family-mono: "JetBrains Mono", "Consolas", monospace;
-  --hz-font-size: 13px;
-  --hz-radius: 4px;
+  /* Native form popups (a <select> list, a date picker, the scrollbars) are
+     painted by the engine, not by this stylesheet. Without this they come up in
+     Chromium's light palette — black text on white, unreadable against the rest
+     of the UI, and not reachable by any CSS rule we could write. */
+  color-scheme: dark;
 
-  /* ── Fixed ────────────────────────────────────────────────────────────── */
-  --hz-font-size-sm: 11px;
-  --hz-font-size-lg: 15px;
-  --hz-space-1: 4px;
-  --hz-space-2: 8px;
-  --hz-space-3: 12px;
-  --hz-space-4: 16px;
-  --hz-radius-sm: 3px;
-  --hz-control-height: 24px;
+  --bg-0: #1f2122;
+  --bg-1: #252728;
+  --bg-2: #2d2f30;
+  --bg-3: #323435;
+  --bg-4: #37393a;
+  --surface: #444647;
+  --well: #3e4041;
+  --raised: #4c4e4f;
+  --hover: #56585a;
+  --input: #353738;
+  --line: #5b5d5e;
+  --line-soft: #37393a;
+  --text: #ffffff;
+  --text-2: #d3d3d3;
+  --text-3: #b6b8b9;
+  --text-disabled: #8c8e8f;
+  --accent: #2f6fd0;
+  --accent-h: #3b7ce0;
+  --accent-t: #8db8f5;
+  --sel: #33507c;
+  --ok: #8fe0a8;
+  --ok-bg: #2c4a37;
+  --warn: #f3cc7a;
+  --warn-bg: #4d4128;
+  --err: #ffa49a;
+  --err-bg: #563334;
+  --info: #a9c8f7;
+  --info-bg: #2c3f5c;
+  --mono: ui-monospace, 'Cascadia Mono', Consolas, 'SF Mono', monospace;
+  /* No remote font download (embedded-ui has no network access): Inter is
+     used where the OS provides it and falls back cleanly otherwise. */
+  --font: Inter, 'Segoe UI', system-ui, sans-serif;
+  --fs: 12px;
+  --fs-sm: 11px;
+  --r-field: 2px;
+  --r-card: 4px;
+  --control-h: 26px;
+
+  /* ---- Neural Flow: chrome ---- */
+  --toolbar-h: 40px;
+  --menu-item-h: 24px;
+  --shadow-pop: 0 10px 28px rgba(0, 0, 0, .5), 0 0 0 1px rgba(0, 0, 0, .35);
+
+  /* ---- Neural Flow: workspace ---- */
+  --ws-bg: #232526;
+  --ws-grid-minor: rgba(255, 255, 255, .035);
+  --ws-grid-major: rgba(255, 255, 255, .07);
+
+  /* ---- Neural Flow: node box ---- */
+  --node-bg: #3e4041;
+  --node-head: #37393a;
+  --node-border: #2a2c2d;
+  --node-border-hover: #6a6c6d;
+  --node-border-sel: var(--accent);
+  --node-radius: 5px;
+  --node-row-h: 22px;
+  --node-pad-x: 10px;
+  --node-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+  --widget-bg: #303233;
+  --widget-bg-hover: #36383a;
+  --widget-border: #4a4c4d;
+  --widget-border-hover: #5f6162;
+
+  /* ---- Neural Flow: socket / connection types ---- */
+  --sock-model: #6ea2ff;
+  --sock-conditioning: #7fd18b;
+  --sock-sampling: #f0b45a;
+  --sock-lora: #b48cf2;
+  --sock-image: #e6e7e8;
+  --sock-mask: #9a9ea1;
+
+  /* ---- Neural Flow: node categories (icon color + header tint) ---- */
+  --cat-models: #6ea2ff;       --cat-models-tint: #2e3d55;
+  --cat-conditioning: #7fd18b; --cat-conditioning-tint: #2d4433;
+  --cat-sampling: #f0b45a;     --cat-sampling-tint: #4a3d27;
+  --cat-input: #5fc9c4;        --cat-input-tint: #274443;
+  --cat-generation: #e08fc0;   --cat-generation-tint: #46303f;
+  --cat-output: #d3d3d3;       --cat-output-tint: #47494b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-1);
+}
+
+body {
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent-t);
+  text-decoration: none;
+}
+a:hover {
+  color: #b5d0f8;
+  text-decoration: underline;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-0);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
 }

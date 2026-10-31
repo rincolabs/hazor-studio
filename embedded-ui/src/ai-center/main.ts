@@ -1,5 +1,5 @@
-import './design-system/tokens.css'
-import './design-system/components.css'
+import '@shared/design-system/tokens.css'
+import '@shared/design-system/components.css'
 
 import { createApp } from 'vue'
 

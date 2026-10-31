@@ -18,6 +18,7 @@
  */
 import type { IWidget } from 'litegraph.js'
 
+import { createSeedWidget } from '../graph/canvasWidgets'
 import type { LGraphNode } from '../graph/litegraph'
 import type { PropertySpec } from '../services/contract'
 import { modelIdsFor } from './modelStore'
@@ -191,12 +192,7 @@ export function addPropertyWidget(node: LGraphNode, spec: PropertySpec): void {
     case 'seed':
       // No upper bound: the catalog leaves one off because the backend only
       // has to parse the integer, and a clamp here would cap a legal seed.
-      node.addWidget<IWidget>('number', spec.label, value, undefined, {
-        property: spec.key,
-        min: spec.minimum,
-        step: STEP_SCALE,
-        precision: 0,
-      })
+      node.addCustomWidget(createSeedWidget(Number(value), spec.key))
       break
     case 'enum':
       node.addWidget<IWidget>('combo', spec.label, value, undefined, {

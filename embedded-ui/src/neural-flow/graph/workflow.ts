@@ -9,6 +9,7 @@
  */
 import type { LGraph, LGraphNode } from './litegraph'
 import { LiteGraph, graphNodes } from './litegraph'
+import { isHazorVisualNode, setNodeState } from './nodeVisualState'
 import { MIN_NODE_WIDTH, toWireValue } from '../nodes/propertyWidgets'
 import {
   type HazorNode,
@@ -16,6 +17,7 @@ import {
   inputSlotPorts,
 } from '../nodes/registerNodes'
 import type {
+  GenerationState,
   NodeCatalog,
   NodeDefinition,
   WorkflowConnection,
@@ -212,32 +214,69 @@ export function buildStartingGraph(
 }
 
 /**
- * Marks the nodes a validation failure named.
- *
- * The status box in the title bar is recoloured rather than the node body:
- * litegraph's own `has_errors` paints the whole node a hardcoded red, which
- * would both shout and ignore the theme. `colour` comes from the theme, like
- * every other colour in Hazor.
+ * Marks the nodes a validation failure named: the error border and footer
+ * message `graph/canvasRenderer.ts` draws for `node.hz.state === 'error'`.
  */
 export function highlightErrorNodes(
   graph: LGraph,
-  errors: ReadonlyArray<{ nodeId: string }>,
-  colour: string,
+  errors: ReadonlyArray<{ nodeId: string; message: string }>,
 ): void {
   for (const error of errors) {
     if (!error.nodeId) {
       continue
     }
     const node = nodeForDocumentId(graph, error.nodeId)
-    if (node) {
-      node.boxcolor = colour
+    if (node && isHazorVisualNode(node)) {
+      setNodeState(node, 'error', { error: error.message })
     }
   }
 }
 
-/** Clears those marks. Also the way a theme change drops a stale colour. */
+/** Clears those marks, back to the default border. */
 export function clearErrorHighlights(graph: LGraph): void {
   for (const node of graphNodes(graph)) {
-    node.boxcolor = LiteGraph.NODE_DEFAULT_BOXCOLOR
+    if (isHazorVisualNode(node)) {
+      setNodeState(node, 'default')
+    }
+  }
+}
+
+/**
+ * Which node a run lights up. The backend reports progress for the run, not
+ * per node, so the editor maps its two working states onto the node that does
+ * the work in each: the checkpoint while the model loads, Generate while it
+ * samples. Presentation only — nothing here is part of the contract.
+ */
+const RUNNING_NODE_TYPE: Partial<Record<GenerationState, string>> = {
+  loading: 'checkpoint',
+  generating: 'generate',
+}
+
+/**
+ * Reflects the run onto the graph: the header badge and progress bar
+ * `graph/canvasRenderer.ts` draws for `running`, and the flowing links it
+ * keeps alive by stamping each incoming link while that state holds.
+ */
+export function showRunState(
+  graph: LGraph,
+  state: GenerationState,
+  progress: { step: number; steps: number } | null,
+): void {
+  const runningType = RUNNING_NODE_TYPE[state]
+  const counted = progress !== null && progress.steps > 0
+  const fraction = counted ? progress.step / progress.steps : 0
+  // Loading reports no progress at all, so the badge says "working", not "0%".
+  const label = counted ? `${progress.step}/${progress.steps}` : '…'
+
+  for (const node of graphNodes(graph)) {
+    // An error is the more important thing to say, and it outlives the run.
+    if (!isHazorVisualNode(node) || node.hz.state === 'error') {
+      continue
+    }
+    if (runningType && (node as HazorNode).hazorType === runningType) {
+      setNodeState(node, 'running', { progress: fraction, label })
+    } else if (node.hz.state === 'running') {
+      setNodeState(node, 'default')
+    }
   }
 }
