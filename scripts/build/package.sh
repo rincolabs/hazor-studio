@@ -269,6 +269,36 @@ write_runtime_notices() {
     fi
 }
 
+# linuxdeploy-plugin-qt's webenginecore deployer copies a hardcoded list of
+# files out of Qt's resources/ directory — the .pak bundles and icudtl.dat —
+# and v8_context_snapshot.bin is not on it. Qt WebEngine cannot start without
+# the snapshot: Chromium aborts in v8_initializer.cc with "Error loading V8
+# startup snapshot file" and the zygote host follows it down, before any window
+# appears. The embedded web panels are not optional in this build, so that
+# failure is the whole editor failing to start, and it only ever shows up in
+# the package — a local build reads the file straight out of the Qt prefix.
+#
+# Everything the Qt prefix holds and the AppDir does not gets copied, not just
+# the one file that is known to be fatal today, so a Qt update that adds
+# another resource does not bring the same class of failure back.
+stage_webengine_resources() {
+    local appdir="$1"
+    require_dir "$QT_TARGET_DIR/resources" "Qt WebEngine resources"
+    local resource name count=0
+    mkdir -p "$appdir/usr/resources"
+    while IFS= read -r -d '' resource; do
+        name="$(basename "$resource")"
+        [[ -e "$appdir/usr/resources/$name" ]] && continue
+        # -L: the prefix is reached through symlinks, so the package has to
+        # receive the bytes and not a link into this machine's 3rdparty.
+        cp -aL "$resource" "$appdir/usr/resources/"
+        count=$((count + 1))
+    done < <(find "$QT_TARGET_DIR/resources" -maxdepth 1 -type f -print0)
+    require_file "$appdir/usr/resources/v8_context_snapshot.bin" \
+        "Qt WebEngine V8 startup snapshot"
+    log "AppImage: completed Qt WebEngine resources ($count file(s) linuxdeploy does not deploy)"
+}
+
 package_appimage() {
     [[ "$TARGET" == "linux-x86_64" ]] || die "AppImage packaging is available only for linux-x86_64"
     require_command patchelf
@@ -315,6 +345,7 @@ package_appimage() {
     find "$appdir/usr/lib" -maxdepth 1 -name 'libQt6DBus.so*' -print -quit | grep -q . \
         || die "libQt6DBus was not bundled for the xdgdesktopportal plugin"
 
+    stage_webengine_resources "$appdir"
     stage_stable_diffusion_appimage "$appdir"
     # After the last hook is written, never before it.
     finalise_apprun_hooks "$appdir"
