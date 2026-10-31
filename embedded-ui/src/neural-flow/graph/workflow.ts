@@ -10,7 +10,7 @@
 import type { LGraph, LGraphNode } from './litegraph'
 import { LiteGraph, graphNodes } from './litegraph'
 import { isHazorVisualNode, setNodeState } from './nodeVisualState'
-import { MIN_NODE_WIDTH, toWireValue } from '../nodes/propertyWidgets'
+import { toWireValue } from '../nodes/propertyWidgets'
 import {
   type HazorNode,
   createNode,
@@ -117,22 +117,46 @@ export function toWorkflowDocument(graph: LGraph, catalog: NodeCatalog): Workflo
 }
 
 /**
- * The nodes of the starting graph and how they are wired.
- *
- * The one place the editor names specific node types, because a starting graph
- * is a choice about which nodes to place rather than something derivable from
- * the catalog. The source of each connection is its node's only output, so
- * only the destination port is named; the backend checks all of it anyway and
- * reports the port by name if any of this ever stops matching.
+ * The starting graph: ComfyUI's canonical text-to-image chain, with Hazor's
+ * canvas output in place of Save Image. `key` exists because two of the nodes
+ * are the same type, and `output` because the loaders have three outputs.
  */
-const STARTING_NODES = ['checkpoint', 'prompt', 'negative_prompt', 'sampling'] as const
-const STARTING_WIRING: ReadonlyArray<{ from: string; to: string; input: string }> = [
-  { from: 'checkpoint', to: 'generate', input: 'model' },
-  { from: 'prompt', to: 'generate', input: 'positive' },
-  { from: 'negative_prompt', to: 'generate', input: 'negative' },
-  { from: 'sampling', to: 'generate', input: 'sampling' },
-  { from: 'generate', to: 'image_output', input: 'image' },
+interface StartingNode {
+  key: string
+  type: string
+  column: number
+}
+const STARTING_NODES: readonly StartingNode[] = [
+  { key: 'checkpoint', type: 'checkpoint', column: 0 },
+  { key: 'positive', type: 'clip_text_encode', column: 1 },
+  { key: 'negative', type: 'clip_text_encode', column: 1 },
+  { key: 'latent', type: 'empty_latent_image', column: 1 },
+  { key: 'sampler', type: 'ksampler', column: 2 },
+  { key: 'decode', type: 'vae_decode', column: 3 },
+  { key: 'output', type: 'image_output', column: 4 },
 ]
+const STARTING_WIRING: ReadonlyArray<{
+  from: string
+  output: string
+  to: string
+  input: string
+}> = [
+  { from: 'checkpoint', output: 'clip', to: 'positive', input: 'clip' },
+  { from: 'checkpoint', output: 'clip', to: 'negative', input: 'clip' },
+  { from: 'checkpoint', output: 'model', to: 'sampler', input: 'model' },
+  { from: 'positive', output: 'conditioning', to: 'sampler', input: 'positive' },
+  { from: 'negative', output: 'conditioning', to: 'sampler', input: 'negative' },
+  { from: 'latent', output: 'latent', to: 'sampler', input: 'latent' },
+  { from: 'sampler', output: 'latent', to: 'decode', input: 'samples' },
+  { from: 'checkpoint', output: 'vae', to: 'decode', input: 'vae' },
+  { from: 'decode', output: 'image', to: 'output', input: 'image' },
+]
+
+/** The text each of the two encode nodes starts with, so their roles read. */
+const STARTING_TEXT: Record<string, string> = {
+  positive: '',
+  negative: 'text, watermark',
+}
 
 interface PlacedNode {
   node: LGraphNode
@@ -140,8 +164,7 @@ interface PlacedNode {
 }
 
 /**
- * Lays out a minimal txt2img graph: the configuration nodes in a column,
- * feeding one Generate node, feeding the canvas output.
+ * Lays out the starting graph column by column and wires it up.
  *
  * `defaultModelId` is the registry's default and may be empty — with no model
  * registered the graph is still built and still editable, and Run reports the
@@ -156,41 +179,28 @@ export function buildStartingGraph(
 
   const definitions = new Map(catalog.nodes.map((definition) => [definition.type, definition]))
   const placed = new Map<string, PlacedNode>()
+  const columnX: number[] = []
+  const columnY: number[] = []
 
-  const place = (type: string, x: number, y: number): PlacedNode | null => {
-    const definition = definitions.get(type)
+  for (const entry of STARTING_NODES) {
+    const definition = definitions.get(entry.type)
     if (!definition) {
-      return null
+      continue
     }
     const node = createNode(graph, definition)
     if (!node) {
-      return null
-    }
-    node.pos = [x, y]
-    const entry = { node, definition }
-    placed.set(type, entry)
-    return entry
-  }
-
-  let y = ORIGIN[1]
-  let columnWidth = MIN_NODE_WIDTH
-  for (const type of STARTING_NODES) {
-    const entry = place(type, ORIGIN[0], y)
-    if (!entry) {
       continue
     }
-    columnWidth = Math.max(columnWidth, entry.node.size[0])
-    // `pos` is the top-left of the body; the title sits above it.
-    y += entry.node.size[1] + LiteGraph.NODE_TITLE_HEIGHT + ROW_GAP
-  }
-
-  const generate = place('generate', ORIGIN[0] + columnWidth + COLUMN_GAP, ORIGIN[1] + 60)
-  if (generate) {
-    place(
-      'image_output',
-      generate.node.pos[0] + generate.node.size[0] + COLUMN_GAP,
-      ORIGIN[1] + 60,
-    )
+    const x = columnX[entry.column] ?? ORIGIN[0]
+    const y = columnY[entry.column] ?? ORIGIN[1]
+    node.pos = [x, y]
+    columnY[entry.column] = y + node.size[1] + LiteGraph.NODE_TITLE_HEIGHT + ROW_GAP
+    // Every later column starts to the right of the widest node so far.
+    const right = x + node.size[0] + COLUMN_GAP
+    for (let next = entry.column + 1; next < STARTING_NODES.length; next += 1) {
+      columnX[next] = Math.max(columnX[next] ?? ORIGIN[0], right)
+    }
+    placed.set(entry.key, { node, definition })
   }
 
   for (const wire of STARTING_WIRING) {
@@ -199,11 +209,18 @@ export function buildStartingGraph(
     if (!from || !to) {
       continue
     }
+    const outputSlot = from.definition.outputs.findIndex((port) => port.id === wire.output)
     const inputSlot = inputSlotForPort(to.node, wire.input)
-    if (inputSlot < 0 || from.definition.outputs.length === 0) {
+    if (outputSlot < 0 || inputSlot < 0) {
       continue
     }
-    from.node.connect(0, to.node, inputSlot)
+    from.node.connect(outputSlot, to.node, inputSlot)
+  }
+
+  for (const [key, text] of Object.entries(STARTING_TEXT)) {
+    if (text) {
+      placed.get(key)?.node.setProperty('text', text)
+    }
   }
 
   // Name the registry's default outright when there is one, so the starting
@@ -250,7 +267,7 @@ export function clearErrorHighlights(graph: LGraph): void {
  */
 const RUNNING_NODE_TYPE: Partial<Record<GenerationState, string>> = {
   loading: 'checkpoint',
-  generating: 'generate',
+  generating: 'ksampler',
 }
 
 /**

@@ -33,20 +33,24 @@ const NODE_TYPE_PREFIX = 'hazor'
  * from the port id rather than restating anything the backend validates.
  */
 const OPTIONAL_GROUP_LABELS: Record<string, string> = {
-  lora: 'LoRA',
-  init_image: 'Image-to-image',
-  mask: 'Image-to-image',
+  engine: 'Engine',
+  clip: 'CLIP',
+  vae: 'VAE',
   references: 'Reference images',
   control: 'ControlNet',
   ip_adapter: 'IP-Adapter',
   photo_maker: 'PhotoMaker',
   pulid: 'PuLID',
+  hires: 'Hi-Res Fix',
 }
 
 /** Which property (if any) a category's nodes show under their title. */
 const SUBTITLE_PROPERTY: Record<string, string> = {
   checkpoint: 'modelId',
+  diffusion_model_loader: 'modelId',
+  vae_loader: 'modelId',
   lora: 'modelId',
+  hires_fix: 'upscaler',
   controlnet_loader: 'modelId',
   ip_adapter_loader: 'modelId',
   photo_maker: 'modelId',

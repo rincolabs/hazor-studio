@@ -15,13 +15,15 @@
 //
 // The important rule it implements is that a graph like
 //
-//     Checkpoint ── LoRA ── LoRA ─┐
-//     Prompt ──────────────────────┤
-//     Sampling ────────────────────┼── Generate ── Image Output
+//     Checkpoint ─ model ─ LoRA ──────────┐
+//              └─ clip ─ CLIP Text Encode ┼─ KSampler ─ latent ─┐
+//     Empty Latent Image ─────────────────┘                     ├─ VAE Decode ─ Output
+//     Checkpoint ─ vae ───────────────────────────────────────── ┘
 //
-// produces one generation request at Generate. Configuration nodes transform
-// values without inference; additional Generate nodes are executed in
-// topological order and may consume or branch images produced earlier.
+// produces exactly one generation request, assembled along the chain and run
+// at the decode, because stable-diffusion.cpp encodes, samples and decodes in
+// one call. Further decodes run in topological order and may consume images
+// produced earlier.
 //
 // It knows nothing about ONNX Runtime, Real-ESRGAN, brushes or adjustments, and
 // reaches the document only through SdCanvasBridge.
@@ -29,6 +31,9 @@ namespace sdlocal {
 
 class SdCanvasBridge;
 struct SdWorkflowExecutionState;
+// One node's output, shaped like the wire it travels on. Defined in the
+// implementation: nothing outside it needs the fields.
+struct NodeValue;
 
 struct SdWorkflowRunResult {
     SdGenerationResult generation;
@@ -79,9 +84,13 @@ private:
     enum class AdvanceResult { Started, Completed, Failed };
 
     AdvanceResult advance(QVector<SdWorkflowError>& errors);
-    bool buildRequest(const SdWorkflowNode& generate,
-                      SdGenerationRequest& request,
-                      QVector<SdWorkflowError>& errors);
+    // Describes the pipeline without running it: the latent a KSampler hands
+    // on carries the whole request, and the decode is what asks for it.
+    bool buildSampledLatent(const SdWorkflowNode& sampler, NodeValue& out,
+                            QVector<SdWorkflowError>& errors);
+    bool buildDecodeRequest(const SdWorkflowNode& decode,
+                            SdGenerationRequest& request,
+                            QVector<SdWorkflowError>& errors);
     bool buildCannyRequest(const SdWorkflowNode& node, SdGenerationRequest& request,
                            QVector<SdWorkflowError>& errors);
     bool buildUpscaleRequest(const SdWorkflowNode& node, SdGenerationRequest& request,
@@ -89,7 +98,7 @@ private:
     bool buildADetailerRequest(const SdWorkflowNode& node, SdGenerationRequest& request,
                                QVector<SdWorkflowError>& errors);
     // Starts the job for an already-built request and records `nodeId` as the
-    // operation in flight. Shared by Generate, Canny, Upscale and ADetailer:
+    // operation in flight. Shared by VAE Decode, Canny, Upscale and ADetailer:
     // everything past "here is a request" is the same for every operation node.
     AdvanceResult startOperation(const QString& nodeId, const SdGenerationRequest& request,
                                  QVector<SdWorkflowError>& errors);

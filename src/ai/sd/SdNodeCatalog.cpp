@@ -199,10 +199,10 @@ QString nodeCategoryName(SdNodeCategory category)
     switch (category) {
     case SdNodeCategory::Models:       return QStringLiteral("models");
     case SdNodeCategory::Conditioning: return QStringLiteral("conditioning");
+    case SdNodeCategory::Latent:       return QStringLiteral("latent");
     case SdNodeCategory::Sampling:     return QStringLiteral("sampling");
     case SdNodeCategory::Input:        return QStringLiteral("input");
     case SdNodeCategory::Processing:   return QStringLiteral("processing");
-    case SdNodeCategory::Generation:   return QStringLiteral("generation");
     case SdNodeCategory::Output:       return QStringLiteral("output");
     }
     return QStringLiteral("models");
@@ -213,10 +213,10 @@ QString nodeCategoryLabel(SdNodeCategory category)
     switch (category) {
     case SdNodeCategory::Models:       return tr_("Models");
     case SdNodeCategory::Conditioning: return tr_("Conditioning");
+    case SdNodeCategory::Latent:       return tr_("Latent");
     case SdNodeCategory::Sampling:     return tr_("Sampling");
     case SdNodeCategory::Input:        return tr_("Input");
     case SdNodeCategory::Processing:   return tr_("Processing");
-    case SdNodeCategory::Generation:   return tr_("Generation");
     case SdNodeCategory::Output:       return tr_("Output");
     }
     return tr_("Models");
@@ -226,54 +226,76 @@ SdNodeCategory nodeCategory(SdNodeType type)
 {
     switch (type) {
     case SdNodeType::Checkpoint:
-    case SdNodeType::Lora:
+    case SdNodeType::DiffusionModelLoader:
+    case SdNodeType::TextEncoderLoader:
+    case SdNodeType::VaeLoader:
+    case SdNodeType::EngineOptions:
     case SdNodeType::ControlNetLoader:
-    case SdNodeType::IpAdapterLoader: return SdNodeCategory::Models;
+    case SdNodeType::IpAdapterLoader:
+    case SdNodeType::Lora:
+    case SdNodeType::ModelSampling:
+    case SdNodeType::SkipLayerGuidance:
+    case SdNodeType::ClipSetLastLayer: return SdNodeCategory::Models;
+    case SdNodeType::ClipTextEncode:
+    case SdNodeType::ReferenceImages:
     case SdNodeType::ControlNetApply:
     case SdNodeType::IpAdapterApply:
     case SdNodeType::PhotoMaker:
-    case SdNodeType::PuLid:
-    case SdNodeType::Prompt:
-    case SdNodeType::NegativePrompt: return SdNodeCategory::Conditioning;
-    case SdNodeType::Sampling:       return SdNodeCategory::Sampling;
+    case SdNodeType::PuLid:            return SdNodeCategory::Conditioning;
+    case SdNodeType::EmptyLatentImage:
+    case SdNodeType::VaeEncode:
+    case SdNodeType::VaeEncodeInpaint:
+    case SdNodeType::VaeDecode:        return SdNodeCategory::Latent;
+    case SdNodeType::KSampler:
+    case SdNodeType::HiresFix:         return SdNodeCategory::Sampling;
     case SdNodeType::InputImage:
-    case SdNodeType::InputMask:      return SdNodeCategory::Input;
+    case SdNodeType::InputMask:        return SdNodeCategory::Input;
     case SdNodeType::Canny:
     case SdNodeType::Upscale:
-    case SdNodeType::ADetailer:      return SdNodeCategory::Processing;
-    case SdNodeType::Generate:       return SdNodeCategory::Generation;
-    case SdNodeType::ImageOutput:    return SdNodeCategory::Output;
+    case SdNodeType::ADetailer:        return SdNodeCategory::Processing;
+    case SdNodeType::ImageOutput:      return SdNodeCategory::Output;
     }
     return SdNodeCategory::Models;
 }
 
 QVector<SdNodeCategory> allNodeCategories()
 {
-    return { SdNodeCategory::Models, SdNodeCategory::Conditioning, SdNodeCategory::Sampling,
-             SdNodeCategory::Input, SdNodeCategory::Processing,
-             SdNodeCategory::Generation, SdNodeCategory::Output };
+    return { SdNodeCategory::Models, SdNodeCategory::Conditioning, SdNodeCategory::Latent,
+             SdNodeCategory::Sampling, SdNodeCategory::Input, SdNodeCategory::Processing,
+             SdNodeCategory::Output };
 }
 
 QString nodeTypeLabel(SdNodeType type)
 {
     switch (type) {
     case SdNodeType::Checkpoint:     return tr_("Load Checkpoint");
-    case SdNodeType::Lora:           return tr_("Load LoRA");
+    case SdNodeType::DiffusionModelLoader: return tr_("Load Diffusion Model");
+    case SdNodeType::TextEncoderLoader: return tr_("Load Text Encoders");
+    case SdNodeType::VaeLoader:      return tr_("Load VAE");
+    case SdNodeType::EngineOptions:  return tr_("Engine Options");
     case SdNodeType::ControlNetLoader:return tr_("Load ControlNet");
-    case SdNodeType::ControlNetApply:return tr_("Apply ControlNet");
     case SdNodeType::IpAdapterLoader:return tr_("Load IP-Adapter");
-    case SdNodeType::IpAdapterApply:return tr_("Apply IP-Adapter");
+    case SdNodeType::Lora:           return tr_("Load LoRA");
+    case SdNodeType::ModelSampling:  return tr_("Model Sampling");
+    case SdNodeType::SkipLayerGuidance: return tr_("Skip Layer Guidance");
+    case SdNodeType::ClipSetLastLayer: return tr_("CLIP Set Last Layer");
+    case SdNodeType::ClipTextEncode: return tr_("CLIP Text Encode");
+    case SdNodeType::ReferenceImages:return tr_("Reference Images");
+    case SdNodeType::ControlNetApply:return tr_("Apply ControlNet");
+    case SdNodeType::IpAdapterApply: return tr_("Apply IP-Adapter");
     case SdNodeType::PhotoMaker:     return tr_("PhotoMaker Identity");
     case SdNodeType::PuLid:          return tr_("PuLID Identity");
-    case SdNodeType::Prompt:         return tr_("Positive Prompt");
-    case SdNodeType::NegativePrompt: return tr_("Negative Prompt");
-    case SdNodeType::Sampling:       return tr_("Sampling Parameters");
-    case SdNodeType::InputImage:     return tr_("Input Image");
-    case SdNodeType::InputMask:      return tr_("Input Mask");
+    case SdNodeType::EmptyLatentImage: return tr_("Empty Latent Image");
+    case SdNodeType::VaeEncode:      return tr_("VAE Encode");
+    case SdNodeType::VaeEncodeInpaint: return tr_("VAE Encode (Inpaint)");
+    case SdNodeType::KSampler:       return tr_("KSampler");
+    case SdNodeType::HiresFix:       return tr_("Hi-Res Fix");
+    case SdNodeType::InputImage:     return tr_("Canvas Image");
+    case SdNodeType::InputMask:      return tr_("Canvas Mask");
     case SdNodeType::Canny:          return tr_("Canny Edge");
-    case SdNodeType::Upscale:        return tr_("ESRGAN Upscale");
+    case SdNodeType::Upscale:        return tr_("Upscale Image (ESRGAN)");
     case SdNodeType::ADetailer:      return tr_("ADetailer");
-    case SdNodeType::Generate:       return tr_("Generate");
+    case SdNodeType::VaeDecode:      return tr_("VAE Decode");
     case SdNodeType::ImageOutput:    return tr_("Canvas Output");
     }
     return tr_("Node");
@@ -283,15 +305,20 @@ QVector<SdNodeType> allNodeTypes()
 {
     // Palette order: the types of one category stay together, and the order
     // inside a category is the order a graph is normally built in.
-    return { SdNodeType::Checkpoint, SdNodeType::Lora,
+    return { SdNodeType::Checkpoint, SdNodeType::DiffusionModelLoader,
+             SdNodeType::TextEncoderLoader, SdNodeType::VaeLoader,
+             SdNodeType::EngineOptions,
              SdNodeType::ControlNetLoader, SdNodeType::IpAdapterLoader,
-             SdNodeType::Prompt, SdNodeType::NegativePrompt,
+             SdNodeType::Lora, SdNodeType::ClipSetLastLayer,
+             SdNodeType::ModelSampling, SdNodeType::SkipLayerGuidance,
+             SdNodeType::ClipTextEncode, SdNodeType::ReferenceImages,
              SdNodeType::ControlNetApply, SdNodeType::IpAdapterApply,
              SdNodeType::PhotoMaker, SdNodeType::PuLid,
-             SdNodeType::Sampling,
+             SdNodeType::EmptyLatentImage, SdNodeType::VaeEncode,
+             SdNodeType::VaeEncodeInpaint, SdNodeType::VaeDecode,
+             SdNodeType::KSampler, SdNodeType::HiresFix,
              SdNodeType::InputImage, SdNodeType::InputMask,
              SdNodeType::Canny, SdNodeType::Upscale, SdNodeType::ADetailer,
-             SdNodeType::Generate,
              SdNodeType::ImageOutput };
 }
 
@@ -310,16 +337,36 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
             // "default" resolves through SdModelManager on whatever machine
             // runs the document, which is what keeps a workflow portable.
             modelRef("modelId", tr_("Model"), QStringLiteral("default"),
-                     { SdModelCategory::Checkpoint, SdModelCategory::DiffusionModel },
+                     { SdModelCategory::Checkpoint },
                      "A registered checkpoint, or \"default\" for the registry's default."),
-            modelRefList("textEncoderIds", tr_("Text encoders"),
-                         { SdModelCategory::TextEncoder },
-                         "Required only when the model is bare diffusion weights."),
-            modelRef("vaeId", tr_("VAE"), QString(), { SdModelCategory::Vae },
-                     "Leave empty to use the VAE the checkpoint embeds."),
+            // ComfyUI has no loader for these: they are named in the prompt and
+            // read by the tokenizer. Here the context loads them by name.
             modelRefList("embeddingIds", tr_("Textual inversions"),
-                         { SdModelCategory::Embedding },
-                         "Embeddings are registered by name and loaded with the context."),
+                         { SdModelCategory::Embedding }),
+        };
+    case SdNodeType::DiffusionModelLoader:
+        return {
+            modelRef("modelId", tr_("Diffusion model"), QString(),
+                     { SdModelCategory::DiffusionModel },
+                     "Bare weights: wire text encoders and a VAE of your own."),
+            modelRefList("embeddingIds", tr_("Textual inversions"),
+                         { SdModelCategory::Embedding }),
+        };
+    case SdNodeType::TextEncoderLoader:
+        return {
+            // One node for the whole set, like ComfyUI's DualCLIPLoader: the
+            // library takes one path per role and the registry infers the role.
+            modelRefList("modelIds", tr_("Text encoders"),
+                         { SdModelCategory::TextEncoder }),
+        };
+    case SdNodeType::VaeLoader:
+        return {
+            modelRef("modelId", tr_("VAE"), QString(), { SdModelCategory::Vae }),
+        };
+    case SdNodeType::EngineOptions:
+        // ComfyUI has no node for any of this — it is launch flags there. The
+        // node is optional, and its absence means the backend's own defaults.
+        return {
             enumeration("weightType", tr_("Weight type"), weightTypeName(SdWeightType::Auto),
                         weightTypeOptions(), /*allowsEmpty*/ true,
                         "f16 halves the memory an fp32 checkpoint needs."),
@@ -337,11 +384,14 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
             boolean("batchedCfg", tr_("Batched CFG"), false),
             boolean("autoFit", tr_("Auto-fit memory"), true),
             integer("conditioningCacheSize", tr_("Conditioning cache"), 4, 0, 64),
-        };
-    case SdNodeType::Lora:
-        return {
-            modelRef("modelId", tr_("LoRA"), QString(), { SdModelCategory::Lora }),
-            number("weight", tr_("Weight"), 1.0, -10.0, 10.0, 0.05),
+            enumeration("cacheMode", tr_("Step cache"), QStringLiteral("disabled"),
+                        { QStringLiteral("disabled"), QStringLiteral("easycache"),
+                          QStringLiteral("ucache"), QStringLiteral("dbcache"),
+                          QStringLiteral("taylorseer"), QStringLiteral("cache-dit"),
+                          QStringLiteral("spectrum") }, false, "", true),
+            number("cacheThreshold", tr_("Cache threshold"), 0.2, 0.0, 10.0, 0.01),
+            number("cacheStart", tr_("Cache start"), 0.0, 0.0, 1.0, 0.01),
+            number("cacheEnd", tr_("Cache end"), 1.0, 0.0, 1.0, 0.01),
         };
     case SdNodeType::ControlNetLoader:
         return {
@@ -364,6 +414,31 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
         return {
             number("strength", tr_("Strength"), 1.0, 0.0, 10.0, 0.05),
         };
+    case SdNodeType::Lora:
+        return {
+            modelRef("modelId", tr_("LoRA"), QString(), { SdModelCategory::Lora }),
+            number("weight", tr_("Weight"), 1.0, -10.0, 10.0, 0.05),
+        };
+    case SdNodeType::ClipSetLastLayer:
+        return {
+            integer("stopAtClipLayer", tr_("Stop at CLIP layer"), -1, -12, -1, 1.0,
+                    "-1 keeps every layer."),
+        };
+    case SdNodeType::ModelSampling:
+        return {
+            number("shift", tr_("Shift"), 0.0, -100.0, 100.0, 0.1,
+                   "0 keeps the model default."),
+            integer("shiftedTimestep", tr_("Shifted timestep"), 0, 0, 1000, 1.0,
+                    "0 disables the timestep shift."),
+        };
+    case SdNodeType::SkipLayerGuidance:
+        return {
+            line("layers", tr_("Layers"), QString(),
+                 "Comma-separated layer indices."),
+            number("scale", tr_("Scale"), 0.0, -100.0, 100.0, 0.1),
+            number("start", tr_("Start"), 0.01, 0.0, 1.0, 0.01),
+            number("end", tr_("End"), 0.2, 0.0, 1.0, 0.01),
+        };
     case SdNodeType::PhotoMaker:
         return {
             modelRef("modelId", tr_("PhotoMaker"), QString(),
@@ -380,16 +455,46 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
                      { SdModelCategory::IdentityEmbedding }),
             number("weight", tr_("Identity weight"), 0.8, 0.0, 5.0, 0.05),
         };
-    case SdNodeType::Prompt:
-        return { text("text", tr_("Prompt"), "What the image should contain.") };
-    case SdNodeType::NegativePrompt:
-        return { text("text", tr_("Negative prompt"), "What the image should avoid.") };
-    case SdNodeType::Sampling:
+    case SdNodeType::ClipTextEncode:
+        return {
+            text("text", tr_("Text"), "What the image should contain, or avoid."),
+            // Flux's distilled guidance rides on the positive conditioning,
+            // which is why ComfyUI puts it inside CLIPTextEncodeFlux too.
+            number("distilledGuidance", tr_("Distilled guidance"), 0.0, 0.0, 100.0, 0.1,
+                   "Flux only; 0 keeps the model default."),
+        };
+    case SdNodeType::ReferenceImages:
+        return {
+            // The library reads these only together with the images they
+            // describe, so they travel with them.
+            line("args", tr_("Arguments"), QString(),
+                 "Comma-separated key=value pairs, e.g. ref_index_mode=increase."),
+        };
+    case SdNodeType::EmptyLatentImage: {
+        // The service hands back the first image of a batch and discards the
+        // rest, so a batch above 1 would only spend minutes on unread pixels.
+        SdPropertySpec batch = integer("batchCount", tr_("Batch size"), 1, 1, 16, 1.0);
+        batch.editable = false;
+        batch.hint = tr_("This build inserts the first image of a batch only.");
         return {
             dimension("width", tr_("Width")),
             dimension("height", tr_("Height")),
-            integer("steps", tr_("Steps"), 20, 1, 1000),
+            batch,
+            boolean("circularX", tr_("Seamless X"),  false,
+                    "Wrap the convolutions horizontally, for a tileable image."),
+            boolean("circularY", tr_("Seamless Y"), false,
+                    "Wrap the convolutions vertically, for a tileable image."),
+        };
+    }
+    case SdNodeType::VaeEncode:
+    case SdNodeType::VaeEncodeInpaint:
+        // Like ComfyUI's: the pixels and the VAE are inputs, and there is
+        // nothing to configure. The denoising strength belongs to the sampler.
+        return {};
+    case SdNodeType::KSampler:
+        return {
             seed("seed", tr_("Seed")),
+            integer("steps", tr_("Steps"), 20, 1, 1000),
             number("cfgScale", tr_("CFG scale"), 7.0, 0.0, 100.0, 0.5,
                    "Above 1.0 the UNet runs twice per step."),
             // Empty is the only safe default across SD 1.x, SDXL, SD3 and Flux:
@@ -400,24 +505,52 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
             enumeration("scheduler", tr_("Scheduler"), QString(),
                         SdGenerationService::schedulerNames(), /*allowsEmpty*/ true,
                         "Empty keeps the checkpoint's own scheduler."),
-            integer("clipSkip", tr_("CLIP skip"), -1, -1, 12, 1.0,
-                    "-1 uses the model default."),
-            number("denoisingStrength", tr_("Denoising strength"), 0.75, 0.0, 1.0, 0.05,
-                   "img2img and inpainting only."),
+            number("denoisingStrength", tr_("Denoise"), 1.0, 0.0, 1.0, 0.05,
+                   "Below 1.0 keeps the structure of an encoded image."),
             number("imageCfgScale", tr_("Image CFG"), 1.0, 0.0, 100.0, 0.1),
-            number("distilledGuidance", tr_("Distilled guidance"), 0.0, 0.0, 100.0, 0.1,
-                   "0 keeps the model default."),
+            // Eta and the sigma schedule belong to the algorithm this node
+            // already selects; ComfyUI reaches them through SamplerCustom.
             number("eta", tr_("Eta"), 0.0, 0.0, 1.0, 0.01),
-            integer("shiftedTimestep", tr_("Shifted timestep"), 0, 0, 1000),
-            number("flowShift", tr_("Flow shift"), 0.0, -100.0, 100.0, 0.1,
-                   "0 keeps the model default."),
             line("customSigmas", tr_("Custom sigmas"), QString(),
                  "Comma-separated non-negative values; at least two when set."),
-            line("skipLayerGuidanceLayers", tr_("SLG layers"), QString(),
-                 "Comma-separated layer indices."),
-            number("skipLayerGuidanceStart", tr_("SLG start"), 0.01, 0.0, 1.0, 0.01),
-            number("skipLayerGuidanceEnd", tr_("SLG end"), 0.2, 0.0, 1.0, 0.01),
-            number("skipLayerGuidanceScale", tr_("SLG scale"), 0.0, -100.0, 100.0, 0.1),
+            // One rule set addressing every image of the call by target name,
+            // so no single input node can own it.
+            line("imagePreprocess", tr_("Image preprocess rules"), QString(),
+                 "Semicolon-separated target=...,key=value rules."),
+        };
+    case SdNodeType::HiresFix:
+        // In ComfyUI this is an upscale followed by a second KSampler. The
+        // library runs it inside the same call and exposes only these knobs.
+        return {
+            enumeration("upscaler", tr_("Upscaler"), QStringLiteral("Latent"),
+                        { QStringLiteral("Latent"), QStringLiteral("Latent (nearest)"),
+                          QStringLiteral("Latent (nearest-exact)"),
+                          QStringLiteral("Latent (antialiased)"),
+                          QStringLiteral("Latent (bicubic)"),
+                          QStringLiteral("Latent (bicubic antialiased)"),
+                          QStringLiteral("Lanczos"), QStringLiteral("Nearest"),
+                          QStringLiteral("Model") }, false, "", true),
+            modelRef("modelId", tr_("ESRGAN model"), QString(),
+                     { SdModelCategory::Upscaler }, "Used by the \"Model\" upscaler."),
+            number("scale", tr_("Scale"), 2.0, 0.1, 8.0, 0.1),
+            integer("targetWidth", tr_("Target width"), 0, 0, 32768, 8.0,
+                    "0 derives the size from the scale."),
+            integer("targetHeight", tr_("Target height"), 0, 0, 32768, 8.0,
+                    "0 derives the size from the scale."),
+            integer("steps", tr_("Steps"), 0, 0, 1000, 1.0,
+                    "0 reuses the first pass's step count."),
+            number("denoisingStrength", tr_("Denoise"), 0.5, 0.0001, 1.0, 0.05),
+            integer("tileSize", tr_("Upscale tile"), 0, 0, 4096, 8.0,
+                    "0 lets the backend choose."),
+        };
+    case SdNodeType::VaeDecode:
+        // Tiling is what ComfyUI splits into VAEDecodeTiled: same decode, less
+        // memory. It is a property here because the decode is one node.
+        return {
+            boolean("tiling", tr_("Tiled decode"), false),
+            integer("tileWidth", tr_("Tile width"), 256, 64, 4096, 8.0),
+            integer("tileHeight", tr_("Tile height"), 256, 64, 4096, 8.0),
+            number("tileOverlap", tr_("Tile overlap"), 0.5, 0.0, 1.0, 0.05),
         };
     case SdNodeType::InputImage:
         return {
@@ -458,55 +591,22 @@ QVector<SdPropertySpec> nodeProperties(SdNodeType type)
                         devicePreferenceOptions(), true),
         };
     case SdNodeType::ADetailer:
+        // A detail pass of its own: it re-samples the regions the detector
+        // finds, so it carries the sampler settings for that pass.
         return {
             modelRef("modelId", tr_("Detector"), QString(),
                      { SdModelCategory::ADetailer }),
+            seed("seed", tr_("Seed")),
+            integer("steps", tr_("Steps"), 20, 1, 1000),
+            number("cfgScale", tr_("CFG scale"), 7.0, 0.0, 100.0, 0.5),
+            enumeration("sampler", tr_("Sampler"), QString(),
+                        SdGenerationService::samplerNames(), true,
+                        "Empty keeps the checkpoint's own sampler."),
+            enumeration("scheduler", tr_("Scheduler"), QString(),
+                        SdGenerationService::schedulerNames(), true,
+                        "Empty keeps the checkpoint's own scheduler."),
+            number("denoisingStrength", tr_("Denoise"), 0.4, 0.0, 1.0, 0.05),
         };
-    case SdNodeType::Generate: {
-        // Part of the contract and validated, but not offered: the generation
-        // service hands back the first image of a batch and discards the rest,
-        // so a batch above 1 would only spend minutes on pixels nothing reads.
-        SdPropertySpec batch = integer("batchCount", tr_("Batch count"), 1, 1, 16, 1.0);
-        batch.editable = false;
-        batch.hint = tr_("This build inserts the first image of a batch only.");
-        return {
-            batch,
-            boolean("vaeTiling", tr_("VAE tiling"), false),
-            integer("vaeTileWidth", tr_("VAE tile width"), 256, 64, 4096, 8.0),
-            integer("vaeTileHeight", tr_("VAE tile height"), 256, 64, 4096, 8.0),
-            number("vaeTileOverlap", tr_("VAE tile overlap"), 0.5, 0.0, 1.0, 0.05),
-            enumeration("cacheMode", tr_("Cache"), QStringLiteral("disabled"),
-                        { QStringLiteral("disabled"), QStringLiteral("easycache"),
-                          QStringLiteral("ucache"), QStringLiteral("dbcache"),
-                          QStringLiteral("taylorseer"), QStringLiteral("cache-dit"),
-                          QStringLiteral("spectrum") }, false, "", true),
-            number("cacheThreshold", tr_("Cache threshold"), 0.2, 0.0, 10.0, 0.01),
-            number("cacheStart", tr_("Cache start"), 0.0, 0.0, 1.0, 0.01),
-            number("cacheEnd", tr_("Cache end"), 1.0, 0.0, 1.0, 0.01),
-            boolean("hiresEnabled", tr_("High-resolution fix"), false),
-            enumeration("hiresUpscaler", tr_("High-res upscaler"), QStringLiteral("Latent"),
-                        { QStringLiteral("Latent"), QStringLiteral("Latent (nearest)"),
-                          QStringLiteral("Latent (nearest-exact)"),
-                          QStringLiteral("Latent (antialiased)"),
-                          QStringLiteral("Latent (bicubic)"),
-                          QStringLiteral("Latent (bicubic antialiased)"),
-                          QStringLiteral("Lanczos"), QStringLiteral("Nearest"),
-                          QStringLiteral("Model") }, false, "", true),
-            modelRef("hiresModelId", tr_("High-res ESRGAN"), QString(),
-                     { SdModelCategory::Upscaler }),
-            number("hiresScale", tr_("High-res scale"), 2.0, 0.1, 8.0, 0.1),
-            integer("hiresWidth", tr_("High-res width"), 0, 0, 32768, 8.0),
-            integer("hiresHeight", tr_("High-res height"), 0, 0, 32768, 8.0),
-            integer("hiresSteps", tr_("High-res steps"), 0, 0, 1000),
-            number("hiresDenoising", tr_("High-res denoising"), 0.5, 0.0001, 1.0, 0.05),
-            integer("hiresTileSize", tr_("High-res tile"), 0, 0, 4096, 8.0),
-            boolean("circularX", tr_("Circular X"), false),
-            boolean("circularY", tr_("Circular Y"), false),
-            line("referenceArgs", tr_("Reference image arguments"), QString()),
-            line("imagePreprocess", tr_("Image preprocess rules"), QString(),
-                 "Semicolon-separated stable-diffusion.cpp preprocessing rules."),
-        };
-    }
     case SdNodeType::ImageOutput:
         return {
             line("layerName", tr_("Layer name"), QStringLiteral("AI Generated"),
@@ -637,8 +737,11 @@ QJsonObject describeNodeCatalog()
     }
 
     QJsonArray portTypes;
-    for (const SdPortType type : { SdPortType::Model, SdPortType::Conditioning,
-                                   SdPortType::Sampling, SdPortType::Image,
+    for (const SdPortType type : { SdPortType::Model, SdPortType::Clip,
+                                   SdPortType::Vae, SdPortType::Engine,
+                                   SdPortType::Conditioning, SdPortType::Latent,
+                                   SdPortType::References, SdPortType::Hires,
+                                   SdPortType::Image,
                                    SdPortType::Mask, SdPortType::ControlNet,
                                    SdPortType::Control, SdPortType::IpAdapter,
                                    SdPortType::ImageConditioning, SdPortType::PhotoMaker,

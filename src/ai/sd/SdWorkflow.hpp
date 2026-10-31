@@ -7,39 +7,52 @@
 
 // The workflow document: a small graph of nodes describing one image generation.
 //
-// This is the format the Neural Flow frontend will eventually produce and edit;
-// for now it is written by hand and by the experimental panel, and executed
-// entirely in C++. It is deliberately NOT ComfyUI's internal format — the node
-// types here are the operations this module actually has, not a surface to be
-// compatible with — and it is deliberately not a general scripting language:
-// typed configuration nodes transform values and Generate nodes run inference.
-// The graph may branch and may contain several Generate nodes; only ancestors
-// of requested Image Output nodes are evaluated.
+// The node shape follows ComfyUI's — loaders produce MODEL/CLIP/VAE, text is
+// encoded against a CLIP, a latent is sampled and then decoded — because that
+// is the vocabulary users of this kind of editor already have. It is not
+// ComfyUI's file format, and the engine underneath is stable-diffusion.cpp,
+// which encodes, samples and decodes in one call: the latent is therefore a
+// described-but-unrun pipeline, and VAE Decode is where it runs. The graph may
+// branch; only ancestors of requested Image Output nodes are evaluated.
 //
 // Nothing here knows about Qt widgets, documents, or any node-graph library.
 namespace sdlocal {
 
 enum class SdNodeType {
-    // ── Configuration: produce parameters, never run inference ──────────────
+    // ── Loaders: name the weights a context will be built from ──────────────
     Checkpoint,
-    Lora,
+    DiffusionModelLoader,
+    TextEncoderLoader,
+    VaeLoader,
+    EngineOptions,
     ControlNetLoader,
-    ControlNetApply,
     IpAdapterLoader,
+    // ── Model and CLIP transforms: same type in, same type out ──────────────
+    Lora,
+    ModelSampling,
+    SkipLayerGuidance,
+    ClipSetLastLayer,
+    // ── Conditioning ────────────────────────────────────────────────────────
+    ClipTextEncode,
+    ReferenceImages,
+    ControlNetApply,
     IpAdapterApply,
     PhotoMaker,
     PuLid,
-    Prompt,
-    NegativePrompt,
-    Sampling,
+    // ── Latent: the image being sampled, before it is pixels ────────────────
+    EmptyLatentImage,
+    VaeEncode,
+    VaeEncodeInpaint,
+    KSampler,
+    HiresFix,
     // ── Input: pull pixels from the host application ────────────────────────
     InputImage,
     InputMask,
     Canny,
     Upscale,
     ADetailer,
-    // ── Processing: the one node that calls the generation service ──────────
-    Generate,
+    // ── The decode is what runs the pipeline this graph describes ───────────
+    VaeDecode,
     // ── Output: hands the result back to the host application ──────────────
     ImageOutput,
 };
@@ -48,8 +61,13 @@ enum class SdNodeType {
 // into a sampling input is a named error rather than a surprise at run time.
 enum class SdPortType {
     Model,
+    Clip,
+    Vae,
+    Engine,
     Conditioning,
-    Sampling,
+    Latent,
+    References,
+    Hires,
     Image,
     Mask,
     ControlNet,
@@ -138,9 +156,9 @@ struct SdWorkflowConnection {
 };
 
 struct SdWorkflowDefinition {
-    // Bumped only on an incompatible change; a document from the future is
-    // refused rather than half-read.
-    static constexpr int kCurrentVersion = 1;
+    // A document from the future is refused; a version-1 one is rewritten into
+    // this shape by SdWorkflowValidator rather than refused.
+    static constexpr int kCurrentVersion = 2;
 
     int version = kCurrentVersion;
     QVector<SdWorkflowNode> nodes;

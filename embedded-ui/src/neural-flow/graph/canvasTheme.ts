@@ -66,8 +66,13 @@ export const T = {
 /** Connection (port) type -> colour. Mirrors --sock-* in the shared tokens. */
 export const SOCKET_COLORS: Record<string, string> = {
   model: '#6ea2ff',
+  clip: '#f3dc6a',
+  vae: '#ff6e6e',
+  engine: '#8c8f91',
   conditioning: '#7fd18b',
-  sampling: '#f0b45a',
+  references: '#a8d9b4',
+  latent: '#d66bd6',
+  hires: '#f2c98a',
   lora: '#b48cf2',
   image: '#e6e7e8',
   mask: '#9a9ea1',
@@ -77,9 +82,10 @@ export const SOCKET_COLORS: Record<string, string> = {
 export const CATEGORY_COLORS: Record<string, readonly [string, string]> = {
   models: ['#6ea2ff', '#2e3d55'],
   conditioning: ['#7fd18b', '#2d4433'],
+  latent: ['#d66bd6', '#43304a'],
   sampling: ['#f0b45a', '#4a3d27'],
   input: ['#5fc9c4', '#274443'],
-  generation: ['#e08fc0', '#46303f'],
+  processing: ['#e08fc0', '#46303f'],
   output: ['#d3d3d3', '#47494b'],
 }
 
@@ -87,9 +93,10 @@ export const CATEGORY_COLORS: Record<string, readonly [string, string]> = {
 export const CATEGORY_ICONS: Record<string, string> = {
   models: 'cube',
   conditioning: 'quote',
+  latent: 'sparkle',
   sampling: 'sliders',
   input: 'import',
-  generation: 'sparkle',
+  processing: 'sparkle',
   output: 'layers',
 }
 

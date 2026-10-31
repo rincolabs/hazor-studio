@@ -32,22 +32,33 @@ QString nodeTypeName(SdNodeType type)
 {
     switch (type) {
     case SdNodeType::Checkpoint:     return QStringLiteral("checkpoint");
-    case SdNodeType::Lora:           return QStringLiteral("lora");
+    case SdNodeType::DiffusionModelLoader: return QStringLiteral("diffusion_model_loader");
+    case SdNodeType::TextEncoderLoader: return QStringLiteral("text_encoder_loader");
+    case SdNodeType::VaeLoader:      return QStringLiteral("vae_loader");
+    case SdNodeType::EngineOptions:  return QStringLiteral("engine_options");
     case SdNodeType::ControlNetLoader:return QStringLiteral("controlnet_loader");
-    case SdNodeType::ControlNetApply:return QStringLiteral("controlnet_apply");
     case SdNodeType::IpAdapterLoader:return QStringLiteral("ip_adapter_loader");
-    case SdNodeType::IpAdapterApply:return QStringLiteral("ip_adapter_apply");
+    case SdNodeType::Lora:           return QStringLiteral("lora");
+    case SdNodeType::ModelSampling:  return QStringLiteral("model_sampling");
+    case SdNodeType::SkipLayerGuidance: return QStringLiteral("skip_layer_guidance");
+    case SdNodeType::ClipSetLastLayer: return QStringLiteral("clip_set_last_layer");
+    case SdNodeType::ClipTextEncode: return QStringLiteral("clip_text_encode");
+    case SdNodeType::ReferenceImages:return QStringLiteral("reference_images");
+    case SdNodeType::ControlNetApply:return QStringLiteral("controlnet_apply");
+    case SdNodeType::IpAdapterApply: return QStringLiteral("ip_adapter_apply");
     case SdNodeType::PhotoMaker:     return QStringLiteral("photo_maker");
     case SdNodeType::PuLid:          return QStringLiteral("pulid");
-    case SdNodeType::Prompt:         return QStringLiteral("prompt");
-    case SdNodeType::NegativePrompt: return QStringLiteral("negative_prompt");
-    case SdNodeType::Sampling:       return QStringLiteral("sampling");
+    case SdNodeType::EmptyLatentImage: return QStringLiteral("empty_latent_image");
+    case SdNodeType::VaeEncode:      return QStringLiteral("vae_encode");
+    case SdNodeType::VaeEncodeInpaint: return QStringLiteral("vae_encode_inpaint");
+    case SdNodeType::KSampler:       return QStringLiteral("ksampler");
+    case SdNodeType::HiresFix:       return QStringLiteral("hires_fix");
     case SdNodeType::InputImage:     return QStringLiteral("input_image");
     case SdNodeType::InputMask:      return QStringLiteral("input_mask");
     case SdNodeType::Canny:          return QStringLiteral("canny");
     case SdNodeType::Upscale:        return QStringLiteral("upscale");
     case SdNodeType::ADetailer:      return QStringLiteral("adetailer");
-    case SdNodeType::Generate:       return QStringLiteral("generate");
+    case SdNodeType::VaeDecode:      return QStringLiteral("vae_decode");
     case SdNodeType::ImageOutput:    return QStringLiteral("image_output");
     }
     return QStringLiteral("unknown");
@@ -56,29 +67,68 @@ QString nodeTypeName(SdNodeType type)
 bool nodeTypeFromName(const QString& name, SdNodeType& out)
 {
     const QString n = name.trimmed().toLower();
+    // The version-1 spellings are kept so a document written before the graph
+    // took ComfyUI's shape still parses; SdWorkflowValidator then rewires it.
     if (n == QLatin1String("checkpoint") || n == QLatin1String("model")) {
         out = SdNodeType::Checkpoint;
         return true;
     }
-    if (n == QLatin1String("lora"))            { out = SdNodeType::Lora; return true; }
+    if (n == QLatin1String("diffusion_model_loader")) {
+        out = SdNodeType::DiffusionModelLoader;
+        return true;
+    }
+    if (n == QLatin1String("text_encoder_loader") || n == QLatin1String("clip_loader")) {
+        out = SdNodeType::TextEncoderLoader;
+        return true;
+    }
+    if (n == QLatin1String("vae_loader"))      { out = SdNodeType::VaeLoader; return true; }
+    if (n == QLatin1String("engine_options"))  { out = SdNodeType::EngineOptions; return true; }
     if (n == QLatin1String("controlnet_loader")) { out = SdNodeType::ControlNetLoader; return true; }
-    if (n == QLatin1String("controlnet_apply")) { out = SdNodeType::ControlNetApply; return true; }
     if (n == QLatin1String("ip_adapter_loader")) { out = SdNodeType::IpAdapterLoader; return true; }
+    if (n == QLatin1String("lora"))            { out = SdNodeType::Lora; return true; }
+    if (n == QLatin1String("model_sampling"))  { out = SdNodeType::ModelSampling; return true; }
+    if (n == QLatin1String("skip_layer_guidance")) {
+        out = SdNodeType::SkipLayerGuidance;
+        return true;
+    }
+    if (n == QLatin1String("clip_set_last_layer")) {
+        out = SdNodeType::ClipSetLastLayer;
+        return true;
+    }
+    if (n == QLatin1String("clip_text_encode") || n == QLatin1String("prompt")
+        || n == QLatin1String("negative_prompt")) {
+        out = SdNodeType::ClipTextEncode;
+        return true;
+    }
+    if (n == QLatin1String("reference_images")) { out = SdNodeType::ReferenceImages; return true; }
+    if (n == QLatin1String("controlnet_apply")) { out = SdNodeType::ControlNetApply; return true; }
     if (n == QLatin1String("ip_adapter_apply")) { out = SdNodeType::IpAdapterApply; return true; }
     if (n == QLatin1String("photo_maker")) { out = SdNodeType::PhotoMaker; return true; }
     if (n == QLatin1String("pulid")) { out = SdNodeType::PuLid; return true; }
-    if (n == QLatin1String("prompt"))          { out = SdNodeType::Prompt; return true; }
-    if (n == QLatin1String("negative_prompt")) { out = SdNodeType::NegativePrompt; return true; }
-    if (n == QLatin1String("sampling") || n == QLatin1String("sampling_params")) {
-        out = SdNodeType::Sampling;
+    if (n == QLatin1String("empty_latent_image") || n == QLatin1String("image_size")) {
+        out = SdNodeType::EmptyLatentImage;
         return true;
     }
+    if (n == QLatin1String("vae_encode"))      { out = SdNodeType::VaeEncode; return true; }
+    if (n == QLatin1String("vae_encode_inpaint")) {
+        out = SdNodeType::VaeEncodeInpaint;
+        return true;
+    }
+    if (n == QLatin1String("ksampler") || n == QLatin1String("sampling")
+        || n == QLatin1String("sampling_params")) {
+        out = SdNodeType::KSampler;
+        return true;
+    }
+    if (n == QLatin1String("hires_fix"))    { out = SdNodeType::HiresFix; return true; }
     if (n == QLatin1String("input_image"))  { out = SdNodeType::InputImage; return true; }
     if (n == QLatin1String("input_mask"))   { out = SdNodeType::InputMask; return true; }
     if (n == QLatin1String("canny"))        { out = SdNodeType::Canny; return true; }
     if (n == QLatin1String("upscale"))      { out = SdNodeType::Upscale; return true; }
     if (n == QLatin1String("adetailer"))    { out = SdNodeType::ADetailer; return true; }
-    if (n == QLatin1String("generate"))     { out = SdNodeType::Generate; return true; }
+    if (n == QLatin1String("vae_decode") || n == QLatin1String("generate")) {
+        out = SdNodeType::VaeDecode;
+        return true;
+    }
     if (n == QLatin1String("image_output") || n == QLatin1String("canvas_output")) {
         out = SdNodeType::ImageOutput;
         return true;
@@ -90,8 +140,13 @@ QString portTypeName(SdPortType type)
 {
     switch (type) {
     case SdPortType::Model:        return QStringLiteral("model");
+    case SdPortType::Clip:         return QStringLiteral("clip");
+    case SdPortType::Vae:          return QStringLiteral("vae");
+    case SdPortType::Engine:       return QStringLiteral("engine");
     case SdPortType::Conditioning: return QStringLiteral("conditioning");
-    case SdPortType::Sampling:     return QStringLiteral("sampling");
+    case SdPortType::Latent:       return QStringLiteral("latent");
+    case SdPortType::References:   return QStringLiteral("references");
+    case SdPortType::Hires:        return QStringLiteral("hires");
     case SdPortType::Image:        return QStringLiteral("image");
     case SdPortType::Mask:         return QStringLiteral("mask");
     case SdPortType::ControlNet:   return QStringLiteral("control_net");
@@ -107,15 +162,30 @@ QString portTypeName(SdPortType type)
 // ── Node signatures ─────────────────────────────────────────────────────────
 //
 // Fixed per type, which is what makes the graph checkable before anything is
-// loaded. Configuration transformers such as LoRA consume and produce the
-// same typed value; they do not run inference, and can therefore be chained or
-// branched without inventing numbered inputs on Generate.
+// loaded. Nothing here runs inference except VAE Decode and the three
+// standalone image operations: a latent is a described pipeline, and decoding
+// it is what asks stable-diffusion.cpp to carry it out.
 
 QVector<SdPortSpec> nodeInputs(SdNodeType type)
 {
     switch (type) {
+    case SdNodeType::Checkpoint:
+    case SdNodeType::DiffusionModelLoader:
+        // ComfyUI has no equivalent: there, these are launch flags. Leaving it
+        // unconnected keeps the backend's defaults.
+        return { port("engine", SdPortType::Engine) };
     case SdNodeType::Lora:
+        return { port("model", SdPortType::Model, /*required*/ true),
+                 port("clip", SdPortType::Clip) };
+    case SdNodeType::ModelSampling:
+    case SdNodeType::SkipLayerGuidance:
         return { port("model", SdPortType::Model, /*required*/ true) };
+    case SdNodeType::ClipSetLastLayer:
+        return { port("clip", SdPortType::Clip, /*required*/ true) };
+    case SdNodeType::ClipTextEncode:
+        return { port("clip", SdPortType::Clip, /*required*/ true) };
+    case SdNodeType::ReferenceImages:
+        return { port("images", SdPortType::Image, true, true) };
     case SdNodeType::ControlNetApply:
         return { port("control_net", SdPortType::ControlNet, true),
                  port("image", SdPortType::Image, true) };
@@ -124,6 +194,28 @@ QVector<SdPortSpec> nodeInputs(SdNodeType type)
                  port("image", SdPortType::Image, true) };
     case SdNodeType::PhotoMaker:
         return { port("images", SdPortType::Image, true, true) };
+    case SdNodeType::VaeEncode:
+        return { port("pixels", SdPortType::Image, true),
+                 port("vae", SdPortType::Vae, true) };
+    case SdNodeType::VaeEncodeInpaint:
+        return { port("pixels", SdPortType::Image, true),
+                 port("vae", SdPortType::Vae, true),
+                 port("mask", SdPortType::Mask, true) };
+    case SdNodeType::KSampler:
+        return {
+            port("model", SdPortType::Model, /*required*/ true),
+            port("positive", SdPortType::Conditioning, /*required*/ true),
+            port("negative", SdPortType::Conditioning),
+            // An empty latent is txt2img; one from VAE Encode carries the
+            // image to start from, and from its inpaint form a mask too.
+            port("latent", SdPortType::Latent, /*required*/ true),
+            port("references", SdPortType::References),
+            port("control", SdPortType::Control),
+            port("ip_adapter", SdPortType::ImageConditioning),
+            port("photo_maker", SdPortType::PhotoMaker),
+            port("pulid", SdPortType::PuLid),
+            port("hires", SdPortType::Hires),
+        };
     case SdNodeType::Canny:
     case SdNodeType::Upscale:
         return { port("image", SdPortType::Image, true) };
@@ -133,35 +225,21 @@ QVector<SdPortSpec> nodeInputs(SdNodeType type)
             port("image", SdPortType::Image, true),
             port("positive", SdPortType::Conditioning, true),
             port("negative", SdPortType::Conditioning),
-            port("sampling", SdPortType::Sampling, true),
+            port("vae", SdPortType::Vae),
         };
-    case SdNodeType::Generate:
-        return {
-            port("model", SdPortType::Model, /*required*/ true),
-            port("positive", SdPortType::Conditioning, /*required*/ true),
-            port("negative", SdPortType::Conditioning),
-            port("sampling", SdPortType::Sampling, /*required*/ true),
-            // Presence of these two is what selects the operation: neither is
-            // txt2img, an image alone is img2img, an image and a mask is
-            // inpainting. There is no "operation" switch to contradict the
-            // wiring.
-            port("init_image", SdPortType::Image),
-            port("mask", SdPortType::Mask),
-            port("references", SdPortType::Image, false, true),
-            port("control", SdPortType::Control),
-            port("ip_adapter", SdPortType::ImageConditioning),
-            port("photo_maker", SdPortType::PhotoMaker),
-            port("pulid", SdPortType::PuLid),
-        };
+    case SdNodeType::VaeDecode:
+        return { port("samples", SdPortType::Latent, /*required*/ true),
+                 port("vae", SdPortType::Vae, /*required*/ true) };
     case SdNodeType::ImageOutput:
         return { port("image", SdPortType::Image, /*required*/ true) };
-    case SdNodeType::Checkpoint:
+    case SdNodeType::TextEncoderLoader:
+    case SdNodeType::VaeLoader:
+    case SdNodeType::EngineOptions:
     case SdNodeType::ControlNetLoader:
     case SdNodeType::IpAdapterLoader:
     case SdNodeType::PuLid:
-    case SdNodeType::Prompt:
-    case SdNodeType::NegativePrompt:
-    case SdNodeType::Sampling:
+    case SdNodeType::EmptyLatentImage:
+    case SdNodeType::HiresFix:
     case SdNodeType::InputImage:
     case SdNodeType::InputMask:
         break;
@@ -172,23 +250,39 @@ QVector<SdPortSpec> nodeInputs(SdNodeType type)
 QVector<SdPortSpec> nodeOutputs(SdNodeType type)
 {
     switch (type) {
-    case SdNodeType::Checkpoint:     return { port("model", SdPortType::Model) };
-    case SdNodeType::Lora:           return { port("model", SdPortType::Model) };
+    case SdNodeType::Checkpoint:
+        // One file carries all three, and they are wired separately so a
+        // workflow can replace any of them with a loader of its own.
+        return { port("model", SdPortType::Model), port("clip", SdPortType::Clip),
+                 port("vae", SdPortType::Vae) };
+    case SdNodeType::DiffusionModelLoader: return { port("model", SdPortType::Model) };
+    case SdNodeType::TextEncoderLoader:    return { port("clip", SdPortType::Clip) };
+    case SdNodeType::VaeLoader:            return { port("vae", SdPortType::Vae) };
+    case SdNodeType::EngineOptions:        return { port("engine", SdPortType::Engine) };
     case SdNodeType::ControlNetLoader:return { port("control_net", SdPortType::ControlNet) };
-    case SdNodeType::ControlNetApply:return { port("control", SdPortType::Control) };
     case SdNodeType::IpAdapterLoader:return { port("ip_adapter", SdPortType::IpAdapter) };
+    case SdNodeType::Lora:
+        return { port("model", SdPortType::Model), port("clip", SdPortType::Clip) };
+    case SdNodeType::ModelSampling:
+    case SdNodeType::SkipLayerGuidance: return { port("model", SdPortType::Model) };
+    case SdNodeType::ClipSetLastLayer:  return { port("clip", SdPortType::Clip) };
+    case SdNodeType::ClipTextEncode: return { port("conditioning", SdPortType::Conditioning) };
+    case SdNodeType::ReferenceImages:return { port("references", SdPortType::References) };
+    case SdNodeType::ControlNetApply:return { port("control", SdPortType::Control) };
     case SdNodeType::IpAdapterApply:return { port("image_conditioning", SdPortType::ImageConditioning) };
     case SdNodeType::PhotoMaker:     return { port("photo_maker", SdPortType::PhotoMaker) };
     case SdNodeType::PuLid:          return { port("pulid", SdPortType::PuLid) };
-    case SdNodeType::Prompt:
-    case SdNodeType::NegativePrompt: return { port("conditioning", SdPortType::Conditioning) };
-    case SdNodeType::Sampling:       return { port("sampling", SdPortType::Sampling) };
+    case SdNodeType::EmptyLatentImage:
+    case SdNodeType::VaeEncode:
+    case SdNodeType::VaeEncodeInpaint:
+    case SdNodeType::KSampler:       return { port("latent", SdPortType::Latent) };
+    case SdNodeType::HiresFix:       return { port("hires", SdPortType::Hires) };
     case SdNodeType::InputImage:     return { port("image", SdPortType::Image) };
     case SdNodeType::InputMask:      return { port("mask", SdPortType::Mask) };
     case SdNodeType::Canny:
     case SdNodeType::Upscale:
-    case SdNodeType::ADetailer:      return { port("image", SdPortType::Image) };
-    case SdNodeType::Generate:       return { port("image", SdPortType::Image) };
+    case SdNodeType::ADetailer:
+    case SdNodeType::VaeDecode:      return { port("image", SdPortType::Image) };
     case SdNodeType::ImageOutput:    break;
     }
     return {};
@@ -427,48 +521,56 @@ QByteArray txt2imgWorkflowJson(const QString& modelId,
 {
     SdWorkflowDefinition def;
 
-    SdWorkflowNode model;
-    model.id = QStringLiteral("model");
-    model.type = SdNodeType::Checkpoint;
-    model.properties[QStringLiteral("modelId")] = modelId;
+    SdWorkflowNode checkpoint;
+    checkpoint.id = QStringLiteral("checkpoint");
+    checkpoint.type = SdNodeType::Checkpoint;
+    checkpoint.properties[QStringLiteral("modelId")] = modelId;
 
     SdWorkflowNode positive;
     positive.id = QStringLiteral("positive");
-    positive.type = SdNodeType::Prompt;
+    positive.type = SdNodeType::ClipTextEncode;
     positive.properties[QStringLiteral("text")] = prompt;
 
     SdWorkflowNode negative;
     negative.id = QStringLiteral("negative");
-    negative.type = SdNodeType::NegativePrompt;
+    negative.type = SdNodeType::ClipTextEncode;
     negative.properties[QStringLiteral("text")] = negativePrompt;
 
-    SdWorkflowNode sampling;
-    sampling.id = QStringLiteral("sampling");
-    sampling.type = SdNodeType::Sampling;
-    sampling.properties[QStringLiteral("width")] = width;
-    sampling.properties[QStringLiteral("height")] = height;
-    sampling.properties[QStringLiteral("steps")] = steps;
+    SdWorkflowNode latent;
+    latent.id = QStringLiteral("latent");
+    latent.type = SdNodeType::EmptyLatentImage;
+    latent.properties[QStringLiteral("width")] = width;
+    latent.properties[QStringLiteral("height")] = height;
+
+    SdWorkflowNode sampler;
+    sampler.id = QStringLiteral("sampler");
+    sampler.type = SdNodeType::KSampler;
+    sampler.properties[QStringLiteral("steps")] = steps;
     // JSON has no 64-bit integer, so a seed is written as a string — the same
     // choice the library makes in its own generation_info.
-    sampling.properties[QStringLiteral("seed")] = QString::number(seed);
-    sampling.properties[QStringLiteral("cfgScale")] = cfgScale;
+    sampler.properties[QStringLiteral("seed")] = QString::number(seed);
+    sampler.properties[QStringLiteral("cfgScale")] = cfgScale;
 
-    SdWorkflowNode generate;
-    generate.id = QStringLiteral("generate");
-    generate.type = SdNodeType::Generate;
+    SdWorkflowNode decode;
+    decode.id = QStringLiteral("decode");
+    decode.type = SdNodeType::VaeDecode;
 
     SdWorkflowNode output;
     output.id = QStringLiteral("output");
     output.type = SdNodeType::ImageOutput;
     output.properties[QStringLiteral("layerName")] = layerName;
 
-    def.nodes = { model, positive, negative, sampling, generate, output };
+    def.nodes = { checkpoint, positive, negative, latent, sampler, decode, output };
     def.connections = {
-        SdWorkflowConnection { model.id,    QStringLiteral("model"),        generate.id, QStringLiteral("model") },
-        SdWorkflowConnection { positive.id, QStringLiteral("conditioning"), generate.id, QStringLiteral("positive") },
-        SdWorkflowConnection { negative.id, QStringLiteral("conditioning"), generate.id, QStringLiteral("negative") },
-        SdWorkflowConnection { sampling.id, QStringLiteral("sampling"),     generate.id, QStringLiteral("sampling") },
-        SdWorkflowConnection { generate.id, QStringLiteral("image"),        output.id,   QStringLiteral("image") },
+        SdWorkflowConnection { checkpoint.id, QStringLiteral("clip"),  positive.id, QStringLiteral("clip") },
+        SdWorkflowConnection { checkpoint.id, QStringLiteral("clip"),  negative.id, QStringLiteral("clip") },
+        SdWorkflowConnection { checkpoint.id, QStringLiteral("model"), sampler.id,  QStringLiteral("model") },
+        SdWorkflowConnection { positive.id, QStringLiteral("conditioning"), sampler.id, QStringLiteral("positive") },
+        SdWorkflowConnection { negative.id, QStringLiteral("conditioning"), sampler.id, QStringLiteral("negative") },
+        SdWorkflowConnection { latent.id,   QStringLiteral("latent"), sampler.id, QStringLiteral("latent") },
+        SdWorkflowConnection { sampler.id,  QStringLiteral("latent"), decode.id,  QStringLiteral("samples") },
+        SdWorkflowConnection { checkpoint.id, QStringLiteral("vae"),  decode.id,  QStringLiteral("vae") },
+        SdWorkflowConnection { decode.id,   QStringLiteral("image"),  output.id,  QStringLiteral("image") },
     };
     return def.toJson();
 }

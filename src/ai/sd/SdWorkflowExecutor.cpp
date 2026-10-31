@@ -28,43 +28,78 @@ void addError(QVector<SdWorkflowError>& errors, SdWorkflowErrorCode code,
     errors.push_back(error);
 }
 
-// A typed value produced by one graph node. Model values are immutable
-// snapshots: a LoRA copies its input and appends itself, so branching before or
-// after that node produces independent configurations without special cases.
+} // namespace
+
+// A typed value produced by one graph node, mirroring what travels along the
+// wire it came out of. Model and CLIP values are immutable snapshots: a LoRA
+// copies its input and appends itself, so branching before or after that node
+// produces independent configurations without special cases.
 //
-// One flat struct rather than a tagged union, matching how Checkpoint/Lora
-// already share `load`/`loras`: every node type fills in the handful of
-// fields its own output means and leaves the rest at their default, which is
-// never read because the port typing already keeps a Control value from
-// reaching a slot that expects an IpAdapter one.
+// One flat struct rather than a tagged union: every node type fills in the
+// handful of fields its own output means and leaves the rest at their default,
+// which is never read because the port typing already keeps a Control value
+// from reaching a slot that expects an IpAdapter one.
 struct NodeValue {
-    SdModelLoadOptions load;          // Checkpoint, transformed by Lora
-    QVector<SdResolvedLora> loras;    // ordered model configuration
-    QString text;                     // Prompt, NegativePrompt
-    SdSamplingParams sampling;        // Sampling
-    int width = 512;                  // Sampling
-    int height = 512;                 // Sampling
-    float denoisingStrength = 0.75f;  // Sampling
-    QImage image;                     // InputImage, InputMask, Generate, Canny, Upscale, ADetailer
-    QVector<QImage> images;           // PhotoMaker identity images
+    // ── engine ──────────────────────────────────────────────────────────────
+    SdModelLoadOptions load;
+    SdCacheParams cache;
 
-    // ControlNetLoader, carried forward by ControlNetApply
+    // ── model ───────────────────────────────────────────────────────────────
+    // Ids rather than paths: which text encoders and which VAE belong to the
+    // context is only known once the whole chain has been walked, so the
+    // registry is asked once, at the decode.
+    SdModelSelection selection;
+    QVector<SdResolvedLora> loras;
+    float shift = 0.0f;
+    int shiftedTimestep = 0;
+    QVector<int> slgLayers;
+    float slgStart = 0.01f;
+    float slgEnd = 0.2f;
+    float slgScale = 0.0f;
+
+    // ── clip ────────────────────────────────────────────────────────────────
+    QStringList textEncoderIds;
+    int clipSkip = -1;
+
+    // ── vae ─────────────────────────────────────────────────────────────────
+    QString vaeId;
+
+    // ── conditioning ────────────────────────────────────────────────────────
+    QString text;
+    float distilledGuidance = 0.0f;
+
+    // ── latent ──────────────────────────────────────────────────────────────
+    int width = 512;
+    int height = 512;
+    bool circularX = false;
+    bool circularY = false;
+    // A latent out of KSampler is a described-but-unrun pipeline; one out of
+    // Empty Latent Image or VAE Encode only carries what to sample from.
+    bool sampled = false;
+    SdGenerationRequest request;
+
+    // ── images ──────────────────────────────────────────────────────────────
+    QImage image;                     // InputImage, VAE Encode, Canny, Upscale, decode
+    QImage mask;                      // InputMask, VAE Encode (Inpaint)
+    QVector<QImage> images;           // PhotoMaker identity images, ReferenceImages
+    QString referenceArgs;
+
+    SdHiresParams hires;
+
+    // ── auxiliary loaders ───────────────────────────────────────────────────
     QString controlNetPath;
-    float controlStrength = 0.9f;     // ControlNetApply
-
-    // IpAdapterLoader, carried forward by IpAdapterApply
+    float controlStrength = 0.9f;
     QString ipAdapterPath;
     QString visionEncoderPath;
-    float ipAdapterStrength = 1.0f;   // IpAdapterApply
-
-    // PhotoMaker / PuLid: both resolve an IdentityEmbedding model, so one
-    // field serves either.
+    float ipAdapterStrength = 1.0f;
     QString photoMakerPath;
     QString identityEmbeddingPath;
     float photoMakerStyleStrength = 20.0f;
     QString pulidPath;
     float pulidWeight = 0.8f;
 };
+
+namespace {
 
 QStringList sourcesFor(const SdWorkflowDefinition& definition, const QString& nodeId,
                        const char* portId)
@@ -157,6 +192,21 @@ QVector<int> parseIntList(const QString& text)
     return out;
 }
 
+// The model chain carries the patches, the conditioning carries what the text
+// encoder was set to: the library takes both as fields of the one call.
+void applyChainSettings(const NodeValue& model, const NodeValue& positive,
+                        SdSamplingParams& out)
+{
+    out.flowShift = model.shift;
+    out.shiftedTimestep = model.shiftedTimestep;
+    out.skipLayerGuidanceLayers = model.slgLayers;
+    out.skipLayerGuidanceStart = model.slgStart;
+    out.skipLayerGuidanceEnd = model.slgEnd;
+    out.skipLayerGuidanceScale = model.slgScale;
+    out.clipSkip = positive.clipSkip;
+    out.distilledGuidance = positive.distilledGuidance;
+}
+
 qint64 readSeed(const QJsonObject& props)
 {
     const QJsonValue value = props.value(QStringLiteral("seed"));
@@ -164,7 +214,7 @@ qint64 readSeed(const QJsonObject& props)
         return value.toString().toLongLong();
     if (value.isDouble())
         return static_cast<qint64>(value.toDouble());
-    return propertyDefault(SdNodeType::Sampling, QStringLiteral("seed"))
+    return propertyDefault(SdNodeType::KSampler, QStringLiteral("seed"))
         .toString().toLongLong();
 }
 
@@ -300,24 +350,34 @@ SdWorkflowExecutor::AdvanceResult SdWorkflowExecutor::advance(
         NodeValue value;
 
         switch (node->type) {
-        case SdNodeType::Checkpoint: {
-            SdModelSelection selection;
-            selection.modelId = properties.value(QStringLiteral("modelId")).toString();
-            selection.vaeId = properties.value(QStringLiteral("vaeId")).toString();
-            for (const QJsonValue& entry
-                 : properties.value(QStringLiteral("textEncoderIds")).toArray()) {
-                selection.textEncoderIds << entry.toString();
-            }
+        case SdNodeType::Checkpoint:
+        case SdNodeType::DiffusionModelLoader: {
+            value.selection.modelId = properties.value(QStringLiteral("modelId")).toString();
             for (const QJsonValue& entry
                  : properties.value(QStringLiteral("embeddingIds")).toArray()) {
-                selection.embeddingIds << entry.toString();
+                value.selection.embeddingIds << entry.toString();
             }
-
-            QString error;
-            if (!models.resolve(selection, value.load.files, &error)) {
-                addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, nodeId);
-                return AdvanceResult::Failed;
+            // Unconnected means the backend's own defaults.
+            if (const NodeValue* engine = sourceValue(
+                    execution.definition, execution.values, nodeId, "engine")) {
+                value.load = engine->load;
+                value.cache = engine->cache;
             }
+            execution.values.insert(nodeId, value);
+            break;
+        }
+        case SdNodeType::TextEncoderLoader:
+            for (const QJsonValue& entry
+                 : properties.value(QStringLiteral("modelIds")).toArray()) {
+                value.textEncoderIds << entry.toString();
+            }
+            execution.values.insert(nodeId, value);
+            break;
+        case SdNodeType::VaeLoader:
+            value.vaeId = properties.value(QStringLiteral("modelId")).toString();
+            execution.values.insert(nodeId, value);
+            break;
+        case SdNodeType::EngineOptions: {
             weightTypeFromName(properties.value(QStringLiteral("weightType")).toString(),
                                value.load.weightType);
             devicePreferenceFromName(properties.value(QStringLiteral("device")).toString(),
@@ -334,6 +394,10 @@ SdWorkflowExecutor::AdvanceResult SdWorkflowExecutor::advance(
             value.load.autoFit = boolProperty(properties, node->type, "autoFit");
             value.load.conditioningCacheSize =
                 intProperty(properties, node->type, "conditioningCacheSize");
+            value.cache.mode = stringProperty(properties, node->type, "cacheMode");
+            value.cache.reuseThreshold = floatProperty(properties, node->type, "cacheThreshold");
+            value.cache.startPercent = floatProperty(properties, node->type, "cacheStart");
+            value.cache.endPercent = floatProperty(properties, node->type, "cacheEnd");
             execution.values.insert(nodeId, value);
             break;
         }
@@ -473,6 +537,13 @@ SdWorkflowExecutor::AdvanceResult SdWorkflowExecutor::advance(
                 return AdvanceResult::Failed;
             }
             value = *input;
+            // One value carries both outputs, so a CLIP wired through here
+            // keeps whatever was done to it upstream.
+            if (const NodeValue* clip = sourceValue(
+                    execution.definition, execution.values, nodeId, "clip")) {
+                value.textEncoderIds = clip->textEncoderIds;
+                value.clipSkip = clip->clipSkip;
+            }
             SdResolvedLora lora;
             QString error;
             if (!models.resolveLora(
@@ -485,41 +556,150 @@ SdWorkflowExecutor::AdvanceResult SdWorkflowExecutor::advance(
             execution.values.insert(nodeId, value);
             break;
         }
-        case SdNodeType::Prompt:
-        case SdNodeType::NegativePrompt:
-            value.text = properties.value(QStringLiteral("text")).toString();
+        case SdNodeType::ModelSampling:
+        case SdNodeType::SkipLayerGuidance: {
+            const NodeValue* input = sourceValue(
+                execution.definition, execution.values, nodeId, "model");
+            if (!input) {
+                addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                         tr_("The node has no evaluated model input."), nodeId,
+                         QStringLiteral("model"));
+                return AdvanceResult::Failed;
+            }
+            value = *input;
+            if (node->type == SdNodeType::ModelSampling) {
+                value.shift = floatProperty(properties, node->type, "shift");
+                value.shiftedTimestep =
+                    intProperty(properties, node->type, "shiftedTimestep");
+            } else {
+                value.slgLayers =
+                    parseIntList(stringProperty(properties, node->type, "layers"));
+                value.slgScale = floatProperty(properties, node->type, "scale");
+                value.slgStart = floatProperty(properties, node->type, "start");
+                value.slgEnd = floatProperty(properties, node->type, "end");
+            }
             execution.values.insert(nodeId, value);
             break;
-        case SdNodeType::Sampling:
+        }
+        case SdNodeType::ClipSetLastLayer: {
+            const NodeValue* input = sourceValue(
+                execution.definition, execution.values, nodeId, "clip");
+            if (!input) {
+                addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                         tr_("The node has no evaluated CLIP input."), nodeId,
+                         QStringLiteral("clip"));
+                return AdvanceResult::Failed;
+            }
+            value = *input;
+            value.clipSkip = intProperty(properties, node->type, "stopAtClipLayer");
+            execution.values.insert(nodeId, value);
+            break;
+        }
+        case SdNodeType::ClipTextEncode: {
+            const NodeValue* clip = sourceValue(
+                execution.definition, execution.values, nodeId, "clip");
+            if (!clip) {
+                addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                         tr_("The text encode node has no evaluated CLIP input."), nodeId,
+                         QStringLiteral("clip"));
+                return AdvanceResult::Failed;
+            }
+            value.textEncoderIds = clip->textEncoderIds;
+            value.clipSkip = clip->clipSkip;
+            value.text = properties.value(QStringLiteral("text")).toString();
+            value.distilledGuidance =
+                floatProperty(properties, node->type, "distilledGuidance");
+            execution.values.insert(nodeId, value);
+            break;
+        }
+        case SdNodeType::ReferenceImages: {
+            const QVector<const NodeValue*> images = sourceValues(
+                execution.definition, execution.values, nodeId, "images");
+            if (images.isEmpty()) {
+                addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                         tr_("Reference images needs at least one image."), nodeId,
+                         QStringLiteral("images"));
+                return AdvanceResult::Failed;
+            }
+            for (const NodeValue* source : images)
+                value.images.push_back(source->image);
+            value.referenceArgs = stringProperty(properties, node->type, "args");
+            execution.values.insert(nodeId, value);
+            break;
+        }
+        case SdNodeType::EmptyLatentImage:
             value.width = intProperty(properties, node->type, "width");
             value.height = intProperty(properties, node->type, "height");
-            value.sampling.steps = intProperty(properties, node->type, "steps");
-            value.sampling.seed = readSeed(properties);
-            value.sampling.cfgScale = floatProperty(properties, node->type, "cfgScale");
-            value.sampling.sampler = stringProperty(properties, node->type, "sampler");
-            value.sampling.scheduler = stringProperty(properties, node->type, "scheduler");
-            value.sampling.clipSkip = intProperty(properties, node->type, "clipSkip");
-            value.sampling.imageCfgScale = floatProperty(properties, node->type, "imageCfgScale");
-            value.sampling.distilledGuidance =
-                floatProperty(properties, node->type, "distilledGuidance");
-            value.sampling.eta = floatProperty(properties, node->type, "eta");
-            value.sampling.shiftedTimestep =
-                intProperty(properties, node->type, "shiftedTimestep");
-            value.sampling.flowShift = floatProperty(properties, node->type, "flowShift");
-            value.sampling.customSigmas =
-                parseFloatList(stringProperty(properties, node->type, "customSigmas"));
-            value.sampling.skipLayerGuidanceLayers = parseIntList(
-                stringProperty(properties, node->type, "skipLayerGuidanceLayers"));
-            value.sampling.skipLayerGuidanceStart =
-                floatProperty(properties, node->type, "skipLayerGuidanceStart");
-            value.sampling.skipLayerGuidanceEnd =
-                floatProperty(properties, node->type, "skipLayerGuidanceEnd");
-            value.sampling.skipLayerGuidanceScale =
-                floatProperty(properties, node->type, "skipLayerGuidanceScale");
-            value.denoisingStrength =
-                floatProperty(properties, node->type, "denoisingStrength");
+            value.circularX = boolProperty(properties, node->type, "circularX");
+            value.circularY = boolProperty(properties, node->type, "circularY");
             execution.values.insert(nodeId, value);
             break;
+        case SdNodeType::VaeEncode:
+        case SdNodeType::VaeEncodeInpaint: {
+            const NodeValue* pixels = sourceValue(
+                execution.definition, execution.values, nodeId, "pixels");
+            const NodeValue* vae = sourceValue(
+                execution.definition, execution.values, nodeId, "vae");
+            if (!pixels || !vae || pixels->image.isNull()) {
+                addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                         tr_("The VAE encode node has no evaluated image input."), nodeId,
+                         QStringLiteral("pixels"));
+                return AdvanceResult::Failed;
+            }
+            value.image = pixels->image;
+            value.vaeId = vae->vaeId;
+            // The encoded image is the canvas: the library samples at its size.
+            value.width = value.image.width() - (value.image.width() % 8);
+            value.height = value.image.height() - (value.image.height() % 8);
+            if (node->type == SdNodeType::VaeEncodeInpaint) {
+                const NodeValue* mask = sourceValue(
+                    execution.definition, execution.values, nodeId, "mask");
+                if (!mask || mask->mask.isNull()) {
+                    addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                             tr_("The inpaint encode node has no evaluated mask."), nodeId,
+                             QStringLiteral("mask"));
+                    return AdvanceResult::Failed;
+                }
+                value.mask = mask->mask.size() == value.image.size()
+                    ? mask->mask
+                    : mask->mask.scaled(value.image.size(), Qt::IgnoreAspectRatio,
+                                        Qt::SmoothTransformation);
+            }
+            execution.values.insert(nodeId, value);
+            break;
+        }
+        case SdNodeType::HiresFix: {
+            value.hires.enabled = true;
+            value.hires.upscaler = stringProperty(properties, node->type, "upscaler");
+            value.hires.scale = floatProperty(properties, node->type, "scale");
+            value.hires.targetWidth = intProperty(properties, node->type, "targetWidth");
+            value.hires.targetHeight = intProperty(properties, node->type, "targetHeight");
+            value.hires.steps = intProperty(properties, node->type, "steps");
+            value.hires.denoisingStrength =
+                floatProperty(properties, node->type, "denoisingStrength");
+            value.hires.tileSize = intProperty(properties, node->type, "tileSize");
+            const QString modelId =
+                properties.value(QStringLiteral("modelId")).toString().trimmed();
+            if (!modelId.isEmpty()) {
+                SdResolvedModelFile resolved;
+                QString error;
+                if (!models.resolveFile(modelId, SdModelCategory::Upscaler,
+                                        resolved, &error)) {
+                    addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, nodeId,
+                             QStringLiteral("modelId"));
+                    return AdvanceResult::Failed;
+                }
+                value.hires.modelPath = resolved.path;
+            }
+            execution.values.insert(nodeId, value);
+            break;
+        }
+        case SdNodeType::KSampler: {
+            if (!buildSampledLatent(*node, value, errors))
+                return AdvanceResult::Failed;
+            execution.values.insert(nodeId, value);
+            break;
+        }
         case SdNodeType::InputImage: {
             const QString source =
                 stringProperty(properties, node->type, "source").trimmed().toLower();
@@ -542,16 +722,16 @@ SdWorkflowExecutor::AdvanceResult SdWorkflowExecutor::advance(
         }
         case SdNodeType::InputMask: {
             QString error;
-            if (!m_bridge->captureMask(value.image, &error)) {
+            if (!m_bridge->captureMask(value.mask, &error)) {
                 addError(errors, SdWorkflowErrorCode::UnsupportedOperation, error, nodeId);
                 return AdvanceResult::Failed;
             }
             execution.values.insert(nodeId, value);
             break;
         }
-        case SdNodeType::Generate: {
+        case SdNodeType::VaeDecode: {
             SdGenerationRequest request;
-            if (!buildRequest(*node, request, errors))
+            if (!buildDecodeRequest(*node, request, errors))
                 return AdvanceResult::Failed;
             return startOperation(nodeId, request, errors);
         }
@@ -610,72 +790,92 @@ SdWorkflowExecutor::AdvanceResult SdWorkflowExecutor::advance(
     return AdvanceResult::Completed;
 }
 
-bool SdWorkflowExecutor::buildRequest(const SdWorkflowNode& generate,
-                                      SdGenerationRequest& request,
-                                      QVector<SdWorkflowError>& errors)
+bool SdWorkflowExecutor::buildSampledLatent(const SdWorkflowNode& sampler, NodeValue& out,
+                                            QVector<SdWorkflowError>& errors)
 {
     if (!m_execution)
         return false;
     const SdWorkflowDefinition& definition = m_execution->definition;
     const QHash<QString, NodeValue>& values = m_execution->values;
 
-    const NodeValue* model = sourceValue(definition, values, generate.id, "model");
-    const NodeValue* positive = sourceValue(definition, values, generate.id, "positive");
-    const NodeValue* sampling = sourceValue(definition, values, generate.id, "sampling");
-    if (!model || !positive || !sampling) {
+    const NodeValue* model = sourceValue(definition, values, sampler.id, "model");
+    const NodeValue* positive = sourceValue(definition, values, sampler.id, "positive");
+    const NodeValue* latent = sourceValue(definition, values, sampler.id, "latent");
+    if (!model || !positive || !latent) {
         addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
-                 tr_("The generate node is missing an evaluated required input."), generate.id);
+                 tr_("The sampler is missing an evaluated required input."), sampler.id);
         return false;
     }
 
+    // The sampled latent keeps the canvas it was given and gains the pipeline
+    // that will produce it; the decode is what finally runs this.
+    out = *latent;
+    out.sampled = true;
+    out.selection = model->selection;
+    out.selection.textEncoderIds = positive->textEncoderIds;
+
+    const QJsonObject& properties = sampler.properties;
+    SdGenerationRequest& request = out.request;
     request.load = model->load;
+    request.cache = model->cache;
     request.loras = model->loras;
     request.prompt = positive->text;
-    if (const NodeValue* negative = sourceValue(
-            definition, values, generate.id, "negative")) {
+    if (const NodeValue* negative = sourceValue(definition, values, sampler.id, "negative"))
         request.negativePrompt = negative->text;
+
+    request.width = latent->width;
+    request.height = latent->height;
+    request.circularX = latent->circularX;
+    request.circularY = latent->circularY;
+    request.initImage = latent->image;
+    request.maskImage = latent->mask;
+
+    request.sampling.steps = intProperty(properties, sampler.type, "steps");
+    request.sampling.seed = readSeed(properties);
+    request.sampling.cfgScale = floatProperty(properties, sampler.type, "cfgScale");
+    request.sampling.sampler = stringProperty(properties, sampler.type, "sampler");
+    request.sampling.scheduler = stringProperty(properties, sampler.type, "scheduler");
+    request.sampling.imageCfgScale = floatProperty(properties, sampler.type, "imageCfgScale");
+    request.sampling.eta = floatProperty(properties, sampler.type, "eta");
+    request.sampling.customSigmas =
+        parseFloatList(stringProperty(properties, sampler.type, "customSigmas"));
+    applyChainSettings(*model, *positive, request.sampling);
+    request.denoisingStrength = floatProperty(properties, sampler.type, "denoisingStrength");
+    request.imagePreprocess = stringProperty(properties, sampler.type, "imagePreprocess");
+    request.label = sampler.id;
+
+    if (const NodeValue* references = sourceValue(definition, values, sampler.id, "references")) {
+        request.referenceImages = references->images;
+        request.referenceImageArgs = references->referenceArgs;
     }
-    request.width = sampling->width;
-    request.height = sampling->height;
-    request.sampling = sampling->sampling;
-    request.denoisingStrength = sampling->denoisingStrength;
-    request.batchCount = intProperty(generate.properties, generate.type, "batchCount");
-    request.label = generate.id;
-
-    if (const NodeValue* init = sourceValue(
-            definition, values, generate.id, "init_image")) {
-        request.initImage = init->image;
-    }
-    if (const NodeValue* mask = sourceValue(definition, values, generate.id, "mask"))
-        request.maskImage = mask->image;
-
-    for (const NodeValue* reference : sourceValues(definition, values, generate.id, "references"))
-        request.referenceImages.push_back(reference->image);
-
-    if (const NodeValue* control = sourceValue(definition, values, generate.id, "control")) {
+    if (const NodeValue* hires = sourceValue(definition, values, sampler.id, "hires"))
+        request.hires = hires->hires;
+    if (const NodeValue* control = sourceValue(definition, values, sampler.id, "control")) {
         request.load.files.controlNetPath = control->controlNetPath;
         request.controlImage = control->image;
         request.controlStrength = control->controlStrength;
     }
-    if (const NodeValue* ip = sourceValue(definition, values, generate.id, "ip_adapter")) {
+    if (const NodeValue* ip = sourceValue(definition, values, sampler.id, "ip_adapter")) {
         request.load.files.ipAdapterPath = ip->ipAdapterPath;
         if (!ip->visionEncoderPath.isEmpty())
             request.load.files.clipVisionPath = ip->visionEncoderPath;
         request.ipAdapterImage = ip->image;
         request.ipAdapterStrength = ip->ipAdapterStrength;
     }
-    if (const NodeValue* pm = sourceValue(definition, values, generate.id, "photo_maker")) {
+    if (const NodeValue* pm = sourceValue(definition, values, sampler.id, "photo_maker")) {
         request.load.files.photoMakerPath = pm->photoMakerPath;
         request.photoMakerEmbeddingPath = pm->identityEmbeddingPath;
         request.photoMakerImages = pm->images;
         request.photoMakerStyleStrength = pm->photoMakerStyleStrength;
     }
-    if (const NodeValue* pulid = sourceValue(definition, values, generate.id, "pulid")) {
+    if (const NodeValue* pulid = sourceValue(definition, values, sampler.id, "pulid")) {
         request.load.files.pulidPath = pulid->pulidPath;
         request.pulidEmbeddingPath = pulid->identityEmbeddingPath;
         request.pulidWeight = pulid->pulidWeight;
     }
 
+    // What the latent carries is what selects the operation: an empty one is
+    // txt2img, an encoded image is img2img, and one with a mask is inpainting.
     if (!request.initImage.isNull() && !request.maskImage.isNull())
         request.operation = SdOperation::Inpaint;
     else if (!request.initImage.isNull())
@@ -683,56 +883,66 @@ bool SdWorkflowExecutor::buildRequest(const SdWorkflowNode& generate,
     else
         request.operation = SdOperation::Txt2Img;
 
-    if (request.operation == SdOperation::Inpaint
-        && request.maskImage.size() != request.initImage.size()) {
-        request.maskImage = request.maskImage.scaled(request.initImage.size(),
-                                                     Qt::IgnoreAspectRatio,
-                                                     Qt::SmoothTransformation);
+    return true;
+}
+
+bool SdWorkflowExecutor::buildDecodeRequest(const SdWorkflowNode& decode,
+                                            SdGenerationRequest& request,
+                                            QVector<SdWorkflowError>& errors)
+{
+    if (!m_execution)
+        return false;
+    const SdWorkflowDefinition& definition = m_execution->definition;
+    const QHash<QString, NodeValue>& values = m_execution->values;
+
+    const NodeValue* latent = sourceValue(definition, values, decode.id, "samples");
+    const NodeValue* vae = sourceValue(definition, values, decode.id, "vae");
+    if (!latent || !vae) {
+        addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                 tr_("The decode node is missing an evaluated required input."), decode.id);
+        return false;
+    }
+    if (!latent->sampled) {
+        addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
+                 tr_("This latent was never sampled: connect it through a KSampler."),
+                 decode.id, QStringLiteral("samples"));
+        return false;
     }
 
-    if (!request.initImage.isNull()) {
-        request.width = request.initImage.width() - (request.initImage.width() % 8);
-        request.height = request.initImage.height() - (request.initImage.height() % 8);
+    request = latent->request;
+
+    // The whole context is resolved once, here, because only now is every
+    // component of it known: the weights, the text encoders and the VAE.
+    // One context encodes and decodes, so a VAE Encode upstream has to have
+    // been handed the same VAE as this node: two would need two contexts.
+    if (!latent->vaeId.isEmpty() && !vae->vaeId.isEmpty() && latent->vaeId != vae->vaeId) {
+        addError(errors, SdWorkflowErrorCode::UnsupportedOperation,
+                 tr_("The encode and the decode were given different VAEs; one "
+                     "context cannot use both."), decode.id, QStringLiteral("vae"));
+        return false;
     }
-
-    request.referenceImageArgs = stringProperty(generate.properties, generate.type, "referenceArgs");
-    request.imagePreprocess = stringProperty(generate.properties, generate.type, "imagePreprocess");
-    request.circularX = boolProperty(generate.properties, generate.type, "circularX");
-    request.circularY = boolProperty(generate.properties, generate.type, "circularY");
-
-    request.vaeTiling.enabled = boolProperty(generate.properties, generate.type, "vaeTiling");
-    request.vaeTiling.tileWidth = intProperty(generate.properties, generate.type, "vaeTileWidth");
-    request.vaeTiling.tileHeight = intProperty(generate.properties, generate.type, "vaeTileHeight");
-    request.vaeTiling.overlap = floatProperty(generate.properties, generate.type, "vaeTileOverlap");
-
-    request.cache.mode = stringProperty(generate.properties, generate.type, "cacheMode");
-    request.cache.reuseThreshold = floatProperty(generate.properties, generate.type, "cacheThreshold");
-    request.cache.startPercent = floatProperty(generate.properties, generate.type, "cacheStart");
-    request.cache.endPercent = floatProperty(generate.properties, generate.type, "cacheEnd");
-
-    request.hires.enabled = boolProperty(generate.properties, generate.type, "hiresEnabled");
-    request.hires.upscaler = stringProperty(generate.properties, generate.type, "hiresUpscaler");
-    request.hires.scale = floatProperty(generate.properties, generate.type, "hiresScale");
-    request.hires.targetWidth = intProperty(generate.properties, generate.type, "hiresWidth");
-    request.hires.targetHeight = intProperty(generate.properties, generate.type, "hiresHeight");
-    request.hires.steps = intProperty(generate.properties, generate.type, "hiresSteps");
-    request.hires.denoisingStrength =
-        floatProperty(generate.properties, generate.type, "hiresDenoising");
-    request.hires.tileSize = intProperty(generate.properties, generate.type, "hiresTileSize");
-    const QString hiresModelId =
-        generate.properties.value(QStringLiteral("hiresModelId")).toString().trimmed();
-    if (!hiresModelId.isEmpty()) {
-        SdResolvedModelFile resolved;
-        QString error;
-        if (!SdModelManager::instance().resolveFile(hiresModelId, SdModelCategory::Upscaler,
-                                                    resolved, &error)) {
-            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, generate.id,
-                     QStringLiteral("hiresModelId"));
-            return false;
-        }
-        request.hires.modelPath = resolved.path;
+    SdModelSelection selection = latent->selection;
+    selection.vaeId = vae->vaeId.isEmpty() ? latent->vaeId : vae->vaeId;
+    QString error;
+    if (!SdModelManager::instance().resolve(selection, request.load.files, &error)) {
+        addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, decode.id);
+        return false;
     }
+    // resolve() fills the context inputs from scratch, so the auxiliary paths
+    // the sampler's branches contributed are put back.
+    const SdModelFiles& sampled = latent->request.load.files;
+    request.load.files.controlNetPath = sampled.controlNetPath;
+    request.load.files.ipAdapterPath = sampled.ipAdapterPath;
+    request.load.files.photoMakerPath = sampled.photoMakerPath;
+    request.load.files.pulidPath = sampled.pulidPath;
+    if (!sampled.clipVisionPath.isEmpty())
+        request.load.files.clipVisionPath = sampled.clipVisionPath;
 
+    request.vaeTiling.enabled = boolProperty(decode.properties, decode.type, "tiling");
+    request.vaeTiling.tileWidth = intProperty(decode.properties, decode.type, "tileWidth");
+    request.vaeTiling.tileHeight = intProperty(decode.properties, decode.type, "tileHeight");
+    request.vaeTiling.overlap = floatProperty(decode.properties, decode.type, "tileOverlap");
+    request.label = decode.id;
     return true;
 }
 
@@ -804,8 +1014,7 @@ bool SdWorkflowExecutor::buildADetailerRequest(const SdWorkflowNode& node,
     const NodeValue* model = sourceValue(definition, values, node.id, "model");
     const NodeValue* image = sourceValue(definition, values, node.id, "image");
     const NodeValue* positive = sourceValue(definition, values, node.id, "positive");
-    const NodeValue* sampling = sourceValue(definition, values, node.id, "sampling");
-    if (!model || !image || !positive || !sampling) {
+    if (!model || !image || !positive) {
         addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
                  tr_("ADetailer is missing an evaluated required input."), node.id);
         return false;
@@ -822,15 +1031,32 @@ bool SdWorkflowExecutor::buildADetailerRequest(const SdWorkflowNode& node,
 
     request.operation = SdOperation::ADetailer;
     request.load = model->load;
+    request.cache = model->cache;
     request.loras = model->loras;
+    // Its own context: this node re-samples regions of an image rather than
+    // continuing a latent, so it resolves the weights the way a decode does.
+    SdModelSelection selection = model->selection;
+    selection.textEncoderIds = positive->textEncoderIds;
+    if (const NodeValue* vae = sourceValue(definition, values, node.id, "vae"))
+        selection.vaeId = vae->vaeId;
+    if (!SdModelManager::instance().resolve(selection, request.load.files, &error)) {
+        addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+        return false;
+    }
     request.auxiliaryModelPath = resolved.path;
     request.prompt = positive->text;
     if (const NodeValue* negative = sourceValue(definition, values, node.id, "negative"))
         request.negativePrompt = negative->text;
-    request.width = sampling->width;
-    request.height = sampling->height;
-    request.sampling = sampling->sampling;
-    request.denoisingStrength = sampling->denoisingStrength;
+    request.width = image->image.width() - (image->image.width() % 8);
+    request.height = image->image.height() - (image->image.height() % 8);
+    request.sampling.steps = intProperty(node.properties, node.type, "steps");
+    request.sampling.seed = readSeed(node.properties);
+    request.sampling.cfgScale = floatProperty(node.properties, node.type, "cfgScale");
+    request.sampling.sampler = stringProperty(node.properties, node.type, "sampler");
+    request.sampling.scheduler = stringProperty(node.properties, node.type, "scheduler");
+    applyChainSettings(*model, *positive, request.sampling);
+    request.denoisingStrength =
+        floatProperty(node.properties, node.type, "denoisingStrength");
     request.initImage = image->image;
     request.label = node.id;
     return true;

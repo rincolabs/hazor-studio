@@ -225,8 +225,65 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
     if (!ok)
         return false;
 
+    const auto resolveEach = [&](const char* key, SdModelCategory category) {
+        for (const QJsonValue& entry : p.value(QString::fromUtf8(key)).toArray()) {
+            SdResolvedModelFile resolved;
+            QString error;
+            if (!models.resolveFile(entry.toString(), category, resolved, &error)) {
+                addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+                ok = false;
+            }
+        }
+    };
+
     switch (node.type) {
     case SdNodeType::Checkpoint: {
+        // A checkpoint is self-contained, so the registry can answer now. The
+        // text encoders and the VAE are wired further down and are checked
+        // where the whole context is assembled.
+        SdModelSelection selection;
+        selection.modelId = p.value(QStringLiteral("modelId")).toString();
+        for (const QJsonValue& entry : p.value(QStringLiteral("embeddingIds")).toArray())
+            selection.embeddingIds << entry.toString();
+        SdModelFiles files;
+        QString error;
+        if (!models.resolve(selection, files, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        return ok;
+    }
+    case SdNodeType::DiffusionModelLoader: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::DiffusionModel, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            ok = false;
+        }
+        resolveEach("embeddingIds", SdModelCategory::Embedding);
+        return ok;
+    }
+    case SdNodeType::TextEncoderLoader: {
+        if (p.value(QStringLiteral("modelIds")).toArray().isEmpty()) {
+            addError(errors, SdWorkflowErrorCode::InvalidProperty,
+                     tr_("A text encoder node needs at least one model id."), node.id);
+            return false;
+        }
+        resolveEach("modelIds", SdModelCategory::TextEncoder);
+        return ok;
+    }
+    case SdNodeType::VaeLoader: {
+        SdResolvedModelFile resolved;
+        QString error;
+        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                SdModelCategory::Vae, resolved, &error)) {
+            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+            return false;
+        }
+        return true;
+    }
+    case SdNodeType::EngineOptions: {
         SdWeightType weightType = SdWeightType::Auto;
         const QString weightName = p.value(QStringLiteral("weightType")).toString();
         if (!weightTypeFromName(weightName, weightType)) {
@@ -240,23 +297,6 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
             addError(errors, SdWorkflowErrorCode::InvalidProperty,
                      tr_("Unknown device preference \"%1\" (use auto, gpu or cpu).")
                          .arg(deviceName), node.id);
-            ok = false;
-        }
-
-        SdModelSelection selection;
-        selection.modelId = p.value(QStringLiteral("modelId")).toString();
-        selection.vaeId = p.value(QStringLiteral("vaeId")).toString();
-        // Already known to be an array of strings, or absent.
-        for (const QJsonValue& entry : p.value(QStringLiteral("textEncoderIds")).toArray())
-            selection.textEncoderIds << entry.toString();
-
-        // The whole point of validating before executing: a missing checkpoint
-        // or a missing component is reported now, with the registry's own
-        // explanation, instead of as a loader failure minutes later.
-        SdModelFiles files;
-        QString error;
-        if (!models.resolve(selection, files, &error)) {
-            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
             ok = false;
         }
         return ok;
@@ -276,7 +316,8 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         }
         return true;
     }
-    case SdNodeType::Sampling: {
+    case SdNodeType::KSampler:
+    case SdNodeType::ADetailer: {
         // The library's own vocabulary, asked of the library: str_to_*() is the
         // only authority on what it will accept.
         const QString sampler = p.value(QStringLiteral("sampler")).toString();
@@ -290,6 +331,28 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
             addError(errors, SdWorkflowErrorCode::InvalidProperty,
                      tr_("Unknown scheduler \"%1\".").arg(scheduler), node.id);
             ok = false;
+        }
+        if (node.type == SdNodeType::ADetailer) {
+            SdResolvedModelFile resolved;
+            QString error;
+            if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
+                                    SdModelCategory::ADetailer, resolved, &error)) {
+                addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
+                ok = false;
+            }
+        }
+        return ok;
+    }
+    case SdNodeType::HiresFix: {
+        const QString modelId = p.value(QStringLiteral("modelId")).toString().trimmed();
+        if (!modelId.isEmpty()) {
+            SdResolvedModelFile resolved;
+            QString error;
+            if (!models.resolveFile(modelId, SdModelCategory::Upscaler, resolved, &error)) {
+                addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id,
+                         QStringLiteral("modelId"));
+                ok = false;
+            }
         }
         return ok;
     }
@@ -361,37 +424,19 @@ bool validateProperties(const SdWorkflowNode& node, const SdModelManager& models
         }
         return ok;
     }
-    case SdNodeType::ADetailer: {
-        SdResolvedModelFile resolved;
-        QString error;
-        if (!models.resolveFile(p.value(QStringLiteral("modelId")).toString(),
-                                SdModelCategory::ADetailer, resolved, &error)) {
-            addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
-            ok = false;
-        }
-        return ok;
-    }
-    case SdNodeType::Generate: {
-        // The high-res pass optionally names an ESRGAN model; everything else
-        // about it is a plain number or a strict enum the generic pass above
-        // already checked.
-        const QString hiresModelId = p.value(QStringLiteral("hiresModelId")).toString().trimmed();
-        if (!hiresModelId.isEmpty()) {
-            SdResolvedModelFile resolved;
-            QString error;
-            if (!models.resolveFile(hiresModelId, SdModelCategory::Upscaler, resolved, &error)) {
-                addError(errors, SdWorkflowErrorCode::ModelUnavailable, error, node.id);
-                ok = false;
-            }
-        }
-        return ok;
-    }
     // Nothing a spec could not already answer: their enums are strict and the
     // generic pass checked them, and their model references (when any) are
     // plain strings resolved by the executor from a connected loader's value
     // rather than from a property on the node itself.
-    case SdNodeType::Prompt:
-    case SdNodeType::NegativePrompt:
+    case SdNodeType::ClipTextEncode:
+    case SdNodeType::ClipSetLastLayer:
+    case SdNodeType::ModelSampling:
+    case SdNodeType::SkipLayerGuidance:
+    case SdNodeType::ReferenceImages:
+    case SdNodeType::EmptyLatentImage:
+    case SdNodeType::VaeEncode:
+    case SdNodeType::VaeEncodeInpaint:
+    case SdNodeType::VaeDecode:
     case SdNodeType::InputImage:
     case SdNodeType::InputMask:
     case SdNodeType::ControlNetApply:
@@ -442,7 +487,7 @@ bool resolvePortNames(SdWorkflowConnection& c, const SdWorkflowNode& from,
 void normaliseLegacyLoraChains(SdWorkflowDefinition& definition)
 {
     for (const SdWorkflowNode& generate : definition.nodes) {
-        if (generate.type != SdNodeType::Generate)
+        if (generate.type != SdNodeType::VaeDecode)
             continue;
 
         QVector<SdWorkflowConnection> loras;
@@ -485,6 +530,330 @@ void normaliseLegacyLoraChains(SdWorkflowDefinition& definition)
     }
 }
 
+// ── Version 1 → 2 ───────────────────────────────────────────────────────────
+//
+// Version 1 had one Generate node fed by a Sampling node, and kept the image
+// size, the components of the checkpoint, the engine options and the second
+// pass as properties. Version 2 is ComfyUI-shaped: the sampling node became
+// the KSampler, Generate became the VAE Decode that runs it, and each of those
+// property groups became the node that owns it. Rewriting is what lets a
+// document written before the change still run.
+
+QString freeNodeId(const SdWorkflowDefinition& definition, const QString& base)
+{
+    QString id = base;
+    for (int suffix = 2; definition.node(id); ++suffix)
+        id = base + QString::number(suffix);
+    return id;
+}
+
+QString incomingSource(const SdWorkflowDefinition& definition, const QString& nodeId,
+                       const char* portId)
+{
+    for (const SdWorkflowConnection& c : definition.connections) {
+        if (c.toNode == nodeId && c.toPort == QLatin1String(portId))
+            return c.fromNode;
+    }
+    return {};
+}
+
+void connect_(SdWorkflowDefinition& definition, const QString& from, const char* fromPort,
+              const QString& to, const char* toPort)
+{
+    definition.connections.push_back(SdWorkflowConnection {
+        from, QString::fromUtf8(fromPort), to, QString::fromUtf8(toPort) });
+}
+
+void dropConnectionsTo(SdWorkflowDefinition& definition, const QString& nodeId,
+                       const char* portId)
+{
+    definition.connections.erase(
+        std::remove_if(definition.connections.begin(), definition.connections.end(),
+                       [&nodeId, portId](const SdWorkflowConnection& c) {
+                           return c.toNode == nodeId && c.toPort == QLatin1String(portId);
+                       }),
+        definition.connections.end());
+}
+
+void renameProperty(SdWorkflowNode& node, const char* from, const char* to)
+{
+    const QString fromKey = QString::fromUtf8(from);
+    const QJsonValue value = node.properties.value(fromKey);
+    if (!value.isUndefined() && !value.isNull())
+        node.properties[QString::fromUtf8(to)] = value;
+    node.properties.remove(fromKey);
+}
+
+void migrateVersion1(SdWorkflowDefinition& definition)
+{
+    const auto findNode = [&definition](const QString& id) -> SdWorkflowNode* {
+        for (SdWorkflowNode& node : definition.nodes) {
+            if (node.id == id)
+                return &node;
+        }
+        return nullptr;
+    };
+    const auto addNode = [&definition](const SdWorkflowNode& node) {
+        definition.nodes.push_back(node);
+    };
+
+    QStringList decodeIds;   // what used to be the Generate nodes
+    for (const SdWorkflowNode& node : definition.nodes) {
+        if (node.type == SdNodeType::VaeDecode)
+            decodeIds << node.id;
+    }
+
+    for (const QString& decodeId : decodeIds) {
+        const QString samplerId = incomingSource(definition, decodeId, "sampling");
+        if (samplerId.isEmpty())
+            continue;
+        const QJsonObject decodeProps = definition.node(decodeId)->properties;
+        const QJsonObject samplerProps = definition.node(samplerId)->properties;
+        const QString checkpointId = incomingSource(definition, decodeId, "model");
+
+        // Everything that fed Generate now feeds the sampler, except the image
+        // the decode produces.
+        for (const char* portId : { "model", "positive", "negative", "control",
+                                    "ip_adapter", "photo_maker", "pulid" }) {
+            for (SdWorkflowConnection& c : definition.connections) {
+                if (c.toNode == decodeId && c.toPort == QLatin1String(portId))
+                    c.toNode = samplerId;
+            }
+        }
+        // The sampler used to be wired into Generate as a value; it is the
+        // node that samples now, so that connection has no successor.
+        dropConnectionsTo(definition, decodeId, "sampling");
+        if (SdWorkflowNode* sampler = findNode(samplerId)) {
+            const QJsonValue rules = decodeProps.value(QStringLiteral("imagePreprocess"));
+            if (!rules.isUndefined() && !rules.isNull())
+                sampler->properties[QStringLiteral("imagePreprocess")] = rules;
+        }
+
+        // The latent: an encode of the init image, or an empty one sized by
+        // what the sampling node used to carry.
+        const QString initImageId = incomingSource(definition, decodeId, "init_image");
+        const QString maskId = incomingSource(definition, decodeId, "mask");
+        QString latentId;
+        if (!initImageId.isEmpty()) {
+            SdWorkflowNode encode;
+            encode.id = freeNodeId(definition, samplerId + QStringLiteral("_encode"));
+            encode.type = maskId.isEmpty() ? SdNodeType::VaeEncode
+                                           : SdNodeType::VaeEncodeInpaint;
+            addNode(encode);
+            connect_(definition, initImageId, "image", encode.id, "pixels");
+            if (!maskId.isEmpty())
+                connect_(definition, maskId, "mask", encode.id, "mask");
+            latentId = encode.id;
+        } else {
+            SdWorkflowNode latent;
+            latent.id = freeNodeId(definition, samplerId + QStringLiteral("_latent"));
+            latent.type = SdNodeType::EmptyLatentImage;
+            for (const char* key : { "width", "height" }) {
+                const QJsonValue value = samplerProps.value(QString::fromUtf8(key));
+                if (!value.isUndefined())
+                    latent.properties[QString::fromUtf8(key)] = value;
+            }
+            for (const char* key : { "circularX", "circularY" }) {
+                const QJsonValue value = decodeProps.value(QString::fromUtf8(key));
+                if (!value.isUndefined())
+                    latent.properties[QString::fromUtf8(key)] = value;
+            }
+            addNode(latent);
+            latentId = latent.id;
+        }
+        dropConnectionsTo(definition, decodeId, "init_image");
+        dropConnectionsTo(definition, decodeId, "mask");
+        connect_(definition, latentId, "latent", samplerId, "latent");
+        connect_(definition, samplerId, "latent", decodeId, "samples");
+
+        // Reference images used to be wired one by one; they now go through
+        // the node that carries their arguments.
+        QStringList referenceSources;
+        for (const SdWorkflowConnection& c : definition.connections) {
+            if (c.toNode == decodeId && c.toPort == QLatin1String("references"))
+                referenceSources << c.fromNode;
+        }
+        if (!referenceSources.isEmpty()) {
+            dropConnectionsTo(definition, decodeId, "references");
+            SdWorkflowNode references;
+            references.id = freeNodeId(definition, samplerId + QStringLiteral("_references"));
+            references.type = SdNodeType::ReferenceImages;
+            const QJsonValue args = decodeProps.value(QStringLiteral("referenceArgs"));
+            if (!args.isUndefined())
+                references.properties[QStringLiteral("args")] = args;
+            addNode(references);
+            for (const QString& source : referenceSources)
+                connect_(definition, source, "image", references.id, "images");
+            connect_(definition, references.id, "references", samplerId, "references");
+        }
+
+        if (decodeProps.value(QStringLiteral("hiresEnabled")).toBool()) {
+            SdWorkflowNode hires;
+            hires.id = freeNodeId(definition, samplerId + QStringLiteral("_hires"));
+            hires.type = SdNodeType::HiresFix;
+            const auto copy = [&decodeProps, &hires](const char* from, const char* to) {
+                const QJsonValue value = decodeProps.value(QString::fromUtf8(from));
+                if (!value.isUndefined() && !value.isNull())
+                    hires.properties[QString::fromUtf8(to)] = value;
+            };
+            copy("hiresUpscaler", "upscaler");
+            copy("hiresModelId", "modelId");
+            copy("hiresScale", "scale");
+            copy("hiresWidth", "targetWidth");
+            copy("hiresHeight", "targetHeight");
+            copy("hiresSteps", "steps");
+            copy("hiresDenoising", "denoisingStrength");
+            copy("hiresTileSize", "tileSize");
+            addNode(hires);
+            connect_(definition, hires.id, "hires", samplerId, "hires");
+        }
+
+        // The CLIP and the VAE were implicit in version 1; they are wires now.
+        // Its properties are copied because inserting nodes below can move it.
+        const SdWorkflowNode* checkpointNode = definition.node(checkpointId);
+        const bool isCheckpoint =
+            checkpointNode && checkpointNode->type == SdNodeType::Checkpoint;
+        const QJsonObject checkpointProps =
+            checkpointNode ? checkpointNode->properties : QJsonObject();
+        QString clipSourceId = checkpointId;
+        const char* clipSourcePort = "clip";
+        QString vaeSourceId = checkpointId;
+        const char* vaeSourcePort = "vae";
+        if (isCheckpoint) {
+            const QJsonArray encoderIds =
+                checkpointProps.value(QStringLiteral("textEncoderIds")).toArray();
+            if (!encoderIds.isEmpty()) {
+                SdWorkflowNode encoders;
+                encoders.id = freeNodeId(definition, checkpointId + QStringLiteral("_encoders"));
+                encoders.type = SdNodeType::TextEncoderLoader;
+                encoders.properties[QStringLiteral("modelIds")] = encoderIds;
+                addNode(encoders);
+                clipSourceId = encoders.id;
+                clipSourcePort = "clip";
+            }
+            const QString vaeId =
+                checkpointProps.value(QStringLiteral("vaeId")).toString().trimmed();
+            if (!vaeId.isEmpty()) {
+                SdWorkflowNode vae;
+                vae.id = freeNodeId(definition, checkpointId + QStringLiteral("_vae"));
+                vae.type = SdNodeType::VaeLoader;
+                vae.properties[QStringLiteral("modelId")] = vaeId;
+                addNode(vae);
+                vaeSourceId = vae.id;
+                vaeSourcePort = "vae";
+            }
+        }
+        if (!vaeSourceId.isEmpty()) {
+            connect_(definition, vaeSourceId, vaeSourcePort, decodeId, "vae");
+            if (!initImageId.isEmpty())
+                connect_(definition, vaeSourceId, vaeSourcePort, latentId, "vae");
+        }
+
+        // CLIP skip was a sampling property and is a node of its own now.
+        const int clipSkip = samplerProps.value(QStringLiteral("clipSkip")).toInt(-1);
+        if (!clipSourceId.isEmpty() && clipSkip != -1) {
+            SdWorkflowNode setLayer;
+            setLayer.id = freeNodeId(definition, samplerId + QStringLiteral("_clip_skip"));
+            setLayer.type = SdNodeType::ClipSetLastLayer;
+            setLayer.properties[QStringLiteral("stopAtClipLayer")] = clipSkip;
+            addNode(setLayer);
+            connect_(definition, clipSourceId, clipSourcePort, setLayer.id, "clip");
+            clipSourceId = setLayer.id;
+            clipSourcePort = "clip";
+        }
+        if (!clipSourceId.isEmpty()) {
+            for (const char* portId : { "positive", "negative" }) {
+                const QString textId = incomingSource(definition, samplerId, portId);
+                SdWorkflowNode* encode = findNode(textId);
+                if (!encode || encode->type != SdNodeType::ClipTextEncode)
+                    continue;
+                connect_(definition, clipSourceId, clipSourcePort, textId, "clip");
+                if (qstrcmp(portId, "positive") == 0) {
+                    const QJsonValue guidance =
+                        samplerProps.value(QStringLiteral("distilledGuidance"));
+                    if (!guidance.isUndefined())
+                        encode->properties[QStringLiteral("distilledGuidance")] = guidance;
+                }
+            }
+        }
+
+        // The model patches that used to be sampling properties.
+        const double shift = samplerProps.value(QStringLiteral("flowShift")).toDouble();
+        const int shiftedTimestep =
+            samplerProps.value(QStringLiteral("shiftedTimestep")).toInt();
+        const QString slgLayers =
+            samplerProps.value(QStringLiteral("skipLayerGuidanceLayers")).toString();
+        QString modelSourceId = incomingSource(definition, samplerId, "model");
+        if (!modelSourceId.isEmpty() && (shift != 0.0 || shiftedTimestep != 0)) {
+            SdWorkflowNode patch;
+            patch.id = freeNodeId(definition, samplerId + QStringLiteral("_model_sampling"));
+            patch.type = SdNodeType::ModelSampling;
+            patch.properties[QStringLiteral("shift")] = shift;
+            patch.properties[QStringLiteral("shiftedTimestep")] = shiftedTimestep;
+            addNode(patch);
+            connect_(definition, modelSourceId, "model", patch.id, "model");
+            dropConnectionsTo(definition, samplerId, "model");
+            connect_(definition, patch.id, "model", samplerId, "model");
+            modelSourceId = patch.id;
+        }
+        if (!modelSourceId.isEmpty() && !slgLayers.trimmed().isEmpty()) {
+            SdWorkflowNode slg;
+            slg.id = freeNodeId(definition, samplerId + QStringLiteral("_slg"));
+            slg.type = SdNodeType::SkipLayerGuidance;
+            slg.properties[QStringLiteral("layers")] = slgLayers;
+            for (const auto& pair : { std::pair<const char*, const char*> {
+                                          "skipLayerGuidanceScale", "scale" },
+                                      { "skipLayerGuidanceStart", "start" },
+                                      { "skipLayerGuidanceEnd", "end" } }) {
+                const QJsonValue value = samplerProps.value(QString::fromUtf8(pair.first));
+                if (!value.isUndefined())
+                    slg.properties[QString::fromUtf8(pair.second)] = value;
+            }
+            addNode(slg);
+            connect_(definition, modelSourceId, "model", slg.id, "model");
+            dropConnectionsTo(definition, samplerId, "model");
+            connect_(definition, slg.id, "model", samplerId, "model");
+        }
+
+        // The engine options and the step cache left the checkpoint.
+        if (checkpointNode) {
+            static const char* kEngineKeys[] = {
+                "weightType", "device", "threads", "allowCpuFallback", "enableMmap",
+                "flashAttention", "diffusionFlashAttention", "vaeConvDirect",
+                "batchedCfg", "autoFit", "conditioningCacheSize" };
+            SdWorkflowNode engine;
+            engine.type = SdNodeType::EngineOptions;
+            for (const char* key : kEngineKeys) {
+                const QJsonValue value = checkpointProps.value(QString::fromUtf8(key));
+                if (!value.isUndefined() && !value.isNull())
+                    engine.properties[QString::fromUtf8(key)] = value;
+            }
+            for (const char* key : { "cacheMode", "cacheThreshold", "cacheStart", "cacheEnd" }) {
+                const QJsonValue value = decodeProps.value(QString::fromUtf8(key));
+                if (!value.isUndefined() && !value.isNull())
+                    engine.properties[QString::fromUtf8(key)] = value;
+            }
+            if (!engine.properties.isEmpty()
+                && incomingSource(definition, checkpointId, "engine").isEmpty()) {
+                engine.id = freeNodeId(definition, checkpointId + QStringLiteral("_engine"));
+                addNode(engine);
+                connect_(definition, engine.id, "engine", checkpointId, "engine");
+            }
+        }
+    }
+
+    // Finally the properties that stayed on a node but changed name.
+    for (SdWorkflowNode& node : definition.nodes) {
+        if (node.type != SdNodeType::VaeDecode)
+            continue;
+        renameProperty(node, "vaeTiling", "tiling");
+        renameProperty(node, "vaeTileWidth", "tileWidth");
+        renameProperty(node, "vaeTileHeight", "tileHeight");
+        renameProperty(node, "vaeTileOverlap", "tileOverlap");
+    }
+    definition.version = SdWorkflowDefinition::kCurrentVersion;
+}
+
 } // namespace
 
 bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
@@ -495,6 +864,8 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
 {
     normalised = definition;
     normaliseLegacyLoraChains(normalised);
+    if (normalised.version < SdWorkflowDefinition::kCurrentVersion)
+        migrateVersion1(normalised);
     plan = SdWorkflowPlan {};
     const int errorsBefore = static_cast<int>(errors.size());
 
@@ -606,12 +977,11 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
         }
     }
 
-    // Every operation node in the active subgraph — Generate and the three
-    // standalone image operations that also call the generation service
-    // (Canny, Upscale, ADetailer). There may be any number: image values can
-    // branch to several outputs or feed a later operation as its input image.
+    // Every node that calls the generation service: the decode that runs a
+    // sampled latent, and the three standalone image operations. There may be
+    // any number — an image can branch to several outputs or feed a later one.
     const auto isOperation = [](SdNodeType type) {
-        return type == SdNodeType::Generate || type == SdNodeType::Canny
+        return type == SdNodeType::VaeDecode || type == SdNodeType::Canny
             || type == SdNodeType::Upscale || type == SdNodeType::ADetailer;
     };
     for (const SdWorkflowNode& node : normalised.nodes) {
@@ -620,7 +990,7 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
     }
     if (plan.generateNodeIds.isEmpty()) {
         addError(errors, SdWorkflowErrorCode::NoGenerateNode,
-                 tr_("No generate node contributes to an image output."));
+                 tr_("Nothing in this graph produces an image: a decode has to reach an output."));
     }
 
     if (plan.outputNodeIds.isEmpty()) {
@@ -649,28 +1019,8 @@ bool SdWorkflowValidator::validate(const SdWorkflowDefinition& definition,
             [&ancestors](const QString& id) { return ancestors.contains(id); });
         if (!hasGenerate) {
             addError(errors, SdWorkflowErrorCode::OutputNotConnected,
-                     tr_("The image output does not depend on a generate node."),
+                     tr_("The image output does not depend on anything that produces an image."),
                      outputId, QStringLiteral("image"));
-        }
-    }
-
-    // The operation follows each Generate node's wiring, so a mask without an
-    // init image is rejected at that node rather than becoming a partial call.
-    for (const QString& generateId : plan.generateNodeIds) {
-        const auto wired = [&normalised, &generateId](const char* portId) {
-            return std::any_of(normalised.connections.cbegin(), normalised.connections.cend(),
-                               [&generateId, portId](const SdWorkflowConnection& c) {
-                                   return c.toNode == generateId
-                                       && c.toPort == QLatin1String(portId);
-                               });
-        };
-        const bool hasInit = wired("init_image");
-        const bool hasMask = wired("mask");
-        if (hasMask && !hasInit) {
-            addError(errors, SdWorkflowErrorCode::MissingRequiredInput,
-                     tr_("A mask needs an input image: connect one to \"init_image\" "
-                         "or remove the mask."),
-                     generateId, QStringLiteral("init_image"));
         }
     }
 

@@ -86,8 +86,13 @@
 
   /* ---- Neural Flow: socket / connection types ---- */
   --sock-model: #6ea2ff;
+  --sock-clip: #f3dc6a;
+  --sock-vae: #ff6e6e;
+  --sock-engine: #8c8f91;
   --sock-conditioning: #7fd18b;
-  --sock-sampling: #f0b45a;
+  --sock-references: #a8d9b4;
+  --sock-latent: #d66bd6;
+  --sock-hires: #f2c98a;
   --sock-lora: #b48cf2;
   --sock-image: #e6e7e8;
   --sock-mask: #9a9ea1;
@@ -97,7 +102,8 @@
   --cat-conditioning: #7fd18b; --cat-conditioning-tint: #2d4433;
   --cat-sampling: #f0b45a;     --cat-sampling-tint: #4a3d27;
   --cat-input: #5fc9c4;        --cat-input-tint: #274443;
-  --cat-generation: #e08fc0;   --cat-generation-tint: #46303f;
+  --cat-latent: #d66bd6;       --cat-latent-tint: #43304a;
+  --cat-processing: #e08fc0;   --cat-processing-tint: #46303f;
   --cat-output: #d3d3d3;       --cat-output-tint: #47494b;
 }
 

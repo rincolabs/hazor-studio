@@ -80,7 +80,7 @@ struct SdPropertySpec {
 
 // One grouping in the node palette. A backend fact, because it follows the node
 // types rather than any particular layout.
-enum class SdNodeCategory { Models, Conditioning, Sampling, Input, Processing, Generation, Output };
+enum class SdNodeCategory { Models, Conditioning, Latent, Sampling, Input, Processing, Output };
 
 QString nodeCategoryName(SdNodeCategory category);
 QString nodeCategoryLabel(SdNodeCategory category);
