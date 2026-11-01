@@ -25,7 +25,7 @@ import type {
   WorkflowDocument,
   WorkflowNode,
 } from '../services/contract'
-import { nodeRunLabelFor } from '../services/status'
+import { nodeRunLabelFor, runPhaseFor } from '../services/status'
 
 /** Space between the columns and rows of the starting graph. */
 const COLUMN_GAP = 90
@@ -260,10 +260,15 @@ export function clearErrorHighlights(graph: LGraph): void {
 }
 
 /**
- * Which node a run lights up. The backend reports progress for the run, not
- * per node, so the editor maps its two working states onto the node that does
- * the work in each: the checkpoint while the model loads, Generate while it
- * samples. Presentation only — nothing here is part of the contract.
+ * Which node a run lights up. The backend reports progress for the run and
+ * never says which node produced it, so the editor maps a state onto the node
+ * that does the work in it: the checkpoint while the model loads, the sampler
+ * while it samples. A Canny or Upscale pass is the exception — it names itself
+ * in the state detail, so `runPhaseFor` sends the badge to that node instead.
+ *
+ * Presentation only, and still an inference: an ADetailer node samples through
+ * the same unnamed path, so its badge lands on the sampler, and a graph with
+ * two nodes of one type lights both.
  */
 const RUNNING_NODE_TYPE: Partial<Record<GenerationState, string>> = {
   loading: 'checkpoint',
@@ -279,11 +284,13 @@ export function showRunState(
   graph: LGraph,
   state: GenerationState,
   progress: { step: number; steps: number } | null,
+  detail: string,
 ): void {
-  const runningType = RUNNING_NODE_TYPE[state]
+  const phase = runPhaseFor(state, detail)
+  const runningType = phase ? phase.nodeType : RUNNING_NODE_TYPE[state]
   const counted = progress !== null && progress.steps > 0
   const fraction = counted ? progress.step / progress.steps : 0
-  const label = nodeRunLabelFor(state, progress)
+  const label = nodeRunLabelFor(state, progress, detail)
 
   for (const node of graphNodes(graph)) {
     // An error is the more important thing to say, and it outlives the run.

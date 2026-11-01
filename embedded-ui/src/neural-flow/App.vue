@@ -70,7 +70,7 @@ const subscriptions: Array<() => void> = []
 
 const busy = computed(() => runState.value === 'loading' || runState.value === 'generating')
 const stateKind = computed(() => statusKindFor(runState.value))
-const stateLabel = computed(() => statusLabelFor(runState.value, progress.value))
+const stateLabel = computed(() => statusLabelFor(runState.value, progress.value, runDetail.value))
 const progressFraction = computed(() =>
   progress.value && progress.value.steps > 0 ? progress.value.step / progress.value.steps : null,
 )
@@ -157,7 +157,7 @@ function showErrors(errors: WorkflowError[]): void {
 /** Mirrors the run onto the graph: badge, progress bar and flowing links. */
 function syncNodeRunState(): void {
   if (graph) {
-    showRunState(graph, runState.value, progress.value)
+    showRunState(graph, runState.value, progress.value, runDetail.value)
     canvas?.setDirty(true, true)
   }
 }

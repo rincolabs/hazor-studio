@@ -4,7 +4,7 @@
  * The states themselves are the backend's (`sdlocal::SdGenerationState`); this
  * only decides what to call them and which colour slot the indicator uses.
  * Loading and generating are kept apart because their bars count different
- * work: model tensors first, then denoising iterations.
+ * work: model tensors first, then sampling iterations.
  */
 import type { GenerationState } from './contract'
 
@@ -12,6 +12,40 @@ export type StatusKind = 'idle' | 'busy' | 'ok' | 'error'
 export interface RunProgress {
   step: number
   steps: number
+}
+
+/**
+ * A `generating` pass that is not sampling at all.
+ *
+ * `SdGenerationState` has a single state for every kind of work in flight, so
+ * the operation behind it travels as the `detail` of `stateChanged`:
+ * `SdGenerationService::run()` names the two passes that never sample ("Canny",
+ * "Upscale") and leaves the detail empty for the sampling path. Without this
+ * table both of them read as denoising — and neither reports a single step,
+ * which is also why `detail` here replaces the step counter rather than
+ * competing with it.
+ *
+ * Matching that string is the honest limit of a frontend-only fix: it is a
+ * user-presentable string on the C++ side, so a translated build stops matching
+ * and falls back to the sampling wording. Naming the operation
+ * machine-readably on the signal is the backend's job, not this file's.
+ */
+interface RunPhase {
+  label: string
+  detail: string
+  /** `hazorType` of the node doing the work, so the badge lands on it. */
+  nodeType: string
+}
+
+const RUN_PHASES: Record<string, RunPhase> = {
+  canny: { label: 'Canny edges', detail: 'No steps reported', nodeType: 'canny' },
+  upscale: { label: 'Upscaling', detail: 'No steps reported', nodeType: 'upscale' },
+}
+
+/** The non-sampling pass `detail` names, or null for sampling and every other state. */
+export function runPhaseFor(state: GenerationState, detail: string): RunPhase | null {
+  if (state !== 'generating') return null
+  return RUN_PHASES[detail.trim().toLowerCase()] ?? null
 }
 
 function hasCountedProgress(progress: RunProgress | null): progress is RunProgress {
@@ -35,13 +69,17 @@ export function statusKindFor(state: GenerationState): StatusKind {
 
 /**
  * Names the real phase behind each progress bar. While loading, stable-
- * diffusion.cpp reports tensors copied into the model; while generating, it
- * reports completed denoising iterations.
+ * diffusion.cpp reports tensors copied into the model; while sampling, it
+ * reports completed denoising iterations — per pass, so a Hi-Res Fix or an
+ * ADetailer face restarts the count under the same label.
  */
 export function statusLabelFor(
   state: GenerationState,
   progress: RunProgress | null,
+  detail: string,
 ): string {
+  const phase = runPhaseFor(state, detail)
+  if (phase) return phase.label
   switch (state) {
     case 'loading':
       return hasCountedProgress(progress) ? 'Loading weights' : 'Loading model'
@@ -64,6 +102,8 @@ export function statusDetailFor(
   progress: RunProgress | null,
   backendDetail: string,
 ): string {
+  const phase = runPhaseFor(state, backendDetail)
+  if (phase) return phase.detail
   if (state === 'loading' && hasCountedProgress(progress)) {
     return `${progress.step}/${progress.steps} tensors`
   }
@@ -78,7 +118,10 @@ export function statusDetailFor(
 export function nodeRunLabelFor(
   state: GenerationState,
   progress: RunProgress | null,
+  detail: string,
 ): string {
+  const phase = runPhaseFor(state, detail)
+  if (phase) return phase.label
   if (state === 'loading') {
     return hasCountedProgress(progress) ? `Load ${progress.step}/${progress.steps}` : 'Load model'
   }
@@ -86,5 +129,5 @@ export function nodeRunLabelFor(
     if (!hasCountedProgress(progress)) return 'Prepare'
     return `Denoise ${progress.step}/${progress.steps}`
   }
-  return statusLabelFor(state, progress)
+  return statusLabelFor(state, progress, detail)
 }
