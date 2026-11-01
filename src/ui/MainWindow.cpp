@@ -1416,7 +1416,7 @@ MainWindow::MainWindow(QWidget* parent)
     // developer build with ENABLE_STABLE_DIFFUSION=ON, which is why everything
     // that walks the dock list below null-checks it instead of assuming it.
     m_stableDiffusionPanel = new StableDiffusionPanel(this);
-    m_stableDiffusionDock  = makePanelDock(tr("Stable Diffusion"),
+    m_stableDiffusionDock  = makePanelDock(tr("AI Tools"),
                                            QStringLiteral("StableDiffusionDock"),
                                            m_stableDiffusionPanel);
 
@@ -1450,7 +1450,7 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onOpenNeuralFlow);
 #endif
     connect(m_stableDiffusionPanel, &StableDiffusionPanel::aiCenterRequested, this, [this] {
-        openAiCenter(QStringLiteral("models"), QStringLiteral("stable-diffusion"));
+        openAiCenter(QStringLiteral("overview"));
     });
 #endif
 

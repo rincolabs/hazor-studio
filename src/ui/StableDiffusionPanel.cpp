@@ -1,43 +1,13 @@
 #include "StableDiffusionPanel.hpp"
 
 #include "ai/sd/SdCanvasBridge.hpp"
-#include "ai/sd/SdWorkflow.hpp"
 #include "ai/sd/SdWorkflowExecutor.hpp"
 #include "theme/Theme.hpp"
 #include "theme/ThemeManager.hpp"
 
-#include <QDebug>
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
-
-namespace {
-
-// ── The fixed test configuration ─────────────────────────────────────────────
-// Still constants, and still no picker: this panel exists to prove the module
-// works end to end, not to be an interface. What is no longer here is the model
-// path — SdModelManager owns that now, which is why no absolute path (valid on
-// exactly one machine) is committed any more. Register a checkpoint, or point
-// HAZOR_SD_MODEL at one, and the "default" model id below resolves to it.
-const char* kPrompt =
-    "A beautiful mountain landscape at sunset, cinematic lighting, highly detailed";
-const char* kNegativePrompt = "";
-
-// Measured once with v1-5-pruned-emaonly.safetensors (SD 1.5, fp32, 4.27 GiB)
-// on a 6-core i5-8400: 694 s for these 20 steps on the CPU. Two things dominate
-// and neither is a misconfiguration — a txt_cfg of 7.0 runs the UNet twice per
-// step (40 passes, not 20), and fp32 weights double the memory traffic a CPU
-// backend is already bound by. A GPU build, or a checkpoint node with
-// "weightType": "f16", is the lever for both.
-constexpr int kWidth = 512;
-constexpr int kHeight = 512;
-constexpr int kSteps = 20;
-constexpr qint64 kSeed = 42;       // fixed, so two runs of the test are comparable
-constexpr float kCfgScale = 7.0f;
-
-const char* kLayerName = "AI Generated";
-
-} // namespace
 
 StableDiffusionPanel::StableDiffusionPanel(QWidget* parent)
     : QWidget(parent)
@@ -79,12 +49,6 @@ void StableDiffusionPanel::buildUi()
     m_title = new QLabel(tr("Stable Diffusion"), this);
     m_title->setObjectName(QStringLiteral("sdPanelTitle"));
     lay->addWidget(m_title);
-
-    m_generateBtn = new QPushButton(tr("Generate"), this);
-    m_generateBtn->setCursor(Qt::PointingHandCursor);
-    connect(m_generateBtn, &QPushButton::clicked,
-            this, &StableDiffusionPanel::onGenerateClicked);
-    lay->addWidget(m_generateBtn);
 
 #ifdef HAVE_NEURAL_FLOW
     // The way into the node editor. Not disabled while a generation runs: the
@@ -178,33 +142,6 @@ void StableDiffusionPanel::setStatus(const QString& text, const QString& detail)
                                        : text + QStringLiteral(" — ") + detail);
 }
 
-void StableDiffusionPanel::onGenerateClicked()
-{
-    if (m_executor->busy())  // the button is disabled too; this is the belt to that braces
-        return;
-
-    // "default" resolves through SdModelManager on whatever machine runs this,
-    // so the document stays portable and the registry stays the single place a
-    // model is configured.
-    const QByteArray workflow = sdlocal::txt2imgWorkflowJson(
-        QStringLiteral("default"),
-        QString::fromUtf8(kPrompt),
-        QString::fromUtf8(kNegativePrompt),
-        kWidth, kHeight, kSteps, kSeed, kCfgScale,
-        QString::fromUtf8(kLayerName));
-
-    qInfo().noquote() << "[SD] generate requested |"
-                      << sdlocal::describeBackendEnvironment()
-                      << "| prompt=" << QString::fromUtf8(kPrompt);
-
-    QVector<sdlocal::SdWorkflowError> errors;
-    if (!m_executor->run(workflow, &errors)) {
-        setStatus(tr("Error"), sdlocal::describeWorkflowErrors(errors));
-        return;
-    }
-    m_generateBtn->setEnabled(false);
-}
-
 void StableDiffusionPanel::onStateChanged(sdlocal::SdGenerationState state, const QString& detail)
 {
     switch (state) {
@@ -226,8 +163,6 @@ void StableDiffusionPanel::onStateChanged(sdlocal::SdGenerationState state, cons
 
 void StableDiffusionPanel::onFinished(const sdlocal::SdWorkflowRunResult& result)
 {
-    m_generateBtn->setEnabled(true);
-
     if (result.generation.state == sdlocal::SdGenerationState::Cancelled) {
         setStatus(tr("Cancelled"));
         return;

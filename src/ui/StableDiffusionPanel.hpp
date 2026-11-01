@@ -14,22 +14,16 @@ class SdWorkflowExecutor;
 struct SdWorkflowRunResult;
 }
 
-// Experimental "Stable Diffusion" dock panel: one Generate button that runs a
-// fixed txt2img workflow through the local Stable Diffusion module
-// (src/ai/sd/) and drops the result into the active document as a new pixel
-// layer.
+// Experimental "AI Tools" dock panel: links into the Neural Flow node editor
+// and the Hazor AI Center, backed by the local Stable Diffusion module
+// (src/ai/sd/) via SdCanvasBridge/SdWorkflowExecutor, which drop a generated
+// result into the active document as a new pixel layer.
 //
 // Only built when ENABLE_STABLE_DIFFUSION=ON, so MainWindow creates it behind
-// the same HAVE_STABLE_DIFFUSION guard. There is still nothing to configure
-// here on purpose — the prompt and the sampling parameters are C++ constants,
-// and the model comes from SdModelManager. What changed underneath is that the
-// button now goes through the workflow controller rather than calling the
-// engine directly, which is what keeps that path exercised: parse, validate,
-// resolve, generate, insert.
+// the same HAVE_STABLE_DIFFUSION guard.
 //
-// The one thing here that is not a test harness is the Neural Flow button: it
-// is how the node editor is opened, so it is present whenever that panel was
-// built (HAVE_NEURAL_FLOW).
+// The Neural Flow button is present only when that panel was built
+// (HAVE_NEURAL_FLOW).
 class StableDiffusionPanel : public QWidget {
     Q_OBJECT
 public:
@@ -52,7 +46,6 @@ private:
     void buildUi();
     void applyTheme();
     void setStatus(const QString& text, const QString& detail = QString());
-    void onGenerateClicked();
     void onStateChanged(sdlocal::SdGenerationState state, const QString& detail);
     void onFinished(const sdlocal::SdWorkflowRunResult& result);
 
@@ -61,7 +54,6 @@ private:
 
     QLabel* m_title = nullptr;
     QLabel* m_status = nullptr;
-    QPushButton* m_generateBtn = nullptr;
     // Only built when the embedded interfaces are compiled in; null otherwise.
     QPushButton* m_neuralFlowBtn = nullptr;
     QPushButton* m_aiCenterBtn = nullptr;
