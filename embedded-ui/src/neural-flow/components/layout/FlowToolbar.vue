@@ -60,6 +60,7 @@ function deviceLabel(entry: DeviceEntry): string {
       <button
         class="btn"
         type="button"
+        :disabled="busy"
         title="Add Node (Shift A)"
         @click="emit('add', $event.currentTarget as HTMLElement)"
       >
