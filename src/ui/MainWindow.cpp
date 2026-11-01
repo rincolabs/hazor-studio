@@ -1446,6 +1446,22 @@ MainWindow::MainWindow(QWidget* parent)
         showNeuralFlowPanel(0.5);
     });
 
+    m_statusNeuralFlowBtn = new QPushButton(m_viewportStatusBar);
+    m_statusNeuralFlowBtn->setIcon(makeIcon(QStringLiteral(":/icons/neural-flow.png")));
+    // The artwork fills its 24px square edge to edge, unlike the zoom icons, so
+    // it is drawn smaller to read at the same visual size as its neighbours.
+    m_statusNeuralFlowBtn->setIconSize(QSize(20, 20));
+    m_statusNeuralFlowBtn->setFixedSize(26, 26);
+    m_statusNeuralFlowBtn->setCheckable(true);
+    m_statusNeuralFlowBtn->setChecked(!m_neuralFlowDock->isHidden());
+    m_statusNeuralFlowBtn->setToolTip(tr("Toggle Neural Flow panel"));
+    // Immediately left of Fit, at the head of the status bar's button cluster.
+    if (auto* barLayout = qobject_cast<QHBoxLayout*>(m_viewportStatusBar->layout()))
+        barLayout->insertWidget(barLayout->indexOf(m_statusZoomFitBtn),
+                                m_statusNeuralFlowBtn, 0, Qt::AlignVCenter);
+    connect(m_statusNeuralFlowBtn, &QPushButton::clicked, neuralFlowAction, &QAction::trigger);
+    connect(neuralFlowAction, &QAction::toggled, m_statusNeuralFlowBtn, &QPushButton::setChecked);
+
     connect(m_stableDiffusionPanel, &StableDiffusionPanel::neuralFlowRequested,
             this, &MainWindow::onOpenNeuralFlow);
 #endif

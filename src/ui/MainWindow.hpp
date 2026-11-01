@@ -658,6 +658,10 @@ private:
     // so the same plain null check covers a build without either.
     QDockWidget* m_neuralFlowDock = nullptr;
     NeuralFlowPanel* m_neuralFlowPanel = nullptr;
+    // Status bar toggle mirroring the Window-menu action; both ultimately
+    // drive m_neuralFlowDock->toggleViewAction(), so either one stays in sync
+    // no matter how the dock's visibility changes.
+    QPushButton* m_statusNeuralFlowBtn = nullptr;
     bool m_neuralFlowVisibleBeforeHome = false;
     double m_neuralFlowRatioBeforeHome = 0.5;
     // Hazor AI Center: built lazily on first openAiCenter() call. Unlike the
