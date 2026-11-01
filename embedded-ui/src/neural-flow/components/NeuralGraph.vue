@@ -117,8 +117,6 @@ defineExpose({ openAddAt })
       <span class="kbd">Shift</span><span class="kbd">A</span><span>Add node</span>
       <span class="sep" />
       <span class="kbd">Right-click</span><span>Context menu</span>
-      <span class="sep" />
-      <span>Wheel zoom · drag background to pan</span>
     </div>
   </div>
 </template>
@@ -143,8 +141,9 @@ defineExpose({ openAddAt })
 
 .neural-graph__hint {
   position: absolute;
-  left: 10px;
+  right: 10px;
   bottom: 10px;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 5px;

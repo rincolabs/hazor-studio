@@ -38,6 +38,7 @@ function deviceLabel(entry: DeviceEntry): string {
     <div class="tb-left">
       <span class="tb-logo"><Icon name="flow" :size="15" /></span>
       <h1 class="tb-title">Neural Flow</h1>
+      <span class="tb-subtitle">- Stable Diffusion Experimental</span>
     </div>
 
     <div class="tb-right">
@@ -57,7 +58,7 @@ function deviceLabel(entry: DeviceEntry): string {
         </option>
       </select>
       <button
-        class="btn ghost"
+        class="btn"
         type="button"
         title="Add Node (Shift A)"
         @click="emit('add', $event.currentTarget as HTMLElement)"
@@ -126,6 +127,15 @@ function deviceLabel(entry: DeviceEntry): string {
   color: var(--text);
   white-space: nowrap;
   letter-spacing: -0.005em;
+}
+.tb-subtitle {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tb-div {
   width: 1px;
