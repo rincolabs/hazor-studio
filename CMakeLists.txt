@@ -11,7 +11,7 @@ project(ImageEditor VERSION 0.0.2 LANGUAGES CXX C)
 # header and the packaging scripts read these two lines, so the splash screen,
 # the About diagnostics, the MCP server info and the package file name always
 # agree: 0.0.2 with an empty label, 0.0.2-beta with "beta".
-set(HAZOR_VERSION_SUFFIX "beta")
+set(HAZOR_VERSION_SUFFIX "beta-neural")
 set(HAZOR_VERSION_FULL "${PROJECT_VERSION}")
 if(HAZOR_VERSION_SUFFIX)
     set(HAZOR_VERSION_FULL "${PROJECT_VERSION}-${HAZOR_VERSION_SUFFIX}")
